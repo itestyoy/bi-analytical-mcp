@@ -1603,7 +1603,7 @@ models:
   # A/B-test assignments — like the users dimension but MANY rows per player: one
   # row per (player, experiment). Joinable to events/users by the user entity.
   # Window events to [assigned_at, ended_at], group by experiment_name+variant_group,
-  # aggregate per group, then run the `ab_test` tool. The dbt model can be named
+  # aggregate per group, then run experiment({ action: analyze }). The dbt model can be named
   # anything; only role: experiments matters.
   - name: fct_experiment_assignments
     description: >
@@ -1611,7 +1611,7 @@ models:
       which experiment a player entered, the assigned variant, and the
       [assigned_at, ended_at] window. To analyze a test, window events to that
       interval, group by experiment_name + variant_group, aggregate per group, and
-      run the ab_test tool. Join to events/users on player_id_of_internal.
+      run experiment({ action: analyze }). Join to events/users on player_id_of_internal.
     config:
       meta:
         mcp:

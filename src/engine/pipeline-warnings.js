@@ -5,6 +5,7 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
+import { stageDef, listSome } from '../pipeline.js';
 
 export const pipelineWarningMethods = {
   /** one_per_match counts EVERY start (incl. partial chains). Nudge to filter completed=true
@@ -49,11 +50,9 @@ export const pipelineWarningMethods = {
     // Starting from a materialized prefix: the stages in this array begin at a BUILT table, so
     // nothing here reads the source and there is nothing to say.
     if (draft?.startsFromTable) return [];
-    // Every stage kind that leaves the data narrower, smaller or otherwise no longer the source —
-    // INCLUDING a python stage, which is a model of its own: what follows it reads its table.
-    const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'sample', 'pivot', 'unpivot', 'window', 'order_by', 'python']);
-    const before = (draft?.stages || []).slice(0, index);
-    if (draft?.timeRange || before.some((st) => REDUCES.has(st?.stage))) return [];
+    // Any stage before it leaves the data narrower, smaller or otherwise no longer the source —
+    // a python stage too, which is a model of its own: what follows it reads its table.
+    if (draft?.timeRange || index > 0) return [];
     const src = draft?.source ? `'${draft.source}'` : 'the source';
     const time = (draft?.source && this.catalog.getModel(draft.source)?.time?.column) || null;
     return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
@@ -263,22 +262,12 @@ export const pipelineWarningMethods = {
     return warns.slice(0, 3);
   },
 
-  /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
+  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
   _draftStepRecommendations(stage, available) {
-    const recs = [];
-    if (stage.stage === 'match_recognize') {
-      recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
-    } else if (stage.stage === 'aggregate') {
-      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or materialize.`);
-      // Comparing two groups? The stats live in a tool — don't hand-roll a t-test. ab_test is a
-      // GENERAL two-sample significance test (not only randomized experiments).
-      recs.push(`Comparing two groups (A vs B, before/after, first vs last)? Don't compute significance by hand — feed the per-group aggregates to ab_test({ action or metric: 'mean' → mean+stddev+n (Welch t-test), 'proportion' → conversions+n (z-test) }) for p-value + CI.`);
-    } else if (stage.stage === 'join') {
-      recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
-    } else {
-      recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
-    }
-    recs.push(`Preview the SQL anytime with build_pipeline_model({ action: "preview", draft_id }); materialize when done.`);
-    return recs;
+    const own = stageDef(stage.stage)?.recommend;
+    return [
+      ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
+      'Preview the SQL anytime with build_pipeline_model({ action: "preview", draft_id }); materialize when done.',
+    ];
   },
 };

@@ -234,9 +234,148 @@ function aggExpr(d, fn, column, q) {
   return `${fn}(${c})`; // sum / avg / min / max
 }
 
+// ── The compute stage's ops ─────────────────────────────
+// One entry per op: what it needs (`needs` — the fields its schema makes required, or `then` for a rule
+// that is not a plain list) and how it is written (`sql`, over one step's helpers → { expr, type },
+// type 'numeric' when it is not said). The op enum, the schema's per-op requirements and the build all
+// read this table, so an op is added in one place.
+const fn1 = (fn, type) => ({ needs: ['column'], sql: ({ col }) => ({ expr: `${fn}(${col()})`, type }) });
+const arith = (sym) => ({
+  needs: ['left', 'right'],
+  sql: ({ operand, p }) => {
+    const l = operand(p.left, 'left'); const r = operand(p.right, 'right');
+    return { expr: sym === '/' ? `(${l} / NULLIF(${r}, 0))` : `(${l} ${sym} ${r})` };
+  },
+});
+// Clamping against a NUMBER (a threshold computed in an earlier pass) is the common case, so the
+// operands may be literals as well as columns: `parts` takes operands, `columns` stays the shorthand
+// for the all-columns form.
+const clamp = (fn) => ({
+  then: { anyOf: [{ title: 'all-columns form: { columns: ["a", "b"] }', required: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', required: ['parts'] }] },
+  sql: ({ operand, list, p }) => {
+    const args = p.parts?.length ? p.parts.map((o, i) => operand(o, `part[${i}]`)) : list();
+    if (!args.length) throw new Error(`compute op '${fn}' needs \`columns\` (column names) or \`parts\` (columns and/or literals, e.g. a threshold)`);
+    return { expr: `${fn}(${args.join(', ')})` };
+  },
+});
+const COMPUTE_OPS = {
+  const: {
+    needs: ['value'],
+    sql: ({ d, p }) => {
+      if (p.value === undefined) throw new Error("compute op 'const' needs a `value` (the literal to place in the column)");
+      return { expr: d.sqlLiteral(p.value), type: typeof p.value === 'number' ? 'numeric' : typeof p.value === 'boolean' ? 'boolean' : 'string' };
+    },
+  },
+  add: arith('+'),
+  sub: arith('-'),
+  mul: arith('*'),
+  div: arith('/'),
+  round: { needs: ['column'], sql: ({ d, col, p }) => ({ expr: d.roundExpr(col(), p.places ?? 0) }) },
+  floor: fn1('floor'),
+  ceil: fn1('ceil'),
+  abs: fn1('abs'),
+  coalesce: { needs: ['columns'], sql: ({ d, list, p }) => ({ expr: `coalesce(${[...list(), ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`, type: 'string' }) },
+  least: clamp('least'),
+  greatest: clamp('greatest'),
+  cast: { needs: ['column', 'type'], sql: ({ d, col, p }) => ({ expr: d.castExpr(col(), p.type || 'string'), type: p.type || 'string' }) },
+  concat: {
+    needs: ['parts'],
+    sql: ({ operand, p }) => {
+      if (!p.parts?.length) throw new Error('concat: needs parts');
+      return { expr: `concat(${p.parts.map((o, i) => operand(o, `part[${i}]`)).join(', ')})`, type: 'string' };
+    },
+  },
+  upper: fn1('upper', 'string'),
+  lower: fn1('lower', 'string'),
+  length: fn1('length', 'int'),
+  substring: { needs: ['column', 'start'], sql: ({ d, col, p }) => ({ expr: d.substringExpr(col(), p.start ?? 1, p.len), type: 'string' }) },
+  trim: fn1('trim', 'string'),
+  replace: { needs: ['column', 'search', 'replacement'], sql: ({ d, col, p }) => ({ expr: `replace(${col()}, ${d.sqlLiteral(p.search ?? '')}, ${d.sqlLiteral(p.replacement ?? '')})`, type: 'string' }) },
+  json_field: {
+    needs: ['column', 'field'],
+    // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
+    // TEXT and has to be parsed first, or the json operators do not apply to it.
+    sql: ({ d, cols, col, p }) => {
+      requireCol(cols, p.column);
+      const asJson = cols.get(p.column)?.type === 'json';
+      return { expr: asJson ? d.jsonColumnField(col(), p.field, p.type) : d.jsonColumnStructField(col(), p.field, p.type), type: p.type || 'string' };
+    },
+  },
+  json_parse_array: { needs: ['column'], sql: ({ d, col }) => ({ expr: d.jsonParseArray(col()), type: 'array' }) }, // STRING JSON array → native array (then unnest)
+  element_at: { needs: ['column', 'index'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'element_at'); return { expr: d.arrayElementAt(col(), p.index), type: p.type || 'string' }; } },
+  array_last: { needs: ['column'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'array_last'); return { expr: d.arrayLast(col()), type: p.type || 'string' }; } },
+  raw: {
+    needs: ['sql'],
+    // escape hatch: verbatim dialect SQL — over columns that exist at this point
+    sql: ({ cols, p }) => {
+      if (!p.sql) throw new Error('raw: needs sql');
+      const unknown = rawUnknownColumns(p.sql, cols);
+      if (unknown.length) throw new Error(`pipeline: raw expression for '${p.name}' names ${unknown.map((n) => `'${n}'`).join(', ')}, not ${unknown.length === 1 ? 'a column' : 'columns'} at this stage (available: ${[...cols.keys()].join(', ')}) — a raw expression reads the columns the steps before it produced`);
+      return { expr: `(${p.sql})`, type: p.type || 'string' };
+    },
+  },
+  hll_extract: { needs: ['column'], sql: ({ d, col }) => ({ expr: d.hllExtract(col()), type: 'int' }) },
+  date_diff: { needs: ['from', 'to', 'unit'], sql: ({ d, operand, p }) => ({ expr: d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')), type: p.unit === 'day' ? 'int' : 'numeric' }) },
+  date_trunc: { needs: ['column', 'granularity'], sql: ({ d, col, p }) => ({ expr: d.dateTrunc(p.granularity, col()), type: 'time' }) },
+  date_part: { needs: ['column', 'part'], sql: ({ d, col, p }) => ({ expr: d.datePart(p.part, col()), type: 'int' }) },
+  unix_date: { needs: ['column'], sql: ({ d, col }) => ({ expr: d.unixDateExpr(col()), type: 'int' }) },
+  elapsed_days: {
+    needs: ['from', 'to'],
+    // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h buckets,
+    // NOT calendar days. Default clamp_zero folds negatives (pre-`from` events) AND NULLs (e.g. a
+    // missing install_date on a left join) to 0, so the result is a clean day 0+.
+    sql: ({ d, operand, p }) => {
+      const inner = d.fullDaysBetween(operand(p.from, 'from'), operand(p.to, 'to'));
+      return { expr: p.clamp_zero === false ? inner : `COALESCE(GREATEST(${inner}, 0), 0)`, type: 'int' };
+    },
+  },
+  case: {
+    needs: ['cases'],
+    sql: ({ d, cols, operand, p }) => {
+      if (!p.cases?.length) throw new Error('case: needs at least one branch');
+      const branches = p.cases.map((cs) => `WHEN ${cs.when.map((c) => condPred(d, cols, c)).join(' AND ')} THEN ${operand(cs.then, 'then')}`);
+      return { expr: `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${operand(p.else, 'else')}` : ''} END`, type: p.type || 'string' };
+    },
+  },
+  window: {
+    needs: ['fn'],
+    sql: ({ d, cols, col, p }) => {
+      (p.partition_by || []).forEach((c) => requireCol(cols, c));
+      (p.order_by || []).forEach((o) => requireCol(cols, o.key));
+      const parts = (p.partition_by || []).map((c) => d.quoteIdent(c));
+      const ords = (p.order_by || []).map((o) => `${d.quoteIdent(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
+      let call; let frame = ''; let type;
+      if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
+      // the value a lag/lead/min/max returns is the column's own; a count is a whole number
+      else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; type = cols.get(p.column)?.type || 'unknown'; }
+      else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) {
+        call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame);
+        type = p.fn === 'count' ? 'int' : ['min', 'max'].includes(p.fn) ? (cols.get(p.column)?.type || 'unknown') : 'numeric';
+      }
+      else throw new Error(`window: bad fn ${p.fn}`);
+      if (frame && !ords.length) throw new Error('window frame requires order_by');
+      const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')}${frame})`;
+      return { expr: `${call} ${over}`, type };
+    },
+  },
+};
+
+/** The compute schema's per-op requirements, read off COMPUTE_OPS — ops that need the same fields share one rule. */
+function computeRequirements() {
+  const byRule = new Map();
+  for (const [op, o] of Object.entries(COMPUTE_OPS)) {
+    const then = o.then || { required: o.needs };
+    const key = JSON.stringify(then);
+    if (!byRule.has(key)) byRule.set(key, { then, ops: [] });
+    byRule.get(key).ops.push(op);
+  }
+  return [...byRule.values()].map(({ then, ops }) => ({ if: { properties: { op: ops.length === 1 ? { const: ops[0] } : { enum: ops } }, required: ['op'] }, then }));
+}
+
 // ── Stage registry ───────────────────────────────────────────────────────────
 const STAGES = {
   where: {
+    keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
       description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column. A constant is compared in the column\'s own type: a boolean column takes true / false ("true" is read as true), a numeric one a number; one of another type is refused here, since the warehouse would refuse it.',
@@ -249,6 +388,7 @@ const STAGES = {
   },
 
   derive: {
+    keepsSourceRows: true,
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
       allOf: [
@@ -309,37 +449,15 @@ const STAGES = {
   },
 
   compute: {
+    keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
-      allOf: [
-        { if: { properties: { op: { const: 'const' } }, required: ['op'] }, then: { required: ['value'] } },
-        { if: { properties: { op: { enum: ['add', 'sub', 'mul', 'div'] } }, required: ['op'] }, then: { required: ['left', 'right'] } },
-        { if: { properties: { op: { enum: ['round', 'floor', 'ceil', 'abs', 'cast', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'unix_date', 'date_trunc', 'date_part', 'hll_extract'] } }, required: ['op'] }, then: { required: ['column'] } },
-        { if: { properties: { op: { const: 'concat' } }, required: ['op'] }, then: { required: ['parts'] } },
-        { if: { properties: { op: { const: 'coalesce' } }, required: ['op'] }, then: { required: ['columns'] } },
-        // least/greatest take EITHER form: `columns` (all columns) or `parts` (operands, so one side
-        // may be a literal — clamping at a threshold computed in an earlier pass).
-        { if: { properties: { op: { enum: ['least', 'greatest'] } }, required: ['op'] }, then: { anyOf: [{ title: 'all-columns form: { columns: ["a", "b"] }', required: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', required: ['parts'] }] } },
-        { if: { properties: { op: { const: 'cast' } }, required: ['op'] }, then: { required: ['type'] } },
-        { if: { properties: { op: { const: 'replace' } }, required: ['op'] }, then: { required: ['search', 'replacement'] } },
-        { if: { properties: { op: { const: 'substring' } }, required: ['op'] }, then: { required: ['start'] } },
-        { if: { properties: { op: { const: 'date_diff' } }, required: ['op'] }, then: { required: ['from', 'to', 'unit'] } },
-        { if: { properties: { op: { const: 'elapsed_days' } }, required: ['op'] }, then: { required: ['from', 'to'] } },
-        { if: { properties: { op: { const: 'date_trunc' } }, required: ['op'] }, then: { required: ['granularity'] } },
-        { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
-        { if: { properties: { op: { const: 'json_field' } }, required: ['op'] }, then: { required: ['column', 'field'] } },
-        { if: { properties: { op: { const: 'json_parse_array' } }, required: ['op'] }, then: { required: ['column'] } },
-        { if: { properties: { op: { const: 'element_at' } }, required: ['op'] }, then: { required: ['column', 'index'] } },
-        { if: { properties: { op: { const: 'array_last' } }, required: ['op'] }, then: { required: ['column'] } },
-        { if: { properties: { op: { const: 'raw' } }, required: ['op'] }, then: { required: ['sql'] } },
-        { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
-        { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
-      ],
+      allOf: computeRequirements(),
       description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
       properties: {
         stage: { enum: ['compute'] },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'elapsed_days', 'case', 'window'] },
+        op: { enum: Object.keys(COMPUTE_OPS) },
         field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
@@ -383,98 +501,14 @@ const STAGES = {
       },
     }),
     build: ({ d, cols }, p) => {
-      const operand = (o, what) => operandSql(d, cols, o, `compute ${p.op} ${what}`);
-      const col = () => { requireCol(cols, p.column); return d.quoteIdent(p.column); };
-      const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.quoteIdent(c)); };
-      const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
-      let expr; let type = 'numeric';
-      if (p.op === 'const') {
-        if (p.value === undefined) throw new Error("compute op 'const' needs a `value` (the literal to place in the column)");
-        expr = d.sqlLiteral(p.value);
-        type = typeof p.value === 'number' ? 'numeric' : typeof p.value === 'boolean' ? 'boolean' : 'string';
-      } else if (p.op === 'concat') {
-        if (!p.parts?.length) throw new Error('concat: needs parts');
-        expr = `concat(${p.parts.map((o, i) => operand(o, `part[${i}]`)).join(', ')})`; type = 'string';
-      } else if (p.op === 'upper') { expr = `upper(${col()})`; type = 'string'; }
-      else if (p.op === 'lower') { expr = `lower(${col()})`; type = 'string'; }
-      else if (p.op === 'trim') { expr = `trim(${col()})`; type = 'string'; }
-      else if (p.op === 'length') { expr = `length(${col()})`; type = 'int'; }
-      else if (p.op === 'substring') { expr = d.substringExpr(col(), p.start ?? 1, p.len); type = 'string'; }
-      else if (p.op === 'replace') { expr = `replace(${col()}, ${d.sqlLiteral(p.search ?? '')}, ${d.sqlLiteral(p.replacement ?? '')})`; type = 'string'; }
-      else if (ARITH[p.op]) {
-        const l = operand(p.left, 'left'); const r = operand(p.right, 'right');
-        expr = p.op === 'div' ? `(${l} / NULLIF(${r}, 0))` : `(${l} ${ARITH[p.op]} ${r})`;
-      } else if (p.op === 'round') expr = d.roundExpr(col(), p.places ?? 0);
-      else if (p.op === 'floor') expr = `floor(${col()})`;
-      else if (p.op === 'ceil') expr = `ceil(${col()})`;
-      else if (p.op === 'abs') expr = `abs(${col()})`;
-      else if (p.op === 'coalesce') { const a = list(); expr = `coalesce(${[...a, ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`; type = 'string'; }
-      else if (p.op === 'least' || p.op === 'greatest') {
-        // Clamping against a NUMBER (a threshold computed in an earlier pass) is the common case, so
-        // the operands may be literals as well as columns: `parts` takes operands, `columns` stays
-        // the shorthand for the all-columns form.
-        const args = p.parts?.length ? p.parts.map((o, i) => operand(o, `part[${i}]`)) : list();
-        if (!args.length) throw new Error(`compute op '${p.op}' needs \`columns\` (column names) or \`parts\` (columns and/or literals, e.g. a threshold)`);
-        expr = `${p.op}(${args.join(', ')})`;
-      }
-      else if (p.op === 'cast') { expr = d.castExpr(col(), p.type || 'string'); type = p.type || 'string'; }
-      else if (p.op === 'date_diff') { expr = d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')); type = p.unit === 'day' ? 'int' : 'numeric'; }
-      else if (p.op === 'elapsed_days') {
-        // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h
-        // buckets, NOT calendar days. Default clamp_zero folds negatives (pre-`from` events) AND
-        // NULLs (e.g. a missing install_date on a left join) to 0, so the result is a clean day 0+.
-        const inner = d.fullDaysBetween(operand(p.from, 'from'), operand(p.to, 'to'));
-        expr = (p.clamp_zero === false) ? inner : `COALESCE(GREATEST(${inner}, 0), 0)`;
-        type = 'int';
-      }
-      else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
-      else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
-      else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
-      else if (p.op === 'json_field') {
-        // An unnested struct element is already JSON-typed; a flattened payload column holding
-        // JSON is TEXT and has to be parsed first, or the json operators do not apply to it.
-        requireCol(cols, p.column);
-        const asJson = cols.get(p.column)?.type === 'json';
-        expr = asJson ? d.jsonColumnField(col(), p.field, p.type) : d.jsonColumnStructField(col(), p.field, p.type);
-        type = p.type || 'string';
-      }
-      else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
-      else if (p.op === 'element_at') { requireArrayCol(cols, p.column, 'element_at'); expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
-      else if (p.op === 'array_last') { requireArrayCol(cols, p.column, 'array_last'); expr = d.arrayLast(col()); type = p.type || 'string'; }
-      else if (p.op === 'raw') {
-        // escape hatch: verbatim dialect SQL — over columns that exist at this point
-        if (!p.sql) throw new Error('raw: needs sql');
-        const unknown = rawUnknownColumns(p.sql, cols);
-        if (unknown.length) throw new Error(`pipeline: raw expression for '${p.name}' names ${unknown.map((n) => `'${n}'`).join(', ')}, not ${unknown.length === 1 ? 'a column' : 'columns'} at this stage (available: ${[...cols.keys()].join(', ')}) — a raw expression reads the columns the steps before it produced`);
-        expr = `(${p.sql})`; type = p.type || 'string';
-      }
-      else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
-      else if (p.op === 'case') {
-        if (!p.cases?.length) throw new Error('case: needs at least one branch');
-        const branches = p.cases.map((cs) => {
-          const cond = cs.when.map((c) => condPred(d, cols, c)).join(' AND ');
-          return `WHEN ${cond} THEN ${operand(cs.then, 'then')}`;
-        });
-        expr = `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${operand(p.else, 'else')}` : ''} END`;
-        type = p.type || 'string';
-      } else if (p.op === 'window') {
-        (p.partition_by || []).forEach((c) => requireCol(cols, c));
-        (p.order_by || []).forEach((o) => requireCol(cols, o.key));
-        const parts = (p.partition_by || []).map((c) => d.quoteIdent(c));
-        const ords = (p.order_by || []).map((o) => `${d.quoteIdent(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
-        let call; let frame = '';
-        if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
-        // the value a lag/lead/min/max returns is the column's own; a count is a whole number
-        else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; type = cols.get(p.column)?.type || 'unknown'; }
-        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) {
-          call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame);
-          type = p.fn === 'count' ? 'int' : ['min', 'max'].includes(p.fn) ? (cols.get(p.column)?.type || 'unknown') : 'numeric';
-        }
-        else throw new Error(`window: bad fn ${p.fn}`);
-        if (frame && !ords.length) throw new Error('window frame requires order_by');
-        const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')}${frame})`;
-        expr = `${call} ${over}`;
-      } else throw new Error(`compute: bad op ${p.op}`);
+      const op = Object.hasOwn(COMPUTE_OPS, p.op) ? COMPUTE_OPS[p.op] : null;
+      if (!op) throw new Error(`compute: bad op ${p.op}`);
+      const { expr, type = 'numeric' } = op.sql({
+        d, cols, p,
+        operand: (o, what) => operandSql(d, cols, o, `compute ${p.op} ${what}`),
+        col: () => { requireCol(cols, p.column); return d.quoteIdent(p.column); },
+        list: () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.quoteIdent(c)); },
+      });
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
     },
   },
@@ -517,6 +551,8 @@ const STAGES = {
   },
 
   join: {
+    keepsSourceRows: true,
+    recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with'],
       description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ model }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
@@ -641,6 +677,12 @@ const STAGES = {
   },
 
   aggregate: {
+    recommend: (available) => [
+      `Aggregated: the output is now group_by keys + measures (${listSome(available)}); add order_by/limit or materialize.`,
+      // Comparing two groups? The stats live in a tool — don't hand-roll a t-test: the experiment
+      // tool's analyze is a GENERAL two-sample significance test (not only randomized experiments).
+      'Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) }) for the p-value and CI.',
+    ],
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
       // The last two sentences are the memory lesson, and they are not decoration: a global
@@ -730,6 +772,7 @@ const STAGES = {
   },
 
   sample: {
+    keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
       description: 'Keep roughly `percent`% of rows, chosen at random — a fast, APPROXIMATE read of the population for a first estimate / where-to-dig signal on large data (no need to scan everything just to see the direction). Put it early. The result is flagged `approximate` with safe/unsafe guidance; re-run WITHOUT this stage for any exact number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).',
@@ -777,6 +820,14 @@ function requireArrayCol(cols, name, op) {
 
 /** Register an additional stage from another module (e.g. match_recognize). */
 export function registerStage(name, def) { STAGES[name] = def; }
+
+/** One stage's definition by name (null for a name no stage has). */
+export function stageDef(name) { return Object.hasOwn(STAGES, name) ? STAGES[name] : null; }
+
+/** The first few column names of a step's output, for a hint. */
+export function listSome(columns, n = 6) {
+  return `${columns.slice(0, n).map((c) => c.name).join(', ')}${columns.length > n ? ', …' : ''}`;
+}
 
 /**
  * Root-level `$defs` the stage schemas reference (`#/$defs/<name>`). A tool schema that embeds
@@ -864,16 +915,14 @@ export function columnMap(columns) {
   return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
 }
 
-// The stages that keep the source's rows and columns as they are — a `where` among them still reads
-// the source's own time axis and partition column.
-const ROW_PRESERVING = new Set(['where', 'derive', 'compute', 'join', 'sample']);
-
 /**
  * A source partitioned by the DAY of its time axis (`partition_column` next to it) is pruned only by
  * a condition on that column. A `where` that bounds the time axis while the rows are still the
  * source's — however the bound got there, a time_range or a condition the caller wrote — gets the
  * same bound on the partition column (the days it touches), unless it states one itself. The time
- * axis stays the exact bound; the new condition only lets the warehouse skip the other days.
+ * axis stays the exact bound; the new condition only lets the warehouse skip the other days. The
+ * rows are the source's while every stage before the `where` declares `keepsSourceRows` (its rows
+ * are source rows — a subset, perhaps with columns added — not groups or reshaped ones).
  */
 function boundPartitions(m, stages, cols) {
   const time = m.time?.column; const part = m.partition_column;
@@ -881,7 +930,7 @@ function boundPartitions(m, stages, cols) {
   const out = [];
   let leading = true;
   for (const st of stages) {
-    if (leading && !ROW_PRESERVING.has(st.stage)) leading = false;
+    if (leading && !STAGES[st.stage]?.keepsSourceRows) leading = false;
     if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
     const extra = [];
     for (const c of st.conditions || []) {

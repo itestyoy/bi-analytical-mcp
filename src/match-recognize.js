@@ -436,6 +436,7 @@ function matchRecognizeSchema(catalog) {
 
 registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
+  recommend: () => ["The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country)."],
   build: ({ d, catalog, cols, source }, p) => {
     const spec = p;
     const r = resolve(catalog, spec, d.name, cols, source);

@@ -776,14 +776,14 @@ test('the SQL-vs-python division of labour is in the stage description and the g
 // as "reads 'events' as it is".
 test('the preparation nudge does not fire where the stage reads a table rather than the source', () => {
   const e = engine();
-  const nudges = (stages, opts) => e._stageWarnings('events', stages, opts).filter((w) => /as it is/.test(w));
+  const nudges = (stages, opts) => e.advisor.stageWarnings('events', stages, opts).filter((w) => /as it is/.test(w));
 
   // one python stage on the raw source: the one case the nudge is for
   assert.equal(nudges([PY_STAGE]).length, 1);
   // a SECOND python stage after it reads the first one's table — it is not the source any more
   assert.equal(nudges([PY_STAGE, PY_STAGE]).length, 1, 'only the first stage may be nudged');
   // …and the one that is nudged is the FIRST one
-  assert.match(e._stageWarnings('events', [PY_STAGE, PY_STAGE]).find((w) => /as it is/.test(w)), /'events'/);
+  assert.match(e.advisor.stageWarnings('events', [PY_STAGE, PY_STAGE]).find((w) => /as it is/.test(w)), /'events'/);
   // a pipeline continued from a materialized prefix starts at a built table: nothing to say
   assert.deepEqual(nudges([PY_STAGE], { startsFromTable: true }), []);
   assert.deepEqual(nudges([PY_STAGE, PY_STAGE], { startsFromTable: true }), []);

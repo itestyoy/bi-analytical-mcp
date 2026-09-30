@@ -37,7 +37,7 @@ export const semanticIndexMethods = {
    * payload runs as-is and fans out to every historical version — plausible numbers, inflated.
    *
    * Only the window is filled in, and only where the catalog says one is required; the moment it
-   * pins is the source's own event time, which is what `_joinCompletenessWarnings` recommends for
+   * pins is the source's own event time, which is what `advisor.joinCompletenessWarnings` recommends for
    * a hand-written join. Every change is reported so the caller sees it rather than discovering a
    * payload that does not match the recipe text.
    */
@@ -231,12 +231,12 @@ export const semanticIndexMethods = {
     if (this.runner && base) {
       // Silent internal guard: keep ONLY columns that physically exist, so a name that is not
       // really in the table never surfaces anywhere. The physical set is cached per source
-      // (_physicalCols) — this view is the AI's most frequent call and must not spawn a dbt
+      // (probe.physicalColumns) — this view is the AI's most frequent call and must not spawn a dbt
       // run-operation each time. Best-effort: if introspection fails, keep the declared set.
-      const physSet = await this._physicalCols(k);
+      const physSet = await this.probe.physicalColumns(k);
       if (physSet) out.columns = out.columns.filter((col) => physSet.has(col.name.toLowerCase()));
       // Data freshness: latest value of the time column (how up-to-date the data is).
-      if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
+      if (m.time?.column) { const fresh = await this.probe.dataFreshness(k); if (fresh) out.data_freshness = fresh; }
     }
     out.recommendations = c.isFact(k)
       ? [
@@ -261,7 +261,7 @@ export const semanticIndexMethods = {
         { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
       ];
     // Saved findings about this model (memory tool) — surface them where they belong (compact).
-    this._attachMemory(out, [{ kind: 'model', source: k }], { source: k });
+    this.notes.attach(out, [{ kind: 'model', source: k }], { source: k });
     return out;
   },
 
@@ -316,7 +316,7 @@ export const semanticIndexMethods = {
       next_actions: nextActions,
       recommendations: recommendations.slice(0, 4),
     };
-    this._attachMemory(eventOut, [{ kind: 'event', source: fact, name: eventName }], { source: fact, name: eventName });
+    this.notes.attach(eventOut, [{ kind: 'event', source: fact, name: eventName }], { source: fact, name: eventName });
     return eventOut;
   },
 
@@ -372,7 +372,7 @@ export const semanticIndexMethods = {
         indexing: this._indexHistory(mk, col, input.recent ?? 3),
         recommendations: recommendations.slice(0, 3),
       };
-      this._attachMemory(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
+      this.notes.attach(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
       return attrOut;
     }
     const propFact = pSource; const propName = p;
@@ -466,7 +466,7 @@ export const semanticIndexMethods = {
         if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
       }
     }
-    this._attachMemory(out, [{ kind: 'property', source: propFact, name: p }], { source: propFact, name: p });
+    this.notes.attach(out, [{ kind: 'property', source: propFact, name: p }], { source: propFact, name: p });
     return out;
   },
 

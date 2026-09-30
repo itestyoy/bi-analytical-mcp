@@ -224,7 +224,7 @@ export const pipelineDraftMethods = {
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
     // guard) — never offered, never buildable, not called out. Only real columns exist.
-    const physSet = await this._physicalCols(source);
+    const physSet = await this.probe.physicalColumns(source);
     const cols = base ? base.columns : this._groundedDeclared(source, physSet).cols;
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
@@ -277,7 +277,7 @@ export const pipelineDraftMethods = {
       draft.stages = snapshot; this.ctxs.touch(ctx.id);
       throw new ToolError(`${e.message} — NO steps applied (add_steps is atomic; fix that stage and retry, ideally in a smaller chunk)`, { stage: 'compile', field: 'stages' });
     }
-    const physSet = await this._physicalCols(draft.source);
+    const physSet = await this.probe.physicalColumns(draft.source);
     const after = this._draftColumns(draft, physSet);
     const resp = {
       draft_id: ctx.id, action: 'add_steps', added: effects.length,
@@ -375,7 +375,7 @@ export const pipelineDraftMethods = {
       inherited.push({ at: cp.at, model: cp.model, owner });
     }
     this.ctxs.touch(ctx.id);
-    const physSet = await this._physicalCols(ctx.state.draft.source);
+    const physSet = await this.probe.physicalColumns(ctx.state.draft.source);
     const cols = this._draftColumns(ctx.state.draft, physSet);
     const resp = {
       draft_id: ctx.id, action: 'fork', forked_from: input.draft_id, name, source: ctx.state.draft.source,
@@ -411,7 +411,7 @@ export const pipelineDraftMethods = {
    * funnel warnings.
    */
   async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null, dropFrom = null } = {}) {
-    const physSet = await this._physicalCols(draft.source);
+    const physSet = await this.probe.physicalColumns(draft.source);
     const before = this._draftColumns(draft, physSet); // columns BEFORE the change
     // Validate what will actually be built: from the last live checkpoint when there is one (the
     // steps it baked are a TABLE now, not stages to re-validate), else from the source with the
@@ -435,9 +435,9 @@ export const pipelineDraftMethods = {
     // A python stage's bodies pass the static gate BEFORE the draft persists them.
     if (changedStage && changedStage.stage === 'python') await this._gatePythonStage(changedStage);
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
-      filterWarnings = this._guardFilterValues(changedStage.conditions
+      filterWarnings = this.advisor.guardFilterValues(changedStage.conditions
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
-        .map((cd) => ({ at: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
+        .map((cd) => ({ at: this.advisor.valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
     }
     draft.stages = newStages;
     // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
@@ -478,7 +478,7 @@ export const pipelineDraftMethods = {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._globalWindowWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.joinCompletenessWarnings(changedStage, draft), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -487,7 +487,7 @@ export const pipelineDraftMethods = {
 
   async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
-    const physSet = await this._physicalCols(draft.source);
+    const physSet = await this.probe.physicalColumns(draft.source);
     const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_step first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is

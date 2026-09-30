@@ -7,7 +7,7 @@
 // `withSignal(signal, …)`, and the one place that spawns processes (src/dbt/process.js) reads it.
 //
 // Two rules keep that honest:
-//   * work SHARED between callers (the enrichment reads of Engine._bestEffort: one in-flight read
+//   * work SHARED between callers (the enrichment reads of WarehouseProbe.bestEffort: one in-flight read
 //     serves every caller waiting on it) must not die with the first caller — it runs `detached`;
 //   * work that deliberately OUTLIVES its call (a task: a query or a build started by it) runs `detached`, and is protected by
 //     the server, which stops forwarding the call's cancellation the moment the call returns.

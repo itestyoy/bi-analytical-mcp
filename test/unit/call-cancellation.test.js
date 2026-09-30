@@ -3,7 +3,7 @@
 // The signal rides the async context (src/request-context.js) down to the one place that spawns
 // processes (src/dbt/process.js). Three properties, each one a way this could go wrong:
 //   * a cancelled call kills its dbt process instead of letting it scan the warehouse to the end;
-//   * work SHARED between callers (Engine._bestEffort) is detached — one caller leaving does not
+//   * work SHARED between callers (WarehouseProbe.bestEffort) is detached — one caller leaving does not
 //     kill the read another caller is waiting on;
 //   * a releasable signal stops forwarding once the call has returned — a build handed back as a
 //     query_id is meant to outlive its call.

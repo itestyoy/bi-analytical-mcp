@@ -151,7 +151,7 @@ export const pipelineMaterializeMethods = {
     draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null };
     let columns;
     try {
-      columns = this._draftColumns(draft, await this._physicalCols(draft.source));
+      columns = this._draftColumns(draft, await this.probe.physicalColumns(draft.source));
     } catch (e) { delete draft.building; throw e; }
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
     const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {
@@ -250,7 +250,7 @@ export const pipelineMaterializeMethods = {
     // pipeline actually runs on, never a mix. Grounded to the physical relation so a
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
-    const physSet = await this._physicalCols(source);
+    const physSet = await this.probe.physicalColumns(source);
     // Sampling is a property of the WHOLE declaration, not of the slice this build renders: a
     // `sample` baked into the materialized prefix still makes every number downstream approximate,
     // and dropping the flag would hand back a 1%-sampled figure as if it were exact.
@@ -280,11 +280,11 @@ export const pipelineMaterializeMethods = {
       };
       // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
       // silently-wrong stage should be pointed out, BEFORE anything is built.
-      const dryWarnings = this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from });
+      const dryWarnings = this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from });
       if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
-      const est = await this._estimateSourceRows(source, tr);
+      const est = await this.probe.estimateSourceRows(source, tr);
       if (est != null) resp.estimated_source_rows = est;
       return resp;
     }
@@ -351,7 +351,7 @@ export const pipelineMaterializeMethods = {
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
-      provenance: { tier: 'pipeline', source, data_freshness: await this._dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
+      provenance: { tier: 'pipeline', source, data_freshness: await this.probe.dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
       ...(sampled ? { sampling: samplingNote(sampled.percent ?? 10) } : {}),
       assumptions: [
         ...(models.length > 1
@@ -363,7 +363,7 @@ export const pipelineMaterializeMethods = {
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
         // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
         // reaches the caller as plausible numbers.
-        ...this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
+        ...this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
         ...((this.runner && rows.length === 0)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
           : []),

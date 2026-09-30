@@ -70,16 +70,16 @@ test('the same window PER GROUP says nothing — a partition is what a window is
 // exact PERCENTILE_CONT here — so the raw escape hatch is where the nudge matters most.
 test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () => {
   const e = engine();
-  const global = e._globalWindowWarnings({ stage: 'compute', name: 'z', op: 'raw', sql: '(revenue - AVG(revenue) OVER ()) / STDDEV_POP(revenue) OVER ()' });
+  const global = e.advisor.globalWindowWarnings({ stage: 'compute', name: 'z', op: 'raw', sql: '(revenue - AVG(revenue) OVER ()) / STDDEV_POP(revenue) OVER ()' });
   assert.equal(global.length, 1);
   assert.match(global[0], /OVER \(\) with no PARTITION BY/);
   // an exact percentile is the same shape with an ordering — still one global window
-  assert.equal(e._globalWindowWarnings({ stage: 'compute', name: 'p99', op: 'raw', sql: 'PERCENTILE_CONT(revenue, 0.99) OVER (ORDER BY revenue)' }).length, 1);
+  assert.equal(e.advisor.globalWindowWarnings({ stage: 'compute', name: 'p99', op: 'raw', sql: 'PERCENTILE_CONT(revenue, 0.99) OVER (ORDER BY revenue)' }).length, 1);
   // …and a real partition is not the shape at all
-  assert.deepEqual(e._globalWindowWarnings({ stage: 'compute', name: 'r', op: 'raw', sql: 'AVG(revenue) OVER (PARTITION BY player_id_of_internal)' }), []);
-  assert.deepEqual(e._globalWindowWarnings({ stage: 'compute', name: 'r', op: 'raw', sql: 'revenue * 2' }), []);
+  assert.deepEqual(e.advisor.globalWindowWarnings({ stage: 'compute', name: 'r', op: 'raw', sql: 'AVG(revenue) OVER (PARTITION BY player_id_of_internal)' }), []);
+  assert.deepEqual(e.advisor.globalWindowWarnings({ stage: 'compute', name: 'r', op: 'raw', sql: 'revenue * 2' }), []);
   // a stage that is not a compute is none of this function's business
-  assert.deepEqual(e._globalWindowWarnings(AGG), []);
+  assert.deepEqual(e.advisor.globalWindowWarnings(AGG), []);
 });
 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.

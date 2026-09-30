@@ -493,7 +493,7 @@ export const semanticQueryMethods = {
           // The value-index key comes from the model the caller NAMED, while it is still here: a
           // path carries no source, so recovering it afterwards loses the guard on any name two
           // sources happen to share.
-          const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
+          const at = this.advisor.valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           whereNames.set(p.field.path, `${refModel}_${refAttr}`);
           delete p.field.model; delete p.field.attribute; delete p.field.via;
@@ -502,7 +502,7 @@ export const semanticQueryMethods = {
           specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
         }
       });
-      filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
+      filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
       where = renderWhereClauses(translated);
     }
     // order_by: a requested metric, a result column name, `metric_time`, or { model, attribute }
@@ -546,7 +546,7 @@ export const semanticQueryMethods = {
       const contributes = (k) => this.catalog.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(this.catalog.getModel(k).measures || {}).length > 0;
       const factsRead = (ctx.state.usedModels || []).filter((k) => this.catalog.getModel(k).time?.column && contributes(k));
       const freshByFact = {};
-      await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this._dataFreshness(f); }));
+      await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f); }));
       const knownFresh = Object.values(freshByFact).filter(Boolean);
       const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
       // Situational recommendations: surface a risk ONLY when it is actually present.

@@ -276,12 +276,12 @@ test('data_freshness re-queries after each index scan (reflects new data, not a 
   let maxTime = '2026-07-10T00:00:00Z';
   const runner = { show: async (_d, sql) => (/MAX\(/.test(sql) ? { ok: true, rows: [{ latest: maxTime }] } : { ok: true, rows: [] }) };
   const e = settle(new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/fresh', workspaceRoot: mkdtempSync(join(tmpdir(), 'fr-')) }) }));
-  assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'first read = MAX(device_time)');
+  assert.equal(await e.probe.dataFreshness('events'), '2026-07-10T00:00:00Z', 'first read = MAX(device_time)');
   maxTime = '2026-07-21T00:00:00Z'; // new data lands
-  assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'between scans: still the cached value');
+  assert.equal(await e.probe.dataFreshness('events'), '2026-07-10T00:00:00Z', 'between scans: still the cached value');
   // an index scan completes → bumps the sync generation → freshness must re-query.
   e.valueIndex.finishRun(e.valueIndex.startRun());
-  assert.equal(await e._dataFreshness('events'), '2026-07-21T00:00:00Z', 'after the scan: re-queried, reflects the newer MAX');
+  assert.equal(await e.probe.dataFreshness('events'), '2026-07-21T00:00:00Z', 'after the scan: re-queried, reflects the newer MAX');
   e.close();
 });
 

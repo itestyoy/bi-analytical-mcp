@@ -1,13 +1,20 @@
 // THE MEMORY TOOL — notes an analyst leaves on the catalog (an event, a property, a metric, a model) and
 // finds again: kept in the store (src/memory.js), attached to what semantic_index answers about the
-// same thing. Methods of the Engine (src/engine/helpers.js — mixin).
+// same thing. A service of its own — `engine.notes` — over the catalog and the memory store; the
+// engine's `memory` tool is its `run`.
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { targetKey, targetWords } from '../memory.js';
 import { memoryView } from './helpers.js';
 
-export const memoryMethods = {
+export class MemoryTool {
+  constructor({ catalog, store, validate }) {
+    this.catalog = catalog;
+    this.store = store;
+    this.validate = validate;
+  }
+
   /**
    * One stored memory target brought onto the current form. Older stores kept a target as a STRING
    * key ('property:ad_type', 'model:users'); a target is now the STRUCTURE it names, so the rewrite
@@ -18,7 +25,7 @@ export const memoryMethods = {
    * which one was meant is not recoverable from the name — so it becomes a searchable term rather
    * than a guess. Returns null when the target is already structural.
    */
-  _memoryCanonForward(stored) {
+  canonForward(stored) {
     if (stored && typeof stored === 'object') return null; // already a target, not a legacy key
     const raw = String(stored);
     const i = raw.indexOf(':');
@@ -37,7 +44,7 @@ export const memoryMethods = {
       if (declared(source)) return memoryTarget(kind, source, name).target;
     }
     return memoryTarget('term', key.toLowerCase()).target;
-  },
+  }
 
   /**
    * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
@@ -47,7 +54,7 @@ export const memoryMethods = {
    * be attributed to an owner, and a name that source does not carry is refused rather than
    * fuzzily re-pointed at something else.
    */
-  _resolveMemoryTarget(t) {
+  resolveTarget(t) {
     const c = this.catalog;
     if (t && typeof t === 'object' && t.term !== undefined) return memoryTarget('term', String(t.term).trim());
     const source = String(t?.source ?? '').trim(); const name = t?.name == null ? null : String(t.name).trim();
@@ -60,20 +67,20 @@ export const memoryMethods = {
     const own = [...c.propertyEnumFor(source), ...(c.isFact(source) ? c.eventNames(source) : [])];
     const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
     throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
-  },
+  }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
-  _memorySurfaceHint({ kind, addressable: target }) {
+  surfaceHint({ kind, addressable: target }) {
     if (kind === 'property') return `semantic_index({ source: '${target.source}', property: '${target.name}' })`;
     if (kind === 'event') return `semantic_index({ source: '${target.source}', event: '${target.name}' })`;
     if (kind === 'model') return `semantic_index({ model: '${target.source}' })`;
     return `semantic_index({ search: '${target.term}' })`;
-  },
+  }
 
   /** Compact notes linked to any of these TARGETS, for attaching to a semantic_index view. */
-  _memoryFor(targets) {
-    return this.memoryStore.forTargets(targets.map(targetKey)).map(memoryView);
-  },
+  notesFor(targets) {
+    return this.store.forTargets(targets.map(targetKey)).map(memoryView);
+  }
 
   /**
    * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
@@ -81,8 +88,8 @@ export const memoryMethods = {
    * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
    * that view is about — { source, name } for a property/attribute/event, { source } for a model.
    */
-  _attachMemory(out, targets, drillTarget, { cap = 3 } = {}) {
-    const all = this.memoryStore.forTargets(targets.map(targetKey));
+  attach(out, targets, drillTarget, { cap = 3 } = {}) {
+    const all = this.store.forTargets(targets.map(targetKey));
     if (!all.length) return;
     const shown = all.slice(0, cap).map((e) => memoryCompact(e));
     out.memory = shown.map((s) => s.view);
@@ -97,7 +104,7 @@ export const memoryMethods = {
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
       });
     }
-  },
+  }
 
   /**
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
@@ -109,24 +116,24 @@ export const memoryMethods = {
    *   action:'search' → notes matching a word (text / alias / target)
    *   action:'forget' → delete one note by id
    */
-  async memory(input = {}) {
-    this._validate('memory', input);
+  async run(input = {}) {
+    this.validate('memory', input);
     const action = input.action;
 
     if (action === 'record') {
       const note = String(input.note ?? '').trim();
       if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
       const question = input.question ? String(input.question).trim() : null;
-      const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
+      const resolved = (input.targets || []).map((t) => this.resolveTarget(t));
       const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
       const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
+      const entry = this.store.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
       return {
         saved: true,
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this._memorySurfaceHint(r) })),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
@@ -135,25 +142,26 @@ export const memoryMethods = {
 
     if (action === 'list') {
       if (input.target !== undefined) {
-        const r = this._resolveMemoryTarget(input.target);
-        return { target: r.addressable, kind: r.kind, notes: this.memoryStore.forTargets([targetKey(r.target)]).map(memoryView) };
+        const r = this.resolveTarget(input.target);
+        return { target: r.addressable, kind: r.kind, notes: this.store.forTargets([targetKey(r.target)]).map(memoryView) };
       }
-      return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
+      return { total: this.store.counts().notes, notes: this.store.all({ limit: input.limit ?? 50 }).map(memoryView) };
     }
 
     if (action === 'search') {
-      const r = await this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false });
+      const r = await this.store.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false });
       return { query: input.query, semantic: r.semantic, ...(r.semantic_error ? { semantic_error: r.semantic_error } : {}), notes: r.notes.map(memoryView) };
     }
 
     if (action === 'forget') {
-      if (!this.memoryStore.forget(input.id)) throw new ToolError(`no memory note with id '${input.id}'`, { stage: 'validate', field: 'id' });
+      if (!this.store.forget(input.id)) throw new ToolError(`no memory note with id '${input.id}'`, { stage: 'validate', field: 'id' });
       return { forgotten: true, id: input.id };
     }
 
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
-  },
-};
+  }
+}
+
 
 /**
  * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is

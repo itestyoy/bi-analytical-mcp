@@ -5,14 +5,14 @@
 //   this file                     the constructor, contexts, the task delegates (src/task-runner.js),
 //                                 the small tools (context, time, experiment, explore_errors), the time spine
 //   engine/semantic-index.js      semantic_index and its views, recipes
-//   engine/memory.js              the memory tool
+//   engine/memory.js              the memory tool (MemoryTool → engine.notes)
 //   engine/semantic-build.js      build / update / delete a semantic model, a native model
 //   engine/semantic-query.js      query_semantic_model: references, the metric-query shell
 //   engine/semantic-preview.js    preview_semantic_model
 //   engine/pipeline-draft.js      build_pipeline_model's draft: steps, checkpoints, preview
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
-//   engine/pipeline-warnings.js   what a step is told as it is added
-//   engine/warehouse-probe.js     best-effort warehouse reads (columns, freshness, row estimates)
+//   engine/pipeline-warnings.js   what a step is told as it is added (PipelineAdvisor → engine.advisor)
+//   engine/warehouse-probe.js     best-effort warehouse reads (WarehouseProbe → engine.probe)
 //   engine/task-results.js        reading a task back, query_pipeline_model, display_model_result
 
 import { buildSchemas, transportSchema, MAX_WAIT_SECONDS } from './schema.js';
@@ -41,15 +41,15 @@ import { ErrorLog, readGenerated } from './error-log.js';
 import { getDialect } from './dialects/index.js';
 import { currentSignal } from './request-context.js';
 import { semanticIndexMethods } from './engine/semantic-index.js';
-import { warehouseProbeMethods } from './engine/warehouse-probe.js';
-import { pipelineWarningMethods } from './engine/pipeline-warnings.js';
+import { WarehouseProbe } from './engine/warehouse-probe.js';
+import { PipelineAdvisor } from './engine/pipeline-warnings.js';
 import { pipelineDraftMethods } from './engine/pipeline-draft.js';
 import { pipelineMaterializeMethods } from './engine/pipeline-materialize.js';
 import { semanticBuildMethods } from './engine/semantic-build.js';
 import { semanticQueryMethods } from './engine/semantic-query.js';
 import { semanticPreviewMethods } from './engine/semantic-preview.js';
 import { taskResultMethods } from './engine/task-results.js';
-import { memoryMethods } from './engine/memory.js';
+import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 
 export class Engine {
@@ -68,19 +68,21 @@ export class Engine {
     // container restarts — then it lives in its own store, isolated from the value index.
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
     this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    this.notes = new MemoryTool({ catalog, store: this.memoryStore, validate: (tool, input) => this._validate(tool, input) }); // the `memory` tool (engine.memory → notes.run)
     // Target keys written before a target carried its source ('property:ad_type_of_event_data')
     // name an entity no source owns. Attributing one to a source now would be guessing which
     // entity was meant, so each is demoted ONCE to a searchable term instead: the note stays
     // findable, and every stored key that addresses a view is (kind, source, name).
     try {
-      const moved = this.memoryStore.retarget((canon) => this._memoryCanonForward(canon));
+      const moved = this.memoryStore.retarget((canon) => this.notes.canonForward(canon));
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
-    // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (_bestEffort): the extras
+    this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
+    // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (engine.probe.bestEffort): the extras
     // an answer is enriched with — a physical column set, a freshness mark. Past it the answer goes
     // out without the extra and the read primes the cache for the next call. Work that is the
-    // point of a call (a query, a build) never holds it at all: it is a task (_startTask).
+    // point of a call (a query, a build) never holds it at all: it is a task (engine.tasks).
     this.queryTimeoutMs = queryTimeoutMs ?? 20000;
     // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
     // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
@@ -173,7 +175,7 @@ export class Engine {
       validate: (tool, input) => this._validate(tool, input),
       context: (id) => this._ctx(id),
       timeRangeConditions: (source, tr) => this._timeRangeConditions(source, tr),
-      physicalColumns: (source) => this._physicalCols(source),
+      physicalColumns: (source) => this.probe.physicalColumns(source),
       modelConfigLine: (materialized) => this._modelConfigLine(materialized),
       expiryConfig: (kind) => this._expiryConfig(kind),
       taskBase: (input) => this._taskBase(input),
@@ -181,6 +183,8 @@ export class Engine {
       precheckWait: (tool, args) => this._precheckWait(tool, args),
     };
     this.runner = runner; // optional; required for non-dry_run parse/query
+    // the warehouse read on the way — a relation's columns, a source's freshness, a row estimate
+    this.probe = new WarehouseProbe({ runner, ctxs: this.ctxs, catalog, valueIndex: this.valueIndex, queryTimeoutMs: this.queryTimeoutMs, timeRangeConditions: (source, tr) => this._timeRangeConditions(source, tr) });
     // The interpreter that runs the static gate over a python stage's functions (a local syntax /
     // safety check; the model itself runs where dbt sends it). The MetricFlow environment's Python —
     // never one found on PATH: an engine given neither refuses the gate (runAstGate says why).
@@ -473,6 +477,11 @@ export class Engine {
    * cap is reported back (`cap_seconds`) so the pacing can be planned from the answer instead of
    * from the description.
    */
+  /** The memory tool (src/engine/memory.js — engine.notes). */
+  memory(input) {
+    return this.notes.run(input);
+  }
+
   async time(input) {
     this._validate('time', input);
     const requested = Number(input.seconds) || 0;
@@ -513,7 +522,7 @@ export class Engine {
       if (this.runner && n.model) {
         // Bounded like every other warehouse enrichment: a slow introspection leaves the
         // declared columns standing rather than holding the whole description hostage.
-        const cols = await this._bestEffort(`context-columns:${ctx.id}:${n.model}`, () => this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model));
+        const cols = await this.probe.bestEffort(`context-columns:${ctx.id}:${n.model}`, () => this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model));
         if (cols?.ok) {
           const names = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
           const declared = (n.columns || []).filter((col) => names.has(String(col).toLowerCase()));
@@ -641,4 +650,4 @@ export class Engine {
   }
 }
 
-mixin(Engine, memoryMethods, semanticIndexMethods, warehouseProbeMethods, pipelineWarningMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods);
+mixin(Engine, semanticIndexMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods);

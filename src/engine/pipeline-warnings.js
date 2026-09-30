@@ -1,22 +1,29 @@
 // WHAT A PIPELINE STEP IS TOLD AS IT IS ADDED — warnings (a filter value the index has never seen, a
 // scope that matches nothing, a funnel whose completion reads nothing, a window over the whole source,
 // a python stage with nothing prepared before it) and the recommendations for the next step. Advice
-// only: nothing here refuses a step. Methods of the Engine (src/engine/helpers.js — mixin).
+// only, apart from a filter value the index proves wrong (guardFilterValues refuses it). A service of
+// its own over the catalog and the value index — `engine.advisor` — that the pipeline builder and the
+// semantic query consult.
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
 
-export const pipelineWarningMethods = {
+export class PipelineAdvisor {
+  constructor({ catalog, valueIndex }) {
+    this.catalog = catalog;
+    this.valueIndex = valueIndex;
+  }
+
   /** one_per_match counts EVERY start (incl. partial chains). Nudge to filter completed=true
    *  downstream when the intent is "completed situations" — the common foot-gun. */
-  _funnelCompletionWarnings(stage, after = []) {
+  funnelCompletionWarnings(stage, after = []) {
     if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
     // said until a where on `completed` follows the funnel — the one judgement, for a step as it is
     // added (nothing follows it yet) and for a whole pipeline alike
     if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed'))) return [];
     return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
-  },
+  }
 
   /**
    * The stage-level warnings for a WHOLE pipeline — the same judgements the incremental builder
@@ -25,15 +32,15 @@ export const pipelineWarningMethods = {
    * register_native_model is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
-  _stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
+  stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
     const draft = { source, stages, timeRange, startsFromTable };
     return stages.flatMap((st, i) => [
-      ...this._joinCompletenessWarnings(st, draft),
-      ...this._funnelCompletionWarnings(st, stages.slice(i + 1)),
-      ...this._pythonPreparationWarnings(st, draft, i),
-      ...this._globalWindowWarnings(st),
+      ...this.joinCompletenessWarnings(st, draft),
+      ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
+      ...this.pythonPreparationWarnings(st, draft, i),
+      ...this.globalWindowWarnings(st),
     ]);
-  },
+  }
 
   /**
    * A python stage that reads the SOURCE as it is. Everything SQL can say belongs in a stage
@@ -45,7 +52,7 @@ export const pipelineWarningMethods = {
    * sometimes right — a model that scores every source row genuinely wants the source — and from
    * here there is no way to tell that apart from handing the raw table over by habit.
    */
-  _pythonPreparationWarnings(stage, draft = null, index = 0) {
+  pythonPreparationWarnings(stage, draft = null, index = 0) {
     if (stage?.stage !== 'python') return [];
     // Starting from a materialized prefix: the stages in this array begin at a BUILT table, so
     // nothing here reads the source and there is nothing to say.
@@ -58,7 +65,7 @@ export const pipelineWarningMethods = {
     return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
       + ` A python stage is for what SQL cannot say (a statistical test, clustering, scoring, a forecast); everything else — scoping to the events${time ? ` and a time window on ${time}` : ''}, extracting the payload columns, joining the attributes, aggregating to the grain your analysis works on — is cheaper and exact as stages BEFORE this one, and the python model then starts from a small prepared table.`
       + ` If the analysis really is per source row (a model scoring every row), this shape is right and there is nothing to change.`];
-  },
+  }
 
   /**
    * A GLOBAL ANALYTIC WINDOW: `OVER ()` with no PARTITION BY. It keeps every row and attaches the
@@ -73,7 +80,7 @@ export const pipelineWarningMethods = {
    * refuses nothing: a global window over an already-aggregated handful of rows is harmless, and
    * from here there is no way to know how many rows arrive.
    */
-  _globalWindowWarnings(stage) {
+  globalWindowWarnings(stage) {
     if (stage?.stage !== 'compute') return [];
     const windowed = stage.op === 'window' && !(stage.partition_by || []).length;
     // Raw SQL is where this actually came from: the built-in window op is only reachable through
@@ -84,7 +91,7 @@ export const pipelineWarningMethods = {
     return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
       + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (compute sub/div, or least/greatest with { value }).`
       + ` If it is per group (per player, per day, per session), name those columns in partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
-  },
+  }
 
   /**
    * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
@@ -92,7 +99,7 @@ export const pipelineWarningMethods = {
    * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
    * add the window (and fix it) instead of trusting a silently wrong join.
    */
-  _joinCompletenessWarnings(stage, draft = null) {
+  joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
     if (!m?.scd) return [];
@@ -108,7 +115,7 @@ export const pipelineWarningMethods = {
       ? `the declared relationship '${stage.via}'`
       : `key '${Array.isArray(stage.on) ? stage.on.join(' + ') : stage.on}'`;
     return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on ${named} with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
-  },
+  }
 
   /**
    * Verify ONE filter literal against the REAL indexed values at `at` = { source, property }. The
@@ -120,7 +127,7 @@ export const pipelineWarningMethods = {
    *   absent   — value not present AND the full value set is indexed (not capped) → HARD
    *   unverifiable — value not found but only the top-N is indexed → WARN, do not block
    */
-  _checkFilterValue(at, value) {
+  checkFilterValue(at, value) {
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return null; // only string literals are case/value-checked
     if (!at) return null;
     const st = this.valueIndex.stats(at.source, at.property);
@@ -142,15 +149,15 @@ export const pipelineWarningMethods = {
     const capped = storedCount < (st.distinctCount ?? Infinity) || storedCount >= VALUE_CAP;
     if (capped) return { kind: 'unverifiable', value: sval, note: 'this column has more values than are indexed (top-N only) — the value may well exist but is not in the index; verify with a direct query before relying on this filter' };
     return { kind: 'absent', value: sval, suggest: stored.slice(0, 10).map((v) => String(v.value)) };
-  },
+  }
 
   /** Where a column filtered on `sourceKey` (the pipeline source) lives in the value index:
    *  { source, property } or null. The index keys rows by that pair, per source. */
-  _valueKeyForColumn(sourceKey, column) {
+  valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
     return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
-  },
+  }
 
   /**
    * HARD guard: given resolved filter specs [{ key, op, value, where }] (op ∈ equality ops,
@@ -158,13 +165,13 @@ export const pipelineWarningMethods = {
    * column's REAL values, with the correct value(s) suggested. Unverifiable misses become
    * warnings (returned), never a block. Throws a single ToolError listing all hard mismatches.
    */
-  _guardFilterValues(specs) {
+  guardFilterValues(specs) {
     const EQ = new Set(['eq', 'neq', 'in', 'not_in']);
     const errors = []; const warnings = []; const unverified = [];
     for (const { at, op, value, where } of specs) {
       if (!EQ.has(op)) continue;
       for (const v of Array.isArray(value) ? value : [value]) {
-        const r = this._checkFilterValue(at, v);
+        const r = this.checkFilterValue(at, v);
         if (!r) continue;
         const fix = r.suggest && r.suggest.length ? ` Did you mean: ${r.suggest.map((s) => `'${s}'`).join(', ')}?` : '';
         // HARD-reject ONLY the certain cases: an exact case-mismatch (the value provably
@@ -184,11 +191,11 @@ export const pipelineWarningMethods = {
     }
     warnings.onEmpty = unverified;
     return warnings;
-  },
+  }
 
   /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
    *  are not scoped by an upstream where on event_name → it reads NULL elsewhere. */
-  _eventScopeWarnings(draft, stage) {
+  eventScopeWarnings(draft, stage) {
     // Identify event properties from the catalog (always known); derive WHICH events actually carry
     // each one from the value index (data, not the declared meta.mcp.events). Unknown coverage
     // (cold index) can't be assessed, so such a property is not flagged.
@@ -206,7 +213,7 @@ export const pipelineWarningMethods = {
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
     return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`];
-  },
+  }
 
   /**
    * After a step, warn when a USED event-property is empty for the pipeline's SCOPED app
@@ -215,7 +222,7 @@ export const pipelineWarningMethods = {
    * both are scoped, else the per-bundle / per-event marginal. Soft warning only (the index
    * can be incomplete/stale); silent when nothing concrete is scoped or the field is fine.
    */
-  _emptyCombinationWarnings(draft, stage) {
+  emptyCombinationWarnings(draft, stage) {
     const c = this.catalog;
     if (!c.isFact(draft?.source)) return []; // no events, no (app × event) cells to be empty
     const fact = draft.source;
@@ -260,14 +267,15 @@ export const pipelineWarningMethods = {
       }
     }
     return warns.slice(0, 3);
-  },
+  }
 
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
-  _draftStepRecommendations(stage, available) {
+  stepRecommendations(stage, available) {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
       'Preview the SQL anytime with build_pipeline_model({ action: "preview", draft_id }); materialize when done.',
     ];
-  },
-};
+  }
+}
+

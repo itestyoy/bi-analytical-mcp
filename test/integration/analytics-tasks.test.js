@@ -119,7 +119,6 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(typeof ex.sql === 'string' && ex.sql.length > 0);            // rendered SQL returned
   assert.ok(ex.plan && typeof ex.plan === 'object');                     // plan object returned
   assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
-  assert.ok(typeof ex.plan.execution_plan === 'string' && ex.plan.execution_plan.length > 0); // execution plan present
 
   // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
   // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.

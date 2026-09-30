@@ -25,12 +25,11 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { makeMcpServer } from '../../src/server.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { isStartedTask } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -55,7 +54,7 @@ before(async () => {
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpe2e-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   const engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 
   // The real protocol surface: an MCP server over a transport, and a client on the other end.
@@ -68,7 +67,7 @@ before(async () => {
 after(async () => {
   if (client) await client.close();
   if (server) await server.close();
-  backend?.close();
+  backend?.close?.();
   if (wh) await wh.stop();
 });
 

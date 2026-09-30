@@ -50,10 +50,10 @@ AI ──► query_semantic_model (enum-constrained)
   context (base template + task additions).
 - **Contexts** (`src/context-manager.js`): per-context overlay dbt project +
   persistent, disk-reconciled registry, leases, teardown.
-- **Runner** (`src/dbt-runner.js`): shells `dbt parse` and `mf query` (NOT
+- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and `mf query` (NOT
   `dbt sl query`, which is dbt-platform/remote and incompatible with local
-  per-context isolation). A warm-process programmatic backend
-  (`src/backends/mf-engine.js` + `python/mf_sidecar.py`) is a drop-in alternative.
+  per-context isolation). The integration tests run the same client, so the numbers
+  they prove are the ones production returns.
 - **Time spine** is a predefined model **always present** in every context:
   `ContextManager.ensureTimeSpine` writes a dialect-aware `metricflow_time_spine`
   if the base project doesn't already define one (required for `metric_time`,

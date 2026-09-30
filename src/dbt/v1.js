@@ -100,17 +100,17 @@ export class DbtV1 {
   /**
    * What each of `metrics` can be grouped by, as MetricFlow itself lists it over `projectDir`'s parsed
    * semantic manifest (its `list_group_bys`: each dimension with its semantic model and entity path,
-   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through the sidecar
-   * script (python/mf_sidecar.py), in the MetricFlow environment. The `mf` CLI prints only names.
+   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through
+   * python/mf_group_bys.py, in the MetricFlow environment. The `mf` CLI prints only names.
    * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
    */
   async groupBys(projectDir, metrics) {
     const python = this.pythonBin || this.environment?.pythonBin;
     if (!python) return { ok: false, error: 'no MetricFlow Python to ask: the dbt environment names no MetricFlow environment (MF_ENV)' };
-    const sidecar = assetPath('mfSidecar');
-    if (!sidecar) return { ok: false, error: missingAssetMessage('mfSidecar') };
+    const script = assetPath('mfGroupBys');
+    if (!script) return { ok: false, error: missingAssetMessage('mfGroupBys') };
     const request = { id: 'group_bys', op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics };
-    const r = await runWithInput(python, [sidecar], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
+    const r = await runWithInput(python, [script], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
     const line = (r.stdout || '').split('\n').find((l) => l.trim().startsWith('{'));
     let out = null;
     try { out = line ? JSON.parse(line) : null; } catch { /* said below */ }

@@ -357,7 +357,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
-  // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.
+  // Graceful shutdown: stop accepting, close the runner and the SQLite handle.
   let shuttingDown = false;
   const shutdown = (sig) => {
     if (shuttingDown) return;

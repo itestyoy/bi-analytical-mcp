@@ -1,35 +1,21 @@
 #!/usr/bin/env python
-"""Long-lived MetricFlow sidecar: programmatic local queries (dbt Core).
+"""What each metric can be grouped by, as MetricFlow itself lists it — asked once per start.
 
-Instead of spawning the `mf` CLI per query (which re-imports MetricFlow and pays
-a cold-start each time), the JS server keeps this process warm and sends one JSON
-request per line on stdin; one JSON response per line is written to stdout.
+The `mf` CLI prints only the names of what a metric can be grouped by; the server needs each item's
+semantic model and entity path (src/group-by-items.js). So the dbt client (src/dbt/v1.js groupBys)
+runs this script on the MetricFlow environment's Python with one request on stdin, over the same
+building blocks the CLI uses (CLIConfiguration -> MetricFlowEngine.list_group_bys).
 
-This is the local-dbt-Core analogue of dbt-mcp's client.py — which uses the
-hosted dbtsl SDK (dbt platform). Here we use the same building blocks the `mf`
-CLI uses: CLIConfiguration -> MetricFlowEngine -> query()/explain().
-
-Protocol (newline-delimited JSON):
-  request : {"id","op":"query"|"explain","project_dir","profiles_dir",
-             "metrics":[...],"group_by":[...],"where":[...],"order":[...],
-             "limit":int,"start":"YYYY-MM-DD","end":"YYYY-MM-DD","plan":bool}
-  response: {"id","ok":true,"columns":[...],"rows":[[...]]}        # query
-            {"id","ok":true,"sql":"...","plan":{...}?}            # explain (plan if requested)
-            {"id","ok":false,"error":"..."}
   request : {"id","op":"group_bys","project_dir","profiles_dir","metrics":[...]}
-  response: {"id","ok":true,"group_bys":{"<metric>":[item, ...]}}  # what each metric can be grouped by,
-            as MetricFlow resolves it: a dimension {kind, name, semantic_model, entity_links, type,
-            grain, dunder_name}, or an entity {kind, name, semantic_model, entity_links}
+  response: {"id","ok":true,"group_bys":{"<metric>":[item, ...]}}  # a dimension {kind, name,
+            semantic_model, entity_links, type, grain, dunder_name}, or an entity {kind, name,
+            semantic_model, entity_links}
+            {"id","ok":false,"error":"..."}
 """
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
-
-
-def _dt(s):
-    return datetime.fromisoformat(s) if s else None
 
 
 def _build_engine(project_dir, profiles_dir):
@@ -106,46 +92,10 @@ def _group_by_item(item):
 
 
 def _answer(cfg, req):
-    from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
-
-    if req.get("op") == "group_bys":
-        # asked of MetricFlow itself, one metric at a time: what each can be grouped by
-        return {"ok": True, "group_bys": {m: [_group_by_item(i) for i in cfg.mf.list_group_bys(metric_names=[m])] for m in req.get("metrics") or []}}
-
-    mf_request = MetricFlowQueryRequest.create(
-        metric_names=req.get("metrics") or None,
-        group_by_names=req.get("group_by") or None,
-        where_constraints=req.get("where") or None,
-        order_by_names=req.get("order") or None,
-        limit=req.get("limit"),
-        time_constraint_start=_dt(req.get("start")),
-        time_constraint_end=_dt(req.get("end")),
-    )
-    if req.get("op") == "explain":
-        res = cfg.mf.explain(mf_request=mf_request)
-        out = {"ok": True, "sql": res.sql_statement.sql}
-        if req.get("plan"):
-            # MetricFlow query plan: the logical dataflow plan and the physical
-            # execution plan, each rendered as a text DAG (like `mf query
-            # --explain --show-dataflow-plan`).
-            plan = {}
-            try:
-                plan["dataflow_plan"] = res.dataflow_plan.structure_text()
-            except Exception as e:  # noqa: BLE001
-                plan["dataflow_plan_error"] = str(e)[:1000]
-            try:
-                plan["execution_plan"] = res.execution_plan.structure_text()
-            except Exception as e:  # noqa: BLE001
-                plan["execution_plan_error"] = str(e)[:1000]
-            out["plan"] = plan
-        return out
-    res = cfg.mf.query(mf_request=mf_request)
-    df = res.result_df
-    return {
-        "ok": True,
-        "columns": list(df.column_names),
-        "rows": [list(r) for r in df.rows],
-    }
+    if req.get("op") != "group_bys":
+        return {"ok": False, "error": f"unknown op {req.get('op')!r} (this script answers group_bys)"}
+    # asked of MetricFlow itself, one metric at a time: what each can be grouped by
+    return {"ok": True, "group_bys": {m: [_group_by_item(i) for i in cfg.mf.list_group_bys(metric_names=[m])] for m in req.get("metrics") or []}}
 
 
 def main():

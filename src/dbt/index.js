@@ -1,5 +1,5 @@
 // THE dbt CLIENT — one set of methods over dbt, whatever its version. The engine, the value index
-// and the MetricFlow sidecar talk to dbt ONLY through this contract; what a given dbt version needs
+// and the MetricFlow group-by script talk to dbt ONLY through this contract; what a given dbt version needs
 // (its CLI, its output format, how metrics are queried) lives in its own implementation next to it.
 //
 //   parse(projectDir)                     → { ok, stdout, stderr, manifest }   (semantic manifest written?)

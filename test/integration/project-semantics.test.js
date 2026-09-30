@@ -12,14 +12,13 @@ import { promisify } from 'node:util';
 import yaml from 'js-yaml';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { loadProjectSemantics, PROJECT_STORE } from '../../src/project-semantics.js';
 import { mergeModelEntry } from '../../src/semantic-latest.js';
 import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
-import { DBT_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project');
@@ -60,7 +59,7 @@ function declareProjectLayer() {
 before(async () => {
   if (!HAS_DBT) return;
   wh = await startWarehouse();
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   // the layer is written in the latest spec, the one the tests' dbt (v2) reads
   if (backend.semanticSpec !== 'latest') return;
   declareProjectLayer();
@@ -73,7 +72,7 @@ before(async () => {
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend, project: loaded }));
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => {
   if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; }
   if (backend.semanticSpec !== 'latest') { t.skip('the fixture layer is in dbt\'s latest spec'); return true; }

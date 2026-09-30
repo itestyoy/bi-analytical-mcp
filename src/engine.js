@@ -4575,7 +4575,7 @@ export class Engine {
     return this.ctxs.gc(maxIdleMs);
   }
 
-  /** Release process resources (shared store handle, warm runner/sidecar). */
+  /** Release process resources (the shared store handle, the runner's). */
   close() {
     // Managers share the store and don't own it; the Engine closes it once.
     try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }

@@ -56,10 +56,10 @@ export const RUNTIME_ASSETS = {
     repoPath: 'src/apps/retentioneering-view/dist/retentioneering-view.html',
     why: 'the MCP Apps view of a path analysis (ui://betti/retentioneering-view.html) — the BUILT single file (npm run build:app); served only while the retentioneering feature is on',
   },
-  mfSidecar: {
-    path: join(ROOT, 'python', 'mf_sidecar.py'),
-    repoPath: 'python/mf_sidecar.py',
-    why: 'the warm MetricFlow process the mf-engine backend talks to over stdio',
+  mfGroupBys: {
+    path: join(ROOT, 'python', 'mf_group_bys.py'),
+    repoPath: 'python/mf_group_bys.py',
+    why: 'what each metric can be grouped by, asked of MetricFlow\'s Python (the dbt client\'s groupBys) — without it the project\'s semantic layer cannot be served',
   },
 };
 

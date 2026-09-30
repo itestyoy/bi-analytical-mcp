@@ -320,7 +320,7 @@
   default compose setup) — `src/dialects/{bigquery,duckdb}.js`. There is no Postgres. A DuckDB
   database is a FILE one process at a time may hold, so every dbt / MetricFlow process on it takes
   the warehouse's turn (`src/dbt/process.js`, keyed by the database file read from the profile), the
-  MetricFlow sidecar lets go of it after each request, and a batch's members run one after another
+  MetricFlow script (python/mf_group_bys.py) lets go of it after its request, and a batch's members run one after another
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
@@ -382,7 +382,7 @@
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
   (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
-  (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and the sidecar's
+  (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and python/mf_group_bys.py's
   Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
   binary. `npm run dbt:env -- create|list` manages them.
 - WHAT IS IN AN ENVIRONMENT IS THIS TOOL'S DECISION (HARD RULE): `src/dbt/environment-specs.js` names
@@ -392,15 +392,18 @@
   ONLY OURS RUN: `resolveEnvironment` refuses a name the specs do not define, one asked for as what
   its spec's `role` is not (DBT_ENV must be a `dbt` environment, MF_ENV a `metricflow` one), and a
   directory whose mcp-env.json does not record the spec's pip and packages as they are now. NOTHING IS
-  TAKEN FROM PATH: no DBT_BIN / MF_BIN / PYTHON_BIN, and `createDbt`, `MfEngineBackend` and the AST
-  gate refuse without a named binary (tests name theirs from the same environments; a refused
-  environment fails the test run instead of skipping it).
+  TAKEN FROM PATH: no DBT_BIN / MF_BIN / PYTHON_BIN, and `createDbt` and the AST gate refuse without
+  a named binary (tests name theirs from the same environments; a refused environment fails the test
+  run instead of skipping it).
   Do NOT add a requirements file, a `pip install <pkg>` in the Dockerfile, or an option to hand the
   tool packages, versions or a dbt of one's own: a version change is a spec change, reviewed as code.
 - The retentioneering feature has an environment of its own, `retentioneering` (dbt 1.x, both
   adapters, the library and the numerical packages that decide its results, all pinned), and a dbt
   client of its own over it, so turning the feature on changes nothing the core runs; its test file
   (test/integration/retentioneering.test.js) runs on it and skips when it is not built.
+- The integration tests query through the dbt client production runs (`testDbt`, test/helpers/
+  dbt-env.js → `createDbt`): the numbers they prove come from `mf query` and `dbt show` as the server
+  calls them. Do NOT add a query backend only the tests use.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 

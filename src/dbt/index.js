@@ -30,7 +30,7 @@ import { resolveEnvironment } from './environments.js';
 
 export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV, DEFAULT_MF_ENV } from './environments.js';
 
-export { formatDbtError, parseShowJson, parseCsv } from './output.js';
+export { formatDbtError, dbtFailure, parseShowJson, parseCsv } from './output.js';
 export { dbtVersion } from './version.js';
 import { dbtVersion } from './version.js';
 

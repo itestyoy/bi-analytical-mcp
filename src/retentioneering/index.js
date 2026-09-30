@@ -21,7 +21,7 @@
 // names.js — besides schema.js, eventstream.js, python.js, checker.js, results.js, view-model.js, guide.js.
 
 import { join } from 'node:path';
-import { createDbt, formatDbtError } from '../dbt/index.js';
+import { createDbt, dbtFailure } from '../dbt/index.js';
 import { ToolError } from '../validate.js';
 import { buildSchema, querySchema, displaySchema, retentioneeringFacts, pathSources, analysisKinds, offeredOps, COMPLEX_EVENT_LOGIC } from './schema.js';
 import { renderEventstream } from './eventstream.js';
@@ -200,7 +200,7 @@ async function start(engine, feature, input) {
   const id = engine.tasks.start(ctx, BUILD, async (taskId) => {
     const dir = engine.ctxs.dir(ctx.id);
     const run = await feature.runner.run(dir, modelName);
-    if (!run.ok) return { ok: false, error: { stage: 'build', message: formatDbtError(run.stdout, run.stderr) || run.error || 'the eventstream did not build' } };
+    if (!run.ok) return dbtFailure('build', run, 'the eventstream did not build');
     const summary = await summarizeEventstream(feature.runner, dir, modelName, { segments: rendered.segments, paths, spec, dialect: engine.catalog.dialect });
     if (summary.ok === false) return summary;
     // the eventstream this task built — unless a later start of the same name replaced it meanwhile

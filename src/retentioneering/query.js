@@ -3,7 +3,7 @@
 // back: its tables' first rows kept (every row on detail: "full"), with what the eventstream was.
 
 import yaml from 'js-yaml';
-import { formatDbtError } from '../dbt/index.js';
+import { dbtFailure } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { retentioneeringFacts } from './schema.js';
@@ -185,7 +185,7 @@ export async function query(engine, feature, input) {
   const id = engine.tasks.start(ctx, QUERY, async () => {
     const dir = engine.ctxs.dir(ctx.id);
     const run = await feature.runner.run(dir, modelName);
-    if (!run.ok) return { ok: false, error: { stage: 'analysis', message: formatDbtError(run.stdout, run.stderr) || run.error || 'the analysis did not run' } };
+    if (!run.ok) return dbtFailure('analysis', run, 'the analysis did not run');
     const out = await readResult(engine, feature, dir, modelName, { context_id: ctx.id, eventstream: es.name, order });
     // an analysis the library raised on is kept with the call's others, and logged like any failure
     for (const [a, r] of Object.entries(out.analyses || {})) {
@@ -209,9 +209,9 @@ export async function readResult(engine, feature, dir, model, { context_id, even
   const where = [Number.isFinite(rows) ? `(part <> 'row' or seq < ${Number(rows)})` : null, analysis ? `analysis = ${d.sqlLiteral(analysis)}` : null].filter(Boolean);
   const from = `from {{ ref('${model}') }}${where.length ? ` where ${where.join(' and ')}` : ''}`;
   const n = await feature.runner.show(dir, `select count(*) as n ${from}`, 1);
-  if (!n.ok) return { ok: false, error: { stage: 'fetch', message: formatDbtError(n.stdout, n.stderr) || n.error } };
+  if (!n.ok) return dbtFailure('fetch', n);
   const res = await feature.runner.show(dir, `select analysis, kind, part, seq, payload ${from} order by analysis, part, seq`, Math.max(Number(n.rows[0]?.n) || 0, 1));
-  if (!res.ok) return { ok: false, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) || res.error } };
+  if (!res.ok) return dbtFailure('fetch', res);
   return { ok: true, kind: 'analyses', context_id, eventstream, analyses: parseResultRows(res.rows, order) };
 }
 

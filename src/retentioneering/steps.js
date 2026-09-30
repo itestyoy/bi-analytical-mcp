@@ -4,7 +4,7 @@
 // fork; and materialize, which runs the steps not yet run in one dbt Python model.
 
 import yaml from 'js-yaml';
-import { formatDbtError } from '../dbt/index.js';
+import { dbtFailure } from '../dbt/index.js';
 import { ToolError } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { RESHAPED, ADDED } from './schema.js';
@@ -23,9 +23,9 @@ export async function summarizeEventstream(runner, dir, model, { segments, paths
   const ref = `{{ ref('${model}') }}`;
   const sessionCol = paths.includes(ES_COLUMNS.session) ? ES_COLUMNS.session : null;
   const totals = await runner.show(dir, `select count(*) as events, count(distinct ${ES_COLUMNS.user}) as users, count(distinct ${ES_COLUMNS.event}) as names, min(${ES_COLUMNS.time}) as first_event, max(${ES_COLUMNS.time}) as last_event${sessionCol ? `, count(distinct ${sessionCol}) as sessions` : ''} from ${ref}`, 1);
-  if (!totals.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(totals.stdout, totals.stderr) || totals.error } };
+  if (!totals.ok) return dbtFailure('summary', totals);
   const vocab = await runner.show(dir, `select ${ES_COLUMNS.event} as event, count(*) as events, count(distinct ${ES_COLUMNS.user}) as users from ${ref} group by ${ES_COLUMNS.event} order by count(*) desc, ${ES_COLUMNS.event}`, Math.max(Number(totals.rows[0]?.names) || 0, 1));
-  if (!vocab.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(vocab.stdout, vocab.stderr) || vocab.error } };
+  if (!vocab.ok) return dbtFailure('summary', vocab);
   const levels = await segmentLevels(runner, dir, ref, segments, getDialect(dialect));
   if (levels.ok === false) return levels;
   const t = totals.rows[0] || {};
@@ -50,14 +50,14 @@ export async function segmentLevels(runner, dir, ref, segments, d) {
   // a segment's name as an identifier (quoted: it may be a keyword) and as a literal, never pasted in
   const q = (s) => d.quoteIdent(s);
   const counts = await runner.show(dir, `select ${segments.map((s, i) => `count(distinct ${q(s)}) as c${i}`).join(', ')} from ${ref}`, 1);
-  if (!counts.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(counts.stdout, counts.stderr) || counts.error } };
+  if (!counts.ok) return dbtFailure('summary', counts);
   const count = Object.fromEntries(segments.map((s, i) => [s, Number(counts.rows[0]?.[`c${i}`]) || 0]));
   const listed = segments.filter((s) => count[s] <= LEVEL_CAP);
   const rows = new Map(segments.map((s) => [s, []]));
   if (listed.length) {
     const sql = listed.map((s) => `select ${d.sqlLiteral(s)} as segment, ${q(s)} as level, count(distinct ${ES_COLUMNS.user}) as users from ${ref} where ${q(s)} is not null group by ${q(s)}`).join(' union all ');
     const res = await runner.show(dir, sql, Math.max(listed.reduce((n, s) => n + count[s], 0), 1));
-    if (!res.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(res.stdout, res.stderr) || res.error } };
+    if (!res.ok) return dbtFailure('summary', res);
     for (const r of res.rows) rows.get(r.segment)?.push({ level: String(r.level), users: Number(r.users) });
   }
   return Object.fromEntries(segments.map((s) => {
@@ -324,10 +324,10 @@ export async function materializeSteps(engine, feature, ctx, name, es) {
     try {
       const dir = engine.ctxs.dir(ctx.id);
       const run = await feature.runner.run(dir, modelName);
-      if (!run.ok) return { ok: false, error: { stage: 'steps', message: formatDbtError(run.stdout, run.stderr) || run.error || 'the steps did not run' } };
+      if (!run.ok) return dbtFailure('steps', run, 'the steps did not run');
       const ref = `{{ ref('${modelName}') }}`;
       const r = await feature.runner.show(dir, `select ${ROLES_COL} as roles from ${ref} where ${ROLES_COL} is not null`, 1);
-      if (!r.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(r.stdout, r.stderr) || r.error } };
+      if (!r.ok) return dbtFailure('summary', r);
       let roles;
       try { roles = JSON.parse(r.rows[0]?.roles); } catch { roles = null; }
       if (!roles) return { ok: false, error: { stage: 'summary', message: 'the steps left no paths — every event was filtered out' } };

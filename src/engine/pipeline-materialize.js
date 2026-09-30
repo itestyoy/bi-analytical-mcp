@@ -4,7 +4,7 @@
 // Methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError, RESULT_GONE } from '../validate.js';
-import { formatDbtError } from '../dbt/index.js';
+import { formatDbtError, dbtFailure } from '../dbt/index.js';
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from '../python-model.js';
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
 import { sqlConfigHeader } from '../sql-header.js';
@@ -339,7 +339,7 @@ export const pipelineMaterializeMethods = {
       if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : this._sqlRunMessage(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
-      else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
+      else return { context_id: ctx.id, kind: 'pipeline', ...dbtFailure('show', show) };
       build = { ok: true, executed: true };
     }
     return {

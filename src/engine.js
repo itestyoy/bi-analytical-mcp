@@ -25,7 +25,7 @@ import { gatePythonRuntime } from './catalog.js';
 import { ContextManager } from './context-manager.js';
 import { renderPredicate } from './predicate.js';
 import { PROJECT_STORE } from './project-semantics.js';
-import { formatDbtError } from './dbt/index.js';
+import { dbtFailure } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
@@ -619,7 +619,7 @@ export class Engine {
     // parse. ensureTimeSpine is idempotent — a no-op once a `time_spine:` config is present.
     try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort — parse will surface a real miss */ }
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
-    if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
+    if (!r.ok) return dbtFailure('parse', r);
     return { ok: true, manifest: r.manifest };
   }
 

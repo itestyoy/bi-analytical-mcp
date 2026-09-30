@@ -13,6 +13,15 @@ export const stripAnsi = (text) => String(text || '').replace(/\x1b\[[0-9;]*m/g,
 /** Where `dbt parse` writes the semantic manifest MetricFlow reads, in a project. */
 export const SEMANTIC_MANIFEST = ['target', 'semantic_manifest.json'];
 
+/**
+ * What a step answers when its dbt call failed: `{ ok: false, error: { stage, message } }`, the
+ * message being what dbt said, else the client's own error (a timeout, a process that did not start),
+ * else `fallback`.
+ */
+export function dbtFailure(stage, run, fallback = `the ${stage} step failed`) {
+  return { ok: false, error: { stage, message: formatDbtError(run.stdout, run.stderr) || run.error || fallback } };
+}
+
 export function formatDbtError(stdout = '', stderr = '') {
   const raw = `${stderr || ''}\n${stdout || ''}`;
   const cleaned = raw

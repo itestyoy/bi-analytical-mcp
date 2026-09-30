@@ -158,9 +158,9 @@ export async function makeEngine(opts = {}) {
     log: (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`),
   });
   // MCP_TABLE_EXPIRATION_DAYS: the tables built for tasks expire this many days after they are built
-  // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again
-  const tableExpirationDays = envNumber('MCP_TABLE_EXPIRATION_DAYS', 30);
-  if (!Number.isInteger(tableExpirationDays) || tableExpirationDays < 0) throw new Error(`MCP_TABLE_EXPIRATION_DAYS must be a whole number of days (0 keeps the tables), got '${rawExpiry}'`);
+  // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again. A value
+  // that is not a whole number of days is the default, as for every setting (src/config.js).
+  const tableExpirationDays = envInt('MCP_TABLE_EXPIRATION_DAYS', 30);
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
   // schema names them, and query_semantic_model runs them in their own context with no build
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;

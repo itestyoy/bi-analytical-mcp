@@ -357,6 +357,15 @@ export class SqliteBackend {
     // what reproduces an error came later: the context's state, the code of the model that failed, the runtime
     ensureColumns('errors', ['context TEXT', 'files TEXT', 'runtime TEXT']);
     const s = this;
+    // every row a table holds for one (source, property), replaced by `rows` — each row the values of
+    // `columns`, after the source and the property (the table names are this file's own)
+    const replaceRows = (table, source, property, columns, rows) => {
+      s._run(`DELETE FROM ${table} WHERE source = ? AND property = ?`, source, property);
+      const insert = `INSERT INTO ${table} (source, property, ${columns.join(', ')}) VALUES (${['?', '?', ...columns.map(() => '?')].join(', ')})`;
+      for (const row of rows) s._run(insert, source, property, ...row);
+    };
+    // a coverage row as the value index reads it: the rows, the ones that carry the property, the NULLs
+    const fill = (r) => ({ row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) });
 
     this.meta = {
       get(key) { return s._all('SELECT value FROM server_meta WHERE key = ?', key)[0]?.value ?? null; },
@@ -411,14 +420,11 @@ export class SqliteBackend {
     this.values = {
       replaceProperty(source, property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) {
         s._tx(() => {
-          s._run('DELETE FROM prop_values WHERE source = ? AND property = ?', source, property);
-          for (const v of values) s._run('INSERT INTO prop_values (source, property, value, freq) VALUES (?, ?, ?, ?)', source, property, String(v.value), Number(v.freq) || 0);
-          s._run('DELETE FROM prop_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of coverage) s._run('INSERT INTO prop_coverage (source, property, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (source, property, bundle, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_event_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of cellCoverage) s._run('INSERT INTO prop_bundle_event_coverage (source, property, bundle, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?, ?)', source, property, String(e.bundle), String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          const counts = (e) => [Number(e.rowCount) || 0, Number(e.nonNull) || 0];
+          replaceRows('prop_values', source, property, ['value', 'freq'], values.map((v) => [String(v.value), Number(v.freq) || 0]));
+          replaceRows('prop_coverage', source, property, ['event_name', 'row_count', 'non_null'], coverage.map((e) => [String(e.event), ...counts(e)]));
+          replaceRows('prop_bundle_coverage', source, property, ['bundle', 'row_count', 'non_null'], bundleCoverage.map((e) => [String(e.bundle), ...counts(e)]));
+          replaceRows('prop_bundle_event_coverage', source, property, ['bundle', 'event_name', 'row_count', 'non_null'], cellCoverage.map((e) => [String(e.bundle), String(e.event), ...counts(e)]));
           s._run('INSERT INTO prop_stats (source, property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at, high_cardinality=excluded.high_cardinality, data_watermark=excluded.data_watermark', source, property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now(), highCardinality ? 1 : 0, dataWatermark ?? null);
         });
       },
@@ -444,12 +450,12 @@ export class SqliteBackend {
       },
       coverage(source, property) {
         return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, event_name ASC', source, property)
-          .map((r) => ({ event_name: r.event_name, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+          .map((r) => ({ event_name: r.event_name, ...fill(r) }));
       },
       // ── per-bundle (app) coverage: which apps populate a property vs leave it empty ──
       bundleCoverage(source, property) {
         return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, bundle ASC', source, property)
-          .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+          .map((r) => ({ bundle: r.bundle, ...fill(r) }));
       },
       // An app is a (source, bundle) pair — never aggregated across sources (see the memory backend).
       bundles(source) {
@@ -462,12 +468,12 @@ export class SqliteBackend {
         const rows = source
           ? s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? AND source = ? ORDER BY source ASC, non_null DESC, property ASC', bundle, source)
           : s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY source ASC, non_null DESC, property ASC', bundle);
-        return rows.map((r) => ({ source: r.source, property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+        return rows.map((r) => ({ source: r.source, property: r.property, ...fill(r) }));
       },
       // ── triple (property × bundle × event) cell lookup: the field's fill at one combo ──
       cellCoverage(source, property, { bundle, event } = {}) {
         const r = s._get('SELECT row_count, non_null FROM prop_bundle_event_coverage WHERE source = ? AND property = ? AND bundle = ? AND event_name = ?', source, property, String(bundle), String(event));
-        return r ? { bundle, event_name: event, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) } : null;
+        return r ? { bundle, event_name: event, ...fill(r) } : null;
       },
       search(query, limit) {
         const q = String(query).toLowerCase();

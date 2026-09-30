@@ -323,6 +323,14 @@
   / `loadSettings()` or, by a function that takes `env` as its argument, by name from it. `.env.example`
   is rendered from the table (`npm run settings:example`), and test/unit/settings.test.js holds the table
   to that file and to every variable src/ reads. Do NOT read `process.env.X` for a new setting without its row.
+- THE ENGINE IS A FACADE OVER SERVICES (src/engine.js). A concern that stands on its own is a class
+  whose constructor names every dependency it reaches — the value index as semantic_index shows it
+  (`engine.indexViews`), the memory tool (`engine.notes`), a pipeline step's advice (`engine.advisor`),
+  the best-effort warehouse reads with their caches (`engine.probe`), the task runtime (`engine.tasks`).
+  The tool families that call each other and run through the context, the validation and the task start
+  (semantic build / query / preview, the pipeline draft and its materialization, reading a task back,
+  semantic_index's catalog views) stay the engine's own methods, one file per family under src/engine/.
+  A new concern with a dependency set of its own is a service, not another mixin.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

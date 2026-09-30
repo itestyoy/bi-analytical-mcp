@@ -90,8 +90,8 @@ export const semanticIndexMethods = {
     // re-checked here.
 
     // ── operational views (sync state / one run) ──
-    if (input.run != null) return this._indexRun(input);
-    if (input.status) return this._indexStatus(input);
+    if (input.run != null) return this.indexViews.run(input);
+    if (input.status) return this.indexViews.status(input);
 
     // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
     // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──
@@ -339,12 +339,12 @@ export const semanticIndexMethods = {
       const mk = pSource; const col = p;
       const dim = (c.getModel(mk).dimensions || {})[col];
       const dDescs = c.columnDescriptions(mk);
-      const { samples, value_stats } = this._valueListing(mk, col, input);
+      const { samples, value_stats } = this.indexViews.valueListing(mk, col, input);
       // NULL coverage + indexing freshness make this ONE page the full truth about the
       // column: meaning, values, completeness, and how recently it was profiled.
       // (event_coverage is [] here — attributes live on the dimension model, not on
       // events — but the SHAPE matches the event-property page exactly.)
-      const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(mk, col);
+      const { nulls, coverage: attrCoverage, recs: nullRecs } = this.indexViews.nullCoverage(mk, col);
       Object.assign(value_stats, nulls);
       const ent = c.primaryEntityName(mk);
       const recommendations = [];
@@ -369,7 +369,7 @@ export const semanticIndexMethods = {
         description: dDescs[col],
         sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
-        indexing: this._indexHistory(mk, col, input.recent ?? 3),
+        indexing: this.indexViews.history(mk, col, input.recent ?? 3),
         recommendations: recommendations.slice(0, 3),
       };
       this.notes.attach(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
@@ -385,8 +385,8 @@ export const semanticIndexMethods = {
     // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction)
     // + NULL coverage per event + indexing freshness: ONE page = the full truth about the
     // column (meaning, values, completeness, profiling recency).
-    const { samples, value_stats } = this._valueListing(propFact, propName, input);
-    const { nulls, coverage, recs: nullRecs } = this._nullCoverage(propFact, propName, { eventScoped: true });
+    const { samples, value_stats } = this.indexViews.valueListing(propFact, propName, input);
+    const { nulls, coverage, recs: nullRecs } = this.indexViews.nullCoverage(propFact, propName, { eventScoped: true });
     Object.assign(value_stats, nulls);
     const dc = value_stats.distinct_count;
     // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
@@ -431,7 +431,7 @@ export const semanticIndexMethods = {
       indexed: value_stats.indexed, value_stats,
       event_coverage: showFullCoverage ? coverage : carriers,
       ...(showFullCoverage || coverageOmitted <= 0 ? {} : { event_coverage_omitted: coverageOmitted }),
-      indexing: this._indexHistory(propFact, propName, historyN),
+      indexing: this.indexViews.history(propFact, propName, historyN),
       next_actions: [
         ...(evs ? [{ call: `semantic_index({ source: '${propFact}', event: '${evs[0]}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace one of these values across the catalog' },
@@ -708,155 +708,5 @@ export const semanticIndexMethods = {
       `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
     ],
   };
-  },
-
-  /**
-   * Pageable/orderable view of one indexed key's VALUES (limit/offset/order_by/direction)
-   * + descriptive stats. Shared by event-property and dimension-attribute drill-downs.
-   * Over-fetches by one so has_more is accurate at the boundary (next page non-empty).
-   */
-  _valueListing(source, key, input = {}) {
-    const st = this.valueIndex.stats(source, key);
-    const dc = st?.distinctCount ?? null;
-    const total = st?.totalCount ?? null;
-    const orderBy = input.order_by === 'value' ? 'value' : 'freq';
-    const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
-    const limit = input.limit ?? 10;
-    const offset = input.offset ?? 0;
-    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir });
-    const has_more = fetched.length > limit;
-    const samples = has_more ? fetched.slice(0, limit) : fetched;
-    // top_value is the single most frequent value; share = its fraction of indexed rows.
-    const top = this.valueIndex.sampleValues(source, key, 1)[0] || null;
-    // The index keeps only the top-N values by frequency. If the column has MORE distinct
-    // values than are stored, rare ones are NOT in the index — a search for them will miss,
-    // so callers must verify a "not found" with a direct query rather than trust absence.
-    const storedValues = this.valueIndex.valueCount(source, key);
-    const valuesCapped = !!st && dc != null && storedValues != null && dc > storedValues;
-    const value_stats = {
-      distinct_count: dc, total_count: total,
-      top_value: top ? top.value : null, top_freq: top ? top.freq : null,
-      top_share: top && total ? Math.round((top.freq / total) * 1000) / 1000 : null,
-      indexed: !!st, indexed_at: st?.indexedAt ?? null,
-      // values stored are capped (top-by-frequency); paging past them returns [].
-      returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
-      has_more,
-      indexed_value_count: storedValues, values_capped: valuesCapped,
-    };
-    return { samples, value_stats };
-  },
-
-  /** Compact row for a property's per-run indexing record. */
-  _indexPropRow(r) {
-    return { ...(r.source ? { source: r.source } : {}), property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
-  },
-
-  /**
-   * NULL coverage of one indexed key (from the latest sync): overall null counts +
-   * a per-event_name breakdown. A property is NULL on events it does not apply to —
-   * each event is annotated with `applies` (OBSERVED: non-null on at least one of that event's
-   * rows) so EXPECTED nulls are distinguishable from real data gaps. Nothing is declared.
-   */
-  _nullCoverage(source, key, { eventScoped = false } = {}) {
-    const st = this.valueIndex.stats(source, key);
-    const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
-    const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
-    const nulls = { non_null_count: st?.totalCount ?? null, null_count: st?.nullCount ?? null, row_count: rowCount, null_fraction: (st?.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null };
-    // Applicability is DATA-DERIVED: for an event property an event "carries" the field when it is
-    // non-null on >= 1 of that event's rows (observed, not a declared meta.mcp.events list). For a
-    // non-event key (a dimension attribute) applicability is not event-scoped, so `applies` is true.
-    const coverage = this.valueIndex.coverage(source, key).map((e) => ({
-      event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
-      null_fraction: frac(e.null_count, e.row_count), applies: eventScoped ? (e.non_null || 0) > 0 : true,
-    }));
-    const carries = eventScoped ? coverage.filter((e) => e.applies).map((e) => e.event_name) : [];
-    const recs = [];
-    if (nulls.null_count != null && nulls.row_count) recs.push(`${nulls.null_count} of ${nulls.row_count} rows are NULL (${nulls.null_fraction != null ? Math.round(nulls.null_fraction * 100) : '?'}%)${carries.length ? `; observed to carry data on event(s): ${carries.join(', ')}` : ''}.`);
-    if (eventScoped && carries.length && carries.length < coverage.length) recs.push(`NULLs on the other events are expected — '${key}' is populated only on ${carries.join(', ')} (derived from the indexed data, not a declared list).`);
-    return { nulls, coverage, recs };
-  },
-
-  /** Per-sync indexing history of one key: { runs, avg_ms, history } (most recent first). */
-  _indexHistory(source, key, recent = 10) {
-    const history = this.valueIndex.propertyHistory(source, key, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...this._indexPropRow(r) }));
-    const timed = history.filter((r) => r.ms != null);
-    return { runs: history.length, avg_ms: timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null, history };
-  },
-
-  /** semantic_index({ run }): per-property breakdown within one sync run (slowest first). */
-  _indexRun(input) {
-    const run = this.valueIndex.runById(input.run);
-    if (!run) throw new ToolError(`unknown index run '${input.run}'. See semantic_index({ status: true }).value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
-    const props = this.valueIndex.runProperties(input.run).map((r) => this._indexPropRow(r));
-    const fallbacks = (this.valueIndex.runNotes ? this.valueIndex.runNotes(run.id) : []).map((n) => n.note);
-    return {
-      run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
-      property_count: props.length,
-      properties: props,
-      // Run-level events: each batch whose combined scan failed, with the FULL raw reason
-      // (process-level error incl. timeout/signal + warehouse/dbt stderr/stdout, untruncated)
-      // and the fact it fell back to per-property. Empty when every batch combined cleanly.
-      // NB: per-property `ms` is only meaningful for properties scanned individually (~0 when batched).
-      ...(fallbacks.length ? { fallbacks } : {}),
-      recommendations: [
-        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ source: '${props[0].source || '<source>'}', property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`,
-        ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property — full reason in fallbacks[].`] : []),
-      ],
-    };
-  },
-
-  /**
-   * semantic_index({ status: true }): operational state — the value-index SYNC state
-   * (last/recent refresh runs, coverage counts, whether one is in flight) plus the
-   * background QUERY jobs and their statuses. Read-only, cheap; touches no warehouse.
-   */
-  _indexStatus(input = {}) {
-    const recent = input.recent ?? 10;
-    const propRow = (r) => this._indexPropRow(r);
-
-    const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
-    const last = sync.last_successful_run || sync.last_run;
-    const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
-    // Preview the slowest properties of the last run; full per-property timing via drill-down.
-    const slowest = last?.id != null ? this.valueIndex.runProperties(last.id, { limit: 5 }).map(propRow) : [];
-    // Batch-fallback events of the last run (combined scan failed → per-property, FULL reason).
-    const fallbacks = (last?.id != null && this.valueIndex.runNotes) ? this.valueIndex.runNotes(last.id).map((n) => n.note) : [];
-
-    const jobs = this.jobs.list(); // [{ task_id, tool, status, table, context_id, age_ms }]
-    const running = jobs.filter((j) => j.status === 'running');
-    const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
-
-    const recommendations = [];
-    if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ source, property }) will show no sample_values until the first sync (it runs in the background at startup).`);
-    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ source, property }).`);
-    if (running.length) recommendations.push(`${running.length} task(s) running — read one with its side's query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }); it waits for the task. semantic_index({ status }) lists them.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ source: '${slowest[0].source}', property: '${slowest[0].property}' }) for one property across syncs.`);
-    if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ run: ${last.id} }).fallbacks).`);
-    if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
-
-    return {
-      value_index: {
-        persisted: sync.persisted,
-        running: sync.running,
-        indexed_properties: sync.indexed_properties,
-        total_values: sync.total_values,
-        total_runs: sync.total_runs,
-        seconds_since_last_sync: secsSince,
-        last_run: sync.last_run,
-        last_successful_run: sync.last_successful_run,
-        slowest_properties: slowest,
-        ...(fallbacks.length ? { last_run_fallbacks: fallbacks } : {}),
-        recent_runs: sync.recent_runs,
-      },
-      tasks: {
-        total: jobs.length,
-        by_status: byStatus,
-        running,
-        recent: jobs.slice(0, recent),
-      },
-      recommendations,
-    };
   },
 };

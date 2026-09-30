@@ -1,18 +1,27 @@
 // Tool engine: validates inputs against catalog-derived schemas, compiles
 // declarations, renders YAML, drives dbt/mf within isolated contexts.
 //
-// ONE object, its methods in one file per concern (mixed in at the end — src/engine/helpers.js):
-//   this file                     the constructor, contexts, the task delegates (src/task-runner.js),
-//                                 the small tools (context, time, experiment, explore_errors), the time spine
-//   engine/semantic-index.js      semantic_index and its views, recipes
-//   engine/memory.js              the memory tool (MemoryTool → engine.notes)
+// A FACADE OVER SERVICES. What stands on its own is a service with explicit dependencies, built in the
+// constructor from what it is given and reaching nothing else:
+//   engine/value-index-views.js   the value index as semantic_index shows it  (ValueIndexViews → engine.indexViews)
+//   engine/memory.js              the memory tool                             (MemoryTool      → engine.notes)
+//   engine/pipeline-warnings.js   what a step is told as it is added          (PipelineAdvisor → engine.advisor)
+//   engine/warehouse-probe.js     best-effort warehouse reads                 (WarehouseProbe  → engine.probe)
+//   src/task-runner.js            the task runtime                            (TaskRunner      → engine.tasks)
+//   src/search.js, src/error-log.js, src/memory.js, src/value-index.js, src/jobs.js — the stores and indexes under them
+// THE ORCHESTRATION CORE stays the engine's own methods, one file per tool family (mixed in at the end —
+// src/engine/helpers.js): they call each other in both directions (a query resolves references through
+// the preview's layer, a draft is materialized by the chain renderer) and all run through the context,
+// the validation and the task start, so a boundary between them would be a second name for the same
+// object, not a dependency cut:
+//   this file                     the constructor, contexts, the task delegates, the small tools
+//                                 (context, delete_context, memory, time, experiment, explore_errors), the time spine
+//   engine/semantic-index.js      semantic_index and its catalog views, recipes
 //   engine/semantic-build.js      build / update / delete a semantic model, a native model
 //   engine/semantic-query.js      query_semantic_model: references, the metric-query shell
 //   engine/semantic-preview.js    preview_semantic_model
 //   engine/pipeline-draft.js      build_pipeline_model's draft: steps, checkpoints, preview
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
-//   engine/pipeline-warnings.js   what a step is told as it is added (PipelineAdvisor → engine.advisor)
-//   engine/warehouse-probe.js     best-effort warehouse reads (WarehouseProbe → engine.probe)
 //   engine/task-results.js        reading a task back, query_pipeline_model, display_model_result
 
 import { buildSchemas, transportSchema, MAX_WAIT_SECONDS } from './schema.js';
@@ -43,6 +52,7 @@ import { currentSignal } from './request-context.js';
 import { semanticIndexMethods } from './engine/semantic-index.js';
 import { WarehouseProbe } from './engine/warehouse-probe.js';
 import { PipelineAdvisor } from './engine/pipeline-warnings.js';
+import { ValueIndexViews } from './engine/value-index-views.js';
 import { pipelineDraftMethods } from './engine/pipeline-draft.js';
 import { pipelineMaterializeMethods } from './engine/pipeline-materialize.js';
 import { semanticBuildMethods } from './engine/semantic-build.js';
@@ -78,6 +88,7 @@ export class Engine {
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
+    this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs }); // what semantic_index shows of the value index
     this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
     // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (engine.probe.bestEffort): the extras
     // an answer is enriched with — a physical column set, a freshness mark. Past it the answer goes

@@ -27,7 +27,7 @@ const RULES = [
     re: /\.(split|indexOf|lastIndexOf)\(\s*['"`](__|_)['"`]\s*\)/g,
     why: "taking a generated name apart — carry what it encodes next to it instead",
     allow: {
-      'engine.js': ["p.split('__')"], // _suggestRef: reads a path the CALLER typed, to answer with the structured form
+      'engine/semantic-query.js': ["p.split('__')"], // _suggestRef: reads a path the CALLER typed, to answer with the structured form
       'mcp-surface.js': ["String(name).split('_')"], // titleFromName: formatting a tool name for humans, not resolving anything
     },
   },
@@ -36,7 +36,7 @@ const RULES = [
     re: /\.(startsWith|endsWith)\(\s*`\$\{/g,
     why: 'matching a generated name by prefix — one name may be a prefix of another',
     allow: {
-      'engine.js': ['startsWith(`${tk}_`)'], // declaredAttribute: the fallback for contexts persisted before `_task`/`_attribute` existed
+      'engine/helpers.js': ['startsWith(`${tk}_`)'], // declaredAttribute: the fallback for contexts persisted before `_task`/`_attribute` existed
     },
   },
   {
@@ -76,12 +76,12 @@ walk(SRC);
 const problems = [];
 for (const file of files.sort()) {
   const rel = relative(ROOT, file);
-  const base = rel.split('/').pop();
+  const inSrc = relative(SRC, file); // an allow key is the file's path under src/
   const text = readFileSync(file, 'utf8');
   const lines = text.split('\n');
   for (const rule of RULES) {
     if (rule.only && !rule.only.test(rel)) continue;
-    const allowed = rule.allow?.[base] || [];
+    const allowed = rule.allow?.[inSrc] || [];
     lines.forEach((line, i) => {
       if (line.trimStart().startsWith('//') || line.trimStart().startsWith('*')) return; // prose
       if (rule.skip?.test(line)) return;

@@ -43,10 +43,11 @@ export const NOT_OFFERED = {
   },
 };
 
-/** The analyses the library offers, in the sheet's order. */
-export const ANALYSIS_KINDS = Object.keys(retentioneeringFacts().analyses);
+/** The analyses the library offers, in the sheet's order. Read when asked, never at import: a server
+ *  with the feature off never opens the sheet. */
+export const analysisKinds = () => Object.keys(retentioneeringFacts().analyses);
 /** The preprocessing ops offered: every op the library registers, but the ones NOT_OFFERED. */
-export const OFFERED_OPS = Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
+export const offeredOps = () => Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
 
 export const NAME = '^[a-z][a-z0-9_]*$';
 /** A column of an eventstream: an identifier the warehouse stores (a segment, a path column, a custom one). */
@@ -185,7 +186,7 @@ export function buildSchema(catalog) {
     type: 'object', additionalProperties: false,
     description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
     properties: {
-      action: { enum: BUILD_ACTIONS, default: 'start', description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${OFFERED_OPS.join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
+      action: { enum: BUILD_ACTIONS, default: 'start', description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${offeredOps().join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
       eventstream: { type: 'string', pattern: NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
       step: { ...stepSchema(), description: 'add_step / edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
       steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: several steps, applied in order.' },
@@ -528,7 +529,7 @@ function methodArgs(list, properties) {
 
 function opSchemas() {
   const f = retentioneeringFacts();
-  return OFFERED_OPS.map((op) => {
+  return offeredOps().map((op) => {
     const { properties, required, allOf } = params(f.ops[op].params);
     for (const [name, a] of Object.entries(ADDED[op] || {})) properties[name] = a.schema();
     return {
@@ -553,7 +554,7 @@ const METHOD_ARGS_NOTE = 'the method\'s own arguments';
 function analysisSchemas() {
   const f = retentioneeringFacts();
   const id = { type: 'string', pattern: NAME, description: 'Your name for this analysis in the result (default: its kind). Unique within the call.' };
-  return ANALYSIS_KINDS.map((kind) => {
+  return analysisKinds().map((kind) => {
     const a = f.analyses[kind];
     const { properties, required, allOf } = params(a.params);
     const branch = {

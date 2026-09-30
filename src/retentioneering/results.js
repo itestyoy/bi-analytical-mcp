@@ -72,6 +72,8 @@ function generic(parts) {
 }
 
 function shape({ kind, parts }) {
+  // an analysis the library raised on is its error alone: the others of the call keep their results
+  if (parts.error?.length) return { kind, error: { type: parts.error[0].type, message: parts.error[0].message } };
   // a diff says so: the analysis step marks it, with its two groups and the form it stored it in — the
   // analysis's own shape (diff_charted) or the library's tables
   const d = parts.diff?.[0];
@@ -121,6 +123,7 @@ const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digit
 /** What the model reads of one analysis: the numbers that answer, not every cell. */
 export function summarize(result) {
   const { kind } = result;
+  if (result.error) return { kind, error: result.error };
   const libraryTables = summarizeGeneric(result);
   if (kind === 'transition_graph' && result.edges) {
     const edges = [...result.edges].sort((a, b) => b.count - a.count || byText(a.source, b.source) || byText(a.target, b.target));

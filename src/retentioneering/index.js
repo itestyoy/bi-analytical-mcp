@@ -21,7 +21,7 @@ import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME, COMPLEX_EVENT_LOGIC, RESHAPED, ADDED } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, analysisKinds, offeredOps, NAME, COMPLEX_EVENT_LOGIC, RESHAPED, ADDED } from './schema.js';
 import { renderEventstream, pathColumns, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, compileStepsModel, analysisModelConfig } from './python.js';
@@ -131,8 +131,8 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
     close: () => feature.checker.close(),
     overview: () => ({
       library: `retentioneering ${retentioneeringFacts().version}`,
-      analyses: ANALYSIS_KINDS,
-      steps: OFFERED_OPS,
+      analyses: analysisKinds(),
+      steps: offeredOps(),
       note: `Path analysis: ${BUILD} (start, then the library's steps, each checked as it is added; materialize) → ${QUERY} → ${DISPLAY}; semantic_index({ guide: "${GUIDE_NAME}" }) says which analysis answers which question.`,
     }),
   };
@@ -928,7 +928,12 @@ async function query(engine, feature, input) {
     const dir = engine.ctxs.dir(ctx.id);
     const run = await feature.runner.run(dir, modelName);
     if (!run.ok) return { ok: false, error: { stage: 'analysis', message: formatDbtError(run.stdout, run.stderr) || run.error || 'the analysis did not run' } };
-    return readResult(engine, feature, dir, modelName, { context_id: ctx.id, eventstream: es.name, order });
+    const out = await readResult(engine, feature, dir, modelName, { context_id: ctx.id, eventstream: es.name, order });
+    // an analysis the library raised on is kept with the call's others, and logged like any failure
+    for (const [a, r] of Object.entries(out.analyses || {})) {
+      if (r.error) engine.errors.record({ source: 'task', tool: QUERY, stage: 'analysis', field: `analyses.${a}`, context_id: ctx.id, task_id: id, message: `${r.error.type}: ${r.error.message}`, args: input });
+    }
+    return out;
   }, { input });
   engine.jobs.setTable(id, modelName);
   return engine._taskStarted(id, { context_id: ctx.id, eventstream: es.name, analyses: order });
@@ -969,7 +974,7 @@ function rowsFor(origin, rows) {
 function answer(engine, feature, id, out, detail = 'summary') {
   if (out?.kind === 'eventstream') return withLevels(out, detail);
   if (out?.kind !== 'analyses') return out;
-  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, diffForm(out.analyses[a])) && !drawnAlready(engine, feature, id, a));
+  const drawable = Object.keys(out.analyses).filter((a) => !out.analyses[a].error && hasCard(out.analyses[a].kind, diffForm(out.analyses[a])) && !drawnAlready(engine, feature, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
@@ -1098,6 +1103,7 @@ async function drawOne(engine, feature, ctx, input) {
   let result = out.analyses[input.analysis];
   const names = held ? Object.keys(out.analyses) : origin.analyses || Object.keys(out.analyses);
   if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field: 'analysis' });
+  if (result.error) throw new ToolError(`'${input.analysis}' did not compute — the library said ${result.error.type}: ${result.error.message} — so there is nothing to draw; the call's other analyses have their results`, { stage: 'validate', field: 'analysis' });
   if (!hasCard(result.kind, diffForm(result))) {
     // a diff of a kind that has its card, stored in the form an earlier version wrote, is drawn by running the query again
     const earlier = result.diff && DIFF_CARD_KINDS.includes(result.kind);

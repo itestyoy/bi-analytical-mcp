@@ -19,11 +19,16 @@ export class BigQueryDialect extends Dialect {
 
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 
+  /** A value read out of JSON (or an array) as `type`: SAFE_CAST, so a row whose value does not
+   *  convert is NULL for that row — as DuckDB's TRY_CAST answers — instead of failing the query. */
+  _typed(expr, type) {
+    const ct = this.castType(type);
+    return ct ? `SAFE_CAST(${expr} AS ${ct})` : expr;
+  }
+
   jsonExtract(column, key, type = 'string') {
     this.ident(key);
-    const base = `JSON_VALUE(${column}, '$.${key}')`;
-    const ct = this.castType(type);
-    return ct ? `CAST(${base} AS ${ct})` : base;
+    return this._typed(`JSON_VALUE(${column}, '$.${key}')`, type);
   }
 
   jsonArrayLength(column, key) {
@@ -41,17 +46,14 @@ export class BigQueryDialect extends Dialect {
 
   jsonStructField(column, key, field, type = 'string') {
     this.ident(key); this.ident(field);
-    const base = `JSON_VALUE(${column}, '$.${key}.${field}')`;
-    const ct = this.castType(type);
-    return ct ? `CAST(${base} AS ${ct})` : base;
+    return this._typed(`JSON_VALUE(${column}, '$.${key}.${field}')`, type);
   }
 
   arrayUnnest(_prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
     this.ident(alias);
     // Native ARRAY/REPEATED column → unnest directly.
     if (key == null && encoding === 'native') {
-      const ct = this.castType(type);
-      return { join: `CROSS JOIN UNNEST(${column}) AS ${alias}`, element: ct ? `CAST(${alias} AS ${ct})` : alias };
+      return { join: `CROSS JOIN UNNEST(${column}) AS ${alias}`, element: this._typed(alias, type) };
     }
     // Array-of-JSON elements: a key inside a json column (blob), or the flat STRING column
     // parsed as a JSON array (encoding 'json').
@@ -59,17 +61,14 @@ export class BigQueryDialect extends Dialect {
     if (field) {
       this.ident(field);
       const e = `${alias}_e`;
-      const base = `JSON_VALUE(${e}, '$.${field}')`;
-      const ct = this.castType(type);
-      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: ct ? `CAST(${base} AS ${ct})` : base };
+      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this._typed(`JSON_VALUE(${e}, '$.${field}')`, type) };
     }
     if (type === 'json') { // bind the whole struct element as a JSON column
       return { join: `CROSS JOIN UNNEST(${jarr}) AS ${alias}`, element: alias };
     }
     // scalar elements
     const sarr = key != null ? `JSON_VALUE_ARRAY(${column}, '$.${key}')` : `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
-    const ct = this.castType(type);
-    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${alias}`, element: ct ? `CAST(${alias} AS ${ct})` : alias };
+    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${alias}`, element: this._typed(alias, type) };
   }
 
   /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
@@ -83,9 +82,7 @@ export class BigQueryDialect extends Dialect {
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
     this.ident(field);
-    const base = `JSON_VALUE(${column}, '$.${field}')`;
-    const ct = this.castType(type);
-    return ct ? `CAST(${base} AS ${ct})` : base;
+    return this._typed(`JSON_VALUE(${column}, '$.${field}')`, type);
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
@@ -169,6 +166,12 @@ export class BigQueryDialect extends Dialect {
 
   // HLL++ approximate distinct count (BigQuery's APPROX_COUNT_DISTINCT uses HLL++).
   approxCountDistinct(c) { return `APPROX_COUNT_DISTINCT(${c})`; }
+
+  recentSince(col, days) { return `${col} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${Math.floor(Number(days))} DAY)`; }
+  sinceTimestampMs(col, ms) { return `${col} > TIMESTAMP_MILLIS(${Math.floor(Number(ms))})`; }
+  // wrapped in a JSON STRING: APPROX_TOP_COUNT returns a nested ARRAY<STRUCT> that `dbt show --output
+  // json` cannot serialize (the query runs, the show step errors); parseApproxTopK reads it back
+  approxTopK(expr, k) { return `TO_JSON_STRING(APPROX_TOP_COUNT(${expr}, ${Math.max(1, Math.floor(Number(k) || 50))}))`; }
 
   // Native HLL++ mergeable sketches — the additive distinct-count workflow.
   hllInit(c) { return `HLL_COUNT.INIT(${c})`; }

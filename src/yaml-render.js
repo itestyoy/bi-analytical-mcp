@@ -7,6 +7,7 @@ import { primaryEntityName } from './catalog.js';
 import { getDialect } from './dialects/index.js';
 import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
+import { measureRefs } from './compile.js';
 
 const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
@@ -35,18 +36,6 @@ function entityExpr(catalog, ent) {
  *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
 function isScdModel(m) {
   return !!m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
-}
-
-/** True when a metric's type_params reference any measure name in `names` (simple/ratio/derived). */
-function metricRefsMeasure(metric, names) {
-  const tp = metric.type_params || {};
-  const refs = [];
-  const push = (v) => { if (typeof v === 'string') refs.push(v); else if (v?.name) refs.push(v.name); };
-  push(tp.measure);
-  for (const m of tp.measures || []) push(m);
-  push(tp.numerator); push(tp.denominator);
-  for (const m of tp.input_measures || []) push(m);
-  return refs.some((r) => names.has(r));
 }
 
 /** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED
@@ -210,8 +199,9 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   // Drop metrics that reference a measure we removed from an SCD model — otherwise dbt fails parse
   // with "a semantic model having a measure `X` does not exist but was referenced".
   const droppedMetrics = [];
+  // — directly or through the metrics it is built from (a ratio, a derived metric, a conversion)
   const metrics = (state.metrics || []).filter((mt) => {
-    if (droppedMeasures.size && metricRefsMeasure(mt, droppedMeasures)) { droppedMetrics.push(mt.name); return false; }
+    if (droppedMeasures.size && [...measureRefs(mt, state.metrics)].some((r) => droppedMeasures.has(r))) { droppedMetrics.push(mt.name); return false; }
     return true;
   });
 

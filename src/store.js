@@ -277,11 +277,17 @@ export class SqliteBackend {
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
+    // A column a later version added, brought to an older database: added only when it is missing, so
+    // a failure to add it (a locked or full database) is the error it is, not taken for "already there"
+    // (SQLite has no ADD COLUMN IF NOT EXISTS).
+    const ensureColumns = (table, defs) => {
+      const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+      for (const def of defs) if (!have.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${table} ADD COLUMN ${def}`);
+    };
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT)');
     // `tool` came later: the tool that started a task is what says which query tool reads it back
-    try { db.exec('ALTER TABLE jobs ADD COLUMN tool TEXT'); } catch { /* already present */ }
     // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
-    try { db.exec('ALTER TABLE jobs ADD COLUMN drawn INTEGER'); } catch { /* already present */ }
+    ensureColumns('jobs', ['tool TEXT', 'drawn INTEGER']);
     // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
     // the users dimension — owns its own index space, so two facts may carry the same property
     // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
@@ -300,13 +306,13 @@ export class SqliteBackend {
     }
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
     db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
-    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
+    // columns added later:
     //  null_count       — nulls per property.
     //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
     //                     so subsequent syncs SKIP it (indexed once, then left alone).
     //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
     //                     only rows newer than this and ADDS the new counts to what is stored.
-    for (const col of ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']) { try { db.exec(`ALTER TABLE prop_stats ADD COLUMN ${col}`); } catch { /* already present */ } }
+    ensureColumns('prop_stats', ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']);
     // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
     db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (source TEXT, property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, event_name))');
@@ -326,8 +332,8 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
     db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
-    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
-    for (const col of ['question TEXT', 'embedding TEXT', 'embedding_model TEXT']) { try { db.exec(`ALTER TABLE memory ADD COLUMN ${col}`); } catch { /* already present */ } }
+    // columns added later
+    ensureColumns('memory', ['question TEXT', 'embedding TEXT', 'embedding_model TEXT']);
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
@@ -338,7 +344,7 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
     db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
     // what reproduces an error came later: the context's state, the code of the model that failed, the runtime
-    for (const col of ['context', 'files', 'runtime']) { try { db.exec(`ALTER TABLE errors ADD COLUMN ${col} TEXT`); } catch { /* already present */ } }
+    ensureColumns('errors', ['context TEXT', 'files TEXT', 'runtime TEXT']);
     const s = this;
 
     this.meta = {

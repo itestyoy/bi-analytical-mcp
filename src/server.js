@@ -265,7 +265,7 @@ export function createApp(engine, opts = {}) {
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {
     logRequest(req, res);
-    if (answerTaskRequest(services.tasks, req, res)) return;
+    if (answerTaskRequest(services.tasks, req, res, services.serverInfo)) return;
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)
     void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));

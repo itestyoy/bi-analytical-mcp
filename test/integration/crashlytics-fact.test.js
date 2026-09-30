@@ -291,6 +291,21 @@ test('a boolean column takes true / false however it is written, and its rows ar
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] } })), /'is_fatal_of_event_data' is a boolean column/);
 });
 
+// A funnel step's condition follows the same rule: a flag spelled "true" is compared as TRUE.
+test('a funnel step on a boolean column takes "true" as the flag, and matches the players the rows say', opts, async (t) => {
+  if (skip(t)) return;
+  const names = (await wh.query('select distinct event_name as e from fct_crashlytics_events order by 1')).rows.map((r) => r.e);
+  const [want] = (await wh.query('select count(distinct player_id_of_internal) as n from fct_crashlytics_events where is_fatal_of_event_data')).rows;
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
+  await engine.build_pipeline_model({
+    action: 'add_step', draft_id: s.draft_id,
+    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'true' }] }] },
+  });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(c.rows.length, num(want.n), 'one row per player with a fatal crash');
+});
+
 // A raw expression runs as written, over the columns the steps before it made: one naming a column
 // that is not there is refused when it is added, not by the warehouse minutes later.
 test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {

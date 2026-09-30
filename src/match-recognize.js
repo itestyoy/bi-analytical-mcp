@@ -16,37 +16,32 @@
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
 import { jsonExtract, sqlLiteral } from './dialect.js';
-import { partitionConditions } from './time-range.js';
-import { registerStage, prepareColumns } from './pipeline.js';
+import { timeRangeConditions, isValidTimezone } from './time-range.js';
+import { registerStage, prepareColumns, typedLiteral } from './pipeline.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
-/** Date-only 'YYYY-MM-DD' end → the NEXT day (exclusive upper bound), so the whole
- *  day is included when comparing a timestamp column. Returns null if not date-only
- *  (a full datetime is used as-is). Avoids `<= 'YYYY-MM-DD'` collapsing to midnight. */
-export function dateEndExclusive(end) {
-  if (typeof end !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
-  const d = new Date(`${end}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
-
-/** Render a single comparison `lhs OP value` with the value bound as a literal. */
-function comparePred(lhs, op, value) {
+/** Render a single comparison `lhs OP value`, the value a literal written in the type of what it is
+ *  compared with (the pipeline's one rule: a flag spelled "true" is TRUE, a number spelled "5" is 5). */
+function comparePred(lhs, op, value, type = null, name = lhs) {
+  const lit = (v) => typedLiteral({ sqlLiteral }, type, v, `'${name}'`);
   const arr = Array.isArray(value) ? value : [value];
   switch (op) {
-    case 'eq': return `${lhs} = ${sqlLiteral(value)}`;
-    case 'neq': return `${lhs} != ${sqlLiteral(value)}`;
-    case 'gt': return `${lhs} > ${sqlLiteral(value)}`;
-    case 'gte': return `${lhs} >= ${sqlLiteral(value)}`;
-    case 'lt': return `${lhs} < ${sqlLiteral(value)}`;
-    case 'lte': return `${lhs} <= ${sqlLiteral(value)}`;
-    case 'in': return `${lhs} IN (${arr.map(sqlLiteral).join(', ')})`;
-    case 'not_in': return `${lhs} NOT IN (${arr.map(sqlLiteral).join(', ')})`;
+    case 'eq': return `${lhs} = ${lit(value)}`;
+    case 'neq': return `${lhs} != ${lit(value)}`;
+    case 'gt': return `${lhs} > ${lit(value)}`;
+    case 'gte': return `${lhs} >= ${lit(value)}`;
+    case 'lt': return `${lhs} < ${lit(value)}`;
+    case 'lte': return `${lhs} <= ${lit(value)}`;
+    case 'in': return `${lhs} IN (${arr.map(lit).join(', ')})`;
+    case 'not_in': return `${lhs} NOT IN (${arr.map(lit).join(', ')})`;
     default: throw new Error(`unsupported filter op: ${op}`);
   }
 }
+
+/** The type of a model column, as the catalog declares it. */
+const columnType = (catalog, source, name) => catalog.modelColumns(source).find((x) => x.name === name)?.type || null;
 
 /** Step/prefilter event names, normalized to the SOURCE fact's physical values. A
  *  row-pattern match scans ONE table, so an event of another fact cannot participate. */
@@ -66,13 +61,13 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   const props = (step.where || []).map((c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
-      return comparePred(c.property, c.op, c.value);
+      return comparePred(c.property, c.op, c.value, prepCols.get(c.property)?.type || null);
     }
     const p = (m.properties || {})[c.property];
     if (!p) {
       // a physical model column (envelope/dimension column like bundle_id) → compare it
       // directly, so a step filter can use model columns without a separate where stage.
-      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value);
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
     if (catalog.isComplexEventProp(c.property, source)) {
@@ -80,7 +75,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
     }
     // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
     // payload column — unqualified, like every other clause here
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value);
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
   });
   return [ev, ...props].join(' AND ');
 }
@@ -101,25 +96,21 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
   if (!f) return '';
   const m = catalog.getModel(source);
   const evNameCol = m.event_name.column;
-  const timeCol = m.time.column;
   const clauses = [];
-  if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
-  if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
-  // a source partitioned by the day of its time axis is scanned only on the days the window touches
-  if (partitionCol && (f.time_range?.start || f.time_range?.end)) {
-    const ex = f.time_range.end ? dateEndExclusive(f.time_range.end) : null;
-    for (const c of partitionConditions(m, { start: f.time_range.start || null, endExclusive: ex, end: ex ? null : (f.time_range.end || null) })) clauses.push(`${partitionCol} ${c.op === 'gte' ? '>=' : '<'} ${sqlLiteral(c.value)}`);
-  }
+  // the window by the one rule every stage applies (a timezone's wall-clock bounds, the whole last day
+  // of a date-only end), and the partition column only where the scanned relation still carries it
+  if (f.time_range?.timezone && !isValidTimezone(f.time_range.timezone)) throw new Error(`filter.time_range: unknown timezone '${f.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`);
+  for (const c of timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []) clauses.push(comparePred(c.column, c.op, c.value));
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
     if (!p) {
       // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value)); continue; }
+      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property))); continue; }
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
-    clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value));
+    clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property));
   }
   return clauses.join(' AND ');
 }
@@ -483,7 +474,7 @@ function matchRecognizeSchema(catalog) {
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {
-          time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
+          time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' }, timezone: { type: 'string', description: 'IANA timezone the bounds are wall-clock times in (default: as stored).' } }, description: 'Event-time window (ISO); a date-only end includes that whole day.' },
           event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
           where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
         },

@@ -359,6 +359,27 @@ test('filter_events takes a condition tree — what keep / drop cannot say — w
   await assert.rejects(engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'bad_where', step: { type: 'filter_events', where: { op: 'and', conditions: [{ column: 'no_such_col', op: '=', value: 'x' }] } } }), (e) => e.field === 'step' && /no_such_col/.test(e.message));
 });
 
+test('an analysis the library raises on keeps its error; the call\'s other analyses keep their numbers', opts, async (t) => {
+  if (skip(t)) return;
+  // two events no path has in this order: a pattern of them matches nothing, which only the rows say
+  const lists = [...paths().values()].map((l) => l.map((r) => r.e));
+  const events = [...new Set(lists.flat())].sort();
+  const follows = (a, b) => lists.some((l) => { const i = l.indexOf(a); return i >= 0 && l.slice(i + 1).includes(b); });
+  const pair = events.flatMap((a) => events.map((b) => [a, b])).find(([a, b]) => a !== b && !follows(a, b));
+  assert.ok(pair, 'the fixture has two events never in that order');
+  const ctx = await stepsContext();
+  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'base', analyses: [{ kind: 'transition_graph' }, { kind: 'step_matrix', path_pattern: `${pair[0]}->.*->${pair[1]}` }] });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(r.analyses.step_matrix.error.type, 'PatternNoMatchError');
+  // the graph is computed all the same: its transitions are the pairs of the paths
+  const pairs = lists.reduce((n, l) => n + l.length + 1, 0);
+  assert.equal(r.analyses.transition_graph.edges.reduce((n, e) => n + e.count, 0), pairs);
+  assert.notEqual(r.show_to_user?.arguments.analysis, 'step_matrix', 'the failed one is not offered as a card');
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix' }), (e) => e.field === 'analysis' && /PatternNoMatchError/.test(e.message));
+  assert.ok(JSON.stringify(await engine.explore_errors({ task_id: q.task_id })).includes('PatternNoMatchError'), 'the failure is in the error log');
+});
+
 test('a where on a segment compares a number as a number, and a negation keeps the rows with no value — as the rows say', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l from fct_analytics_events')).rows;

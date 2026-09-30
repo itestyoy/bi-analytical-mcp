@@ -98,6 +98,20 @@ test('time_range with a timezone keeps the events on the other UTC day of a part
   assert.deepEqual(byDay, { '2026-01-01': 9, '2026-01-02': 30 });
 });
 
+// A funnel's own window follows the pipeline's one rule for a window: a timezone's wall-clock day, the
+// whole of a date-only end — the players it keeps are those of the same window given to the pipeline.
+test('a funnel filter window in a timezone keeps the players of the same window on the pipeline', opts, async (t) => {
+  if (skip(t)) return;
+  const tr = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
+  const own = await pipe([matchActivation({ filter: { time_range: tr }, steps: activationSteps.slice(0, 2) })]);
+  const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: tr, stages: [matchActivation({ steps: activationSteps.slice(0, 2) })] } });
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  ctxId = out.context_id;
+  const rows = (o) => o.rows.map((r) => JSON.stringify(r)).sort();
+  assert.ok(own.rows.length > 0, 'the window keeps players');
+  assert.deepEqual(rows(own), rows(out));
+});
+
 // The partition bound is a pruning aid, never a filter of its own: whatever bounds the time axis —
 // a where the caller wrote, a funnel's own window — the rows are exactly the ones the source gives
 // when it declares no partition column at all.

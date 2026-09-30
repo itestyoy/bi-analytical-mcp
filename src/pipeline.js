@@ -161,7 +161,7 @@ export function rawUnknownColumns(sql, cols) {
 // is left as it is: that is also the type of what nothing more is known about.
 const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
 const NUMERIC_TYPES = new Set(['numeric', 'int', 'integer', 'float']);
-function typedLiteral(d, type, v, where) {
+export function typedLiteral(d, type, v, where) {
   if (v === null) return d.sqlLiteral(v);
   if (type === 'boolean') {
     const b = typeof v === 'boolean' ? v : typeof v === 'number' && (v === 0 || v === 1) ? v === 1 : typeof v === 'string' ? BOOL_TEXT.get(v.trim().toLowerCase()) : undefined;
@@ -840,7 +840,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
   } else {
     // the primary entity's key can span several columns, and each of them is a real column of the
     // relation — the same shape the fact branch above reads (the old single `.column` form is gone)
-    for (const p of (typeof m.primary_entity === 'object' && m.primary_entity.key) || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
+    for (const p of (typeof m.primary_entity === 'object' && m.primary_entity?.key) || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }

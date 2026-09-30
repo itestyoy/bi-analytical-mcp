@@ -140,3 +140,12 @@ models:
     assert.ok(c.getModel('events').entities?.user || c.getModel('events').foreign_entities?.user || true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('primary_entity: null is no primary entity — the model loads and its keys are its entities\' own', () => {
+  const nulled = usersYml.replace('meta: { mcp: { role: users } }', 'meta: { mcp: { role: users, primary_entity: null } }');
+  const dir = project({ 'events.yml': eventsYml, 'users.yml': nulled });
+  try {
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
+    assert.deepEqual(c.entityKeyColumns('users'), ['user_id']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

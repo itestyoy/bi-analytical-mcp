@@ -119,6 +119,27 @@ export function resolveTimeRange(tr) {
 }
 
 /**
+ * The conditions a {start, end, timezone} window puts on a model's time axis — and on its partition
+ * column when it partitions by another (`partition: false` leaves that out, for a relation that no
+ * longer carries it): the ONE rule every stage, build and funnel filter applies. The timezone is
+ * checked by the caller (isValidTimezone), which knows how to refuse. → { column, op, value }[] | null
+ */
+export function timeRangeConditions(model, tr, { partition = true } = {}) {
+  if (!tr || !(tr.start || tr.end)) return null;
+  const timeCol = model?.time?.column;
+  if (!timeCol) return null;
+  const r = resolveTimeRange(tr);
+  const conditions = [];
+  if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
+  if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
+  else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
+  // a source partitioned by ANOTHER column (the day of the event time, next to it) is pruned only by a
+  // condition on that column; the time axis above stays the exact bound
+  if (partition) conditions.push(...partitionConditions(model, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));
+  return conditions.length ? conditions : null;
+}
+
+/**
  * Warnings about the window itself (data-independent):
  * - no window at all → full-history scan warning;
  * - window reaching into today → the trailing period is incomplete.

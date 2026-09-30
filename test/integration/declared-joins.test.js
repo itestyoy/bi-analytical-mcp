@@ -570,7 +570,7 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   if (skip(t)) return;
   assert.equal(phantom.entityKey('experiments', 'ghost_pair'), undefined, 'the owner lost the key');
   assert.equal(phantom.joinTargetFor('ghost_pair'), undefined, 'so nothing points at it as a target');
-  assert.ok(!phantom.reachableGroupByPaths().some((p) => p.startsWith('ghost_pair__')), 'and it offers no group-by path');
+  assert.ok(!phantom.reachableAttributes().some((r) => r.via === 'ghost_pair'), 'and it offers no attribute through it');
   // the events side still declares it, but with no owner it is not offered as a join
   assert.ok(!phantom.joinEntityNames().includes('ghost_pair'));
   // the owner's other, real relationship is untouched — and still joins, on the warehouse:

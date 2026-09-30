@@ -167,6 +167,41 @@ function compileDimension(catalog, task, modelKey, decl) {
  * specs (incl. auto-created simple metrics for ratio), used models, and the
  * declared measure/metric names (namespaced).
  */
+/** The measures a compiled metric reads itself: a simple or cumulative metric's measure, a conversion's
+ *  base and conversion measures (and the legacy measures / input_measures lists). */
+function ownMeasures(metric) {
+  const tp = metric?.type_params || {};
+  const ctp = tp.conversion_type_params || {};
+  const name = (v) => (typeof v === 'string' ? v : v?.name);
+  return [tp.measure, ctp.base_measure, ctp.conversion_measure, ...(tp.measures || []), ...(tp.input_measures || [])].map(name).filter(Boolean);
+}
+
+/** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */
+function inputMetrics(metric) {
+  const tp = metric?.type_params || {};
+  const name = (v) => (typeof v === 'string' ? v : v?.name);
+  return [tp.numerator, tp.denominator, ...(tp.metrics || [])].map(name).filter(Boolean);
+}
+
+/**
+ * EVERY measure a compiled metric reads — its own and, through the metrics it is built from, theirs
+ * (`metrics`: the context's compiled metrics). The one walk of that graph: which metrics a removed
+ * measure takes with it, and which a model that cannot carry measures drops before dbt parses them.
+ */
+export function measureRefs(metric, metrics = []) {
+  const byName = new Map(metrics.map((m) => [m.name, m]));
+  const found = new Set();
+  const seen = new Set();
+  const walk = (m) => {
+    if (!m || seen.has(m.name)) return;
+    seen.add(m.name);
+    for (const x of ownMeasures(m)) found.add(x);
+    for (const n of inputMetrics(m)) walk(byName.get(n));
+  };
+  walk(metric);
+  return found;
+}
+
 export function compileDeclaration(catalog, decl) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');

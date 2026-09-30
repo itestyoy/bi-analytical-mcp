@@ -174,6 +174,10 @@ export class DuckDBDialect extends Dialect {
   // (approx_count_distinct exists, but an HLL estimate would make a test's number a coin toss).
   approxCountDistinct(c) { return `count(distinct ${c})`; }
 
+  recentSince(col, days) { return `${col} >= CAST(now() AS TIMESTAMP) - INTERVAL '${Math.floor(Number(days))} days'`; }
+  sinceTimestampMs(col, ms) { return `${col} > epoch_ms(${Math.floor(Number(ms))})`; }
+  // approx_top_k returns the values WITHOUT their counts, so the index groups each property instead
+
   // EXACT, MERGEABLE sketch: a sketch is the chr(1)-joined set of distinct values. init dedups;
   // merge_partial concatenates (a coarser sketch); merge and extract dedup-and-count. Same additive
   // semantics as HLL++, exact.

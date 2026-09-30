@@ -31,9 +31,10 @@ function decodeHeader(v) {
 
 /**
  * Answer a 2026-07-28 tasks/get or tasks/cancel. Returns true when it answered, false when the
- * request is not one (the caller hands it to the SDK).
+ * request is not one (the caller hands it to the SDK). `serverInfo` is the one every other answer
+ * carries — its version with the surface's fingerprint (src/surface-change.js).
  */
-export function answerTaskRequest(tasks, req, res) {
+export function answerTaskRequest(tasks, req, res, serverInfo = SERVER_INFO) {
   const body = req.body;
   if (req.method !== 'POST' || !body || Array.isArray(body) || !METHODS.has(body.method)) return false;
   const outcome = classifyInboundRequest({
@@ -62,5 +63,5 @@ export function answerTaskRequest(tasks, req, res) {
 
   if (body.method === 'tasks/cancel') tasks.cancel(t.taskId, 'Cancelled by the client (tasks/cancel).');
   const result = body.method === 'tasks/get' ? tasks.detailed(t) : {};
-  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: { name: SERVER_INFO.name, version: SERVER_INFO.version } } } });
+  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: { name: serverInfo.name, version: serverInfo.version } } } });
 }

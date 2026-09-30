@@ -198,6 +198,14 @@ export class Dialect {
   get approximateStats() { return []; }
   /** Approximate distinct count (HLL++ where available). */
   approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
+  // ── the value index's scans ─────────────────────────────────────────────────
+  /** Rows of the last `days` days on time column `col` (a positive integer, checked by the caller). */
+  recentSince(_col, _days) { throw new Error('abstract recentSince'); }
+  /** Rows STRICTLY NEWER than an epoch-ms watermark on time column `col`. */
+  sinceTimestampMs(_col, _ms) { throw new Error('abstract sinceTimestampMs'); }
+  /** The K most frequent values WITH their counts in one aggregate, as a JSON string
+   *  ([{ value, count }]), or null where the warehouse has none that carries the counts. */
+  approxTopK(_expr, _k) { return null; }
   // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────
   /** Build a sketch over a column (aggregate). */
   hllInit(_columnSql) { throw new Error('abstract hllInit'); }

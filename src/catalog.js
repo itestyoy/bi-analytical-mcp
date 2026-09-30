@@ -540,7 +540,8 @@ export function dbtSchemaToCatalog(doc) {
     const m = { dbt_model: model.name };
     if (model.description) m.description = model.description;
     if (mcp.role) m.role = mcp.role;
-    if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
+    // an explicit null is no primary entity (the model owns none), as leaving it out is
+    if (mcp.primary_entity != null) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
     // Model-level declarations. An entry WITHOUT `agg` is an aggregatable EXPRESSION — the
     // caller picks the function; an entry WITH `agg` is additionally a governed measure whose
@@ -1442,7 +1443,7 @@ export class Catalog {
     const m = this.getModel(key);
     const cols = [];
     const pe = m.primary_entity;
-    if (typeof pe === 'object') for (const p of pe.key || []) cols.push(p.column);
+    if (pe && typeof pe === 'object') for (const p of pe.key || []) cols.push(p.column);
     for (const e of Object.values(m.entities || {})) {
       for (const p of e.key || []) cols.push(p.column);
     }
@@ -1476,41 +1477,6 @@ export class Catalog {
   sharedEntities(a, b) {
     const ea = this.entitiesOf(a); const eb = this.entitiesOf(b);
     return Object.keys(ea).filter((n) => eb[n]).map((n) => ({ entity: n, left: ea[n], right: eb[n] }));
-  }
-
-  /**
-   * Group-by / filter paths reachable from every events source via the entity graph,
-   * up to `maxHops` (default 2 hops / 3 tables). Foreign entities with no
-   * matching primary target are pruned (m3). Includes `metric_time`.
-   */
-  reachableGroupByPaths(maxHops = 2) {
-    const out = new Set(['metric_time']);
-
-    // local categorical columns of a source are added per-task; here we expose
-    // only join-reachable dimensions + metric_time (task dims added at runtime).
-    const visit = (modelKey, prefix, hop) => {
-      if (hop > maxHops) return;
-      const model = this.models[modelKey];
-      for (const [entName, ent] of Object.entries(model.entities || {})) {
-        if (ent.type !== 'foreign') continue;
-        const targetKey = this.primaryByEntity[entName];
-        if (!targetKey) continue; // pruned: dangling foreign (m3)
-        const target = this.models[targetKey];
-        const newPrefix = prefix ? `${prefix}__${entName}` : entName;
-        for (const dim of Object.keys(target.dimensions || {})) out.add(`${newPrefix}__${dim}`);
-        visit(targetKey, newPrefix, hop + 1);
-      }
-    };
-    for (const fact of this.facts) visit(fact, '', 1);
-    // A source's OWN attributes are groupable under its primary entity — that is how a base
-    // measure declared on a non-events source (acquisition spend, say) is sliced by its own
-    // channel/campaign columns, without a join and without declaring a task dimension.
-    for (const key of this.modelKeys()) {
-      const ent = primaryEntityName(this.models[key]);
-      if (!ent) continue;
-      for (const dim of Object.keys(this.models[key].dimensions || {})) out.add(`${ent}__${dim}`);
-    }
-    return [...out];
   }
 
   /**

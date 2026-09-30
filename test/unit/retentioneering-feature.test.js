@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { resolveFeatures, flagOn } from '../../src/features.js';
 import { createRetentioneeringFeature, retentioneeringDefinition } from '../../src/retentioneering/index.js';
-import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED } from '../../src/retentioneering/schema.js';
+import { retentioneeringFacts, analysisKinds, offeredOps, NOT_OFFERED } from '../../src/retentioneering/schema.js';
 import { RETENTIONEERING_VIEW_URI, retentioneeringViewModel, hasCard, CARD_KINDS, DIFF_CARD_KINDS, CHARTED_DIFF_KINDS } from '../../src/retentioneering/view-model.js';
 import { buildToolDefs, createServices, runTool, coreInstructions } from '../../src/mcp-surface.js';
 import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
@@ -86,8 +86,8 @@ test('on: three tools within the budgets, the drawing one pointing at its own vi
   assert.deepEqual(page._meta.ui.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] });
   // the guide, its routing trigger, the skill, one line of the core instructions
   const g = await e.semantic_index({ guide: 'retentioneering' });
-  assert.deepEqual(Object.keys(g.analyses).sort(), [...ANALYSIS_KINDS].sort());
-  assert.deepEqual(Object.keys(g.steps), OFFERED_OPS);
+  assert.deepEqual(Object.keys(g.analyses).sort(), [...analysisKinds()].sort());
+  assert.deepEqual(Object.keys(g.steps), offeredOps());
   const all = await e.semantic_index({ guide: true });
   assert.ok(all.routing_triggers.some((t) => t.do.includes('build_retentioneering_model')));
   assert.ok(s.skills.list().some((k) => k.frontmatter.name === 'retentioneering'));
@@ -277,4 +277,22 @@ test('ties are ordered by code point, the same on every machine — not by the l
   const edge = (source) => ({ source, target: 'x', count: 1, unique_paths: 1, proba_out: 1, proba_in: 1, time_median: 0 });
   const s = summarize({ kind: 'transition_graph', nodes: [], edges: [edge('a'), edge('B'), edge('_c')] });
   assert.deepEqual(s.top_transitions.map((e) => e.from), ['B', '_c', 'a']);
+});
+
+test('with the feature off, loading the server never opens the library\'s sheet', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const probe = `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const read = fs.readFileSync;
+    fs.readFileSync = (p, ...rest) => { if (String(p).endsWith('retentioneering-facts.json')) { console.log('READ'); } return read(p, ...rest); };
+    syncBuiltinESMExports();
+    await import('./src/features.js');
+    await import('./src/engine.js');
+    await import('./src/mcp-surface.js');
+    console.log('LOADED');
+  `;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', probe], { cwd: new URL('../..', import.meta.url).pathname, env: { ...process.env, MCP_RETENTIONEERING: 'off' }, encoding: 'utf8' });
+  assert.ok(out.includes('LOADED'), out);
+  assert.ok(!out.includes('READ'), 'the sheet was read at import');
 });

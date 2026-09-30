@@ -63,6 +63,7 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
+  if (r.error) return none('error');
   // analysis_kind stays the analysis's own kind where the card's kind is a shape of its (a diff, a distribution)
   const head = { kind: r.kind, analysis_kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a

@@ -4,7 +4,7 @@
 // Method, not data: it names no column or event (the catalog and the eventstream summary say what
 // exists), and every parameter it mentions is one the tool schema offers.
 
-import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED, COMPLEX_EVENT_LOGIC, pathPatternUses } from './schema.js';
+import { retentioneeringFacts, analysisKinds, offeredOps, NOT_OFFERED, COMPLEX_EVENT_LOGIC, pathPatternUses } from './schema.js';
 import { CHARTED_KINDS, DIFF_CARD_KINDS } from './view-model.js';
 
 export const GUIDE_NAME = 'retentioneering';
@@ -19,7 +19,7 @@ export const ROUTING_TRIGGERS = [
 export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model, which answers with the numbers and tables the library computes. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
 
 /** The analyses the library lets take a diff: those with a `diff` parameter. */
-const DIFF_KINDS = () => ANALYSIS_KINDS.filter((k) => retentioneeringFacts().analyses[k].params.some((p) => p.name === 'diff'));
+const DIFF_KINDS = () => analysisKinds().filter((k) => retentioneeringFacts().analyses[k].params.some((p) => p.name === 'diff'));
 
 export function retentioneeringGuide() {
   const f = retentioneeringFacts();
@@ -42,7 +42,7 @@ export function retentioneeringGuide() {
       funnel: 'How many paths reach each event of an ordered list (in that order), and the conversion step to step. For steps defined by an event property value, build a pipeline funnel instead.',
       cluster_analysis: `Groups of similar paths from per-path metrics (features, e.g. { metric: "event_count_bulk" } — how often each event occurs), with ${f.cluster_methods.join(' or ')}; method_args.n_clusters as a list tries several and the best silhouette wins. overview_metrics say what each cluster's profile shows (length, duration, the share of paths with each event).`,
       segment_overview: 'Per-path metrics compared across the levels of a segment (segment_col): a user attribute listed in segments at start, or one an add_segment / add_clusters step made (materialized).',
-      ...Object.fromEntries(ANALYSIS_KINDS.filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
+      ...Object.fromEntries(analysisKinds().filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
     },
     // which analyses take a diff, and what it takes, are the library's (its parameter and its docstring)
     diff: `${DIFF_KINDS().join(', ')} take diff — the same analysis for two groups of paths and their difference. ${f.analyses[DIFF_KINDS()[0]].params.find((p) => p.name === 'diff').doc} The diff of ${DIFF_CARD_KINDS.join(', ')} has a card; any other is answered in words.`,
@@ -54,7 +54,7 @@ export function retentioneeringGuide() {
       occurrence: f.path_patterns.occurrence,
       rules: f.path_patterns.rules,
     },
-    steps: Object.fromEntries(OFFERED_OPS.map((op) => [op, f.ops[op].summary])),
+    steps: Object.fromEntries(offeredOps().map((op) => [op, f.ops[op].summary])),
     not_offered: { ...NOT_OFFERED.ops, ...Object.fromEntries(Object.entries(NOT_OFFERED.params).map(([p, why]) => [`the ${p} parameter`, why])) },
     path_metrics: f.path_metrics,
     metric_aggregations: f.segment_aggs,

@@ -5,7 +5,7 @@ import { buildSchemas, transportSchema, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
-import { compileDeclaration } from './compile.js';
+import { compileDeclaration, measureRefs } from './compile.js';
 import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
@@ -16,7 +16,7 @@ import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf, timeItem } 
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
-import { partitionConditions, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
+import { partitionConditions, resolveTimeRange, timeRangeConditions, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
@@ -437,13 +437,6 @@ export class Engine {
     return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once their model is loaded (use_base_models): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   }
 
-  /** All group-by/where dimension paths allowed for a context (bare + qualified). */
-  _allowedPaths(ctx) {
-    const set = new Set(this.catalog.reachableGroupByPaths());
-    for (const [bare, qualified] of this._taskDimMap(ctx)) { set.add(bare); set.add(qualified); }
-    return set;
-  }
-
   /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
   _suggestRef(ctx, path) {
     const c = this.catalog;
@@ -527,7 +520,7 @@ export class Engine {
     }
     if (candidates.size === 1) return `${[...candidates][0]}__${attribute}`;
     if (candidates.size > 1) throw new ToolError(`${where}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field: 'via' });
-    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it with use_base_models and check semantic_index({ model: '${model}' }).relationships.`, { stage: 'validate', field: 'model' });
+    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it with use_base_models and check semantic_index({ model: '${model}' }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
   }
 
   /**
@@ -1432,14 +1425,18 @@ export class Engine {
   async _physicalCols(source) {
     if (!this.runner || !this.ctxs.baseProjectDir) return null;
     this._physColCache ??= new Map();
-    if (this._physColCache.has(source)) return this._physColCache.get(source);
-    return this._bestEffort(`columns:${source}`, async () => {
+    // a known set is kept; a lookup that could not know (the relation not built yet, the warehouse
+    // unreachable) is kept only until the next index scan, so grounding comes back once it can
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
+    const hit = this._physColCache.get(source);
+    if (hit && (hit.set || hit.gen === gen)) return hit.set;
+    return this._bestEffort(`columns:${source}:${gen}`, async () => {
       let set = null;
       try {
         const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
         if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
       } catch { /* introspection unavailable → grounding skipped */ }
-      this._physColCache.set(source, set);
+      this._physColCache.set(source, { set, gen });
       return set;
     });
   }
@@ -1651,19 +1648,8 @@ export class Engine {
    * whole (local) day, next-midnight-exclusive.
    */
   _timeRangeConditions(source, tr) {
-    if (!tr || !(tr.start || tr.end)) return null;
-    const timeCol = this.catalog.getModel(source).time?.column;
-    if (!timeCol) return null;
-    if (tr.timezone && !isValidTimezone(tr.timezone)) throw new ToolError(`unknown timezone '${tr.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
-    const r = resolveTimeRange(tr);
-    const conditions = [];
-    if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
-    if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
-    else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
-    // A source partitioned by ANOTHER column — the day of the event time, next to it — is pruned only
-    // by a condition on that column; the time axis above stays the exact bound.
-    conditions.push(...this._partitionConditions(source, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));
-    return conditions.length ? conditions : null;
+    if (tr?.timezone && !isValidTimezone(tr.timezone)) throw new ToolError(`unknown timezone '${tr.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    return timeRangeConditions(this.catalog.getModel(source), tr);
   }
 
   /** The conditions on a source's partition column for a window on its time axis. */
@@ -2000,8 +1986,11 @@ export class Engine {
 
   /** one_per_match counts EVERY start (incl. partial chains). Nudge to filter completed=true
    *  downstream when the intent is "completed situations" — the common foot-gun. */
-  _funnelCompletionWarnings(stage) {
+  _funnelCompletionWarnings(stage, after = []) {
     if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
+    // said until a where on `completed` follows the funnel — the one judgement, for a step as it is
+    // added (nothing follows it yet) and for a whole pipeline alike
+    if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed'))) return [];
     return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
   }
 
@@ -2022,7 +2011,7 @@ export class Engine {
     const draft = { source, stages, timeRange, startsFromTable };
     return stages.flatMap((st, i) => [
       ...this._joinCompletenessWarnings(st, draft),
-      ...this._funnelCompletionWarnings(st),
+      ...this._funnelCompletionWarnings(st, stages.slice(i + 1)),
       ...this._pythonPreparationWarnings(st, draft, i),
       ...this._globalWindowWarnings(st),
     ]);
@@ -2612,12 +2601,6 @@ export class Engine {
       }
       const cp = (draft.checkpoints || []).find((c) => c.task_id === id);
       if (cp) cp.rows = result.row_count ?? null;
-      // Funnel-completeness nudge: a one_per_match funnel with NO downstream completed filter
-      // counts all starts (incl. partials), not completed situations — surface it on the result.
-      const mrIdx = stages.findIndex((s) => s.stage === 'match_recognize' && (s.rows || 'one_per_partition') === 'one_per_match');
-      if (mrIdx >= 0 && !stages.slice(mrIdx + 1).some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed'))) {
-        (result.warnings ||= []).push(`This funnel used rows:'one_per_match' with NO downstream filter on completed — the row count includes partial/abandoned chains (all starts), not only completed situations. Add a 'where completed = true' step before materialize if you meant completed funnels.`);
-      }
       if (plan.checkpoint) {
         result.from_checkpoint = { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at };
         result.steps_recomputed = plan.stages.length;
@@ -3004,7 +2987,7 @@ export class Engine {
     if (input.remove_metrics) state.metrics = state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
     if (input.remove_measures) {
       for (const rm of input.remove_measures) {
-        const dependents = state.metrics.filter((m) => metricUsesMeasure(m, rm));
+        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(rm));
         if (dependents.length && !input.cascade) {
           throw new ToolError(`cannot remove measure '${rm}'; metrics depend on it: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate', field: rm });
         }
@@ -3054,7 +3037,7 @@ export class Engine {
     const add = ctx.state.additions[modelKey];
     if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
     const taskMeasureNames = new Set(add.measures.map((m) => m.name));
-    const dependents = ctx.state.metrics.filter((m) => [...taskMeasureNames].some((mm) => metricUsesMeasure(m, mm)));
+    const dependents = ctx.state.metrics.filter((m) => [...measureRefs(m, ctx.state.metrics)].some((mm) => taskMeasureNames.has(mm)));
     if (dependents.length && !input.cascade) {
       throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate' });
     }
@@ -3964,7 +3947,8 @@ export class Engine {
     if (!input.metrics?.length) throw new ToolError(`metrics is required for a metric query. This context defines: ${[...known].join(', ') || '(none — create metrics first)'}`, { stage: 'validate', field: 'metrics' });
     for (const m of input.metrics) if (!known.has(m)) throw new ToolError(`unknown metric in context: '${m}'. Available: ${[...known].join(', ') || '(none)'}`, { stage: 'validate', field: m });
 
-    const allowed = this._allowedPaths(ctx);
+    // what a reference reaches is _normalizeRef's one judgement: it resolves the reference or
+    // refuses it, saying what is reachable (_reachableHint)
     const groupBy = [];
     // Result columns are named after the reference the caller made — `<model>_<attribute>` and
     // `metric_time_<grain>` — so nothing the caller reads back or addresses later (order_by, a
@@ -3977,8 +3961,6 @@ export class Engine {
         const tok = `metric_time__${g.grain || 'day'}`;
         groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
       }
-      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'group_by' });
-      this._checkModelLoaded(ctx, gRaw);
       const friendly = `${gRaw.model}_${gRaw.attribute}`;
       if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
       groupBy.push(g); rename.set(g, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
@@ -4010,8 +3992,6 @@ export class Engine {
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           whereNames.set(p.field.path, `${refModel}_${refAttr}`);
           delete p.field.model; delete p.field.attribute; delete p.field.via;
-          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'where' });
-          this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
           specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
@@ -4077,7 +4057,7 @@ export class Engine {
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
-      const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
+      const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...measureRefs(metric, ctx.state.metrics)].some((dm) => distinctMeasures.has(dm)); });
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
@@ -4655,13 +4635,6 @@ export class Engine {
     a.push('metric_time / cumulative / conversion metrics require a configured time dimension');
     return a;
   }
-}
-
-function metricUsesMeasure(metric, measureName) {
-  const tp = metric.type_params || {};
-  const refs = [tp.measure?.name];
-  if (tp.conversion_type_params) refs.push(tp.conversion_type_params.base_measure?.name, tp.conversion_type_params.conversion_measure?.name);
-  return refs.includes(measureName);
 }
 
 function walkPredicates(group, fn) {

@@ -56,67 +56,28 @@ export function castExpr(dialect, expr, type) {
   return getDialect(dialect).castExpr(expr, type);
 }
 
-/**
- * SQL predicate restricting `col` to the last `days` days (for bounding the value-index
- * scans on a partitioned fact). `days` MUST be a positive integer (caller-validated; it is
- * interpolated). Returns null for dialects we do not have a safe expression for → no window.
- */
+/** Rows of the last `days` days on `col` (null for no window: `days` not a positive integer). */
 export function recentSince(dialect, col, days) {
   const n = Math.floor(Number(days));
-  if (!col || !Number.isFinite(n) || n <= 0) return null;
-  const d = String(dialect || '').toLowerCase();
-  if (d === 'redshift') return `${col} >= CURRENT_TIMESTAMP - INTERVAL '${n} days'`;
-  if (d === 'bigquery') return `${col} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${n} DAY)`;
-  if (d === 'snowflake') return `${col} >= DATEADD(day, -${n}, CURRENT_TIMESTAMP())`;
-  if (d === 'duckdb') return `${col} >= CAST(now() AS TIMESTAMP) - INTERVAL '${n} days'`;
-  return null; // unknown dialect → no window (best-effort, never break the scan)
+  return col && Number.isFinite(n) && n > 0 ? getDialect(dialect).recentSince(col, n) : null;
 }
 
-/**
- * Predicate keeping rows STRICTLY NEWER than an epoch-ms watermark on time column `col` — the
- * incremental-merge delta scan ("only rows since the last index"). Returns null for a dialect we
- * have no safe expression for (→ caller falls back to a full re-scan rather than risk a bad bound).
- */
+/** Rows strictly newer than an epoch-ms watermark on `col` — the incremental-merge delta scan
+ *  (null → the caller re-scans everything rather than risk a bad bound). */
 export function sinceTimestampMs(dialect, col, ms) {
   const n = Math.floor(Number(ms));
-  if (!col || !Number.isFinite(n)) return null;
-  const d = String(dialect || '').toLowerCase();
-  if (d === 'redshift') return `${col} > to_timestamp(${n} / 1000.0)`;
-  if (d === 'bigquery') return `${col} > TIMESTAMP_MILLIS(${n})`;
-  if (d === 'snowflake') return `${col} > TO_TIMESTAMP_LTZ(${n}, 3)`;
-  if (d === 'duckdb') return `${col} > epoch_ms(${n})`;
-  return null;
+  return col && Number.isFinite(n) ? getDialect(dialect).sinceTimestampMs(col, n) : null;
 }
 
-/**
- * APPROXIMATE distinct-count expression (HLL-class) for `expr`, or null when the dialect has
- * no built-in (→ caller falls back to exact COUNT(DISTINCT)). A cheaper cardinality scan on
- * a large fact; the count becomes approximate, so it is OPT-IN at the indexer.
- */
+/** The warehouse's distinct count for a cardinality scan — the same expression the pipeline's
+ *  approx_count_distinct writes (exact on DuckDB, where numbers are checked exactly). */
 export function approxCountDistinct(dialect, expr) {
-  const d = String(dialect || '').toLowerCase();
-  if (d === 'bigquery' || d === 'snowflake' || d === 'duckdb') return `APPROX_COUNT_DISTINCT(${expr})`;
-  if (d === 'redshift') return `APPROXIMATE COUNT(DISTINCT ${expr})`;
-  return null; // unknown → no native approx; use exact COUNT(DISTINCT)
+  return getDialect(dialect).approxCountDistinct(expr);
 }
 
-/**
- * APPROXIMATE top-K expression returning the K most frequent values WITH their counts in a
- * single aggregate — lets the indexer collect top-values for MANY properties in ONE scan.
- * null when the dialect has no count-bearing top-k (→ caller does a per-property GROUP BY,
- * the most efficient option that DB has). Note: DuckDB's approx_top_k returns values WITHOUT
- * counts, so it is intentionally excluded (we need frequencies).
- */
+/** The K most frequent values with their counts in one aggregate, or null (→ a GROUP BY per property). */
 export function approxTopK(dialect, expr, k = 50) {
-  const d = String(dialect || '').toLowerCase();
-  const n = Math.max(1, Math.floor(Number(k) || 50));
-  // Wrap the array result in a JSON STRING: APPROX_TOP_COUNT/APPROX_TOP_K return a nested
-  // ARRAY<STRUCT> that `dbt show --output json` CANNOT serialize (the query runs fine in the
-  // warehouse, but the show step then errors). A plain JSON string serializes cleanly and
-  // parseApproxTopK() parses it back.
-  if (d === 'bigquery') return `TO_JSON_STRING(APPROX_TOP_COUNT(${expr}, ${n}))`; // → "[{\"value\":..,\"count\":..}]"
-  if (d === 'snowflake') return `TO_JSON(APPROX_TOP_K(${expr}, ${n}))`;            // → "[[value,count],..]"
-  return null;
+  return getDialect(dialect).approxTopK(expr, k);
 }
 
 /**

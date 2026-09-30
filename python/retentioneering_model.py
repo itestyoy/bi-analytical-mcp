@@ -514,22 +514,34 @@ def _diff_groups(diff):
     return {"first": f"{len(diff[0])} paths", "second": f"{len(diff[1])} paths"}
 
 
+def _analyze(stream, spec, a, frame_out, out):
+    """One analysis's records into `out`."""
+    # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
+    if a["path_col"] in frame_out.columns:
+        out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
+    charted = charted_of(a)
+    diff = a["params"].get("diff")
+    if diff is not None:
+        # which groups, and in which form the diff is stored: the analysis's own shape, or the library's tables
+        out.add(a["id"], a["kind"], "diff", {"diff": True, "charted": charted is not None, "groups": json.dumps(_diff_groups(diff), default=str)})
+    if charted:
+        charted(stream, spec, a, out)
+    else:
+        _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))
+
+
 def run(frame, spec):
-    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
+    """The analyses `spec` names, over the eventstream `frame` → the long result table. Each analysis
+    stands alone: one the library raises on is kept as its error, and the others keep their results."""
     stream = _stream(frame, spec)
+    frame_out = stream.to_dataframe()
     out = _Out()
     for a in spec["analyses"]:
-        # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
-        frame_out = stream.to_dataframe()
-        if a["path_col"] in frame_out.columns:
-            out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
-        charted = charted_of(a)
-        diff = a["params"].get("diff")
-        if diff is not None:
-            # which groups, and in which form the diff is stored: the analysis's own shape, or the library's tables
-            out.add(a["id"], a["kind"], "diff", {"diff": True, "charted": charted is not None, "groups": json.dumps(_diff_groups(diff), default=str)})
-        if charted:
-            charted(stream, spec, a, out)
-        else:
-            _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))
+        own = _Out()
+        try:
+            _analyze(stream, spec, a, frame_out, own)
+        except Exception as e:  # noqa: BLE001 — the library's own error, said for this analysis alone
+            own = _Out()
+            own.add(a["id"], a["kind"], "error", {"type": type(e).__name__, "message": str(e)})
+        out.rows.extend(own.rows)
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)

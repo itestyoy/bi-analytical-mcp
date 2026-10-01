@@ -212,13 +212,13 @@ test('_buildPipeline warns about an incomplete SCD join, like the step builder d
   const e = engine();
   const out = await e._buildPipeline({
     name: 'scd_fanout', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'] }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] },
   });
   assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
   // with the window stated, there is nothing to warn about
   const ok = await e._buildPipeline({
     name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
   });
   assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
 });

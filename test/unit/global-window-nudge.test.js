@@ -83,19 +83,19 @@ test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () 
 });
 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.
-test('least/greatest take a literal as well as columns, and say so when given neither', () => {
+test('least/greatest take parts — columns and literals in one form — and say so when given none', () => {
   const validators = makeValidators(buildSchemas(loadCatalog(CATALOG, {})));
   const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_step', draft_id: 'ctxabc123456', stage });
 
   assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', parts: [{ column: 'revenue' }, { value: 100 }] }).ok, true);
-  assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', columns: ['revenue', 'budget'] }).ok, true);
+  assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', parts: [{ column: 'revenue' }, { column: 'budget' }] }).ok, true);
+  assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', columns: ['revenue', 'budget'] }).ok, false, 'one spelling: parts');
   assert.equal(step({ stage: 'compute', name: 'capped', op: 'greatest', parts: [{ column: 'revenue' }, { value: 0 }] }).ok, true);
 
   const neither = step({ stage: 'compute', name: 'capped', op: 'least' });
   assert.equal(neither.ok, false);
   const text = (neither.errors || []).join(' | ');
-  assert.match(text, /columns/, 'the refusal names the all-columns form');
-  assert.match(text, /parts/, 'and the form that takes a literal');
+  assert.match(text, /parts/, 'the refusal names the field it needs');
 
   // coalesce is unchanged: it takes columns, and its `default` is where a literal goes
   assert.equal(step({ stage: 'compute', name: 'c', op: 'coalesce', parts: [{ column: 'revenue' }] }).ok, false);

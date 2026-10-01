@@ -247,11 +247,12 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
 
 // The point of the fold is SIZE — what every request carries before a word of the conversation: the
 // tool list a client is handed (the tools callable by name only are never in it). The ceiling is
-// deliberately loose (it grows with the catalog), but it is a ceiling: a tool that doubles because a
-// description grew unchecked should fail here, not in production.
+// deliberately loose: it grows with the catalog, and with every name closed as an enum per model (an
+// attribute, a joined column) — exactness is worth the bytes. But it is a ceiling: a tool that doubles
+// because a description grew unchecked should fail here, not in production.
 test('the tool list stays within its size budget on the production catalog', () => {
   const total = JSON.stringify(listed(PRODUCTION)).length;
-  assert.ok(total < 200000, `the tool list is ${total} characters — it was ~180k with every form folded; something is being dumped into every request again`);
+  assert.ok(total < 260000, `the tool list is ${total} characters — it was ~206k with every form folded and the catalog's names closed per model; something is being dumped into every request again`);
 });
 
 test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {

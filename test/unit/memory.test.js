@@ -242,11 +242,11 @@ test('memory target: an entity is { source, name }, a phrase is { term }, and a 
   const e = engine();
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'x', targets: ['users.country'] }),
-    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+    /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/,
   );
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'x', targets: ['country'] }),
-    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+    /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/,
   );
   // …and a phrase says it is one
   const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: [{ term: 'v2.4 rollout' }] });

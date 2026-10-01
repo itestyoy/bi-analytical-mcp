@@ -34,11 +34,11 @@ test('semantic_index serves the research guide and one guide per domain — exac
     assert.deepEqual(d, researchGuide(key));
     assert.ok(d.sequence.length && d.metrics.length && d.questions.length && d.pitfalls.length, `${key} has a sequence, metrics, questions and pitfalls`);
   }
-  assert.deepEqual(await e.semantic_index({ guide: ' Research/UA ' }), researchGuide('research/ua'), 'the name is read in any case');
+  await assert.rejects(Promise.resolve().then(() => e.semantic_index({ guide: ' Research/UA ' })), /`guide` must be one of: [^;]*research\/ua/, 'one spelling: the name as listed');
 });
 
 test('an unknown research guide is refused, not answered with an empty guide', async () => {
-  await assert.rejects(engine().semantic_index({ guide: 'research/finance' }), (err) => err.field === 'guide' && err.stage === 'validate');
+  await assert.rejects(Promise.resolve().then(() => engine().semantic_index({ guide: 'research/finance' })), (err) => err.stage === 'validate' && /`guide` must be one of: [^;]*research\/monetization/.test(err.message));
 });
 
 test('every recipe a research guide names is written recipe "<id>" and is loaded by this server', () => {

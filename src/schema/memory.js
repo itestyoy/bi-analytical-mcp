@@ -1,6 +1,6 @@
 // THE MEMORY TOOL'S INPUT — durable analyst findings, each linked to what it is about in the catalog.
 
-import { form } from '../schema-kit.js';
+import { form, strEnum } from '../schema-kit.js';
 
 // ── Analyst memory (durable findings linked to catalog entities) ───────────────
 // A single action-driven tool. `record` saves a finding (+ the entities it is about,
@@ -16,14 +16,19 @@ export function memoryTargetSchema(catalog, description) {
   return {
     ...(description ? { description } : {}),
     anyOf: [
-      {
-        title: '{ source, name }',
-        type: 'object', additionalProperties: false, required: ['source'],
-        properties: {
-          source: { enum: catalog.modelKeys(), description: 'The source the entity belongs to.' },
-          name: { type: 'string', description: 'A property, user attribute or event of that source. Omit to link the model itself.' },
-        },
-      },
+      // one closed form per source: `name` is one of ITS properties, attributes or events
+      ...catalog.modelKeys().map((source) => {
+        const m = catalog.models[source];
+        const names = [...new Set([...Object.keys(m.dimensions || {}), ...(catalog.isFact(source) ? [...Object.keys(m.properties || {}), ...catalog.eventNames(source)] : [])])];
+        return {
+          title: `{ source: "${source}", name? }`,
+          type: 'object', additionalProperties: false, required: ['source'],
+          properties: {
+            source: { const: source, description: 'The source the entity belongs to.' },
+            ...(names.length ? { name: strEnum(names, `A property, attribute or event of ${source}. Omit to link the model itself.`) } : {}),
+          },
+        };
+      }),
       {
         title: '{ term }',
         type: 'object', additionalProperties: false, required: ['term'],

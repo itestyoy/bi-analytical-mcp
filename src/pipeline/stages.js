@@ -6,7 +6,7 @@
 import { GRAINS } from '../catalog.js';
 import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITION, propEnum, sourceProp, operandSql, condPred, aggExpr, addCol, requireCol } from './sql.js';
 import { COMPUTE_OPS, computeForms } from './compute.js';
-import { form, pick } from '../schema-kit.js';
+import { form, pick, strEnum } from '../schema-kit.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -32,7 +32,7 @@ export const STAGES = {
         source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
         value: { description: 'The value to look for in the array.' },
         field: { type: 'string', description: 'The struct field to read.' },
-        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
+        type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
       };
       // one form per op, each with the fields that op reads
       const op = (value, title, needs, may = []) => form({ title, tag: ['op', value], required: ['stage', 'name', 'source', ...needs], properties: pick(fields, ['stage', 'name', 'source', ...needs, ...may]) });
@@ -101,8 +101,8 @@ export const STAGES = {
         // open side is a sentinel (e.g. 1970-01-01), which makes retention_day nonsensically huge.
         clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
         column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
-        columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest, all of them columns. To mix in a LITERAL (clamping a column at a threshold) use `parts` instead.' },
-        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands — columns and/or literals — for op=concat, and for least/greatest when one side is a constant: winsorizing at a threshold computed earlier is least with parts [{ column }, { value: <threshold> }].' },
+        columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Inputs for coalesce, all of them columns; its literal fallback is `default`.' },
+        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands — each { column } or { value } — for op=concat and for least/greatest: least of two columns is parts [{ column: "a" }, { column: "b" }]; winsorizing at a threshold computed earlier is least with parts [{ column }, { value: <threshold> }].' },
         search: { type: 'string', description: 'Substring to find for op=replace.' },
         replacement: { type: 'string', description: 'Replacement string for op=replace.' },
         start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
@@ -114,7 +114,7 @@ export const STAGES = {
         part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
         places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places for round (default 0).' },
         default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
-        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type. cast is SAFE — a value that will not convert becomes NULL rather than failing the query.' },
+        type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type. cast is SAFE — a value that will not convert becomes NULL rather than failing the query.' },
         // op=case
         cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of ANDed conditions, `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: CONDITION }, then: OPERAND } } },
         else: OPERAND,
@@ -161,7 +161,7 @@ export const STAGES = {
         source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by compute op=json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
         as: { type: 'string', pattern: NAME },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
-        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },
+        type: { enum: ['int', 'numeric', 'float', 'string'] },
       },
     }),
     build: ({ catalog, cols, source }, p) => {
@@ -193,48 +193,56 @@ export const STAGES = {
     keepsSourceRows: true,
     recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
     schema: (catalog) => {
-      const fields = {
-        with: { type: 'string', enum: catalog.modelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
-        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at.' },
-        on: {
-          description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
-          anyOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
-        },
-        attrs: {
-          type: 'array',
-          minItems: 1,
-          description: 'REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is a column name, or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns.',
-          items: {
-            anyOf: [
-              { type: 'string', description: 'A column of the joined model, exposed under its own name.' },
-              {
-                type: 'object', additionalProperties: false, required: ['column'],
-                description: 'A column of the joined model exposed under a different name — use it for a column both sides name identically.',
-                properties: {
-                  column: { type: 'string', description: 'Column of the JOINED model.' },
-                  as: { type: 'string', description: 'Name it gets in the pipeline (defaults to `column`).' },
-                },
+      // ONE CLOSED FORM PER JOINED MODEL AND WAY OF MATCHING: `with` pinned, and every column the form
+      // names — attrs, the window's bounds, the shared key — one of THAT model's own columns, so a
+      // join is written only with names the model has. (Its left side — `via`'s key on the
+      // pipeline's own source, `between.value` — is the pipeline's, checked when the step is added.)
+      const forms = [];
+      for (const model of catalog.modelKeys()) {
+        const m = catalog.models[model];
+        const columns = [...new Set([...catalog.modelColumns(model).map((c) => c.name), ...(m.event_data_column ? [m.event_data_column] : [])])];
+        if (!columns.length) continue;
+        // one enum object for every place the form names a column of the model, so the transport folds it into one $defs entry
+        const column = strEnum(columns, `A column of ${model}.`);
+        const fields = {
+          with: { const: model, description: 'Catalog model to join (any model but the pipeline\'s own source).' },
+          attrs: {
+            type: 'array', minItems: 1, uniqueItems: true,
+            description: 'The columns of the joined model to expose — exactly these arrive (see the stage).',
+            items: {
+              type: 'object', additionalProperties: false, required: ['column'],
+              properties: {
+                column,
+                as: { type: 'string', pattern: NAME, description: 'Name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
               },
-            ],
+            },
           },
-        },
-        between: {
-          type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
-          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
-          properties: {
-            value: { type: 'string', description: 'A column on THIS (left) side compared against the window — e.g. the event time.' },
-            from: { type: 'string', description: 'Window LOWER-bound column on the joined model (inclusive), e.g. valid_from.' },
-            to: { type: 'string', description: 'Window UPPER-bound column on the joined model (inclusive), e.g. valid_until.' },
+          between: {
+            type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
+            description: 'Point-in-time window on the joined model (see the stage).',
+            properties: {
+              // from / to: the window's lower and upper bound columns on the joined model (inclusive), e.g. valid_from / valid_until
+              value: { type: 'string', pattern: NAME, description: 'A column on THIS (left) side compared against the window — e.g. the event time; from / to are the joined model\'s lower and upper bound columns (inclusive), e.g. valid_from / valid_until.' },
+              from: column,
+              to: column,
+            },
           },
-        },
-        kind: { enum: ['left', 'inner'], default: 'left' },
-      };
-      // two closed forms: by a declared relationship (via) or by columns both sides name alike (on) — never both
-      const by = (title, key) => form({ title, tag: ['stage', 'join'], required: ['stage', 'with', key], properties: pick(fields, ['with', key, 'attrs', 'between', 'kind']) });
+          kind: { enum: ['left', 'inner'], default: 'left' },
+        };
+        // the relationships this model carries that another model carries too — what `via` can name
+        const vias = Object.keys(catalog.entitiesOf(model)).filter((e) => catalog.joinEntityNames().includes(e));
+        if (vias.length) {
+          forms.push(form({ title: `join ${model} by a declared relationship (via)`, tag: ['stage', 'join'], required: ['stage', 'with', 'via', 'attrs'], properties: { ...fields, via: { enum: vias, description: 'A relationship declared in the schema and carried by both sides (see the stage).' } } }));
+        }
+        forms.push(form({
+          title: `join ${model} on columns both sides name alike (on)`, tag: ['stage', 'join'], required: ['stage', 'with', 'on', 'attrs'],
+          properties: { ...fields, on: { type: 'array', minItems: 1, uniqueItems: true, items: column, description: 'Ad-hoc fallback when no relationship is declared: the key column(s) that exist under the SAME NAME on both sides — several for a composite key.' } },
+        }));
+      }
       return {
         type: 'object',
-        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
-        anyOf: [by('join by a declared relationship (via)', 'via'), by('join on columns both sides name alike (on)', 'on')],
+        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there. VIA: A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at. ATTRS: REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is { column } — or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns. BETWEEN: Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
+        anyOf: forms,
       };
     },
     build: ({ catalog, cols, source }, p) => {
@@ -257,8 +265,8 @@ export const STAGES = {
         for (const part of left) requireCol(cols, part.column); // the left key must survive to here
         onKeys = { left, right };
       } else {
-        on = Array.isArray(p.on) ? p.on : [p.on];
-        if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
+        on = p.on;
+        if (!on?.length) throw new Error('join: `on` needs the key column names');
         for (const k of on) requireCol(cols, k); // every key must exist on THIS side
       }
       // What the joined model REALLY has (declared, and already grounded to the physical table at
@@ -277,7 +285,7 @@ export const STAGES = {
           + ` Use { column, as } to expose one under a different name. semantic_index({ request: { model: '${p.with}' } }) describes them.`,
         );
       }
-      const attrs = p.attrs.map((a) => (typeof a === 'string' ? { column: a, as: a } : { column: a.column, as: a.as || a.column }));
+      const attrs = p.attrs.map((a) => ({ column: a.column, as: a.as || a.column }));
       const byName = new Map();
       for (const a of attrs) {
         if (known && !known.has(a.column)) throw new Error(`join '${p.with}' attrs: '${a.column}' is not a column of '${p.with}' (available: ${avail()})`);

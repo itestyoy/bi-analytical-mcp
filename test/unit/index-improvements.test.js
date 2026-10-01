@@ -37,11 +37,11 @@ test('a value search that finds nothing warns that rare values may be unindexed'
 // п.5 FUZZY TARGETS: a near-miss target name links to the real catalog entity (not a term).
 test('memory record refuses a near-miss name inside its source, suggesting the real one', async () => {
   const e = engine();
-  // typo: missing a 't' in "event". The source is written down, so the miss is a misspelling
-  // WITHIN it — reported with the nearest real names, never silently linked to one of them.
+  // typo: missing a 't' in "event". The source is written down, so the miss is a misspelling WITHIN
+  // it — the schema refuses it with the nearest real name, never silently linked to one of them.
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_even_data' }] }),
-    /is not a property, attribute or event of 'events'.*Did you mean.*'ad_type_of_event_data'/s,
+    /targets\.0\.name` must be one of: .*Did you mean 'ad_type_of_event_data'/s,
   );
   // spelled correctly, it links — and surfaces on that property's view.
   const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });

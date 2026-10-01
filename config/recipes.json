@@ -1209,10 +1209,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1516,10 +1524,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1664,10 +1680,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1920,10 +1944,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -2132,10 +2164,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -2450,7 +2490,9 @@
               "with": "users",
               "via": "user",
               "attrs": [
-                "install_date"
+                {
+                  "column": "install_date"
+                }
               ]
             },
             {
@@ -4294,7 +4336,9 @@
               "with": "users",
               "via": "user",
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {
@@ -5056,7 +5100,9 @@
               "via": "ad_funnel_rewarded",
               "kind": "inner",
               "attrs": [
-                "event_id"
+                {
+                  "column": "event_id"
+                }
               ]
             },
             {
@@ -5118,7 +5164,9 @@
                 "to": "install_time_valid_until"
               },
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {
@@ -5334,7 +5382,9 @@
                 "to": "install_time_valid_until"
               },
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {

@@ -193,7 +193,7 @@ export function semanticModelBranch(catalog, modelKey) {
   return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" model.`, properties: props };
 }
 
-export function metricSchema() {
+export function metricSchema(catalog) {
   const measureRef = {
     type: 'object',
     additionalProperties: false,
@@ -215,9 +215,9 @@ export function metricSchema() {
     base_measure: { ...measureRef, description: 'The starting population (must be count_distinct of an entity), e.g. users who launched.' },
     conversion_measure: { ...measureRef, description: 'The converted population (count_distinct of the same entity), e.g. users who purchased.' },
     window: { type: 'string', pattern: WINDOW, description: 'Time window in which the conversion must occur after the base event, e.g. "1 day", "7 day", "1 week".' },
-    entity: { type: 'string', description: 'The entity linking base and conversion events (default "user").' },
+    entity: { enum: [...new Set(catalog.modelKeys().flatMap((k) => Object.keys(catalog.entitiesOf(k))))], description: 'The entity linking base and conversion events (default "user").' },
     calculation: { enum: ['conversion_rate', 'conversion'], description: 'Return the rate (converted/base, default) or the raw converted count.' },
-    constant_properties: { type: 'array', items: { type: 'string' }, description: 'Properties that must match between the base and conversion events (e.g. same product_id).' },
+    constant_properties: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.scalarEventPropEnum()), description: 'Properties that must match between the base and conversion events (e.g. same product_id).' },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
   const kind = (type, title, required, optional, own = {}) => form({ title, tag: ['type', type], required: ['name', ...required], properties: { ...pick(fields, ['name', 'label', ...required, ...optional]), ...own } });
@@ -266,6 +266,48 @@ export function projectEntityRef(project, { withKind = false } = {}) {
   }];
 }
 
+/**
+ * What a metric query can name on `model` as an attribute — the set the engine resolves
+ * (semantic-query.js): its groupable dimensions and dimension columns and, on an events source, the
+ * scalar payload properties a task declares as dimensions.
+ */
+export function modelAttributes(catalog, model) {
+  const m = catalog.models[model];
+  return [...new Set([
+    ...Object.keys(m.dimensions || {}),
+    ...catalog.modelDimensionColumns(model),
+    ...(catalog.isFact(model) ? catalog.scalarEventProps(model) : []),
+  ])];
+}
+
+/** The relationships that lead to `model`: each entity a model declares whose owner is `model`. */
+export function relationshipsTo(catalog, model) {
+  return [...new Set(catalog.modelKeys().flatMap((k) => Object.keys(catalog.entitiesOf(k))).filter((e) => catalog.joinTargetFor(e) === model))];
+}
+
+/**
+ * `{ model, attribute, via? }` — ONE CLOSED FORM PER MODEL, each with that model's own attributes as
+ * an enum, so an attribute is written exactly as the model carries it; `via` is there only on a model
+ * several relationships lead to (one is chosen for the caller otherwise). `lead` adds fixed fields in
+ * front (a where's `kind`).
+ */
+export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
+  return catalog.modelKeys().map((model) => {
+    const attrs = modelAttributes(catalog, model);
+    if (!attrs.length) return null;
+    const vias = relationshipsTo(catalog, model);
+    return {
+      type: 'object', additionalProperties: false, title: `an attribute of ${model}`, required: [...required, 'model', 'attribute'],
+      properties: {
+        ...lead,
+        model: { const: model, description: 'The model that carries the attribute.' },
+        attribute: strEnum(attrs, `An attribute of ${model}, as semantic_index({ request: { model: "${model}" } }) lists it.`),
+        ...(vias.length > 1 ? { via: { enum: vias, description: `The relationship to reach ${model} through — several lead to it.` } } : {}),
+      },
+    };
+  }).filter(Boolean);
+}
+
 /** A metric_time window, as a metric query and a preview's validation take it. */
 export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
 
@@ -273,12 +315,9 @@ export function predicateDefs(catalog, project = null) {
   return {
     fieldRef: {
       type: 'object',
-      // model/attribute are validated per-context in the handler (task dims are not a static
-      // enum); `_reachable_attributes` documents what the catalog can reach.
-      _reachable_attributes: catalog.reachableAttributes(),
-      description: 'The field a condition applies to: an attribute addressed by where it lives ({ kind: "dimension", model, attribute }) or the metric time axis.',
+      description: 'The field a condition applies to: a dimension addressed by where it lives ({ kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema) or the metric time axis.',
       anyOf: [
-        { type: 'object', additionalProperties: false, required: ['kind', 'model', 'attribute'], description: 'A dimension addressed by WHERE IT LIVES: { kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema (add via when the source has several relationships to that model).', properties: { kind: { enum: ['dimension'], description: 'Filter on a dimension.' }, model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column) on that model.' }, via: { type: 'string', description: 'Optional relationship name when several lead to the model.' } } },
+        ...attributeRefForms(catalog, { lead: { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } }, required: ['kind'] }),
         { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { enum: ['metric_time'], description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
         ...(project ? [projectRef(project, catalog, { withKind: true }), ...projectEntityRef(project, { withKind: true })] : []),
       ],

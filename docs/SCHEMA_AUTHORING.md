@@ -795,7 +795,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
       "source": "events",
       "stages": [
         { "stage": "join", "with": "experiments", "via": "user",
-          "attrs": ["experiment_name", "variant_group", "assigned_at", "ended_at"] },
+          "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
         { "stage": "where", "conditions": [
           { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
           { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },

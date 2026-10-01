@@ -230,7 +230,7 @@ test('memory targets: { source, name } resolves; a bare name is not a target', a
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
   const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
   assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
 });

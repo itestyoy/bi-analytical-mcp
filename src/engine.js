@@ -61,6 +61,7 @@ import { semanticPreviewMethods } from './engine/semantic-preview.js';
 import { taskResultMethods } from './engine/task-results.js';
 import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
+import { RESEARCH_GUIDES } from './research-guides.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -149,6 +150,13 @@ export class Engine {
       // one form takes a recipe id ({ recipe }); the ids are known only now, after the schemas were built
       const branch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.recipe);
       if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), ...(branch.properties.recipe.description ? { description: branch.properties.recipe.description } : {}) };
+    }
+    // The guide view takes true or a name this server answers — the recipe families, the reserved
+    // guides (python, research, research/<domain>) and a feature's own — known only now, like the ids.
+    const guideBranch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.guide);
+    if (guideBranch) {
+      const names = [...new Set(['python', ...Object.keys(RESEARCH_GUIDES), ...(recipes ? recipes.summary().map((r) => r.task_type) : []), ...features.map((f) => f.guide?.name).filter(Boolean)])];
+      guideBranch.properties.guide = { description: guideBranch.properties.guide.description, anyOf: [{ type: 'boolean', const: true, description: 'The whole guide.' }, { type: 'string', enum: names, description: 'One guide or recipe family by name.' }] };
     }
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the

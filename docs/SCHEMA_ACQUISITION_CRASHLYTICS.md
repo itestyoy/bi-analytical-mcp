@@ -414,7 +414,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 ```json
 { "stage": "join", "with": "users", "via": "user",
   "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-  "attrs": [{ "column": "app_version", "as": "users_app_version" }, "country"] }
+  "attrs": [{ "column": "app_version", "as": "users_app_version" }, { column: "country" }] }
 ```
 
 Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
@@ -428,10 +428,10 @@ semantic_index({ model: 'acquisition' }) describes them.
 
 ```json
 { "source": "crashlytics", "stages": [
-  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": ["event_id"] },
-  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": ["country"],
+  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ column: "event_id" }] },
+  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ column: "country" }],
     "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
-  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": ["media_source", "cost"] }
+  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ column: "media_source" }, { column: "cost" }] }
 ] }
 ```
 
@@ -560,7 +560,7 @@ MetricFlow умеет соединять только по уникальном�
 { "source": "acquisition", "stages": [
   { "stage": "join", "with": "users", "via": "user",
     "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-    "kind": "inner", "attrs": ["country"] },
+    "kind": "inner", "attrs": [{ column: "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
     "measures": [{ "name": "total", "fn": "sum", "column": "cost" }] }
 ] }
@@ -571,7 +571,7 @@ MetricFlow умеет соединять только по уникальном�
 ```json
 { "source": "crashlytics", "stages": [
   { "stage": "join", "with": "events", "via": "ad_funnel_rewarded",
-    "kind": "inner", "attrs": ["event_id", "event_name"] }
+    "kind": "inner", "attrs": [{ column: "event_id" }, { column: "event_name" }] }
 ] }
 ```
 

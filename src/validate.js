@@ -7,6 +7,7 @@
 import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
+import { rankFuzzy } from './fuzzy.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -68,6 +69,18 @@ function fieldRef(instancePath) {
   return `\`${instancePath.replace(/^\//, '').replace(/\//g, '.')}\``;
 }
 
+/**
+ * "must be one of" — and, for a string that is a near miss, the nearest values first (a misspelt
+ * column or attribute names what was meant, even when the list is long and its first values are not
+ * it). A long list is cut: the schema is exact, the message names enough to act on.
+ */
+function oneOf(at, vals, used, alt) {
+  const near = typeof used === 'string' && !alt ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
+  return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
+    + (near.length ? `. Did you mean ${near.map((v) => `'${v}'`).join(' or ')}?` : '')
+    + (alt ? `. Here '${used}' is spelled '${alt}' — '${used}' is the other path's spelling of the same function` : '');
+}
+
 /** Turn one Ajv error into a plain-English sentence. `ctx` = { input, schema } for the hints. */
 function describe(e, ctx = {}) {
   const at = fieldRef(e.instancePath);
@@ -91,8 +104,7 @@ function describe(e, ctx = {}) {
       if (vals.length === 1) return `${at} must be ${JSON.stringify(vals[0])}`;
       const used = valueAt(ctx.input, e.instancePath);
       const alt = otherSpelling(used, vals);
-      return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
-        + (alt ? `. Here '${used}' is spelled '${alt}' — '${used}' is the other path's spelling of the same function` : '');
+      return oneOf(at, vals, used, alt);
     }
     case 'const': return `${at} must be ${JSON.stringify(e.params.allowedValue)}`;
     case 'type': return `${at} must be ${Array.isArray(e.params.type) ? e.params.type.join(' or ') : e.params.type}`;
@@ -108,8 +120,7 @@ function describe(e, ctx = {}) {
       // said as an enum is said (describe, 'enum'): one value is a pinned one, several a list
       const vals = e.params.values;
       if (vals.length === 1) return `${fieldRef(e.params.at)} must be ${JSON.stringify(vals[0])}`;
-      return `${fieldRef(e.params.at)} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
-        + (alt ? `. Here '${used}' is spelled '${alt}' — '${used}' is the other path's spelling of the same function` : '');
+      return oneOf(fieldRef(e.params.at), vals, used, alt);
     }
     case 'oneOf':
     case 'anyOf': return `${at} must match exactly one of the allowed configurations (provide the fields for exactly one mode)`;

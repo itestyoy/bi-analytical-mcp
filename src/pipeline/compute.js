@@ -20,13 +20,11 @@ export const arith = (sym) => ({
 });
 
 // Clamping against a NUMBER (a threshold computed in an earlier pass) is the common case, so the
-// operands may be literals as well as columns: `parts` takes operands, `columns` stays the shorthand
-// for the all-columns form.
+// operands are `parts` — each a column or a literal — one form for every mix of the two.
 export const clamp = (fn) => ({
-  forms: [{ title: 'all-columns form: { columns: ["a", "b"] }', needs: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', needs: ['parts'] }],
-  sql: ({ operand, list, p }) => {
-    const args = p.parts?.length ? p.parts.map((o, i) => operand(o, `part[${i}]`)) : list();
-    if (!args.length) throw new Error(`compute op '${fn}' needs \`columns\` (column names) or \`parts\` (columns and/or literals, e.g. a threshold)`);
+  needs: ['parts'],
+  sql: ({ operand, p }) => {
+    const args = p.parts.map((o, i) => operand(o, `part[${i}]`));
     return { expr: `${fn}(${args.join(', ')})` };
   },
 });

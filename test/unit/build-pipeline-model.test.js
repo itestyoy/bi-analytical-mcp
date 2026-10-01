@@ -152,21 +152,21 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   const s = await e.build_pipeline_model({ action: 'start', name: 'pit', source: 'events' });
   // value is a base (events) column; from/to are columns of the joined model.
   const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: {
-    stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'],
+    stage: 'join', with: 'users', on: ['player_id_of_internal'], attrs: [{ column: 'country' }],
     between: { value: 'device_time', from: 'install_date', to: 'install_date' },
   }, include_columns: true });
   assert.ok(ok.available_columns.some((c) => c.name === 'country'), 'joined attr exposed');
   // it renders end-to-end (forces the ON-clause CTE form so the BETWEEN can be expressed).
   const pv = await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'pipeline renders with the between join');
-  // a window bound that is not a column of the joined model is rejected at add_step.
+  // a window bound that is not a column of the joined model is refused by the schema, naming its columns
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
     () => e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: {
-      stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'],
+      stage: 'join', with: 'users', on: ['player_id_of_internal'], attrs: [{ column: 'country' }],
       between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
     } }),
-    /not a column of/,
+    /between\.from` must be one of: [^;]*install_time_valid_from/,
   );
 });
 

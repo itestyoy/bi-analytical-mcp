@@ -68,8 +68,7 @@ test('off: no tool, no view, no guide, no skill, no instruction line, nothing in
   assert.equal(s.read(RETENTIONEERING_VIEW_URI), null);
   assert.ok(!s.skills.list().some((k) => k.frontmatter.name === 'retentioneering'));
   assert.ok(!s.instructionsFor({ apps: true, skills: true }).includes('build_retentioneering_model'));
-  const g = await e.semantic_index({ guide: 'retentioneering' });
-  assert.equal(g.recipes?.length ?? 0, 0, 'an unknown family, not the guide');
+  await assert.rejects(Promise.resolve().then(() => e.semantic_index({ guide: 'retentioneering' })), /`guide` must be one of/, 'its guide is no name the schema offers');
   const ov = await e.semantic_index({});
   assert.equal(ov.features, undefined);
   const r = await runTool(e, 'build_retentioneering_model', { request: { name: 'x', source: 'events' } });

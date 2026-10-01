@@ -381,7 +381,7 @@ test('27. a time axis on a missing column is dropped and the model still joins: 
   assert.ok(pruned.experiments.includes('(time axis)'), JSON.stringify(pruned));
   assert.equal(cat.getModel('experiments').time, undefined);
   const rows = await pipeRows('events', [
-    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group'] },
+    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', fn: 'count_distinct', column: 'player_id_of_internal' }] },
   ], eng);
   assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 });

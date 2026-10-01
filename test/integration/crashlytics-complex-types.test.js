@@ -279,7 +279,7 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' },
-    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', fn: 'count' }, { name: 'crashes', fn: 'count_distinct', column: 'crash_id' }] },
   );
   assert.deepEqual(mapCol(rows, 'country', 'n'), { GB: 10, US: 6, DE: 3, BR: 1 });
@@ -294,7 +294,7 @@ test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', o
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'unnest', source: 'stack_frames_of_event_data', as: 'file', field: 'file' },
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
     { stage: 'aggregate', measures: [
       { name: 'n', fn: 'count' },
       { name: 'crashes', fn: 'count_distinct', column: 'crash_id' },

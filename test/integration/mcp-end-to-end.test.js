@@ -153,9 +153,9 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
 test('2. crash → its ad funnel → the install version then → that player\'s spend: 22 rows', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id', 'tracking_id'] },
-    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: ['country'] },
-    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['acquisition_id', 'cost', 'media_source'] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }, { column: 'tracking_id' }] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'acquisition_id' }, { column: 'cost' }, { column: 'media_source' }] },
     { stage: 'aggregate', measures: [
       { name: 'n', fn: 'count' },
       { name: 'crashes', fn: 'count_distinct', column: 'crash_id' },
@@ -182,7 +182,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   if (skip(t)) return;
   const stats = async (extra) => {
     const built = await mcpPipeline('acquisition', [
-      { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'], ...extra },
+      { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: [{ column: 'country' }], ...extra },
       { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'rows', fn: 'count_distinct', column: 'acquisition_id' }] },
     ]);
     return { n: num(built.rows[0].n), distinct: num(built.rows[0].rows) };
@@ -196,7 +196,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
   const step = await call('build_pipeline_model', {
     action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'join', with: 'users', via: 'user', attrs: ['country'] },
+    stage: { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] },
   });
   const recs = JSON.stringify(step.recommendations || []);
   assert.match(recs, /INCOMPLETE JOIN/);
@@ -208,7 +208,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
 test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funnels apart', opts, async (t) => {
   if (skip(t)) return;
   const rowsFor = async (variant) => (await mcpPipeline('crashlytics', [
-    { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] },
+    { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
     { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
   ])).rows[0].n;
   assert.equal(num(await rowsFor('rewarded')), 14);
@@ -220,7 +220,7 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
   const idsFor = async (variant) => {
     const built = await mcpPipeline('crashlytics', [
       { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
-      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] },
+      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
       { stage: 'project', columns: ['event_id'] },
     ]);
     return new Set(built.rows.map((r) => String(r.event_id)));
@@ -247,7 +247,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
   // (b) a name the pipeline already carries → refused, with the rename to apply.
   const dup = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: await start(),
-    stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: ['event_name'] },
+    stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] },
   });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
   assert.match(dup.error.message, /as: 'events_event_name'/);
@@ -267,7 +267,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] } });
+  await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] } });
   const unlisted = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: s,
     stage: { stage: 'aggregate', measures: [{ name: 'x', fn: 'count_distinct', column: 'tracking_id' }] },
@@ -289,7 +289,7 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
       ] },
     // after the funnel the per-event time is gone; `first_seen_at` (the funnel's first event) is
     // the instant to attribute the player by.
-    { stage: 'join', with: 'users', via: 'user', between: AT('first_seen_at'), kind: 'inner', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('first_seen_at'), kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country', 'reached_tut1'], measures: [{ name: 'n', fn: 'count' }] },
   ]);
   const cell = {};
@@ -341,7 +341,7 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
   if (skip(t)) return;
   // group sizes: distinct players per assigned variant, straight from the experiments source.
   const sizes = await mcpPipeline('events', [
-    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group', 'experiment_name'] },
+    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }, { column: 'experiment_name' }] },
     { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'users', fn: 'count_distinct', column: 'player_id_of_internal' }] },
   ]);
   const n = mapCol(sizes.rows, 'variant_group', 'users');
@@ -350,7 +350,7 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
   // conversions: the same players, scoped to the purchase event.
   const conv = await mcpPipeline('events', [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group'] },
+    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', fn: 'count_distinct', column: 'player_id_of_internal' }] },
   ]);
   const c = mapCol(conv.rows, 'variant_group', 'payers');
@@ -383,8 +383,8 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
 test('9. materialize once, then re-slice the stored result from its task: meta 18 / organic 2 / applovin 2', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] },
-    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['media_source', 'cost'] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }] },
   ], `e2e_store_${seq++}`);
   assert.equal(num(built.row_count), 22, 'the row-level result is stored as a table');
 

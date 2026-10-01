@@ -60,13 +60,13 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: agg('events_seen') });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] } });
   const c1 = await e.build_pipeline_model({ action: 'materialize', draft_id }); // at: 2
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'compute', name: 'twice', op: 'mul', left: { column: 'events_seen' }, right: { value: 2 } } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'mul', args: [{ column: 'events_seen' }, { value: 2 }] } } });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'order_by', keys: [{ key: 'twice', direction: 'desc' }] } });
   const c2 = await e.build_pipeline_model({ action: 'materialize', draft_id }); // at: 4
   assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2, 4]);
 
   // Editing step 3 retires ONLY the checkpoint that baked it (at: 4); the one at 2 lives.
-  const edit = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 3, stage: { stage: 'compute', name: 'twice', op: 'mul', left: { column: 'events_seen' }, right: { value: 3 } } });
+  const edit = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 3, stage: { stage: 'compute', name: 'twice', expr: { fn: 'mul', args: [{ column: 'events_seen' }, { value: 3 }] } } });
   assert.deepEqual(edit.checkpoints_dropped.map((d) => d.at), [4]);
   assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2]);
   assert.deepEqual(edit.from_checkpoint.model, c1.model);

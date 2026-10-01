@@ -611,8 +611,8 @@ test('join guards: an undeclared relationship, a self-join and via+on are all re
   if (skip(t)) return;
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
     /`stage.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
-  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
-  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /unexpected property '(on|via)' — join (by a declared relationship|on columns both sides name alike)/, 'via and on are two forms: the schema takes one');
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property '(on|via)' — join users (by a declared relationship|on columns both sides name alike)/, 'via and on are two forms: the schema takes one');
 });
 
 // ═══════════ F. THE GENERATED JOIN CODE, PROVEN BY RUNNING IT ═══════════
@@ -1176,7 +1176,7 @@ test('45. group by a joined attribute, measure joined amounts: meta 18 / organic
 test('46. date math between a base time column and a joined one: 2..6 days, 82 in total', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows('crashlytics', ...CHAIN_LISTED,
-    { stage: 'compute', name: 'days_after_spend', op: 'date_diff', from: { column: 'spend_date' }, to: { column: 'event_time' }, unit: 'day' },
+    { stage: 'compute', name: 'days_after_spend', expr: { fn: 'date_diff', args: [{ column: 'spend_date' }, { column: 'event_time' }], unit: 'day' } },
     { stage: 'aggregate', measures: [{ name: 'lo', agg: 'min', column: 'days_after_spend' }, { name: 'hi', agg: 'max', column: 'days_after_spend' }, { name: 'total', agg: 'sum', column: 'days_after_spend' }] });
   assert.equal(num(rows[0].lo), 2);
   assert.equal(num(rows[0].hi), 6);
@@ -1223,14 +1223,14 @@ test('48. duplicate names and unknown columns are refused with the fix', opts, a
   // (b) a column the joined model does not have.
   await assert.rejects(
     () => joinStep('crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: [{ column: 'cost' }, { column: 'nope' }] }),
-    /'nope' is not a column of 'acquisition'.*cost/s,
+    /`stage.attrs.1.column` must be one of: .*cost/s,
   );
   // (c) a name the pipeline already carries, holding DIFFERENT data → rename it.
   await assert.rejects(
     () => joinStep('crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }),
     (e) => {
       assert.match(e.message, /already has a column named 'event_name'/);
-      assert.match(e.message, /hold different data.*as: 'events_event_name'/s);
+      assert.match(e.message, /hold different data.*name: 'events_event_name'/s);
       return true;
     },
   );
@@ -1272,7 +1272,7 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
   });
   await assert.rejects(() => preview(null), /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*country/s);
   await assert.rejects(() => preview([{ column: 'app_version' }]), /already has a column named 'app_version'.*name: 'users_app_version'/s);
-  const ok = await preview([{ column: 'app_version', as: 'users_app_version' }, 'country']);
+  const ok = await preview([{ column: 'app_version', name: 'users_app_version' }, { column: 'country' }]);
   assert.ok(ok.model_sql, 'the resolved preview renders');
 
   // and it builds, with BOTH versions in the result.

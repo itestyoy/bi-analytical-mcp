@@ -99,6 +99,7 @@ export function buildToolDefs(engine) {
     title: def.title,
     description: def.description,
     inputSchema: wireSchema(engine.schemas[def.name]),
+    ...(def.output ? { outputSchema: def.output } : {}),
     annotations: { openWorldHint: false, ...def.annotations },
     _meta: viewMeta(def),
   }));
@@ -136,16 +137,19 @@ export function requestOf(name, args) {
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
  *  both, and a host that uses the structured copy does not add it to the model's context). */
 export function toCallToolResult(result, name, args, engine = null) {
-  // STRUCTURED OUTPUT ONLY FOR A CARD THAT IS DRAWN: display_model_result's answer when the engine drew
-  // it (the task's one card), or experiment's when the call asked for its card (`card: true`) — and
-  // only when the same view model the card runs finds something to draw. A feature's drawing tool
-  // follows the same rule with its own view model. Anything else — every other tool, a refusal, a
-  // failure — is the text alone.
+  // STRUCTURED OUTPUT FOR A CARD THAT IS DRAWN, AND FOR AN ANSWER OF A DECLARED SHAPE: display_model_result's
+  // answer when the engine drew it (the task's one card), or experiment's when the call asked for its card
+  // (`card: true`) — and only when the same view model the card runs finds something to draw (a feature's
+  // drawing tool follows the same rule with its own view model); and every successful answer of a tool
+  // that declares its outputSchema (src/schema/outputs.js — tools with no view, so nothing is drawn).
+  // Anything else — every other tool, a refusal, a failure — is the text alone.
   const def = toolsOf(engine).get(name);
   const asked = def?.cardField ? args?.[def.cardField] === true : isPlainObject(result) && result.drawn === true;
   // the view model the card runs: the result view's, or the feature view's own
   const viewModel = def?.view === 'result' ? (r, a) => buildViewModel(name, r, a) : def?.view?.viewModel;
-  const structured = !!viewModel && asked && isPlainObject(result) && viewModel(result, args).kind !== 'none';
+  // a tool that declares the shape of its answer (outputSchema) carries it on every success
+  const declared = !!def?.output && isPlainObject(result) && result.ok !== false;
+  const structured = declared || (!!viewModel && asked && isPlainObject(result) && viewModel(result, args).kind !== 'none');
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     ...(structured ? { structuredContent: result } : {}),

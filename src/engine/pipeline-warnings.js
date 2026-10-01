@@ -8,6 +8,7 @@
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
+import { FNS, exprCalls } from '../pipeline/compute.js';
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -82,15 +83,17 @@ export class PipelineAdvisor {
    */
   globalWindowWarnings(stage) {
     if (stage?.stage !== 'compute') return [];
-    const windowed = stage.op === 'window' && !(stage.partition_by || []).length;
-    // Raw SQL is where this actually came from: the built-in window op is only reachable through
-    // `partition_by`, but `op: 'raw'` carries whatever the caller wrote.
-    const rawGlobal = stage.op === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(stage.sql || ''));
+    // every function the expression calls, nested ones included
+    const calls = exprCalls(stage.expr);
+    const windowed = calls.find((c) => FNS[c.fn]?.window && !(c.over?.partition_by || []).length);
+    // Raw SQL is where this actually came from: a window function is only reachable through its
+    // `over`, but `fn: 'raw'` carries whatever the caller wrote.
+    const rawGlobal = calls.some((c) => c.fn === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(c.sql || '')));
     if (!windowed && !rawGlobal) return [];
-    const what = windowed ? `the window function '${stage.fn}' has no partition_by` : `the raw expression for '${stage.name}' uses OVER () with no PARTITION BY`;
+    const what = windowed ? `the window function '${windowed.fn}' has no partition_by in its over` : `the raw expression for '${stage.name}' uses OVER () with no PARTITION BY`;
     return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
-      + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (compute sub/div, or least/greatest with { value }).`
-      + ` If it is per group (per player, per day, per session), name those columns in partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
+      + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (sub / div, or least / greatest, with { value }).`
+      + ` If it is per group (per player, per day, per session), name those columns in over.partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
   }
 
   /**

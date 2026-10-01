@@ -153,7 +153,11 @@
   condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
   every condition taking the same operators (`OPS`, src/conditions.js, written by its one
   `comparison`). Only what a condition compares differs by place: a column, an event property, or —
-  in a metric query — the field as group_by names it. A caller who brings another tool's spelling
+  in a metric query — the field as group_by names it. A computed column is ONE expression —
+  `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
+  to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
+  is added there once, its schema form and its SQL beside each other; a window function takes `over`,
+  `raw` stays the escape hatch). A caller who brings another tool's spelling
   (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
   the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
@@ -209,9 +213,13 @@
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
-  `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
-  experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
-  other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
+  `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an
+  experiment called with `card: true`, only when `buildViewModel(...).kind !== 'none'` — and by every
+  successful answer of a tool that declares an `outputSchema` (`output` on its definition,
+  src/schema/outputs.js: time, context, delete_context, memory, explore_errors, build_semantic_model —
+  an answer of one shape, from a tool with no view, since a host draws a card for every answer that
+  carries structuredContent). A tool that answers with a result's rows (the query tools, a pipeline
+  build) declares none: the rows would be carried twice. Every other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
   fits a picture has its card, a kind that does not has no card code at all (no view-model branch, no
   renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
   NOT MIXED WITH display: it is statistics over numbers the caller brings — no task, no task_id —

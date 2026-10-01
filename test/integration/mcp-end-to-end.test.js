@@ -249,7 +249,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
     stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] },
   });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
-  assert.match(dup.error.message, /as: 'events_event_name'/);
+  assert.match(dup.error.message, /name: 'events_event_name'/);
 
   // (c) the rename works, and both sides are readable side by side.
   const built = await mcpPipeline('crashlytics', [

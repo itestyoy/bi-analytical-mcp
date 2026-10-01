@@ -88,7 +88,7 @@ test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', op
 test('time_range with a timezone keeps the events on the other UTC day of a partitioned source: 39 (9 on 01-01)', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' }, stages: [
-    { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
+    { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
     { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
@@ -121,7 +121,7 @@ test('a where on the time axis and a funnel window read the same rows with the p
   const rowsOf = async (stages) => (await pipe(stages)).rows.map((r) => JSON.stringify(r)).sort();
   const byDay = [
     { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 10:00:00' }, { column: 'device_time', op: 'lt', value: '2026-01-02 10:00:00' }] },
-    { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
+    { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
     { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ];
   const funnel = [matchActivation({ filter: { time_range: { start: '2026-01-01 09:30:00', end: '2026-01-02' } }, steps: activationSteps.slice(0, 2) })];

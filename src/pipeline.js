@@ -9,11 +9,11 @@
 //
 // Safety: stage params are catalog-enum / typed; column references are validated
 // against the live column set threaded through the pipeline; identifiers pass the
-// dialect guard; values are bound via sqlLiteral. Raw SQL enters only through compute op=raw, an
+// dialect guard; values are bound via sqlLiteral. Raw SQL enters only through a compute expression's fn: raw, an
 // escape hatch whose column names are checked against the columns at that step.
 //
 // This file renders a pipeline (its source's columns, the stages' ops, the partition bounds); the
-// stages are in src/pipeline/: stages.js (the registry), compute.js (the compute ops), sql.js (what
+// stages are in src/pipeline/: stages.js (the registry), compute.js (the compute expressions), sql.js (what
 // a stage is written with).
 //
 // ─── STAGE CATALOG (what each stage does + what it solves) ───────────────────
@@ -74,7 +74,7 @@ export function sqlRunHints(text) {
   const log = String(text || '');
   const hints = [];
   if (/Resources exceeded|memory limit|out of memory|exceeded .*memory/i.test(log)) {
-    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute `window` stage without partition_by, or op=raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub/div, least/greatest with { value }). Worked: semantic_index({ request: { recipe: "agg_table_stat_no_global_window" } }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
+    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute window function whose over has no partition_by, or fn: raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub / div, least / greatest with a { value } argument). Worked: semantic_index({ request: { recipe: "agg_table_stat_no_global_window" } }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
   }
   return hints;
 }

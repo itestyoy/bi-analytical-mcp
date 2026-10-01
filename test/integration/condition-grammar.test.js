@@ -72,7 +72,7 @@ test('a CASE branch takes the same conditions: an { or } in `when` flags the row
   if (skip(t)) return;
   const want = await truth("select count(*) as n from fct_analytics_events where event_name in ('tutorial', 'level_started')");
   const { rows } = await pipe([
-    { stage: 'compute', name: 'flag', op: 'case', cases: [{ when: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'eq', value: 'level_started' }] }], then: { value: 1 } }], else: { value: 0 }, type: 'int' },
+    { stage: 'compute', name: 'flag', expr: { fn: 'case', cases: [{ when: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'eq', value: 'level_started' }] }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'flag' }] },
   ]);
   assert.equal(num(rows[0].n), want);

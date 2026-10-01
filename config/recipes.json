@@ -1249,25 +1249,27 @@
             {
               "stage": "compute",
               "name": "is_conv",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "aggregate",
@@ -1571,25 +1573,27 @@
             {
               "stage": "compute",
               "name": "price0",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "column": "price"
                     }
-                  ],
-                  "then": {
-                    "column": "price"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -1704,88 +1708,94 @@
             {
               "stage": "compute",
               "name": "price0",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "column": "price"
                     }
-                  ],
-                  "then": {
-                    "column": "price"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
               "name": "y_val",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "left": {
-                        "column": "device_time"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "gte",
+                        "right": {
+                          "column": "assigned_at"
+                        }
                       },
-                      "op": "gte",
-                      "right": {
-                        "column": "assigned_at"
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "lte",
+                        "right": {
+                          "column": "ended_at"
+                        }
                       }
-                    },
-                    {
-                      "left": {
-                        "column": "device_time"
-                      },
-                      "op": "lte",
-                      "right": {
-                        "column": "ended_at"
-                      }
+                    ],
+                    "then": {
+                      "column": "price0"
                     }
-                  ],
-                  "then": {
-                    "column": "price0"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
               "name": "x_val",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "left": {
-                        "column": "device_time"
-                      },
-                      "op": "lt",
-                      "right": {
-                        "column": "assigned_at"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "lt",
+                        "right": {
+                          "column": "assigned_at"
+                        }
                       }
+                    ],
+                    "then": {
+                      "column": "price0"
                     }
-                  ],
-                  "then": {
-                    "column": "price0"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -1810,34 +1820,46 @@
             {
               "stage": "compute",
               "name": "uy2",
-              "op": "mul",
-              "left": {
-                "column": "uy"
-              },
-              "right": {
-                "column": "uy"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "uy"
+                  },
+                  {
+                    "column": "uy"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "ux2",
-              "op": "mul",
-              "left": {
-                "column": "ux"
-              },
-              "right": {
-                "column": "ux"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "ux"
+                  },
+                  {
+                    "column": "ux"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "uxy",
-              "op": "mul",
-              "left": {
-                "column": "ux"
-              },
-              "right": {
-                "column": "uy"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "ux"
+                  },
+                  {
+                    "column": "uy"
+                  }
+                ]
               }
             },
             {
@@ -1984,48 +2006,52 @@
             {
               "stage": "compute",
               "name": "is_completed",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "level_completed"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "compute",
               "name": "is_started",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_started"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "level_started"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "aggregate",
@@ -2050,34 +2076,46 @@
             {
               "stage": "compute",
               "name": "num2",
-              "op": "mul",
-              "left": {
-                "column": "num"
-              },
-              "right": {
-                "column": "num"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "num"
+                  },
+                  {
+                    "column": "num"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "den2",
-              "op": "mul",
-              "left": {
-                "column": "den"
-              },
-              "right": {
-                "column": "den"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "den"
+                  },
+                  {
+                    "column": "den"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "numden",
-              "op": "mul",
-              "left": {
-                "column": "num"
-              },
-              "right": {
-                "column": "den"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "num"
+                  },
+                  {
+                    "column": "den"
+                  }
+                ]
               }
             },
             {
@@ -2299,7 +2337,7 @@
       "required_user_attrs": [],
       "metric_types": [],
       "approach": "Prepare the grain you are asking about (here: revenue per player), then ONE `aggregate` stage with NO group_by: it returns a single row with every statistic you need — the percentile, the mean, the deviation, the max — computed once. Read that row, and use the numbers in the next pass (see agg_scale_rows_by_literals).",
-      "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute `window` stage with no partition_by, or op=raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
+      "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute window function whose over has no partition_by, or fn: raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
       "notes": "Say which kind of number you are reporting: on BigQuery `percentile`/`median` here are APPROX_QUANTILES — a sketch, which is exactly why they need no ordering and no global memory; on Postgres they are exact (percentile_cont). The stage description states this per warehouse. An exact percentile over a huge table is the one form that needs a total order, so it is the most expensive thing you can ask for — take the approximate one unless the difference changes a decision, and label it.",
       "hack": "Two passes instead of one query: pass 1 collapses the table to ONE row of statistics (no group_by, no window, no ordering), pass 2 uses those numbers as literals on the rows. Anything you were tempted to write as OVER () belongs in pass 1; a window is only for a value within a group — per player, per day, per session — and then partition_by names that group.",
       "pipeline_payload": {
@@ -2379,7 +2417,7 @@
       ],
       "required_user_attrs": [],
       "metric_types": [],
-      "approach": "Put the numbers from pass 1 in as LITERALS: `least` with parts [{ column }, { value: <p99> }] clamps at the threshold, then `sub` and `div` against { value: <mean> } / { value: <deviation> } give the z-score. Every row is then independent arithmetic — no window, no ordering, no global memory — and the result is the feature table a python stage (or a segmentation) reads.",
+      "approach": "Put the numbers from pass 1 in as LITERALS: `least` with args [{ column }, { value: <p99> }] clamps at the threshold, then `sub` and `div` against { value: <mean> } / { value: <deviation> } give the z-score. Every row is then independent arithmetic — no window, no ordering, no global memory — and the result is the feature table a python stage (or a segmentation) reads.",
       "instead_of": "Recomputing the same statistics per row with AVG/STDDEV/PERCENTILE_CONT OVER () — the global window that exhausts the query's memory. Also: a `sample` stage to make the window affordable, which changes the answer instead of the shape of the query.",
       "notes": "The literals belong to the window of data pass 1 measured — re-run pass 1 when the period or the filter changes, or the z-scores quietly describe a different population. Keep them in the model's description (build_pipeline_model's `description`) so the next reader knows where the numbers came from. div guards against a zero deviation by itself (a NULL, not a division error).",
       "hack": "A number about the whole table enters the row-level query as a constant. Pass 1 (one row of statistics) → pass 2 (arithmetic per row with those constants): the pair replaces every OVER () that had no PARTITION BY, and each pass stays a plain dbt model.",
@@ -2421,36 +2459,46 @@
             {
               "stage": "compute",
               "name": "revenue_capped",
-              "op": "least",
-              "parts": [
-                {
-                  "column": "revenue"
-                },
-                {
-                  "value": 100
-                }
-              ]
+              "expr": {
+                "fn": "least",
+                "args": [
+                  {
+                    "column": "revenue"
+                  },
+                  {
+                    "value": 100
+                  }
+                ]
+              }
             },
             {
               "stage": "compute",
               "name": "revenue_centered",
-              "op": "sub",
-              "left": {
-                "column": "revenue_capped"
-              },
-              "right": {
-                "value": 12.5
+              "expr": {
+                "fn": "sub",
+                "args": [
+                  {
+                    "column": "revenue_capped"
+                  },
+                  {
+                    "value": 12.5
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "revenue_z",
-              "op": "div",
-              "left": {
-                "column": "revenue_centered"
-              },
-              "right": {
-                "value": 8.25
+              "expr": {
+                "fn": "div",
+                "args": [
+                  {
+                    "column": "revenue_centered"
+                  },
+                  {
+                    "value": 8.25
+                  }
+                ]
               }
             }
           ]
@@ -2498,14 +2546,18 @@
             {
               "stage": "compute",
               "name": "day_n",
-              "op": "date_diff",
-              "from": {
-                "column": "install_date"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "day"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "install_date"
+                  },
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "unit": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -2552,80 +2604,100 @@
             {
               "stage": "compute",
               "name": "prev_ts",
-              "op": "window",
-              "fn": "lag",
-              "column": "device_time",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
+              "expr": {
+                "fn": "lag",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "over": {
+                  "partition_by": [
+                    "player_id_of_internal"
+                  ],
+                  "order_by": [
+                    {
+                      "key": "device_time",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "compute",
               "name": "gap_s",
-              "op": "date_diff",
-              "from": {
-                "column": "prev_ts"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "second"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "prev_ts"
+                  },
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "unit": "second"
+              }
             },
             {
               "stage": "compute",
               "name": "is_session_start",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "is_null"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "gap_s",
+                        "op": "is_null"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
+                  },
+                  {
+                    "when": [
+                      {
+                        "column": "gap_s",
+                        "op": "gt",
+                        "value": 1800
+                      }
+                    ],
+                    "then": {
+                      "value": 1
+                    }
                   }
+                ],
+                "else": {
+                  "value": 0
                 },
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "gt",
-                      "value": 1800
-                    }
-                  ],
-                  "then": {
-                    "value": 1
-                  }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                "type": "int"
+              }
             },
             {
               "stage": "compute",
               "name": "session_idx",
-              "op": "window",
-              "fn": "sum",
-              "column": "is_session_start",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
+              "expr": {
+                "fn": "sum",
+                "args": [
+                  {
+                    "column": "is_session_start"
+                  }
+                ],
+                "over": {
+                  "partition_by": [
+                    "player_id_of_internal"
+                  ],
+                  "order_by": [
+                    {
+                      "key": "device_time",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "aggregate",
@@ -2653,14 +2725,18 @@
             {
               "stage": "compute",
               "name": "session_seconds",
-              "op": "date_diff",
-              "from": {
-                "column": "session_start"
-              },
-              "to": {
-                "column": "session_end"
-              },
-              "unit": "second"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "session_start"
+                  },
+                  {
+                    "column": "session_end"
+                  }
+                ],
+                "unit": "second"
+              }
             },
             {
               "stage": "order_by",
@@ -2719,9 +2795,15 @@
             {
               "stage": "compute",
               "name": "period",
-              "op": "date_trunc",
-              "column": "device_time",
-              "granularity": "day"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -2739,36 +2821,51 @@
             {
               "stage": "compute",
               "name": "prev_revenue",
-              "op": "window",
-              "fn": "lag",
-              "column": "revenue",
-              "order_by": [
-                {
-                  "key": "period",
-                  "direction": "asc"
+              "expr": {
+                "fn": "lag",
+                "args": [
+                  {
+                    "column": "revenue"
+                  }
+                ],
+                "over": {
+                  "order_by": [
+                    {
+                      "key": "period",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "compute",
               "name": "delta",
-              "op": "sub",
-              "left": {
-                "column": "revenue"
-              },
-              "right": {
-                "column": "prev_revenue"
+              "expr": {
+                "fn": "sub",
+                "args": [
+                  {
+                    "column": "revenue"
+                  },
+                  {
+                    "column": "prev_revenue"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "pct_change",
-              "op": "div",
-              "left": {
-                "column": "delta"
-              },
-              "right": {
-                "column": "prev_revenue"
+              "expr": {
+                "fn": "div",
+                "args": [
+                  {
+                    "column": "delta"
+                  },
+                  {
+                    "column": "prev_revenue"
+                  }
+                ]
               }
             },
             {
@@ -3007,9 +3104,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -3253,9 +3356,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -3856,9 +3965,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -3970,24 +4085,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -4105,24 +4222,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -4362,24 +4481,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -4503,9 +4624,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",

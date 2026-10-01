@@ -175,12 +175,12 @@ test('build_pipeline_model: compute elapsed_days adds an int column and requires
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'ret', source: 'events' });
   // from an event timestamp to now → a whole-24h-day column (retention day).
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'ret_day', op: 'elapsed_days', from: { column: 'device_time' }, to: { now: true } }, include_columns: true });
+  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'ret_day', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }, { now: true }] } }, include_columns: true });
   const col = ok.available_columns.find((c) => c.name === 'ret_day');
   assert.ok(col && col.type === 'int', 'elapsed_days adds an int column');
   // missing an endpoint is rejected by schema (from+to both required).
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'ret2', source: 'events' });
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'bad', op: 'elapsed_days', from: { column: 'device_time' } } }), 'elapsed_days needs from AND to');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'bad', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }] } } }), 'elapsed_days needs from AND to');
 });
 
 // #2: array ops are type-checked at add_step (not only at commit/runtime).
@@ -189,13 +189,13 @@ test('build_pipeline_model: array op on a non-array column is rejected at add_st
   const s = await e.build_pipeline_model({ action: 'start', name: 'arr', source: 'events' });
   // array_last over a string column → rejected when the stage is ADDED, with a fix hint.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'player_id_of_internal' } }),
+    () => e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'player_id_of_internal' }] } } }),
     /not an array/,
   );
   // correct flow: json_parse_array (string → array) first, then array_last passes validation.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'arr2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', op: 'json_parse_array', column: 'player_id_of_internal' } });
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'player_id_of_internal' }] } } });
+  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'arr' }] } } });
   assert.equal(ok.steps_count, 2, 'array_last on a parsed array column is accepted');
 });
 

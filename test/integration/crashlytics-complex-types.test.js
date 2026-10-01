@@ -142,9 +142,9 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
   if (skip(t)) return;
   const frames = [
     { stage: 'unnest', source: 'stack_frames_of_event_data', name: 'frame' },
-    { stage: 'compute', name: 'file', op: 'json_field', column: 'frame', field: 'file' },
-    { stage: 'compute', name: 'line', op: 'json_field', column: 'frame', field: 'line', type: 'int' },
-    { stage: 'compute', name: 'in_app', op: 'json_field', column: 'frame', field: 'in_app' },
+    { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
+    { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } },
+    { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } },
   ];
   const totals = await pipeRows(...frames, {
     stage: 'aggregate',
@@ -226,8 +226,8 @@ test('8. derive struct_field on a JSON object: wifi 8 / cellular 5', opts, async
 test('9. json_field with a cast over the object column: coins 5205, top level 31', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'coins', op: 'json_field', column: 'custom_keys_of_event_data', field: 'coins', type: 'int' },
-    { stage: 'compute', name: 'level', op: 'json_field', column: 'custom_keys_of_event_data', field: 'level', type: 'int' },
+    { stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } },
+    { stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } },
     { stage: 'aggregate', measures: [
       { name: 'n', agg: 'count' },
       { name: 'coins', agg: 'sum', column: 'coins' },
@@ -250,9 +250,9 @@ test('9. json_field with a cast over the object column: coins 5205, top level 31
 test('10. json_parse_array then element_at / array_last: first vs last breadcrumb', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'trail', op: 'json_parse_array', column: 'breadcrumbs_of_event_data' },
-    { stage: 'compute', name: 'entered', op: 'element_at', column: 'trail', index: 1 },
-    { stage: 'compute', name: 'died_at', op: 'array_last', column: 'trail' },
+    { stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } },
+    { stage: 'compute', name: 'entered', expr: { fn: 'element_at', args: [{ column: 'trail' }], index: 1 } },
+    { stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } },
     { stage: 'project', columns: ['crash_id', 'entered', 'died_at'] },
   );
   assert.equal(rows.length, 13);
@@ -264,8 +264,8 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
   assert.equal(pair.k2, 'level_start>level_start', 'a one-element trail: first and last coincide');
   // what the app was doing at the moment it died, across all reports
   const last = await pipeRows(
-    { stage: 'compute', name: 'trail', op: 'json_parse_array', column: 'breadcrumbs_of_event_data' },
-    { stage: 'compute', name: 'died_at', op: 'array_last', column: 'trail' },
+    { stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } },
+    { stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } },
     { stage: 'aggregate', group_by: ['died_at'], measures: [{ name: 'n', agg: 'count' }] });
   assert.equal(sumCol(last, 'n'), 13);
   assert.deepEqual(mapCol(last, 'died_at', 'n'), { ad_shown: 2, iap_start: 1, level_start: 2, shop_open: 1, net_retry: 3, decode: 1, gc_pause: 2, ui_freeze: 1 });
@@ -340,11 +340,11 @@ test('14. complex ops on a scalar column are refused with what it actually is', 
   // message points at the op that IS right for an object.
   await assert.rejects(
     () => step({ stage: 'derive', name: 'x', op: 'contains', source: 'custom_keys_of_event_data', value: 'wifi' }),
-    /contains: 'custom_keys_of_event_data'.*not an array.*op=struct_field.*op=json_field/s,
+    /contains: 'custom_keys_of_event_data'.*not an array.*op=struct_field.*compute json_field/s,
   );
   // element_at needs a native array, not the raw JSON string.
   await assert.rejects(
-    () => step({ stage: 'compute', name: 'x', op: 'element_at', column: 'breadcrumbs_of_event_data', index: 1 }),
+    () => step({ stage: 'compute', name: 'x', expr: { fn: 'element_at', args: [{ column: 'breadcrumbs_of_event_data' }], index: 1 } }),
     /not an array — produce an array first.*json_parse_array/s,
   );
 });

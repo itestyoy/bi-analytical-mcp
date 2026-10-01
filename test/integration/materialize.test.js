@@ -163,7 +163,7 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   const per = new Map();
   for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
   const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
-  const step = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, include_columns: true, stage: { stage: 'compute', name: 'prev_event', op: 'window', fn: 'lag', column: 'event_name', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } });
+  const step = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, include_columns: true, stage: { stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } } });
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));

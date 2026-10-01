@@ -6,6 +6,8 @@
 import { getDialect } from '../dialects/index.js';
 import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
 import { form, conditionList } from '../schema-kit.js';
+// (compute.js imports this module too: exprSql is read when a condition is written, never as the module loads)
+import { exprSql } from './compute.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -32,17 +34,10 @@ export function statAccuracyNote(catalog) {
     : 'On this warehouse every measure here is exact.';
 }
 
-// A scalar operand: exactly one of a column reference, a literal value, or the
-// `now` token (current timestamp). Shared by `where`, `compute`, and `case`.
-export const OPERAND = {
-  type: 'object',
-  description: 'One of: { column }, { value }, or { now: true }.',
-  anyOf: [
-    form({ title: 'a column', required: ['column'], properties: { column: { type: 'string' } } }),
-    form({ title: 'a constant', required: ['value'], properties: { value: {} } }),
-    form({ title: 'the current time', required: ['now'], properties: { now: { const: true } } }),
-  ],
-};
+// An operand is an EXPRESSION (src/pipeline/compute.js: a column, a constant, now, or a function of
+// expressions), defined once in the stage schemas' $defs and referenced from every place that takes one.
+export const EXPR = { $ref: '#/$defs/expr' };
+export const OPERAND = EXPR;
 
 // One comparison, used identically by `where` and `case` branches. Either side is
 // a column / constant / now: shorthand `{column, op, value}` (column vs constant)
@@ -75,13 +70,9 @@ export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
-// SQL for one operand: a column reference, a literal constant, or `now`.
+// SQL for one operand: an expression (src/pipeline/compute.js exprSql).
 export function operandSql(d, cols, o, label = 'operand') {
-  if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
-  if (o.now) return d.nowExpr();
-  if (o.column !== undefined) { requireCol(cols, o.column); return d.quoteIdent(o.column); }
-  if (o.value !== undefined) return d.sqlLiteral(o.value);
-  throw new Error(`${label}: needs column | value | now`);
+  return exprSql(d, cols, o, label).sql;
 }
 
 // A RAW expression is the caller's own SQL, run as written — but a column it names has to exist at
@@ -109,38 +100,31 @@ export function rawUnknownColumns(sql, cols) {
   return unknown;
 }
 
-/** The type of the COLUMN one side of a comparison names (null for a constant, `now`, or an untyped column). */
-export function sideType(cols, c, side) {
-  const name = side === 'left' ? (c.left ? c.left.column : c.column) : c.right?.column;
-  return name !== undefined ? cols.get(name)?.type || null : null;
-}
 
 // One comparison. Each side may be a column, a constant (value), or now:
 //   { column, op, value }        — column vs constant (shorthand)
 //   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
 //                                     constant vs column, etc.)
 export function condPred(d, cols, c) {
-  let lhs;
-  if (c.left !== undefined) lhs = operandSql(d, cols, c.left, 'left');
-  else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.quoteIdent(c.column); }
+  // the left side: a column named outright, or an expression — with the type its constants are written in
+  let left;
+  if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left');
+  else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null }; }
   else throw new Error('condition needs `column` or `left`');
-  // the column a constant is compared with, and what it is called in a refusal
-  const leftType = sideType(cols, c, 'left');
-  const rightType = sideType(cols, c, 'right');
-  const colName = c.left ? c.left.column : c.column;
-  const lit = (v, type = leftType, name = colName) => typedLiteral(type, v, `'${name}'`);
+  const name = c.column ?? c.left?.column ?? 'the left side';
   const right = c.right;
-  // a constant on the right (`value`, or right: { value }) — the one comparison writer, in the column's type
-  if (right === undefined || (right.value !== undefined && right.column === undefined && !right.now)) {
+  // a constant on the right (`value`, or right: { value }) — the one comparison writer, in the left side's type
+  if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
-    return comparison(lhs, c.op, value, { lit: (v) => lit(v) });
+    return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
-  // an operand on the right (a column, now): a plain comparison of the two
-  if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with a column or now`);
+  // an expression on the right (a column, now, a function): a plain comparison of the two
+  if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
+  const r = exprSql(d, cols, right, 'right');
   // a constant on the left compared with a column on the right is written in that column's type
-  if (c.left?.value !== undefined && right.column !== undefined) lhs = lit(c.left.value, rightType, right.column);
-  return `${lhs} ${OPSYM[c.op]} ${operandSql(d, cols, right, 'right')}`;
+  const lhs = c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined ? typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`) : left.sql;
+  return `${lhs} ${OPSYM[c.op]} ${r.sql}`;
 }
 
 // Window frame clause, e.g. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or
@@ -202,6 +186,6 @@ export function requireArrayCol(cols, name, op) {
   requireCol(cols, name);
   const t = cols.get(name)?.type;
   if (t && t !== 'array' && t !== 'unknown') {
-    throw new Error(`compute ${op}: column '${name}' is '${t}', not an array — produce an array first (compute op=json_parse_array on a JSON/string column, or unnest a native array column), then ${op}.`);
+    throw new Error(`compute ${op}: column '${name}' is '${t}', not an array — produce an array first (a compute json_parse_array on a JSON/string column, or unnest a native array column), then ${op}.`);
   }
 }

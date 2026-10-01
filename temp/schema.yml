@@ -175,9 +175,9 @@ models:
 
       HOW TO COMPUTE IT — use the pipeline's built-in primitive, do NOT hand-roll date
       math or cast anything yourself:
-        compute op=elapsed_days
-          from = install_date   (the install moment)
-          to   = device_time    (the event moment)
+        compute elapsed_days
+          args[0] = install_date   (the install moment)
+          args[1] = device_time    (the event moment)
     config:
       meta:
         mcp:
@@ -1949,8 +1949,8 @@ models:
           When the player installed the app (UTC instant) — the cohort/acquisition time
           dimension, and the anchor for retention. Retention day is the whole 24-hour
           bucket between this and the event time, so it always requires joining this
-          model to the events fact. Do NOT compute it by hand: use the pipeline op
-          compute op=elapsed_days with from=install_date, to=device_time — it returns
+          model to the events fact. Do NOT compute it by hand: use the pipeline's
+          compute { fn: elapsed_days, args: [install_date, device_time] } — it returns
           retention day in whole 24-hour buckets (NOT calendar days) and handles the
           casting, negative spans, and missing-install case for you. A player present in
           the events fact but absent from this model has no install_date on the join;

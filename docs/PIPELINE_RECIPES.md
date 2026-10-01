@@ -44,7 +44,7 @@ contract.
 ### Days-since-install (retention-day building block)
 ```jsonc
 [ {stage:"join", with:"users", via:"user", attrs:[{ column: "install_date" }]},
-  {stage:"compute", name:"dsi", op:"date_diff", from:{column:"install_date"}, to:{column:"device_time"}, unit:"day"} ]
+  {stage:"compute", name:"dsi", expr:{ fn: "date_diff", args: [{column:"install_date"}, {column:"device_time"}], unit: "day" }} ]
 ```
 Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active users**;
 `group_by dsi` ⇒ a retention curve.
@@ -52,7 +52,7 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
 ### Repeat purchasers / N-th purchase  (window)
 ```jsonc
 [ {stage:"where", conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
-  {stage:"compute", name:"pseq", op:"window", fn:"row_number", partition_by:["appsflyer_id"], order_by:[{key:"device_time"}]},
+  {stage:"compute", name:"pseq", expr:{ fn: "row_number", over: { partition_by: ["appsflyer_id"], order_by: [{key:"device_time"}] } }},
   {stage:"where", conditions:[{column:"pseq",op:"gte",value:2}]},
   {stage:"aggregate", group_by:[], measures:[{name:"repeat_buyers",agg:"count_distinct",column:"appsflyer_id"}]} ]
 ```
@@ -61,18 +61,16 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
 ### Period-over-period (WoW change)  (window lag)
 ```jsonc
 [ …aggregate by week into (wk, revenue)…,
-  {stage:"compute", name:"prev", op:"window", fn:"lag", column:"revenue", order_by:[{key:"wk"}]},
-  {stage:"compute", name:"wow",  op:"sub", left:{column:"revenue"}, right:{column:"prev"}} ]
+  {stage:"compute", name:"prev", expr:{ fn: "lag", args: [{ column: "revenue" }], over: { order_by: [{key:"wk"}] } }},
+  {stage:"compute", name:"wow", expr:{ fn: "sub", args: [{column:"revenue"}, {column:"prev"}] }} ]
 ```
 `|> EXTEND revenue - LAG(revenue) OVER(ORDER BY wk) AS wow`
 
 ### Rolling N-day sum  (window RANGE frame + unix_date)
 ```jsonc
 [ …derive(amount)…,
-  {stage:"compute", name:"day",  op:"unix_date", column:"order_completed_at"},
-  {stage:"compute", name:"roll", op:"window", fn:"sum", column:"amount",
-     partition_by:["customer_id"], order_by:[{key:"day"}],
-     frame:{mode:"range", preceding:10, following:0}} ]
+  {stage:"compute", name:"day", expr:{ fn: "unix_date", args: [{ column: "order_completed_at" }] }},
+  {stage:"compute", name:"roll", expr:{ fn: "sum", args: [{ column: "amount" }], over: { partition_by: ["customer_id"], order_by: [{key:"day"}], frame: {mode:"range", preceding:10, following:0} } }} ]
 ```
 Lowers to a value-based RANGE frame on an integer day key (so "10 PRECEDING" = 10
 days), matching the BigQuery idiom — order by `UNIX_DATE(CAST(... AS DATE))` (DuckDB:
@@ -102,8 +100,7 @@ then merge the trailing-N days' sketches.
 ### Price tiers (bucketing)  (CASE)
 ```jsonc
 [ …derive(price)…,
-  {stage:"compute", name:"tier", op:"case",
-     cases:[{when:[{column:"price",op:"lt",value:10}], then:{value:"low"}}], else:{value:"high"}},
+  {stage:"compute", name:"tier", expr:{ fn: "case", cases: [{when:[{column:"price",op:"lt",value:10}], then:{value:"low"}}], else: {value:"high"} }},
   {stage:"aggregate", group_by:["tier"], measures:[{name:"n",agg:"count"}]} ]
 ```
 

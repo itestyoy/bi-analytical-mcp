@@ -17,9 +17,11 @@
 //   view         the card it draws: 'result' (the result view) or a feature's view; `cardField` — the
 //                argument that asks for it (a tool that draws only when asked)
 //   appsOnly     offered to a client that renders MCP Apps only; `appCallable` — the card itself calls it
+//   output       the JSON Schema of its answer, where the answer has one shape (src/schema/outputs.js): listed
+//                as outputSchema, and every successful answer carries structuredContent — never on a tool with a view
 
 const NAME = /^[a-z][a-z0-9_]*$/;
-const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'cardField', 'appsOnly', 'appCallable', 'feature']);
+const KEYS = new Set(['name', 'title', 'description', 'annotations', 'schema', 'output', 'run', 'side', 'reads', 'waits', 'precheck', 'view', 'cardField', 'appsOnly', 'appCallable', 'feature']);
 
 /** A tool definition, checked: a missing or mistyped field is a defect found at start, not in a call. */
 export function defineTool(def) {
@@ -36,6 +38,8 @@ export function defineTool(def) {
   if (def.schema !== undefined && typeof def.schema !== 'function') throw new Error(`${where}: schema is (catalog) → a JSON Schema`);
   if (def.precheck !== undefined && !def.waits) throw new Error(`${where}: a precheck belongs to a tool whose read waits`);
   if (def.cardField !== undefined && !def.view) throw new Error(`${where}: cardField asks for a card the tool must draw`);
+  // a host draws a card for every answer that carries structuredContent: a tool with a view carries it only when it draws
+  if (def.output !== undefined && (def.view || def.output?.type !== 'object')) throw new Error(`${where}: an output schema is an object schema, for a tool that draws nothing`);
   return Object.freeze({ ...def, annotations: Object.freeze({ ...a }) });
 }
 

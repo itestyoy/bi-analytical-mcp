@@ -918,8 +918,8 @@ test('an eventstream from a pipeline build: events a window defined, the table\'
   assert.ok(expected.get('level_restarted') > 0, 'the fixture has restarts to find');
   const p = await engine.build_pipeline_model({ action: 'start', name: 'restarts', source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', draft_id: p.draft_id, stages: [
-    { stage: 'compute', name: 'prev', op: 'window', fn: 'lag', column: 'event_name', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] },
-    { stage: 'compute', name: 'ev', op: 'case', type: 'string', cases: [{ when: [{ column: 'event_name', op: 'eq', value: 'level_started' }, { column: 'prev', op: 'eq', value: 'level_started' }], then: { value: 'level_restarted' } }], else: { column: 'event_name' } },
+    { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
+    { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ column: 'event_name', op: 'eq', value: 'level_started' }, { column: 'prev', op: 'eq', value: 'level_started' }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
     { stage: 'project', columns: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
   ] });
   const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: p.draft_id });

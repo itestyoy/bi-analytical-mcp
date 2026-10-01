@@ -493,9 +493,9 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 //   → retried = true у 3 отчётов (net_retry встречается 4 раза, но k8 записал его дважды)
 
 // первый / последний элемент — «куда вошёл, где умер»
-{ stage: 'compute', name: 'trail',   op: 'json_parse_array', column: 'breadcrumbs_of_event_data' }
-{ stage: 'compute', name: 'entered', op: 'element_at', column: 'trail', index: 1 }
-{ stage: 'compute', name: 'died_at', op: 'array_last',  column: 'trail' }
+{ stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } }
+{ stage: 'compute', name: 'entered', expr: { fn: 'element_at', args: [{ column: 'trail' }], index: 1 } }
+{ stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } }
 ```
 
 `unnest` **меняет грань**: строки без массива (NULL) выпадают. Если нужно сохранить все
@@ -531,9 +531,9 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 // несколько полей — элемент целиком, потом json_field по каждому
 { stage: 'unnest',  source: 'stack_frames_of_event_data', name: 'frame' }
-{ stage: 'compute', name: 'file',   op: 'json_field', column: 'frame', field: 'file' }
-{ stage: 'compute', name: 'line',   op: 'json_field', column: 'frame', field: 'line', type: 'int' }
-{ stage: 'compute', name: 'in_app', op: 'json_field', column: 'frame', field: 'in_app' }
+{ stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } }
+{ stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } }
+{ stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } }
 //   → where in_app = false: 3 кадра (все три — Engine.cs); true: 13
 
 // глубина стека без разворота
@@ -571,8 +571,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 //   → wifi 8 / cellular 5
 
 // один ключ с приведением типа — для сумм
-{ stage: 'compute', name: 'coins', op: 'json_field', column: 'custom_keys_of_event_data', field: 'coins', type: 'int' }
-{ stage: 'compute', name: 'level', op: 'json_field', column: 'custom_keys_of_event_data', field: 'level', type: 'int' }
+{ stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } }
+{ stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } }
 //   → sum(coins) 5205; max(level) 31; median(level) 12
 ```
 
@@ -613,7 +613,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' }
 { stage: 'derive', name: 'has_cat', op: 'contains',     source: 'words_collected', value: 'cat' }
 { stage: 'unnest', source: 'rewards', name: 'rw' }          // элемент-структура целиком
-{ stage: 'compute', name: 'item', op: 'json_field', column: 'rw', field: 'item' }
+{ stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item' } }
 ```
 
 Когда blob, а когда плоская колонка: **плоская всегда лучше** — она типизирована,
@@ -799,9 +799,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
         { "stage": "where", "conditions": [
           { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
           { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
-        { "stage": "compute", "name": "is_conv", "op": "case", "type": "int",
-          "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }],
-          "else": { "value": 0 } },
+        { "stage": "compute", "name": "is_conv", "expr": { "fn": "case", "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }], "else": { "value": 0 }, "type": "int" } },
         { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
           "measures": [{ "name": "converted", "fn": "max", "column": "is_conv" }] },
         { "stage": "aggregate", "group_by": ["experiment_name", "variant_group"],

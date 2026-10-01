@@ -211,10 +211,10 @@ test('8. via names the relationship explicitly and gives the same numbers', opts
   assert.deepEqual(mapCol(r.rows, groupCol(r, 'aown_evts'), 'aown_evts'), { none: 176, iphone: 14 });
 });
 
-test('9. a via toward a model reached by one relationship is refused: the schema offers via only where there is a choice', opts, async (t) => {
+test('9. a via that is not a relationship to that model is refused, listing the real ones', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'session' }] }, ownerEngine),
-    /unexpected property 'via' — an attribute of crashlytics takes model, attribute/);
+    /`group_by.0.via` must be one of: .*ad_funnel/s);
 });
 
 test('10. a structured attribute and a time grain together: one month, 184 events', opts, async (t) => {

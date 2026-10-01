@@ -102,15 +102,15 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
       }
       const by = colOf(rule.by);
       const text = `es_v${i}`;
-      stages.push({ stage: 'compute', name: text, op: 'cast', column: by, type: 'string' });
+      stages.push({ stage: 'compute', name: text, expr: { fn: 'cast', args: [{ column: by }], type: 'string' } });
       for (const [value, name] of Object.entries(rule.names || {})) cases.push({ when: [isEvent(rule.event), { column: text, op: 'eq', value }], then: { value: name } });
       // any other value: <event>_<value>; an event without the parameter keeps its name
       const named = `es_n${i}`;
-      stages.push({ stage: 'compute', name: named, op: 'concat', parts: [{ value: `${rule.event}_` }, { column: text }] });
+      stages.push({ stage: 'compute', name: named, expr: { fn: 'concat', args: [{ value: `${rule.event}_` }, { column: text }] } });
       cases.push({ when: [isEvent(rule.event), { column: text, op: 'is_not_null' }], then: { column: named } });
     });
     splitCol = 'es_event';
-    stages.push({ stage: 'compute', name: splitCol, op: 'case', cases, else: { column: eventCol }, type: 'string' });
+    stages.push({ stage: 'compute', name: splitCol, expr: { fn: 'case', cases, else: { column: eventCol }, type: 'string' } });
   }
   // a path by something other than the user: its key parts, each present, as one text column —
   // parts joined by '|' (a composite key), so one path is one value of all of them together
@@ -126,18 +126,18 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     stages.push({ stage: 'where', conditions: partCols.map((column) => ({ column, op: 'is_not_null' })) });
     const texts = partCols.map((column, i) => {
       const text = `es_kt${i}`;
-      stages.push({ stage: 'compute', name: text, op: 'cast', column, type: 'string' });
+      stages.push({ stage: 'compute', name: text, expr: { fn: 'cast', args: [{ column }], type: 'string' } });
       return text;
     });
     if (texts.length === 1) pathCol = texts[0];
     else {
       pathCol = 'es_path';
-      stages.push({ stage: 'compute', name: pathCol, op: 'concat', parts: texts.flatMap((column, i) => (i ? [{ value: '|' }, { column }] : [{ column }])) });
+      stages.push({ stage: 'compute', name: pathCol, expr: { fn: 'concat', args: texts.flatMap((column, i) => (i ? [{ value: '|' }, { column }] : [{ column }])) } });
     }
   }
   const segments = [];
   for (const seg of spec.segments || []) {
-    const name = seg.name || seg.as || seg.attribute;
+    const name = seg.name || seg.attribute;
     if (seg.column !== undefined) { segments.push({ name, expr: seg.column }); continue; }
     if (seg.property !== undefined) {
       const col = `es_s_${name}`;
@@ -148,7 +148,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     // joined under a name of the eventstream's own (the segment's may be a keyword: group, order), named
     // as the segment in the final select
     const col = `es_j${segments.length}`;
-    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, as: col }] };
+    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, name: col }] };
     // a slowly-changing model is joined point in time — at the event's own time (as a pipeline must state it)
     const m = catalog.getModel(seg.model);
     if (m?.scd) {

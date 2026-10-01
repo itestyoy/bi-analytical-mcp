@@ -351,6 +351,18 @@ function explainNode(root, n, value, memo) {
         if (optional.length && optional.length < candidates.length) defaults = new Set(optional);
       }
     }
+    // then a field pinned in SOME branches, the others closed without it (an expression's `fn`: the
+    // function forms pin it, a column or a constant has no such field): the value given picks too
+    for (const key of Object.keys(value)) {
+      const taking = candidates.filter((i) => pins[i].has(key) && pins[i].get(key).includes(value[key]));
+      const closedWithout = (b) => b.additionalProperties === false && !(b.properties && key in b.properties);
+      // …and only when those branches know every field given (a mix of two forms' fields is said as the union)
+      // and take what every other pinned field given says (else the fields disagree, and the closest is said)
+      const knowsAll = (i) => Object.keys(value).every((k) => branches[i].properties && k in branches[i].properties && (!pins[i].has(k) || pins[i].get(k).includes(value[k])));
+      if (taking.length && taking.length < candidates.length && taking.every(knowsAll) && candidates.every((i) => taking.includes(i) || pins[i].has(key) || closedWithout(branches[i]))) {
+        candidates = taking;
+      }
+    }
   }
   // Closest = the branch the value most nearly IS. A field the branch does not know means the caller
   // did not mean this mode at all; `type` is nearly as strong (not even shaped like it); a missing

@@ -319,7 +319,7 @@ test('columns named like keywords (group, order) flow through the stages as colu
   const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
   await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
-    { stage: 'compute', name: 'group', op: 'coalesce', columns: ['app_version'], default: 'none' },
+    { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
   ] });
@@ -334,9 +334,9 @@ test('columns named like keywords (group, order) flow through the stages as colu
 test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', op: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', expr: { fn: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
   // one over real columns — with functions, keywords, strings and an alias of its own — is taken
-  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', op: 'raw', sql: "case when is_fatal_of_event_data then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end" } });
+  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end" } } });
   assert.equal(ok.step_index, 1);
 });
 

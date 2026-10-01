@@ -68,14 +68,14 @@ test('percentile requires q in (0,1); compute validates operands', () => {
     { stage: 'aggregate', group_by: [], measures: [{ name: 'p', agg: 'percentile', column: 'price' }] },
   ]), /percentile requires/);
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'compute', name: 'x', op: 'add', left: { column: 'nope' }, right: { value: 1 } },
+    { stage: 'compute', name: 'x', expr: { fn: 'add', args: [{ column: 'nope' }, { value: 1 }] } },
   ]), /unknown column 'nope'/);
 });
 
 test('date_diff / stat functions render on both dialects', () => {
   const stages = [
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'compute', name: 'age', op: 'date_diff', from: { column: 'device_time' }, to: { now: true }, unit: 'day' },
+    { stage: 'compute', name: 'age', expr: { fn: 'date_diff', args: [{ column: 'device_time' }, { now: true }], unit: 'day' } },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'm', agg: 'median', column: 'price' }] },
   ];
   for (const d of ['duckdb', 'bigquery']) assert.ok(renderPipeline(catalog, d, 'events', stages).sql.length > 0);

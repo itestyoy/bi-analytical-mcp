@@ -9,6 +9,7 @@
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { RESEARCH_DOMAINS } from '../research-guides.js';
 import { defineTool } from './define.js';
+import { OUTPUTS } from '../schema/outputs.js';
 
 export const CORE_TOOLS = [
   defineTool({
@@ -20,6 +21,7 @@ export const CORE_TOOLS = [
   }),
   defineTool({
     name: 'build_semantic_model',
+    output: OUTPUTS.build_semantic_model,
     title: 'Build Semantic Model',
     description: 'Declare reusable, named metrics for a task — semantic models (one per source; several sources may sit side by side, e.g. spend next to an event measure) plus metrics — in an isolated context, then query them many ways with query_semantic_model (group_by, time grain, filters). Use it for measurable metrics such as DAU, revenue, conversion or retention; for a one-off derived table whose rows are the answer (a funnel, sessions, a window, a pivot) use build_pipeline_model instead. Omit context_id to start a task; pass it to extend the same one. To change a task already in a context — add or remove measures, dimensions or metrics on one model without restating the rest — call it with action:"update" (context_id, semantic_model, the add_*/remove_* fields). The declaration is validated in the call; parsing it is a task, so the call returns only { task_id, context_id } and does not wait. query_semantic_model({ request: { task_ids } }) returns the parse, the metrics and what they can be grouped by; a query on the context can be started right away (it waits for the parse). preview_semantic_model shows the context\'s layer as parsed and checks it.',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -95,6 +97,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'context',
+    output: OUTPUTS.context,
     title: 'Read Contexts',
     description: 'Read the isolated contexts that build_semantic_model and build_pipeline_model create: action:"list" gives every context with its description; action:"describe" gives one context\'s tasks, models, metrics and group-by paths. It changes nothing; to remove a context or a model in it, use delete_context.',
     // list / describe read the contexts; removing is delete_context
@@ -103,6 +106,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'delete_context',
+    output: OUTPUTS.delete_context,
     title: 'Delete Context',
     description: 'Remove a context build_semantic_model or build_pipeline_model created, or part of it: what:"context" (the default) tears the whole context down; what:"pipeline_model" removes its pipeline model and keeps the context; what:"semantic_model" removes one model\'s task additions (cascade also removes the metrics that depend on them). Use it when a workspace is no longer needed or a declaration has to be taken back; it cannot be undone. A context another draft reads a table from is kept unless force is set. The dbt project\'s own semantic models cannot be removed.',
     // removes a context or what it holds: done once, then there is nothing left to remove
@@ -111,6 +115,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'memory',
+    output: OUTPUTS.memory,
     title: 'Use Memory',
     description: 'Durable analyst memory: record what you found out, so it comes back through semantic_index next time. Use it after you resolve something non-obvious — a vague request tracked down to a real field, a gotcha, a useful source. action:"record" takes `note` (the finding); `question` (the original business question it answers, in the stakeholder\'s words — it is embedded with the note, so a later question with the same meaning retrieves it); `targets` (the catalog entities it is about, each { source, name } — a property, attribute or event of that source, e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" } — or { source } for a model); `aliases` (the words the user actually used, e.g. "ad format", in the original language and in English so search works across languages); `links` (any sources). The note then appears on the linked semantic_index views ({ model } / { source, event } / { source, property }) and in semantic_index({ request: { search } }). Keep one finding per note: when studying a topic or a document, split it into several small notes, each with its own targets and aliases — small notes link precisely and are retrieved far better, while an over-long note matches poorly and may fail to index. Other actions: list (all, or one { target }) | search (by word — typo-tolerant, and by meaning when embeddings are enabled) | forget (by id).',
     // forget removes a finding
@@ -128,6 +133,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'explore_errors',
+    output: OUTPUTS.explore_errors,
     title: 'Explore Errors',
     description: 'Read the failures this server kept, to find out why something did not work: a tool call that was refused or failed (with the arguments it was called with), a task that ended in an error (what dbt or the warehouse said), and what the last start could not serve (the dbt project\'s semantic layer, a join it leaves out, a feature that cannot run here). Use it when a result was an error you cannot explain from its message, when a task failed earlier in the conversation, or when something the overview lists as unavailable needs its reason. With an empty request it gives the newest 20 and a summary by source, tool and stage; since / until, source, severity, tool, stage, context_id, task_id and text narrow them, and { id } gives one in full. It reads the log only and changes nothing.',
     // reads the error log; writes nothing
@@ -136,6 +142,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'time',
+    output: OUTPUTS.time,
     title: 'Timer',
     description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a timer that touches no data and follows no task. To wait for a task, call its query tool with { task_ids } instead (query_semantic_model or query_pipeline_model): it returns the moment the task is done.`,
     annotations: { readOnlyHint: true, idempotentHint: true },

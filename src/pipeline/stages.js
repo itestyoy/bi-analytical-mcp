@@ -3,9 +3,8 @@
 // `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
 // themselves (src/match-recognize.js, src/python-model.js).
 
-import { GRAINS } from '../catalog.js';
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITIONS, propEnum, sourceProp, operandSql, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
-import { COMPUTE_OPS, computeForms } from './compute.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, propEnum, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
+import { exprSchema, exprSql } from './compute.js';
 import { form, pick, strEnum } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
 
@@ -68,7 +67,7 @@ export const STAGES = {
       // An array op on a property that is not an array builds SQL the warehouse will reject
       // (array_length over text). Say so here, naming what the property actually is.
       if ((p.op === 'array_length' || p.op === 'contains') && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
-        throw new Error(`derive ${p.op}: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.op} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). For a JSON OBJECT use op=struct_field, or compute op=json_field.`);
+        throw new Error(`derive ${p.op}: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.op} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). For a JSON OBJECT use op=struct_field, or a compute json_field.`);
       }
       let expr; let type;
       if (p.op === 'extract') {
@@ -91,75 +90,30 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
-    schema: () => {
-      const fields = {
-        field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
-        value: { description: 'Constant literal (number / string / boolean) for op=const.' },
-        left: OPERAND, right: OPERAND, // arithmetic
-        from: OPERAND, to: OPERAND, // date_diff / elapsed_days (each may be { column } / { value } / { now: true })
-        // For retention with elapsed_days, anchor `from` on the TRUE install/cohort timestamp
-        // (e.g. install_date) — NOT an SCD validity bound like install_time_valid_from, whose
-        // open side is a sentinel (e.g. 1970-01-01), which makes retention_day nonsensically huge.
-        clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
-        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/average/min/max.' },
-        columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Inputs for coalesce, all of them columns; its literal fallback is `default`.' },
-        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands — each { column } or { value } — for op=concat and for least/greatest: least of two columns is parts [{ column: "a" }, { column: "b" }]; winsorizing at a threshold computed earlier is least with parts [{ column }, { value: <threshold> }].' },
-        search: { type: 'string', description: 'Substring to find for op=replace.' },
-        replacement: { type: 'string', description: 'Replacement string for op=replace.' },
-        start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
-        index: { type: 'integer', minimum: 1, description: '1-based index for op=element_at.' },
-        sql: { type: 'string', description: 'Raw dialect SQL expression over existing columns — escape hatch for op=raw when no built-in op fits (e.g. array indexing, dialect functions). Not portable across dialects. It reads only the columns available at this step: a name it uses that is not one of them is refused when the step is added.' },
-        len: { type: 'integer', minimum: 0, description: 'Length (chars) for op=substring (optional).' },
-        unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
-        granularity: { enum: GRAINS, description: 'date_trunc granularity.' },
-        part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
-        places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places for round (default 0).' },
-        default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
-        type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type. cast is SAFE — a value that will not convert becomes NULL rather than failing the query.' },
-        // op=case
-        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: OPERAND } } },
-        else: OPERAND,
-        // op=window
-        fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'average', 'count', 'min', 'max'], description: 'Window function for op=window.' },
-        partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' },
-        order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' },
-        offset: { type: 'integer', minimum: 1, description: 'Row offset for window lag/lead (default 1).' },
-        frame: {
-          type: 'object', additionalProperties: false,
-          description: 'Window frame for aggregate window fns (sum/average/count/min/max). ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
-          properties: {
-            mode: { enum: ['rows', 'range'], description: 'rows = physical rows; range = value-based on the order key.' },
-            preceding: { description: 'Lower bound: an integer offset, or "unbounded" (default unbounded).' },
-            following: { description: 'Upper bound: an integer offset, "unbounded", or 0/omitted = CURRENT ROW.' },
-          },
-        },
-      };
-      return {
-        type: 'object',
-        description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
-        anyOf: computeForms({ required: ['stage', 'name', 'op'], properties: { stage: { enum: ['compute'] }, name: { type: 'string', pattern: NAME } } }, fields),
-      };
-    },
+    // the expression grammar, once: every stage that takes an operand references it
+    defs: () => ({ expr: exprSchema() }),
+    schema: () => ({
+      type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
+      description: 'Add a column computed from existing columns and constants: `expr` is one expression — arithmetic, rounding, coalesce, cast, text functions, dates (date_diff / date_trunc / date_part / unix_date / elapsed_days), a CASE (fn: "case"), a window function (row_number / rank / lag / lead / running and rolling sum / average / count / min / max, over a window) — its arguments expressions themselves, so a whole formula is one stage.',
+      properties: {
+        stage: { enum: ['compute'] },
+        name: { type: 'string', pattern: NAME, description: 'The name of the column it adds.' },
+        expr: EXPR,
+      },
+    }),
     build: ({ d, cols }, p) => {
-      const op = Object.hasOwn(COMPUTE_OPS, p.op) ? COMPUTE_OPS[p.op] : null;
-      if (!op) throw new Error(`compute: bad op ${p.op}`);
-      const { expr, type = 'numeric' } = op.sql({
-        d, cols, p,
-        operand: (o, what) => operandSql(d, cols, o, `compute ${p.op} ${what}`),
-        col: () => { requireCol(cols, p.column); return d.quoteIdent(p.column); },
-        list: () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.quoteIdent(c)); },
-      });
-      return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
+      const { sql, type } = exprSql(d, cols, p.expr, `compute '${p.name}'`);
+      return { op: { op: 'extend', cols: [{ name: p.name, expr: sql }] }, cols: addCol(cols, p.name, type) };
     },
   },
 
   unnest: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'source', 'name'],
-      description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
+      description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
       properties: {
         stage: { enum: ['unnest'] },
-        source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by compute op=json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
+        source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by a compute json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
         name: { type: 'string', pattern: NAME, description: 'The name the element column gets.' },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: { enum: ['int', 'numeric', 'float', 'string'] },
@@ -171,7 +125,7 @@ export const STAGES = {
       let column; let key; let encoding; let isStruct = false;
       if (spec) {
         if (!String(spec.type || '').toLowerCase().startsWith('array')) {
-          throw new Error(`unnest: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with compute op=json_field.`);
+          throw new Error(`unnest: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with a compute json_field.`);
         }
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
@@ -343,7 +297,7 @@ export const STAGES = {
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
       description: `Group rows and compute measures (COLLAPSES grain to the group keys). Measures (agg): sum/average/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile (its share in percentile). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles. `
-        + `A TABLE-WIDE NUMBER IS THIS STAGE WITH NO group_by — it returns ONE row (a threshold, a mean, a deviation) and is the memory-safe way to get one; an analytic OVER() with no PARTITION BY (op=window without partition_by, or raw SQL) instead keeps all the rows and attaches the value to each, which exhausts the query's memory on a large table ("Resources exceeded during query execution") — the exact percentile worst of all, because it also has to order the values. So: get the numbers here first, then apply them per row in a later pass as literals (compute sub/div/least with { value }). `
+        + `A TABLE-WIDE NUMBER IS THIS STAGE WITH NO group_by — it returns ONE row (a threshold, a mean, a deviation) and is the memory-safe way to get one; an analytic OVER() with no PARTITION BY (a window function whose over has no partition_by, or raw SQL) instead keeps all the rows and attaches the value to each, which exhausts the query's memory on a large table ("Resources exceeded during query execution") — the exact percentile worst of all, because it also has to order the values. So: get the numbers here first, then apply them per row in a later pass as literals (compute sub / div / least with a { value } argument). `
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },

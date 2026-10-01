@@ -178,7 +178,7 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
   const rowsAfterJoin = async (name, on) => {
     const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
-    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'spend_date', op: 'date_trunc', column: 'device_time', granularity: 'day' } });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } } });
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'acquisition', on, attrs: [{ column: 'media_source' }] } });
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] } });
     const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });

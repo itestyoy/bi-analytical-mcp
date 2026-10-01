@@ -27,6 +27,7 @@ export const SETTING_GROUPS = [
     S('MCP_PROGRESS_INTERVAL_MS', 'number', 'How often a long call sends progress to the client (ms). 0: no progress notifications.', { default: 5000 }),
     S('MCP_TASK_AFTER_MS', 'number', 'After how long a waiting call becomes a protocol task (ms; clients with the Tasks extension). 0: at once.', { default: 3000 }),
     S('MCP_TASK_TTL_SECONDS', 'number', 'How long a protocol task is kept (seconds).', { default: 3600, min: 1 }),
+    S('MCP_SESSION_IDLE_SECONDS', 'number', 'A 2025 client\'s session unused for this long is closed (seconds); the client then initializes again.', { default: 86400, min: 1 }),
   ]],
   ['dbt project and catalog', [
     S('DBT_BASE_PROJECT', 'string', 'Inside the container: the dbt project and the folder with profiles.yml (set by compose).', { shown: '/dbt_project' }),

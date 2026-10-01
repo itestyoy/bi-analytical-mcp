@@ -304,8 +304,15 @@
     instructions;
   * Tasks (`io.modelcontextprotocol/tasks`): a long call becoming a task, tasks/get|cancel|update
     (-32021 otherwise).
-  A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
-  requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
+  The extensions are 2026-07-28's: a 2025 client gets none of them, whatever its `initialize` declared.
+  The lists that differ are cached `private`.
+- A 2025 CLIENT IS SERVED IN FULL OTHERWISE (src/legacy-sessions.js): its `initialize` opens a session
+  of the SDK's own sessionful transport (`NodeStreamableHTTPServerTransport`, the SDK's documented
+  route for 2025 traffic next to 2026-07-28), so `notifications/cancelled` stops the call it names and
+  the GET stream is there; a request without a session id is served statelessly by the per-request
+  handler, and one with an id this process does not know (a restart, a closed session) likewise —
+  NEVER 404: hosts were seen stuck on that until the connector was re-added by hand. A session idle
+  for MCP_SESSION_IDLE_SECONDS is closed.
 
 - RESEARCH GUIDES ARE METHOD, NOT DATA (`src/research-guides.js`): how to run an investigation
   (sequence, checks, report) and what matters in product, monetization and UA — served by

@@ -3,8 +3,9 @@
 // Built on the official MCP SDK v2 (@modelcontextprotocol/server), which implements protocol
 // revision 2026-07-28 and serves every earlier revision from the same factory: `createMcpHandler`
 // builds a fresh server per request (src/mcp-server.js) and decides by itself how the request is
-// spoken — there is no second code path here for an older client, and no session state to lose on
-// a restart.
+// spoken. A 2025 client that initializes gets a session of the SDK's own sessionful transport
+// (src/legacy-sessions.js) — for its cancellation and its GET stream — and a session id a restart
+// lost is served statelessly, never refused, so a restart breaks no client.
 
 import { loadSettings, setting } from './settings.js';
 import { join, dirname } from 'node:path';
@@ -27,6 +28,7 @@ import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
 import { answerTaskRequest } from './mcp-tasks.js';
+import { LegacySessions } from './legacy-sessions.js';
 import { withClientCapabilities, envelopeCapabilities } from './client-extensions.js';
 
 export { buildToolDefs };
@@ -261,12 +263,15 @@ export function createApp(engine, opts = {}) {
     bus: services.bus,
   });
   const node = toNodeHandler(handler);
+  // a 2025 client's session (src/legacy-sessions.js): opened by its initialize, served by its own server
+  const sessions = new LegacySessions(services);
   app.all('/mcp', (req, res) => {
     logRequest(req, res);
     // the transport asks for it on an SSE response: a buffering proxy (nginx) then passes each event
     // through as it is written — a progress heartbeat, a list_changed on a listen stream
     res.setHeader('X-Accel-Buffering', 'no');
     if (answerTaskRequest(services.tasks, req, res, services.serverInfo)) return;
+    if (sessions.claims(req)) return void sessions.handle(req, res).catch((e) => { logLine('session', `✗ ${e?.message || e}`); if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: `Internal error: ${e?.message || e}` }, id: null }); });
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)
     void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));
@@ -291,7 +296,7 @@ export function createApp(engine, opts = {}) {
   outer.disable('x-powered-by');
   outer.use(logRefusals);
   outer.use(app);
-  outer.locals.close = () => handler.close();
+  outer.locals.close = async () => { await sessions.close(); await handler.close(); };
   return outer;
 }
 

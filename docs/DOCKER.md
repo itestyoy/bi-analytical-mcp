@@ -108,11 +108,11 @@ analytics:
 - dbt runs in named environments — one virtualenv each under `/opt/dbt-envs` (`DBT_ENVS_DIR`), picked by `DBT_ENV`: `dbt-v2` is dbt v2, `dbt-v1` is dbt 1.x with the DuckDB and BigQuery adapters. MetricFlow is an environment of its own, `metricflow` (`MF_ENV` names another), which every dbt environment queries metrics through. The build installs each with `scripts/dbt-env.mjs create`: exactly the packages, at exactly the versions, `src/dbt/environment-specs.js` names — there is no requirements file to pass. Every environment carries both warehouses' adapters, so the image is the same for DuckDB and BigQuery; dbt picks the adapter from your profile. `docker-compose.yml` runs `dbt-v2`, the BigQuery setup `dbt-v1` until the python stage is proven on v2 there. The server runs dbt only from these environments — one built with other versions than the spec names, or a venv not built by `create`, is refused, and there is no binary to name from outside — and reads the dbt version from the binary (`DBT_VERSION` pins it). On v2 the semantic layer is written in dbt's latest YAML spec, and the python stage is not offered on DuckDB. v2 downloads its ADBC driver from dbt's CDN on the first run — allow that once, or warm it at build time.
 - For BigQuery, use `docker-compose.bigquery.yml` (and `.env.bigquery.example`).
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
-- **Restarting the container loses nothing a client holds.** The server keeps no sessions (the SDK
-  serves each request from a fresh server instance), so a client connected before a deploy keeps
-  calling after it with no new handshake; a stale `Mcp-Session-Id` is ignored. (This replaced a
-  session table that lived in the process: after a restart, clients got errors for a session id the
-  new process had never issued until the connector was re-added by hand.)
+- **Restarting the container breaks no client.** A 2025 client that initializes gets a session (the
+  SDK's sessionful transport — its cancellation and its GET stream live there), but a session id the
+  new process never issued is served statelessly, never answered 404, so a client connected before a
+  deploy keeps calling after it with no new handshake. (A 404 there is what once left clients stuck
+  until the connector was re-added by hand.) A 2026-07-28 client keeps no session at all.
 
 ## The error log
 
@@ -251,9 +251,8 @@ at startup (`surface <fingerprint> — changed since the last start …`). A hos
 still needs its tool list refreshed by hand after a deploy.
 
 Each extension below is offered ONLY to a client that declares it in the request being served —
-its capabilities in the 2026-07-28 envelope. A 2025 client declares capabilities once, in
-`initialize`, and this server keeps no sessions, so its later requests carry nothing to go by: it is
-offered none of them (src/client-extensions.js). The listings that differ by client are cached
+its capabilities in the 2026-07-28 envelope. The extensions are 2026-07-28's: a 2025 client is
+offered none of them, whatever its `initialize` declared (src/client-extensions.js). The listings that differ by client are cached
 `private`.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
@@ -273,8 +272,8 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   reachable through `semantic_index`.
 - **Apps** (`io.modelcontextprotocol/ui`) — drawing is offered ONLY to a client that declares the extension
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
-  request carries its capabilities. Every other client — including a 2025 client that declared it in
-  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no card
+  request carries its capabilities. Every other client — including a 2025 client, whatever its
+  `initialize` declared (the extensions are 2026-07-28's) — gets no card
   instructions and no `show_to_user` hint, and a call that would draw (`display_model_result`, `card`
   on `experiment`) is refused. The tool list (with `_meta.ui`) and the view page are the same for
   every client, as the official ext-apps `registerAppTool` serves them: a host re-draws a card

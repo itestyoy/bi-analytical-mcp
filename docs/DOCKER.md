@@ -328,9 +328,11 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   `{ task_ids }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
-  card by construction: `structuredContent` (what a host draws a card from) is carried only by a
-  `display_model_result` that drew, or an `experiment` called with `card: true`; every other answer,
-  of every tool, is text alone. A task still running
+  card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
+  carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
+  tools whose answer has one shape and no card (`time`, `context`, `delete_context`, `memory`,
+  `explore_errors`, `build_semantic_model`) declare an `outputSchema` and carry every successful
+  answer as `structuredContent` too; every other answer is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `drill_result`, `["model", "app"]` (served only for a drawn task); the view resource declares
@@ -346,7 +348,8 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
 
 Also: `Origin` is always validated (403), every refusal is a JSON-RPC error body (including a body
 that is not JSON, `-32700`), every tool declares `readOnlyHint` / `destructiveHint` /
-`idempotentHint` / `openWorldHint`, and every result carries `structuredContent` next to its text.
+`idempotentHint` / `openWorldHint`, and a tool with an `outputSchema` carries `structuredContent`
+conforming to it next to its text.
 
 ## BigQuery
 BigQuery is a managed warehouse — there's no local DB service. Use the dedicated

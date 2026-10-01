@@ -612,7 +612,7 @@ test('join guards: an undeclared relationship, a self-join and via+on are all re
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
     /declares no such relationship.*share: user/s);
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
-  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /not both/);
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /unexpected property '(on|via)' — join (by a declared relationship|on columns both sides name alike)/, 'via and on are two forms: the schema takes one');
 });
 
 // ═══════════ F. THE GENERATED JOIN CODE, PROVEN BY RUNNING IT ═══════════

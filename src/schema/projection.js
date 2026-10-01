@@ -4,11 +4,11 @@
 
 import { AGGS as PROJECTION_AGGS } from '../projection.js';
 import { OPS } from '../conditions.js';
-import { conditionList } from '../schema-kit.js';
+import { conditionList, CONSTANT } from '../schema-kit.js';
 
 // A read-only projection over a stored table — what query_pipeline_model runs over a built model
 // and what a drill-down card reads one view with. The row cap is the tool's own `limit`.
-const rowCondition = { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: OPS, description: 'Comparison operator.' }, value: { description: 'Comparison value (an array for in/not_in, [low, high] for between, a string for the text operators, none for is_null/is_not_null).' } } };
+const rowCondition = { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: OPS, description: 'Comparison operator.' }, value: { ...CONSTANT, description: 'Comparison value (an array for in/not_in, [low, high] for between, a string for the text operators, none for is_null/is_not_null).' } } };
 export const rowFilter = conditionList(rowCondition, 'Row filters on result columns: all of them hold — an item may be { or: [...] }, any of its conditions holds.');
 
 export const onlyWhere = { ...conditionList(rowCondition), description: 'A CONDITIONAL aggregate: fold only the rows these conditions hold for (sum/count of the loads that succeeded, the distinct cycles that reached a show) — sum(case when …) without writing it.' };
@@ -35,9 +35,9 @@ export const projectionLevel = (withThen) => ({
     : 'The second level: the same projection over the first level\'s result — its group_by columns and aggregate aliases are the columns here (count the groups: aggregations: [{ agg: "count" }]).',
   properties: {
     where: rowFilter,
-    group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
+    group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
     aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: aggregation },
-    having: conditionList({ type: 'object', additionalProperties: false, required: ['agg', 'op'], properties: { agg: { enum: [...PROJECTION_AGGS], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, where: onlyWhere, op: { enum: OPS, description: 'Comparison operator.' }, value: { description: 'Threshold value (an array for in/not_in and between).' } } }, 'Post-aggregation filters on aggregate values: all of them hold (an item may be { or: [...] }).'),
+    having: conditionList({ type: 'object', additionalProperties: false, required: ['agg', 'op'], properties: { agg: { enum: [...PROJECTION_AGGS], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, where: onlyWhere, op: { enum: OPS, description: 'Comparison operator.' }, value: { ...CONSTANT, description: 'Threshold value (an array for in/not_in and between).' } } }, 'Post-aggregation filters on aggregate values: all of them hold (an item may be { or: [...] }).'),
     order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
     ...(withThen ? { then: projectionLevel(false) } : {}),
   },

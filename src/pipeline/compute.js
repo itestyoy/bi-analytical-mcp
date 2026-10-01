@@ -11,17 +11,19 @@ import { GRAINS } from '../catalog.js';
 // the module loads)
 import { rawUnknownColumns, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
 import { conditionsSql } from '../conditions.js';
-import { form } from '../schema-kit.js';
+import { form, SCALAR, CONSTANT } from '../schema-kit.js';
 
 const ORDER = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' };
-const PARTITION = { type: 'array', items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' };
+const PARTITION = { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' };
+// a frame bound: an offset, or the edge of the partition
+const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
 const FRAME = {
   type: 'object', additionalProperties: false,
   description: 'Window frame. ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
   properties: {
     mode: { enum: ['rows', 'range'], description: 'rows = physical rows; range = value-based on the order key.' },
-    preceding: { description: 'Lower bound: an integer offset, or "unbounded" (default unbounded).' },
-    following: { description: 'Upper bound: an integer offset, "unbounded", or 0/omitted = CURRENT ROW.' },
+    preceding: { ...BOUND, description: 'Lower bound: a row (or value) offset, or "unbounded" (default unbounded).' },
+    following: { ...BOUND, description: 'Upper bound: an offset, "unbounded", or 0/omitted = CURRENT ROW.' },
   },
 };
 
@@ -43,7 +45,7 @@ const params = () => ({
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: EXPR } } },
   else: { ...EXPR, description: 'The value when no branch holds (default NULL).' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
-  default: { description: 'The constant when the offset row does not exist.' },
+  default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
   over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION, order_by: ORDER } },
   over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION, order_by: ORDER, frame: FRAME } },
 });
@@ -211,7 +213,7 @@ export function exprSchema() {
     description: 'An expression: { column }, a constant { value }, the current time { now: true }, or a function { fn, args: [expressions], …its parameters } — arguments are expressions themselves, so a formula nests in one place (e.g. round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }). Window functions (row_number, rank, dense_rank, lag, lead, and sum / average / count / min / max of a frame) take `over`. raw is the escape hatch: dialect SQL in `sql`.',
     anyOf: [
       form({ title: 'a column', required: ['column'], properties: { column: { type: 'string' } } }),
-      form({ title: 'a constant', required: ['value'], properties: { value: {} } }),
+      form({ title: 'a constant', required: ['value'], properties: { value: CONSTANT } }),
       form({ title: 'the current time', required: ['now'], properties: { now: { const: true } } }),
       ...forms,
     ],

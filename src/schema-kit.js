@@ -71,6 +71,15 @@ export function form({ title, description, tag, tagDescription, optionalTag = fa
   };
 }
 
+/** A moment as every time window takes it: an ISO date, or a date-time (seconds, a fraction, an offset optional). */
+export const ISO_TIME = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}([T ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:?\\d{2})?)?$' };
+/** An IANA timezone name, spelled as the zone database spells it ("UTC", "Europe/Berlin", "America/Argentina/Buenos_Aires"). */
+export const TIMEZONE = { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$' };
+
+/** A constant a condition or an expression takes: a scalar — or, for in / not_in / between, a list of them. */
+export const SCALAR = { anyOf: [{ type: 'string', title: 'a string' }, { type: 'number', title: 'a number' }, { type: 'boolean', title: 'a boolean' }, { type: 'null', title: 'null' }] };
+export const CONSTANT = { anyOf: [...SCALAR.anyOf, { type: 'array', items: SCALAR, title: 'a list of constants' }] };
+
 /**
  * ONE CONDITION GRAMMAR — what every `where` is written in, wherever it sits: a list of conditions
  * that ALL hold, each item a condition (`leaf`, the place's own: a column, an event property, a

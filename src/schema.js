@@ -17,7 +17,7 @@ import { TASK, CTX, TASK_ID, D, genericMeasureItem, genericDimensionItem, semant
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
-import { form, pick, conditionList } from './schema-kit.js';
+import { form, pick, conditionList, ISO_TIME, TIMEZONE } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
 import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
@@ -49,7 +49,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     context_id: { type: 'string', pattern: CTX, description: D.context_id },
     name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
     description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
-    use_base_models: { type: 'array', items: { type: 'string', enum: catalog.modelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
+    use_base_models: { type: 'array', uniqueItems: true, items: { type: 'string', enum: catalog.modelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
     semantic_models: { type: 'array', items: { anyOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
     metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above).' },
     dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
@@ -65,7 +65,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'Measures to add.' },
     remove_measures: { type: 'array', items: { type: 'string' }, description: 'Measures to remove; refused while a metric depends on one, unless cascade.' },
     add_metrics: { type: 'array', items: metricSchema(catalog), description: 'Metrics to add.' },
-    remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Metrics to remove.' },
+    remove_metrics: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Metrics to remove.' },
     task: { type: 'string', description: 'The task the additions belong to (defaults to the context\'s first task).' },
     cascade: { type: 'boolean', description: 'Also remove the metrics that depend on a removed measure.' },
     dry_run: createFields.dry_run,
@@ -97,7 +97,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
           source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Always named: each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
-          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
+          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },
@@ -108,7 +108,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
   // materialized until materialize).
-  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
+  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   const pipelineFields = {
     draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). For fork it may also be a context whose pipeline was already materialized.' },
     name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -172,7 +172,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
-      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
+      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
         description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — and { entity } for a key the project declares as an entity; preview_semantic_model({ request: { context_id, metric } }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
@@ -287,14 +287,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       description: 'Read the failures the server kept. { id } → one in full; otherwise a page of them, newest first, narrowed by the fields given.',
       properties: {
         id: { type: 'integer', minimum: 1, description: 'One error in full — what reproduces it: the call\'s arguments (a task\'s input), the state of the context it worked on (a semantic declaration, a pipeline draft with its steps, an eventstream with its steps), the code of each generated model the error names (as written and as dbt compiled it), the runtime (server version, dbt, dialect), and everything that was said about it.' },
-        since: { type: 'string', description: 'Only errors at or after this moment (ISO 8601 date or date-time, e.g. "2026-09-29" or "2026-09-29T10:00:00Z").' },
-        until: { type: 'string', description: 'Only errors at or before this moment (ISO 8601; a date alone means the whole of that day).' },
+        since: { ...ISO_TIME, description: 'Only errors at or after this moment (ISO 8601 date or date-time, e.g. "2026-09-29" or "2026-09-29T10:00:00Z").' },
+        until: { ...ISO_TIME, description: 'Only errors at or before this moment (ISO 8601; a date alone means the whole of that day).' },
         source: { enum: ERROR_SOURCES, description: 'Where it happened: tool — a call refused or failed; task — warehouse work that ended in an error; startup — what a start could not serve.' },
         severity: { enum: ['error', 'warning'], description: 'error — something failed; warning — something was left out and served without it (a join the project declares that no reference can name, a feature that cannot run here).' },
-        tool: { type: 'string', description: 'Only the errors of this tool (for a task: the tool that started it).' },
-        stage: { type: 'string', description: 'Only this stage (validate, query, build, task, …).' },
-        context_id: { type: 'string', description: 'Only the errors on this context.' },
-        task_id: { type: 'string', description: 'Only this task\'s errors.' },
+        tool: { type: 'string', pattern: '^[a-z][a-z0-9_]*$', description: 'Only the errors of this tool (for a task: the tool that started it).' },
+        stage: { type: 'string', pattern: '^[a-z_]+$', description: 'Only this stage (validate, query, build, task, …).' },
+        context_id: { type: 'string', pattern: '^[A-Za-z0-9_]+$', description: 'Only the errors on this context.' },
+        task_id: { type: 'string', pattern: TASK_ID, description: 'Only this task\'s errors.' },
         text: { type: 'string', minLength: 1, description: 'Only errors whose message contains this text (any case).' },
         detail: { type: 'boolean', description: 'Give each error of the page in full (arguments and detail), not only its message.' },
         limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many to return (default 20).' },

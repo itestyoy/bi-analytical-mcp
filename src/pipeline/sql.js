@@ -5,7 +5,7 @@
 
 import { getDialect } from '../dialects/index.js';
 import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
-import { form, conditionList } from '../schema-kit.js';
+import { form, conditionList, CONSTANT } from '../schema-kit.js';
 // (compute.js imports this module too: exprSql is read when a condition is written, never as the module loads)
 import { exprSql } from './compute.js';
 
@@ -48,8 +48,8 @@ export const CONDITION = {
   description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
   // the left side is a column named outright or an operand — one of the two, never both
   anyOf: [
-    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: {}, right: OPERAND } }),
-    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: OPERAND, op: { enum: CMP }, value: {}, right: OPERAND } }),
+    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: OPERAND } }),
+    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: OPERAND, op: { enum: CMP }, value: CONSTANT, right: OPERAND } }),
   ],
 };
 

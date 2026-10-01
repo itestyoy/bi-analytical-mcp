@@ -5,7 +5,7 @@
 
 import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, propEnum, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
 import { exprSchema, exprSql } from './compute.js';
-import { form, pick, strEnum } from '../schema-kit.js';
+import { form, pick, strEnum, SCALAR } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
@@ -30,7 +30,7 @@ export const STAGES = {
         stage: { enum: ['derive'] },
         name: { type: 'string', pattern: NAME },
         source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
-        value: { description: 'The value to look for in the array.' },
+        value: { ...SCALAR, description: 'The value to look for in the array.' },
         field: { type: 'string', description: 'The struct field to read.' },
         type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
       };
@@ -301,7 +301,7 @@ export const STAGES = {
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
-        group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
+        group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
         measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/average/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
       },
     }),
@@ -322,11 +322,11 @@ export const STAGES = {
       description: 'Turn listed values of `on` into columns, each aggregating `value_column` (the values must be listed explicitly). For dashboard-ready matrices (e.g. revenue as one column per country, or retention day as columns).',
       properties: {
         stage: { enum: ['pivot'] },
-        group_by: { type: 'array', items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
+        group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
         on: { type: 'string', description: 'Column whose values become columns.' },
         agg: { enum: ['sum', 'average', 'min', 'max', 'count'], description: 'How each pivoted cell aggregates value_column.' },
         value_column: { type: 'string', description: 'Column aggregated into each pivoted column.' },
-        values: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^[A-Za-z0-9_]+$' }, description: 'The values of `on` to pivot into columns.' },
+        values: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: '^[A-Za-z0-9_]+$' }, description: 'The values of `on` to pivot into columns.' },
       },
     }),
     build: ({ cols }, p) => {
@@ -345,7 +345,7 @@ export const STAGES = {
       description: 'Fold the listed columns into rows of (name_as, value_as), keeping the rest. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { enum: ['unpivot'] },
-        columns: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Columns to fold into rows.' },
+        columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Columns to fold into rows.' },
         keep: { type: 'array', items: { type: 'string' }, description: 'Columns to keep as-is (default: none).' },
         name_as: { type: 'string', pattern: NAME },
         value_as: { type: 'string', pattern: NAME },
@@ -390,7 +390,7 @@ export const STAGES = {
   },
 
   project: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { enum: ['project'] }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { enum: ['project'] }, columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } } } }),
     build: ({ cols }, p) => { p.columns.forEach((c) => requireCol(cols, c)); const out = new Map(); for (const c of p.columns) out.set(c, cols.get(c) || { type: 'string' }); return { op: { op: 'project', cols: p.columns }, cols: out }; },
   },
 };

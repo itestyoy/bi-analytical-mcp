@@ -21,7 +21,7 @@ import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
-import { anyOfOr, form, pick, stringOtherThan, conditionList } from '../schema-kit.js';
+import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
 import { OPS } from '../conditions.js';
 
 let factsCache;
@@ -67,9 +67,9 @@ const timeRange = {
   type: 'object', additionalProperties: false,
   description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.',
   properties: {
-    start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' },
-    end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
-    timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock there. Omit for UTC.' },
+    start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' },
+    end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
+    timezone: { ...TIMEZONE, description: 'Optional IANA timezone: start/end are wall-clock there. Omit for UTC.' },
   },
 };
 
@@ -146,7 +146,7 @@ export function buildSchema(catalog) {
     properties: { property: own(ownProps, 'A scalar event_data property'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
   });
   const OP = { enum: OPS };
-  const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; a string for the text operators; none for is_null/is_not_null).' };
+  const VALUE = { ...CONSTANT, description: 'The constant (an array for in/not_in; [low, high] for between, both included; a string for the text operators; none for is_null/is_not_null).' };
   // one condition on the source's own column or on a scalar event property — the filter's and a split case's
   const condition = {
     anyOf: [

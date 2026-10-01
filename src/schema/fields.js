@@ -5,7 +5,7 @@
 
 import { MEASURE_AGGS, GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
-import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList } from '../schema-kit.js';
+import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
 import { OPS } from '../conditions.js';
 import { CONTEXT_ID } from '../context-manager.js';
 
@@ -37,7 +37,7 @@ export function whereItemSchema(catalog, modelKey) {
     properties: {
       property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); scope the measure to those event_name(s) or it reads NULL.`),
       op: { enum: OPS, description: 'Comparison operator.' },
-      value: { description: 'Literal value(s) to compare against: a scalar; an array for in/not_in, [low, high] for between; a string for the text operators; none for is_null/is_not_null.' },
+      value: { ...CONSTANT, description: 'Literal value(s) to compare against: a scalar; an array for in/not_in, [low, high] for between; a string for the text operators; none for is_null/is_not_null.' },
     },
   };
 }
@@ -127,7 +127,7 @@ export function genericMeasureItem(catalog) {
     percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
     cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
     label: { type: 'string', description: D.label },
-    event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
+    event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
     where: measureWhere(genericWhereItem(catalog)),
   });
 }
@@ -170,7 +170,7 @@ export function measureItemSchema(catalog, modelKey) {
     label: { type: 'string', description: D.label },
     ...(catalog.isFact(modelKey)
       ? {
-          event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
+          event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
           where: measureWhere(whereItemSchema(catalog, modelKey)),
         }
       : {}),
@@ -190,7 +190,7 @@ export function semanticModelBranch(catalog, modelKey) {
       additionalProperties: false,
       description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
       properties: {
-        event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNames(modelKey)), description: 'Events that scope every measure here.' },
+        event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: 'Events that scope every measure here.' },
       },
     };
   }
@@ -311,7 +311,7 @@ export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
 }
 
 /** A metric_time window, as a metric query and a preview's validation take it. */
-export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
+export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
 
 /** The metric time axis at a grain — as group_by, order_by and where name it. */
 export const timeRef = (catalog) => ({ type: 'object', additionalProperties: false, required: ['time'], title: 'the metric time axis', description: 'The metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } });
@@ -333,7 +333,7 @@ export function predicateDefs(catalog, project = null) {
           anyOf: [timeRef(catalog), ...attributeRefForms(catalog), ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])],
         },
         op: { enum: OPS, description: 'Comparison operator. between takes [low, high]; in/not_in take an array; the text operators a string; is_null/is_not_null take no value.' },
-        value: { description: 'Value to compare against (scalar, array for in/not_in/between). Bound as an escaped literal.' },
+        value: { ...CONSTANT, description: 'Value to compare against (scalar, array for in/not_in/between). Bound as an escaped literal.' },
       },
     },
   };

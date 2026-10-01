@@ -612,8 +612,7 @@ export function querySchema() {
     context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
     eventstream: { type: 'string', pattern: NAME, description: 'Which eventstream of the context (optional when it holds one).' },
     analyses: { type: 'array', minItems: 1, items: { anyOf: analysisSchemas() }, description: 'The analyses to run, computed together in one run.' },
-    task_id: TASK_ID,
-    task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'Several tasks, read together.' },
+    task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'The tasks to read back (or cancel) — one, or several read together; each one\'s result comes back under `results`, in this order.' },
     detail: { enum: ['summary', 'full'], default: 'summary', description: 'Reading a task: each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table (summary) — or every record it computed (full).' },
     cancel: { const: true, description: 'Stop the tasks instead of reading them.' },
     wait_seconds: { type: 'integer', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for a running task (default and cap ${MAX_WAIT_SECONDS}s).` },
@@ -623,10 +622,8 @@ export function querySchema() {
     description: 'Start path analyses over a built eventstream (its materialized steps included), or read one back.',
     anyOf: [
       form({ title: 'start analyses', required: ['context_id', 'analyses'], properties: pick(F, ['context_id', 'eventstream', 'analyses']) }),
-      form({ title: 'read a task', required: ['task_id'], properties: pick(F, ['task_id', 'detail', 'wait_seconds']) }),
-      form({ title: 'read several tasks', required: ['task_ids'], properties: pick(F, ['task_ids', 'detail', 'wait_seconds']) }),
-      form({ title: 'cancel a task', required: ['task_id', 'cancel'], properties: pick(F, ['task_id', 'cancel']) }),
-      form({ title: 'cancel several tasks', required: ['task_ids', 'cancel'], properties: pick(F, ['task_ids', 'cancel']) }),
+      form({ title: 'read tasks', required: ['task_ids'], properties: pick(F, ['task_ids', 'detail', 'wait_seconds']) }),
+      form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(F, ['task_ids', 'cancel']) }),
     ],
     $defs: { [CONDITION_DEF]: f.condition_schema },
   };

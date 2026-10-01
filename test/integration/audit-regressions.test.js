@@ -187,7 +187,7 @@ test("4. the source's OWN attribute under its identity: bundle_id splits 131 / 5
 test('5. an attribute the model does not have is refused, listing the ones it has', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'shoe_size' }] }),
-    /'shoe_size' is not an attribute of 'users'.*country/s);
+    /`group_by.0.attribute` must be one of: .*country/s);
 });
 
 test('6. a model the task did not load is refused with the use_base_models fix', opts, async (t) => {
@@ -211,10 +211,10 @@ test('8. via names the relationship explicitly and gives the same numbers', opts
   assert.deepEqual(mapCol(r.rows, groupCol(r, 'aown_evts'), 'aown_evts'), { none: 176, iphone: 14 });
 });
 
-test('9. a via that is not a relationship to that model is refused, listing the real ones', opts, async (t) => {
+test('9. a via toward a model reached by one relationship is refused: the schema offers via only where there is a choice', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'session' }] }, ownerEngine),
-    /'session' is not a relationship from this task's source\(s\) to 'crashlytics'.*ad_funnel/s);
+    /unexpected property 'via' — an attribute of crashlytics takes model, attribute/);
 });
 
 test('10. a structured attribute and a time grain together: one month, 184 events', opts, async (t) => {
@@ -329,7 +329,7 @@ test('22. a finding on a qualified crash property surfaces on that property', op
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}.*\{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════
@@ -453,7 +453,7 @@ test('35. an event accessor without a source is refused; named, it answers', opt
 test('36. the session key is not a groupable path of the events source', opts, async (t) => {
   if (skip(t)) return;
   assert.ok(!catalog.modelDimensionColumns('events').includes('session_number'));
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'session_number' }] }), /'session_number' is not an attribute of 'events'/);
+  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'session_number' }] }), /`group_by.0.attribute` must be one of/);
 });
 
 test('37. …a pipeline reads the key like any column: sessions 1..4 hold 150 / 26 / 4 / 4 events', opts, async (t) => {

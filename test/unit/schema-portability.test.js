@@ -284,10 +284,10 @@ test('the card declaration (display) is structural: each kind is a closed branch
   ]) assert.equal(check(bad).ok, false, why);
   // the declaration lives on display_model_result alone: no other tool takes one
   assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
-  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_id: 'abc123abc123', display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
+  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
-  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_id with a query');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_id: 'abc123abc123', transform: {} }).ok, false, 'task_id with a transform');
+  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_ids with a query');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], transform: {} }).ok, false, 'task_ids with a transform');
   assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
-  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
+  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

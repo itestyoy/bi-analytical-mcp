@@ -20,7 +20,7 @@ import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
-In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ request: { task_id } }) or query_pipeline_model({ request: { task_id } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ request: { task_ids } }) or query_pipeline_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 
 /**
  * THE FIRST THING A CLIENT READS, and in some the only thing. `instructions` (InitializeResult in
@@ -36,8 +36,8 @@ function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = 
   return [
     'Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool.',
     '',
-    'Every tool takes its input under one field: tool({ request: { … } }); a bare shape below, like { task_id }, is the request\'s content.',
-    `semantic_index({ request: {} }) gives the catalog overview — its sources and models; { guide: true } the analyst workflow and which tool fits which question. A read ({ task_id }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
+    'Every tool takes its input under one field: tool({ request: { … } }); a bare shape below, like { task_ids }, is the request\'s content.',
+    `semantic_index({ request: {} }) gives the catalog overview — its sources and models; { guide: true } the analyst workflow and which tool fits which question. A read ({ task_ids }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
     '',
     'Name the events source in every call: sources are independent and never mixed. User attributes live on the users model ({ model: "users", attribute }), not on the events, and joins follow the relationships the catalog declares — you never state join columns.',
     `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
@@ -172,7 +172,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // (the arguments are kept as they came, so a failure is replayed by the same call)
   // (a call refused for not using the envelope still carried its ids — at the top)
   const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : null });
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
     failed(name, unknownToolMessage(name), { stage: 'validate' });
@@ -195,7 +195,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   if (!renders && def.appsOnly && !def.appCallable) {
     logLine(name, '✗ from a client without the Apps extension');
     failed(name, `${name} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate' });
-    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
+    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_ids })`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
   if (!renders && cardField && input[cardField] !== undefined) {
@@ -215,11 +215,16 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     // a tool that answers synchronously still answers through the promise, so a throw is its rejection
     let raw = await withSignal(signal, () => Promise.resolve().then(() => def.run(engine, input)));
     // the hint to show a result as a card means nothing to a client that draws none
-    if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
+    // (a read answers each task under `results`, each with its own hint)
+    if (!renders && isPlainObject(raw)) {
+      const unhinted = (r) => { if (!isPlainObject(r) || !('show_to_user' in r)) return r; const { show_to_user: _hint, ...rest } = r; return rest; };
+      raw = unhinted(raw);
+      if (Array.isArray(raw.results)) raw = { ...raw, results: raw.results.map(unhinted) };
+    }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
-    // a failure the engine RETURNED ({ ok: false }) is kept too — except a read of a task that failed,
-    // whose failure the task itself recorded when it ended
-    if (isPlainObject(raw) && raw.ok === false && !raw.task_id && !raw.task_ids) failed(name, raw.error?.message || (typeof raw.error === 'string' ? raw.error : 'the call failed'), { stage: raw.error?.stage, field: raw.error?.field, code: raw.error?.code, detail: raw.error });
+    // a failure the engine RETURNED ({ ok: false }) is kept too — except a read of tasks that failed
+    // (their results), whose failure each task itself recorded when it ended
+    if (isPlainObject(raw) && raw.ok === false && !raw.task_id && !raw.task_ids && !Array.isArray(raw.results)) failed(name, raw.error?.message || (typeof raw.error === 'string' ? raw.error : 'the call failed'), { stage: raw.error?.stage, field: raw.error?.field, code: raw.error?.code, detail: raw.error });
     return { result: toCallToolResult(raw, name, input, engine), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
@@ -233,7 +238,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
 
 /**
  * Run a tool call TO ITS END — what a protocol task runs. A call that waits on an engine task
- * (a query tool with { task_id }, display_model_result) keeps waiting while the task runs, then
+ * (a query tool with { task_ids }, display_model_result) keeps waiting while the task runs, then
  * answers as it would have had the task been done: the host polls the protocol task instead of
  * the model calling again. A call that STARTS work returns its task_id at once, as always — it is
  * never held.
@@ -244,10 +249,10 @@ export async function runToCompletion(engine, name, args, { signal, renders = tr
   const call = def ? requestOf(name, args) : { error: 'unknown tool' };
   if (call.error) return runTool(engine, name, args, { signal, renders });
   const input = call.request;
-  // the tasks the call reads: one (task_id), or a batch (task_ids) — followed until every one is done
+  // the tasks the call reads (a query tool's task_ids, a drawing tool's task_id) — followed until every one is done
   const ids = typeof input.task_id === 'string' ? [input.task_id] : Array.isArray(input.task_ids) ? input.task_ids.filter((id) => typeof id === 'string') : [];
   // (a cancel is answered at once: it never waits for the task it stops)
-  // a call that WAITS on an engine task — a query tool's read half ({ task_id }), a drawing tool — is
+  // a call that WAITS on an engine task — a query tool's read half ({ task_ids }), a drawing tool — is
   // run to its end under a protocol task
   let waits = !!def?.waits && !input.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
   // what the call would refuse — bad arguments, a task of the other side, a card already drawn — is

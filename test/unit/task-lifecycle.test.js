@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { isStartedTask, taskResult } from '../helpers/settle.js';
+import { isStartedTask, taskResult, one } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 
@@ -50,7 +50,7 @@ test('a call that starts work answers with its task only, and a query on the sam
   for (let i = 0; i < 10; i += 1) await tick();
   // …and runs only once the parse is done
   assert.deepEqual(runner.log, ['parse:start'], 'the query waits for the declaration to be parsed');
-  assert.equal((await e.query_semantic_model({ task_id: queried.task_id, wait_seconds: 0 })).status, 'running');
+  assert.equal((await one(e.query_semantic_model({ task_ids: [queried.task_id], wait_seconds: 0 }))).status, 'running');
   runner.parses.shift()();
   const done = await taskResult(e, queried.task_id);
   assert.deepEqual(runner.log, ['parse:start', 'parse:end', 'query']);
@@ -73,13 +73,13 @@ test('a query tool\'s read pages what the task holds, reads only its own side, a
   const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
   await taskResult(e, q.task_id);
   // a result held in memory pages WITHIN the rows its query returned
-  const within = await e.query_semantic_model({ task_id: q.task_id, limit: 1 });
+  const within = await one(e.query_semantic_model({ task_ids: [q.task_id], limit: 1 }));
   assert.deepEqual([within.row_count, within.page.held_rows, within.page.has_more], [1, 1, false]);
-  const past = await e.query_semantic_model({ task_id: q.task_id, offset: 10 });
+  const past = await one(e.query_semantic_model({ task_ids: [q.task_id], offset: 10 }));
   assert.equal(past.row_count, 0);
-  await assert.rejects(() => e.query_semantic_model({ task_id: 'ffffffffffff' }), (err) => err.code === 'result_gone');
+  await assert.rejects(() => one(e.query_semantic_model({ task_ids: ['ffffffffffff'] })), (err) => err.code === 'result_gone');
   // a semantic task is not the pipeline side's to read
-  await assert.rejects(() => e.query_pipeline_model({ task_id: q.task_id }), /query_semantic_model/);
+  await assert.rejects(() => one(e.query_pipeline_model({ task_ids: [q.task_id] })), /query_semantic_model/);
 });
 
 test('a pipeline starts only from a finished task that stored a table', async () => {
@@ -187,7 +187,7 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
   const build = await e.build_pipeline_model({ action: 'materialize', draft_id });
   await until(() => runner.held.length);
   const t0 = Date.now();
-  const { result } = await runToCompletion(e, 'query_semantic_model', { request: { task_id: build.task_id } });
+  const { result } = await runToCompletion(e, 'query_semantic_model', { request: { task_ids: [build.task_id] } });
   assert.equal(result.isError, true);
   assert.match(JSON.parse(result.content[0].text).error.message, /query_pipeline_model/);
   assert.ok(Date.now() - t0 < 5000, 'answered without waiting for the build');
@@ -316,7 +316,8 @@ test('a batch takes any number of queries, and each mode takes only its own fiel
   assert.equal(new Set(many.task_ids).size, 12, 'one task per query, however many');
   await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q], metrics: ['task_cnt'] }), 'a query field beside queries');
   await assert.rejects(() => e.query_semantic_model({ queries: [q] }), 'a batch names its context');
-  await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id], offset: 1 }), 'task_ids does not page');
+  // a read pages each stored result: offset/limit are a read's own; a cancel takes neither
+  await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id], cancel: true, offset: 1 }), 'a cancel does not page');
   await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id, created.task_id] }), 'the same task twice');
   await assert.rejects(() => e.query_pipeline_model({ context_id: ctx, queries: [{ metrics: ['task_cnt'] }] }), 'a pipeline query has no metrics');
   // a task of the other side is refused before any wait
@@ -374,19 +375,19 @@ test('a running query is cancelled at once: its process is stopped, a read says 
   const first = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
   const second = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt2'] });
   await until(() => runner.held.length === 1);
-  const out = await e.query_semantic_model({ task_id: first.task_id, cancel: true });
+  const out = await one(e.query_semantic_model({ task_ids: [first.task_id], cancel: true }));
   assert.deepEqual([out.cancelled, out.status], [true, 'cancelled']);
   assert.equal(signals[0].aborted, true, 'the process the task started is told to stop');
-  const read = await e.query_semantic_model({ task_id: first.task_id, wait_seconds: 5 });
+  const read = await one(e.query_semantic_model({ task_ids: [first.task_id], wait_seconds: 5 }));
   assert.deepEqual([read.status, read.error.code], ['cancelled', 'cancelled']);
   // the held process ends (as a killed one would); the next task runs, and the cancelled one stays cancelled
   runner.held.shift()();
   await until(() => runner.held.length === 1);
   runner.held.shift()();
   assert.equal((await taskResult(e, second.task_id)).status, 'done');
-  assert.equal((await e.query_semantic_model({ task_id: first.task_id })).status, 'cancelled');
+  assert.equal((await one(e.query_semantic_model({ task_ids: [first.task_id] }))).status, 'cancelled');
   // a finished task is left as it is
-  const again = await e.query_semantic_model({ task_id: second.task_id, cancel: true });
+  const again = await one(e.query_semantic_model({ task_ids: [second.task_id], cancel: true }));
   assert.deepEqual([again.cancelled, again.status], [false, 'done']);
 });
 
@@ -404,9 +405,9 @@ test('a queued task that is cancelled never starts a process; a batch is cancell
   for (let i = 0; i < 20; i += 1) await tick();
   assert.equal(runner.log.filter((l) => l.startsWith('start:')).length, 1, 'the cancelled batch never reached the warehouse');
   // cancel is refused beside fields it does not take, and for a task of the other side
-  await assert.rejects(() => e.query_semantic_model({ task_id: first.task_id, cancel: true, wait_seconds: 1 }));
+  await assert.rejects(() => one(e.query_semantic_model({ task_ids: [first.task_id], cancel: true, wait_seconds: 1 })));
   await assert.rejects(() => e.query_semantic_model({ context_id: created.context_id, cancel: true }));
-  await assert.rejects(() => e.query_pipeline_model({ task_id: first.task_id, cancel: true }), /query_semantic_model/);
+  await assert.rejects(() => one(e.query_pipeline_model({ task_ids: [first.task_id], cancel: true })), /query_semantic_model/);
 });
 
 test('a cancel under a protocol task is answered at once, not after the task', async () => {
@@ -417,8 +418,8 @@ test('a cancel under a protocol task is answered at once, not after the task', a
   const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
   await until(() => runner.held.length === 1);
   const t0 = Date.now();
-  const { raw } = await runToCompletion(e, 'query_semantic_model', { request: { task_id: q.task_id, cancel: true } });
-  assert.equal(raw.status, 'cancelled');
+  const { raw } = await runToCompletion(e, 'query_semantic_model', { request: { task_ids: [q.task_id], cancel: true } });
+  assert.equal(raw.results[0].status, 'cancelled');
   assert.ok(Date.now() - t0 < 2000);
   runner.held.shift()();
 });

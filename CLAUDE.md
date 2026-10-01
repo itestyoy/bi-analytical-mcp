@@ -172,10 +172,11 @@
   `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process
   with a target directory of its own), after what was queued before them and before what is
   queued after. The query tool of the SAME
-  side reads a task back (the started answer names it in `read_with`): `{ task_id }` waits
-  (≤ MAX_WAIT_SECONDS per call) and returns the result, paging a stored table or the rows held in
-  memory; `{ task_ids }` waits for several and returns each one's result as `{ task_id }` would;
-  `{ task_id | task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
+  side reads tasks back (the started answer names it in `read_with`) with ONE form, `{ task_ids }` —
+  one id or several: it waits (≤ MAX_WAIT_SECONDS per call) and returns each one's result under
+  `results`, in the order asked (`TaskRunner.readAnswer`; a read whose every task failed is a tool
+  error), `offset`/`limit` paging each stored table or the rows held in memory;
+  `{ task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
   refuses a task of the other side — before any wait — and it never draws. The side is
   the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.

@@ -610,7 +610,7 @@ test('an unowned relationship offers no governed group-by path', opts, async (t)
 test('join guards: an undeclared relationship, a self-join and via+on are all rejected', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
-    /declares no such relationship.*share: user/s);
+    /`stage.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /unexpected property '(on|via)' — join (by a declared relationship|on columns both sides name alike)/, 'via and on are two forms: the schema takes one');
 });
@@ -842,7 +842,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
       arguments: { request: { action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' } } },
     });
     assert.equal(bad.isError, true);
-    assert.match(JSON.parse(bad.content[0].text).error.message, /declares no such relationship/);
+    assert.match(JSON.parse(bad.content[0].text).error.message, /`stage.via` must be "user"/);
   } finally {
     await mcpConn.close();
   }
@@ -1051,7 +1051,7 @@ test('42. a chained relationship the pipeline source does not declare is refused
   await assert.rejects(
     () => engine.build_pipeline_model({
       action: 'add_step', draft_id: s.draft_id,
-      stage: { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded' },
+      stage: { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded', attrs: [{ column: 'crash_id' }] },
     }),
     /'acquisition' declares no such relationship.*share: user/s,
   );
@@ -1216,8 +1216,7 @@ test('48. duplicate names and unknown columns are refused with the fix', opts, a
   await assert.rejects(
     () => joinStep('crashlytics', { stage: 'join', with: 'acquisition', via: 'user' }),
     (e) => {
-      assert.match(e.message, /`attrs` is required — list the columns you want/);
-      assert.match(e.message, /Columns of 'acquisition':.*cost.*impressions.*clicks/s);
+      assert.match(e.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s);
       return true;
     },
   );
@@ -1271,8 +1270,8 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
     name: 'contract_preview', dry_run: true,
     pipeline: { source: 'crashlytics', stages: [{ stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', ...(attrs ? { attrs } : {}) }] },
   });
-  await assert.rejects(() => preview(null), /join 'users': `attrs` is required/);
-  await assert.rejects(() => preview(['app_version']), /already has a column named 'app_version'.*as: 'users_app_version'/s);
+  await assert.rejects(() => preview(null), /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*country/s);
+  await assert.rejects(() => preview([{ column: 'app_version' }]), /already has a column named 'app_version'.*name: 'users_app_version'/s);
   const ok = await preview([{ column: 'app_version', as: 'users_app_version' }, 'country']);
   assert.ok(ok.model_sql, 'the resolved preview renders');
 

@@ -112,10 +112,8 @@ export const semanticQueryMethods = {
 
   async query_semantic_model(input) {
     this._validate('query_semantic_model', input);
-    // the read half: { task_id } waits for a semantic task (a model being parsed, a query) and returns it;
-    // { task_ids } waits for several at once
+    // the read half: { task_ids } waits for semantic tasks (a model being parsed, a query) and returns each
     if (input.cancel) return this._cancelTasks(input, 'semantic');
-    if (input.task_id) return this._pollTask(input, 'semantic');
     if (input.task_ids) return this._pollTasks(input, 'semantic');
     const ctx = this._ctx(input.context_id);
 
@@ -123,7 +121,7 @@ export const semanticQueryMethods = {
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
       const built = ctx.state.pipeline_model?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_id: '${built}' } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     const project = ctx.state.engine === 'project';
@@ -557,7 +555,7 @@ export const semanticQueryMethods = {
       return out;
     };
 
-    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ request: { task_id } }).
+    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ request: { task_ids } }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
     return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });

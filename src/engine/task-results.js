@@ -18,7 +18,7 @@ export const taskResultMethods = {
   /**
    * Materialization mode (inside the query's task): compile the query to SQL, write it as a
    * materialized='table' dbt model named after the task (`qr_<task_id>`), build it, and read the
-   * first page back. The table is the durable result: query_semantic_model({ request: { task_id } }) pages it after the in-memory
+   * first page back. The table is the durable result: query_semantic_model({ request: { task_ids } }) pages it after the in-memory
    * response is gone, a card drills into it, and a pipeline can start from it (from_task).
    */
   async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename)) {
@@ -81,7 +81,7 @@ export const taskResultMethods = {
   },
 
   /**
-   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ request: { task_id } }) / query_pipeline_model({ request: {
+   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ request: { task_ids } }) / query_pipeline_model({ request: {
    * task_id } }): wait for a task of THAT side (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
    * returning the moment it is done) and return its finished response — the rows of a query or a
    * build, a parsed model, or the error it ended in. Still running → `status: 'running'`: call
@@ -90,11 +90,6 @@ export const taskResultMethods = {
    * showing a result is display_model_result. A task of the other side is refused with the tool
    * that reads it.
    */
-  async _pollTask(input, side) {
-    this._taskForSide(input.task_id, side);
-    return this._awaitRead(input.task_id, input);
-  },
-
   _cancelTasks(input, side) {
     return this.tasks.cancel(input, side);
   },
@@ -110,17 +105,8 @@ export const taskResultMethods = {
     for (const id of ids) this._taskForSide(id, side);
     const waited = await this.tasks.await(ids, TaskRunner.clampWait(input.wait_seconds));
     const results = [];
-    for (const id of ids) results.push(await this._taskResult(id, { waited }));
-    const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
-    const failed = results.filter((r) => r.status === 'error').length;
-    return {
-      ok: true,
-      status: running.length ? 'running' : 'done',
-      waited_seconds: waited,
-      ...(failed ? { failed } : {}),
-      results,
-      ...(running.length ? { next: `${running.length} still running — call ${this._readers[side]}({ request: { task_ids: [${running.map((id) => `'${id}'`).join(', ')}] } }) for them; the others are final above` } : {}),
-    };
+    for (const id of ids) results.push(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit }));
+    return TaskRunner.readAnswer(results, this._readers[side], { waited_seconds: waited });
   },
 
   _knownTask(id) {
@@ -164,7 +150,6 @@ export const taskResultMethods = {
   async query_pipeline_model(input) {
     this._validate('query_pipeline_model', input);
     if (input.cancel) return this._cancelTasks(input, 'pipeline');
-    if (input.task_id) return this._pollTask(input, 'pipeline');
     if (input.task_ids) return this._pollTasks(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
     if (input.queries) return this._startBatch(ctx, 'query_pipeline_model', input.queries, (q) => this._pipelineQueryWork(ctx, q));

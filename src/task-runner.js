@@ -51,6 +51,27 @@ export class TaskRunner {
     return Math.min(Math.max(seconds ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
   }
 
+  /**
+   * THE ANSWER OF A READ — { task_ids }, on either side's query tool: each task's result under
+   * `results`, in the order asked. Those still running come back as running and `next` names just
+   * them. A read whose every task FAILED is a failure itself (ok: false, the error of the one task, or
+   * how many failed) — a tool error, as the call that waited on it reports it.
+   */
+  static readAnswer(results, reader, extra = {}) {
+    const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
+    const failed = results.filter((r) => r.status === 'error' || r.ok === false);
+    const allFailed = failed.length === results.length;
+    return {
+      ok: !allFailed,
+      status: running.length ? 'running' : allFailed ? 'error' : 'done',
+      ...extra,
+      ...(failed.length && !allFailed ? { failed: failed.length } : {}),
+      ...(allFailed ? { error: results.length === 1 ? results[0].error : { stage: 'task', message: `all ${results.length} tasks failed — each one's error is under results` } } : {}),
+      results,
+      ...(running.length ? { next: `${running.length} still running — call ${reader}({ request: { task_ids: [${running.map((id) => `'${id}'`).join(', ')}] } }) for them${running.length < results.length ? '; the others are final above' : ''}` } : {}),
+    };
+  }
+
   /** Start `work(id)` as a task of `tool` on `ctx` (null: no context). Returns the task id. */
   start(ctx, tool, work, { input = null, batch = null } = {}) {
     const id = this.jobs.create({ ...(ctx ? { contextId: ctx.id } : {}), tool });
@@ -130,7 +151,7 @@ export class TaskRunner {
 
   /** The call that reads a task back: its side's query tool, with the task_id. */
   readWith(id) {
-    return `${this.readers[this.sideOf(this.jobs.get(id)?.tool)]}({ request: { task_id: '${id}' } })`;
+    return `${this.readers[this.sideOf(this.jobs.get(id)?.tool)]}({ request: { task_ids: ['${id}'] } })`;
   }
 
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
@@ -162,7 +183,7 @@ export class TaskRunner {
     if (!own) throw new ToolError(job.tool
       ? `task ${job.id} was started by ${job.tool}, which this server does not serve now (its feature is off), so no tool reads it back`
       : `task ${job.id} records no tool that started it, so neither side can read it back — start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-    if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_id: '${job.id}' } })`, { stage: 'validate', field: 'task_id' });
+    if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_ids: ['${job.id}'] } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 
@@ -173,20 +194,20 @@ export class TaskRunner {
    * already finished is left as it is, and the answer says so.
    */
   cancel(input, side) {
-    const ids = input.task_ids || [input.task_id];
+    const ids = input.task_ids;
     for (const id of ids) this.forSide(id, side);
     const results = ids.map((id) => {
       const job = this.jobs.get(id);
       if (job.status !== 'running') {
         return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
       }
-      const reason = `cancelled by ${this.readers[side]}({ request: { task_id, cancel: true } })`;
+      const reason = `cancelled by ${this.readers[side]}({ request: { task_ids, cancel: true } })`;
       this.controls.get(id)?.abort(new Error(reason));
       this.jobs.cancel(id, reason);
       this.keep(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
       return { task_id: id, cancelled: true, status: 'cancelled' };
     });
-    return input.task_ids ? { ok: true, results } : { ok: true, ...results[0] };
+    return { ok: true, results };
   }
 
   /** Wait until every one of these tasks has settled, `seconds` at most — or until the call is cancelled. Returns the seconds waited. */

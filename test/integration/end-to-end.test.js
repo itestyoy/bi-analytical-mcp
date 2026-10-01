@@ -36,7 +36,7 @@ import { Engine } from '../../src/engine.js';
 
 import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, readTable } from '../helpers/settle.js';
+import { settle, readTable, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -226,7 +226,7 @@ test('3a. build_pipeline_model: start → add_step (funnel) → preview → comm
 
 test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_model (same 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.query_pipeline_model({ task_id: S.pipeTask, limit: 1000 });
+  const r = await one(engine.query_pipeline_model({ task_ids: [S.pipeTask], limit: 1000 }));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(reached(r.rows, 'launch'), 12);
   assert.equal(reached(r.rows, 'tut1'), 8);

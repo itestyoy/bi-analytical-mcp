@@ -472,7 +472,7 @@ export class Engine {
 
   /**
    * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
-   * waiting for a task is its side's query tool ({ task_id }), which returns the moment it is done.
+   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
    *
    * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
    * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
@@ -547,7 +547,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_id: '${n.task_id}' } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }

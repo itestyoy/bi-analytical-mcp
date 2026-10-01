@@ -1,7 +1,7 @@
 // TASKS — a tool call that outlives its request, tracked by an id the client polls.
 //
 // This server has the idea at the tool level too: a query or a build returns a task_id at once, and
-// the query tool of its side reads it back with { task_id }, waiting up to MAX_WAIT_SECONDS per call.
+// the query tool of its side reads it back with { task_ids }, waiting up to MAX_WAIT_SECONDS per call.
 // A PROTOCOL task is what a call that waits becomes when it outlasts services.taskAfterMs: the HOST
 // polls instead of holding the request, and the call is run TO ITS END (src/mcp-surface.js
 // runToCompletion waits on the engine task, then answers), so its result is exactly the

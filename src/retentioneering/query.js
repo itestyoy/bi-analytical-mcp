@@ -135,13 +135,9 @@ export function validateAnalyses(es, shape, analyses) {
 
 export async function query(engine, feature, input) {
   engine.host.validate(QUERY, input);
-  if (input.cancel) {
-    if (!input.task_id && !input.task_ids) throw new ToolError('cancel needs task_id or task_ids', { stage: 'validate', field: 'cancel' });
-    return engine.tasks.cancel(input, SIDE);
-  }
+  if (input.cancel) return engine.tasks.cancel(input, SIDE);
   if (input.task_ids) return readTasks(engine, feature, input);
-  if (input.task_id) return readTask(engine, feature, input.task_id, input);
-  if (!input.analyses) throw new ToolError(`${QUERY} takes { context_id, analyses } to start analyses, or { task_id } to read one back`, { stage: 'validate' });
+  if (!input.analyses) throw new ToolError(`${QUERY} takes { context_id, analyses } to start analyses, or { task_ids } to read them back`, { stage: 'validate' });
   const ctx = pathContext(engine, input.context_id);
   const es = eventstreamOf(ctx, input.eventstream);
   // the analyses read what is materialized: steps added after it are not what they would read
@@ -280,8 +276,7 @@ export async function readTasks(engine, feature, input) {
   await engine.tasks.await(input.task_ids, TaskRunner.clampWait(input.wait_seconds));
   const results = [];
   for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { wait_seconds: 0, detail: input.detail }));
-  const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
-  return { ok: true, status: running.length ? 'running' : 'done', results, ...(running.length ? { next: `${running.length} still running — call ${QUERY}({ request: { task_ids: [${running.map((i) => `'${i}'`).join(', ')}] } }) for them` } : {}) };
+  return TaskRunner.readAnswer(results, QUERY);
 }
 
 /** A finished task's output: held in memory, else read from its stored table — a query task's with a

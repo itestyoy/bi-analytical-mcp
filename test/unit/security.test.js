@@ -12,9 +12,10 @@ const v = (tool, input) => validateInput(validators[tool], input);
 
 test('a task is addressed by its id alone — no table name or path reaches a read', () => {
   for (const tool of ['query_semantic_model', 'query_pipeline_model', 'display_model_result']) {
-    assert.equal(v(tool, { task_id: "x') }} ; drop table dim_users -- " }).ok, false, `${tool}: a task id is hex`);
-    assert.equal(v(tool, { task_id: 'aabbccddeeff', table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
-    assert.ok(v(tool, { task_id: 'aabbccddeeff' }).ok);
+    const id = (x) => (tool === 'display_model_result' ? { task_id: x } : { task_ids: [x] });
+    assert.equal(v(tool, id("x') }} ; drop table dim_users -- ")).ok, false, `${tool}: a task id is hex`);
+    assert.equal(v(tool, { ...id('aabbccddeeff'), table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
+    assert.ok(v(tool, id('aabbccddeeff')).ok);
   }
   assert.equal(v('drill_result', { task_id: 'aabbccddeeff', transform: {}, table: 'qr_aabbccddeeff' }).ok, false);
 });

@@ -17,7 +17,7 @@ import { loadProjectSemantics, PROJECT_STORE } from '../../src/project-semantics
 import { mergeModelEntry } from '../../src/semantic-latest.js';
 import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
+import { settle, taskResult, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { deref, field } from '../helpers/schema-nav.js';
 
@@ -285,7 +285,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   const stored = await q(ACQ, { metrics: ['project_clicks'], group_by: [{ entity: 'media_source' }], materialize: true });
   assert.equal(stored.ok, true, JSON.stringify(stored.error));
   // a read of what is stored, not of the response still held in memory (a restart forgets that)
-  const readStored = async (id) => { raw._taskResults.delete(id); return raw.query_semantic_model({ task_id: id }); };
+  const readStored = async (id) => { raw._taskResults.delete(id); return one(raw.query_semantic_model({ task_ids: [id] })); };
   const readBack = () => readStored(stored.task_id);
   const clicks = (r) => Object.fromEntries(r.rows.map((x) => [x.media_source, num(x.project_clicks)]));
   // a start whose project does not parse serves nothing, and keeps what earlier starts stored

@@ -84,7 +84,7 @@ test('a task that ends in an error is kept once, with its input — its reads ar
   const tasks = engine.explore_errors({ source: 'task' });
   assert.deepEqual(tasks.errors.map((e) => e.task_id).sort(), [id, thrown].sort());
   assert.deepEqual(engine.explore_errors({ task_id: id, detail: true }).errors[0].args, { transform: { limit: 1 } });
-  await runTool(engine, 'query_pipeline_model', { request: { task_id: id } });
+  await runTool(engine, 'query_pipeline_model', { request: { task_ids: [id] } });
   assert.equal(engine.explore_errors({}).total, 2);
 });
 

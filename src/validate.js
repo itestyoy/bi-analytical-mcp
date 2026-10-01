@@ -76,11 +76,29 @@ function oneOf(at, vals, used, alt) {
     + (alt ? `. Here '${used}' is spelled '${alt}'` : '');
 }
 
+/**
+ * What a missing field takes, when the schema names its values — an enum, or a list of objects whose
+ * key field is one: the refusal then lists them (a join's attrs: the joined model's columns), so the
+ * caller can write the field without another round trip. Nothing is said for a free-form field.
+ */
+function takesValues(prop, root) {
+  const list = (vals) => `${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`;
+  if (Array.isArray(prop?.enum) && prop.enum.length > 1) return ` — one of: ${list(prop.enum)}`;
+  const item = deref(root, prop?.items);
+  if (!item?.properties) return '';
+  const [key, of] = Object.entries(item.properties).map(([k, v]) => [k, deref(root, v)]).find(([, v]) => Array.isArray(v?.enum) && v.enum.length > 1) || [];
+  return key ? ` — a list of { ${key}${(item.required || []).filter((r) => r !== key).map((r) => `, ${r}`).join('')}, … }, ${key} one of: ${list(of.enum)}` : '';
+}
+
 /** Turn one Ajv error into a plain-English sentence. `ctx` = { input, schema } for the hints. */
 function describe(e, ctx = {}) {
   const at = fieldRef(e.instancePath);
   switch (e.keyword) {
-    case 'required': return `${at} is missing required property '${e.params.missingProperty}'`;
+    case 'required': {
+      const field = e.params.missingProperty;
+      const node = deref(ctx.schema, e.parentSchema);
+      return `${at} is missing required property '${field}'${takesValues(deref(ctx.schema, node?.properties?.[field]), ctx.schema)}`;
+    }
     case 'additionalProperties': {
       const used = e.params.additionalProperty;
       // A field this path spells differently: say its name here rather than only that it is unknown.

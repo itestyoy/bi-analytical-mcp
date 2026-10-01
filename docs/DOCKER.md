@@ -75,7 +75,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   **Values above 30 s are capped at 30**, with a line on stderr saying so — a longer wait inside one
   tool call outlives the calling client's own timeout, which this server cannot raise. (A query or a
   build never holds a call at all: it is a task — the call returns its `task_id` at once and
-  the query tool of its side, given `{ task_id }`, waits for it, at most 30 s per call.)
+  the query tool of its side, given `{ task_ids }`, waits for it, at most 30 s per call.)
 - `CONTEXT_TTL_MS` — context GC tuning.
 - `MCP_ALLOWED_ORIGINS` — comma-separated browser origin HOSTNAMES allowed to call the endpoint
   (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
@@ -188,7 +188,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   between two segment levels — checked by the library first on what the eventstream holds.
   It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
   BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
-  start. `{ task_id }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  start. `{ task_ids }` reads it back, summarized for the model (`detail: "full"`: every record). The
   feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
   for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
@@ -325,7 +325,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
   and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
   query) returns only `{ task_id }` and never waits; the query tool of the same side, given
-  `{ task_id }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  `{ task_ids }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: `structuredContent` (what a host draws a card from) is carried only by a

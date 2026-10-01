@@ -15,7 +15,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
+import { settle, isStartedTask, taskResult, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -60,7 +60,7 @@ test('materialize: the query is a task whose result is a stored table — rows r
 test('resilient re-read: once the in-memory response is gone, query_semantic_model({ task_id }) reads the stored table', opts, async (t) => {
   if (skip(t)) return;
   engine.raw._taskResults.delete(globalThis.__matTask); // what a restart (or an hour) does to the held response
-  const r = await engine.query_semantic_model({ task_id: globalThis.__matTask });
+  const r = await one(engine.query_semantic_model({ task_ids: [globalThis.__matTask] }));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(r.status, 'done');
   assert.equal(num(r.rows[0].mon_revenue), 85); // recomputes nothing — reads the table
@@ -195,14 +195,14 @@ test('a stored result is paged with query_semantic_model({ task_id }): limit/off
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(m.status, 'done', JSON.stringify(m));
-  const full = await engine.query_semantic_model({ task_id: m.task_id, limit: 1000 });
+  const full = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 1000 }));
   const total = full.row_count;
   assert.ok(total >= 2, `expected multiple country rows, got ${total}`);
   // page through in chunks of 2; has_more drives the loop and must terminate.
   const collected = [];
   let offset = 0; let last; let guard = 0;
   do {
-    last = await engine.query_semantic_model({ task_id: m.task_id, limit: 2, offset });
+    last = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 2, offset }));
     assert.equal(last.ok, true, JSON.stringify(last.error));
     collected.push(...last.rows);
     offset += 2;

@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
-import { settle, isStartedTask } from '../helpers/settle.js';
+import { settle, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -54,7 +54,7 @@ test('a metric query answers with its task at once; the same tool, given the tas
   const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
   assert.ok(isStartedTask(started), JSON.stringify(started));
   assert.match(started.task_id, /^[a-f0-9]{12}$/);
-  const done = await engine.query_semantic_model({ task_id: started.task_id });
+  const done = await one(engine.query_semantic_model({ task_ids: [started.task_id] }));
   assert.equal(done.status, 'done', 'one wait is enough for a query this size');
   assert.ok(done.waited_seconds === undefined, 'a finished task answers with its result, not a wait report');
   assert.equal(done.tool, 'query_semantic_model');
@@ -153,7 +153,7 @@ test('a task is drawn once: a second display_model_result is refused, and readin
   const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'] };
   assert.equal((await engine.display_model_result({ task_id: done.task_id, display })).drawn, true);
   await assert.rejects(engine.display_model_result({ task_id: done.task_id, display }), /shown already/);
-  const again = await engine.query_semantic_model({ task_id: done.task_id });
+  const again = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
   assert.equal(again.drawn, undefined, 'a read is never a card');
   assert.equal(again.show_to_user, undefined, 'and no longer suggests showing it');
   assert.equal(again.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
@@ -167,16 +167,16 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   const done = await q({});
   assert.equal(Number(done.rows[0].mon_revenue), 85);
   engine.raw._taskResults.delete(done.task_id);
-  const forgotten = await engine.query_semantic_model({ task_id: done.task_id });
+  const forgotten = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
   assert.deepEqual([forgotten.ok, forgotten.error.code], [false, 'result_gone']);
   assert.deepEqual(buildViewModel('display_model_result', forgotten), { kind: 'none', reason: 'gone' });
   // a task this server never ran
-  await assert.rejects(engine.query_semantic_model({ task_id: 'ffffffffffff' }), (e) => e.code === 'result_gone');
+  await assert.rejects(one(engine.query_semantic_model({ task_ids: ['ffffffffffff'] })), (e) => e.code === 'result_gone');
   // a materialized result whose table definition was deleted
   const built = await q({ materialize: true });
   assert.equal(Number(built.rows[0].mon_revenue), 85);
   engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
-  const deleted = await engine.query_semantic_model({ task_id: built.task_id, limit: 10 });
+  const deleted = await one(engine.query_semantic_model({ task_ids: [built.task_id], limit: 10 }));
   assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
   // …while a query that FAILED stays an error
   assert.equal(buildViewModel('display_model_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');

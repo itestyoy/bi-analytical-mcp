@@ -73,7 +73,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   };
   const create = {
     type: 'object',
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ request: { task_id } }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ request: { task_ids } }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
     anyOf: [
       form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, tagDescription: 'create (the default): declare a task — name + semantic_models + metrics.', required: ['name', 'metrics'], properties: createFields }),
       form({ title: 'update the task in a context', tag: ['action', 'update'], tagDescription: 'update: change the task already in this context — the add_*/remove_* fields, on one `semantic_model`.', required: ['context_id', 'semantic_model'], properties: updateFields }),
@@ -85,7 +85,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ request: { task_id } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ request: { task_ids } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -131,7 +131,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const startOptional = ['draft_id', 'description', 'materialized', 'time_range', ...echo];
   const buildModel = {
     type: 'object',
-    description: 'Compose a pipeline model incrementally, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the next stage (pure schema; nothing is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. Materialize is not the end: the draft stays open and the table it built stands for the steps so far, so the steps you add next read that table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). When to use: a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ request: { task_id } }), filter or regroup them with query_pipeline_model({ request: { context_id, transform } }). For reusable named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path). Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. Prefer add_step or small add_steps chunks over one giant add_steps, so you see how each chunk changes the data.',
+    description: 'Compose a pipeline model incrementally, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the next stage (pure schema; nothing is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. Materialize is not the end: the draft stays open and the table it built stands for the steps so far, so the steps you add next read that table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). When to use: a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ request: { task_ids } }), filter or regroup them with query_pipeline_model({ request: { context_id, transform } }). For reusable named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path). Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. Prefer add_step or small add_steps chunks over one giant add_steps, so you see how each chunk changes the data.',
     anyOf: [
       form({ title: 'start from a source', tag: ['action', 'start'], tagDescription: 'start a new draft over a catalog source (returns a draft_id + the source columns); draft_id reuses a context.', required: ['name', 'source'], properties: pick(pipelineFields, ['name', 'source', ...startOptional]) }),
       form({ title: 'start from a task', tag: ['action', 'start'], tagDescription: 'start a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(pipelineFields, ['name', 'from_task', 'source', ...startOptional]) }),
@@ -148,29 +148,26 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const pdefs = predicateDefs(catalog, project);
   const pipelineQueryFields = {
     transform: projection,
-    limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000); with task_id, pages a stored result.' },
-    offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging); with task_id, pages a stored result.' },
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000).' },
+    offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging).' },
   };
-  // The read half of a query tool: { task_id } waits for a task of its side and returns it.
+  // The read half of a query tool: { task_ids } waits for tasks of its side and returns each one.
   const taskRead = {
-    task_id: { type: 'string', pattern: TASK_ID, description: 'READ a task of this side back (instead of starting a query): wait for it and return its result.' },
-    wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `With task_id: how long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
+    task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'READ tasks of this side back (instead of starting a query) — one, or several (the task_ids a batch returned): waits until all are done and returns each one\'s result under `results`, in this order.' },
+    wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment every task is done. 0 = just look.` },
+    cancel: { type: 'boolean', const: true, description: 'CANCEL these tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' },
   };
-  taskRead.cancel = { type: 'boolean', const: true, description: 'With task_id / task_ids: CANCEL those tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' };
-  taskRead.task_ids = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'READ several tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one\'s result, in this order.' };
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
-  // batch (context_id + queries), read one task (task_id), read several (task_ids), cancel either.
-  // Told apart by the fields each requires; each takes only its own.
-  const queryModes = (startFields, batch) => [
+  // batch (context_id + queries), read tasks (task_ids), cancel them. Told apart by the fields each
+  // requires; each takes only its own.
+  const queryModes = (startFields, batch, paging) => [
     form({ title: 'start a query', required: ['context_id'], properties: { context_id: startFields.context_id, ...startFields.fields } }),
     form({ title: 'start a batch', required: ['context_id', 'queries'], properties: { context_id: startFields.context_id, queries: batch } }),
-    form({ title: 'read a task', required: ['task_id'], properties: pick(taskRead, ['task_id', 'wait_seconds']) }),
-    form({ title: 'read several tasks', required: ['task_ids'], properties: pick(taskRead, ['task_ids', 'wait_seconds']) }),
-    form({ title: 'cancel a task', required: ['task_id', 'cancel'], properties: pick(taskRead, ['task_id', 'cancel']) }),
-    form({ title: 'cancel several tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
+    form({ title: 'read tasks', required: ['task_ids'], properties: { ...pick(taskRead, ['task_ids', 'wait_seconds']), ...paging } }),
+    form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
   ];
-  // a read of one task may page what it returns
-  const paged = (modes, paging) => modes.map((m) => (m.title === 'read a task' ? { ...m, properties: { ...m.properties, ...paging } } : m));
+  // a read pages what each task stored: the same offset/limit for each
+  const readPaging = (fields) => Object.fromEntries(['offset', 'limit'].map((k) => [k, { ...fields[k], description: k === 'offset' ? 'With task_ids: rows of each stored result to skip (paging).' : 'With task_ids: rows of each stored result to return.' }]));
   const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `START several ${what} on this context in one call, run side by side: each item takes the fields of a single query (described above; context_id stays at the top). All are checked first — one mistake refuses the whole batch. Returns task_ids, in this order: read them together with { task_ids }.`, items: item });
 
   const semanticQueryFields = {
@@ -190,21 +187,18 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
       order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { anyOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, ...attributeRefForms(catalog), ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
       time_range: METRIC_TIME_RANGE,
-      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000); with task_id, pages a stored result.' },
-      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging); with task_id, pages a stored result.' },
-      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ request: { task_id, offset, limit } }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ request: { action: "start", from_task } })).' },
+      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
+      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
+      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ request: { task_ids, offset, limit } }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ request: { action: "start", from_task } })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
   };
   const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where.`);
   const query = {
     type: 'object',
-    description: 'Start a metric query against a context (or several at once with queries) — or, with task_id / task_ids, read semantic tasks back.',
+    description: 'Start a metric query against a context (or several at once with queries) — or, with task_ids, read semantic tasks back.',
     $defs: pdefs,
-    anyOf: paged(
-      queryModes({ context_id: semanticContextId, fields: semanticQueryFields }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries')),
-      pick(semanticQueryFields, ['offset', 'limit']),
-    ),
+    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries'), readPaging(semanticQueryFields)),
   };
 
   const ctxRef = { type: 'object', additionalProperties: false, required: ['context_id'], description: 'Reference an existing context by id.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id } } };
@@ -243,13 +237,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     query_semantic_model: query,
     query_pipeline_model: {
       type: 'object',
-      description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_id / task_ids, read pipeline tasks back.',
-      anyOf: paged(
-        queryModes(
-          { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
-          batchOf({ type: 'object', additionalProperties: false, properties: terse(pipelineQueryFields) }, 'queries over the built model'),
-        ),
-        pick(pipelineQueryFields, ['offset', 'limit']),
+      description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
+      anyOf: queryModes(
+        { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
+        batchOf({ type: 'object', additionalProperties: false, properties: terse(pipelineQueryFields) }, 'queries over the built model'),
+        readPaging(pipelineQueryFields),
       ),
     },
     display_model_result: {
@@ -277,14 +269,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
         semantic_model: { type: 'string', description: 'Narrow the answer to one semantic model of the context (as its semantic_models name them) and the metrics that read it — mostly for a task\'s context, which can hold several.' },
         metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as query_semantic_model\'s group_by takes it.' },
-        validate: { type: 'boolean', description: 'Check the layer by running it rather than only reading it. MetricFlow compiles each metric in view, naming one whose SQL it cannot build; with time_range the warehouse also runs each metric over that window (its value comes back) and groups each semantic model\'s rows by all its dimensions and entities, naming a column it cannot read — the checks a dbt v2 parse skips. It is a task: the call returns { task_id }, and query_semantic_model({ request: { task_id } }) returns valid, compiled[], ran.metrics[], ran.semantic_models[] and a summary.' },
+        validate: { type: 'boolean', description: 'Check the layer by running it rather than only reading it. MetricFlow compiles each metric in view, naming one whose SQL it cannot build; with time_range the warehouse also runs each metric over that window (its value comes back) and groups each semantic model\'s rows by all its dimensions and entities, naming a column it cannot read — the checks a dbt v2 parse skips. It is a task: the call returns { task_id }, and query_semantic_model({ request: { task_ids } }) returns valid, compiled[], ran.metrics[], ran.semantic_models[] and a summary.' },
         time_range: { ...METRIC_TIME_RANGE, description: 'Only with validate: the metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it. Without it, validate compiles only and reads nothing.' },
       },
     },
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
-      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Purely a timer; it touches no data and follows no task — waiting for a task is its side\'s query tool with { task_id }.`,
+      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Purely a timer; it touches no data and follows no task — waiting for a task is its side\'s query tool with { task_ids }.`,
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },

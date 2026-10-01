@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, one } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -82,7 +82,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
   assert.equal(stored.table, `qr_${stored.task_id}`);
   const s = revenueBy(stored.rows);
   assert.deepEqual([s.US, s.GB, s.BR], [35, 25, 25]);
-  const page = await engine.query_semantic_model({ task_id: stored.task_id, limit: 2 });
+  const page = await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 2 }));
   assert.equal(page.rows.length, 2);
   assert.equal(page.page.has_more, true);
   assert.equal(num(us.rows[0].mon_revenue), 35);

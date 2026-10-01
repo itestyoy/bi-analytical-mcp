@@ -46,7 +46,7 @@ export const semanticBuildMethods = {
    */
   async _buildPipeline(input) {
     this._validate('build_pipeline_model.pipeline', input);
-    // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_id } })
+    // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_ids } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'build_pipeline_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });

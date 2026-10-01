@@ -90,7 +90,7 @@ export async function builtShape(engine, name, es, ctx) {
   }
   if (es.base.shape) return es.base.shape;
   const job = es.base.task_id ? engine.jobs.get(es.base.task_id) : null;
-  if (job?.status === 'running') throw new ToolError(`eventstream '${name}' is still being built (task ${es.base.task_id}) — its steps are checked against what it holds, so add them once it is built: ${QUERY}({ request: { task_id: '${es.base.task_id}' } }) waits for it`, { stage: 'validate', field: 'eventstream' });
+  if (job?.status === 'running') throw new ToolError(`eventstream '${name}' is still being built (task ${es.base.task_id}) — its steps are checked against what it holds, so add them once it is built: ${QUERY}({ request: { task_ids: ['${es.base.task_id}'] } }) waits for it`, { stage: 'validate', field: 'eventstream' });
   throw new ToolError(`eventstream '${name}' did not build${job?.error ? ` (${job.error})` : ''} — start it again`, { stage: 'validate', field: 'eventstream' });
 }
 
@@ -297,7 +297,7 @@ export async function materializeSteps(engine, feature, ctx, name, es) {
   const upto = es.checkpoint?.upto || 0;
   if (!es.steps.length) throw new ToolError(`eventstream '${name}' has no steps — it is built already; add the library's steps with ${BUILD}({ request: { action: 'add_step', … } }), or run analyses on it as it is`, { stage: 'validate', field: 'eventstream' });
   if (upto === es.steps.length) throw new ToolError(`every step of eventstream '${name}' is materialized already (1..${upto}) — its table (${es.checkpoint.model}) is what the analyses read`, { stage: 'validate', field: 'eventstream' });
-  if (es.building) throw new ToolError(`a materialize of eventstream '${name}' is already in flight (task ${es.building.task_id}) — read it with ${QUERY}({ request: { task_id: '${es.building.task_id}' } })`, { stage: 'validate', field: 'eventstream' });
+  if (es.building) throw new ToolError(`a materialize of eventstream '${name}' is already in flight (task ${es.building.task_id}) — read it with ${QUERY}({ request: { task_ids: ['${es.building.task_id}'] } })`, { stage: 'validate', field: 'eventstream' });
   const inputShape = shapeBefore(es, upto + 1) || await builtShape(engine, name, es, ctx);
   const inputModel = es.checkpoint?.model || es.base.model;
   const state = ctx.state.retentioneering;

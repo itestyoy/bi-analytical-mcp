@@ -175,7 +175,7 @@ MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
 general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
 aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in
 `match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
-result (the build is a task: `query_pipeline_model({ task_id })` returns and pages its rows,
+result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
 `query_pipeline_model({ context_id, transform })` filters and regroups the built model, and a
 pipeline started from it with `from_task` re-slices them).
 

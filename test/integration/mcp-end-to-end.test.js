@@ -241,8 +241,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
     action: 'add_step', draft_id: await start(),
     stage: { stage: 'join', with: 'acquisition', via: 'user' },
   });
-  assert.match(missing.error.message, /`attrs` is required/);
-  assert.match(missing.error.message, /Columns of 'acquisition':.*cost.*impressions.*clicks/s);
+  assert.match(missing.error.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
   const dup = await callErr('build_pipeline_model', {
@@ -409,7 +408,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   ]);
   assert.equal(num(meta.rows[0].n), 18);
   // the stored result itself pages without recomputing
-  const page = await call('query_pipeline_model', { task_id: built.task_id, limit: 5, offset: 20 });
+  const page = (await call('query_pipeline_model', { task_ids: [built.task_id], limit: 5, offset: 20 })).results[0];
   assert.equal(page.rows.length, 2, 'rows 21-22 of 22');
 });
 

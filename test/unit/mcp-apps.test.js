@@ -118,7 +118,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
 
 test('a task that is gone reaches the model as result_gone over MCP, and a card of it would say "no longer available"', async () => {
   for (const era of ['legacy', 'modern']) {
-    const r = await (await s.client({ era })).callTool({ name: 'query_semantic_model', arguments: { request: { task_id: 'ffffffffffff' } } });
+    const r = await (await s.client({ era })).callTool({ name: 'query_semantic_model', arguments: { request: { task_ids: ['ffffffffffff'] } } });
     assert.equal(r.isError, true, era);
     const payload = JSON.parse(r.content[0].text);
     assert.equal(payload.error.code, 'result_gone', era);

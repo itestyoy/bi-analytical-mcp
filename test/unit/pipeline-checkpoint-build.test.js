@@ -19,7 +19,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { graceMsFromEnv, MAX_BUILD_GRACE_SECONDS } from '../../src/server.js';
-import { isStartedTask, taskResult } from '../helpers/settle.js';
+import { isStartedTask, taskResult, one } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is the minutes-long build
@@ -104,7 +104,7 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
   assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
-  const peek = await e.query_pipeline_model({ task_id: bg.task_id, wait_seconds: 0 });
+  const peek = await one(e.query_pipeline_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.

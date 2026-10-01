@@ -1074,10 +1074,10 @@
             "expr": "coins_in - coins_out",
             "metrics": [
               {
-                "name": "coins_in"
+                "metric": "coins_in"
               },
               {
-                "name": "coins_out"
+                "metric": "coins_out"
               }
             ]
           }
@@ -1279,7 +1279,7 @@
               "measures": [
                 {
                   "name": "converted",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "is_conv"
                 }
               ]
@@ -1293,11 +1293,11 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "conversions",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "converted"
                 }
               ]
@@ -1465,10 +1465,10 @@
             "expr": "iap_revenue + ad_revenue_cents / 100",
             "metrics": [
               {
-                "name": "iap_revenue"
+                "metric": "iap_revenue"
               },
               {
-                "name": "ad_revenue_cents"
+                "metric": "ad_revenue_cents"
               }
             ]
           }
@@ -1601,7 +1601,7 @@
               "measures": [
                 {
                   "name": "user_rev",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price0"
                 }
               ]
@@ -1615,16 +1615,16 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "rev_mean",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "user_rev"
                 },
                 {
                   "name": "rev_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "user_rev"
                 }
               ]
@@ -1797,12 +1797,12 @@
               "measures": [
                 {
                   "name": "uy",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "y_val"
                 },
                 {
                   "name": "ux",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "x_val"
                 }
               ]
@@ -1849,31 +1849,31 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "sum_y",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uy"
                 },
                 {
                   "name": "sum_y2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uy2"
                 },
                 {
                   "name": "sum_x",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "ux"
                 },
                 {
                   "name": "sum_x2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "ux2"
                 },
                 {
                   "name": "sum_xy",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uxy"
                 }
               ]
@@ -2037,12 +2037,12 @@
               "measures": [
                 {
                   "name": "num",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "is_completed"
                 },
                 {
                   "name": "den",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "is_started"
                 }
               ]
@@ -2089,31 +2089,31 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "sum_num",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "num"
                 },
                 {
                   "name": "sum_den",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "den"
                 },
                 {
                   "name": "sum_num2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "num2"
                 },
                 {
                   "name": "sum_den2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "den2"
                 },
                 {
                   "name": "sum_numden",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "numden"
                 }
               ]
@@ -2211,7 +2211,7 @@
               "measures": [
                 {
                   "name": "events_seen",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -2224,7 +2224,7 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -2332,7 +2332,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2342,22 +2342,22 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue_p99",
-                  "fn": "percentile",
-                  "q": 0.99,
+                  "agg": "percentile",
+                  "percentile": 0.99,
                   "column": "revenue"
                 },
                 {
                   "name": "revenue_avg",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 },
                 {
                   "name": "revenue_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "revenue"
                 }
               ]
@@ -2413,7 +2413,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2515,7 +2515,7 @@
               "measures": [
                 {
                   "name": "returners",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -2636,16 +2636,16 @@
               "measures": [
                 {
                   "name": "events_in_session",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "session_start",
-                  "fn": "min",
+                  "agg": "min",
                   "column": "device_time"
                 },
                 {
                   "name": "session_end",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "device_time"
                 }
               ]
@@ -2731,7 +2731,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2808,11 +2808,11 @@
               "measures": [
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "users",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -2920,11 +2920,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3020,7 +3020,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3176,11 +3176,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3265,7 +3265,7 @@
               "measures": [
                 {
                   "name": "dau",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -3349,11 +3349,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3443,7 +3443,7 @@
               "measures": [
                 {
                   "name": "attempts",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -3524,11 +3524,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3608,11 +3608,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3681,11 +3681,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -3726,11 +3726,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3806,11 +3806,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -3868,7 +3868,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3958,11 +3958,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4048,11 +4048,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -4093,11 +4093,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4223,16 +4223,16 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 },
                 {
                   "name": "max_price",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "price"
                 }
               ]
@@ -4289,16 +4289,16 @@
               "measures": [
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "pc1_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "principal_component_1"
                 },
                 {
                   "name": "pc2_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "principal_component_2"
                 }
               ]
@@ -4350,11 +4350,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4468,7 +4468,7 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             }
@@ -4516,7 +4516,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4594,11 +4594,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4682,11 +4682,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -5113,11 +5113,11 @@
               "measures": [
                 {
                   "name": "matched_events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "reports",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "crash_id"
                 }
               ]
@@ -5177,12 +5177,12 @@
               "measures": [
                 {
                   "name": "spend",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "cost"
                 },
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -5300,7 +5300,7 @@
             {
               "stage": "unnest",
               "source": "breadcrumbs_of_event_data",
-              "as": "crumb",
+              "name": "crumb",
               "type": "string"
             },
             {
@@ -5311,11 +5311,11 @@
               "measures": [
                 {
                   "name": "occurrences",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "reports",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "crash_id"
                 }
               ]
@@ -5395,12 +5395,12 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 },
                 {
                   "name": "purchases",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },

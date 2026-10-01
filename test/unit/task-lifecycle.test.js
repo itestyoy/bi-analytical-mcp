@@ -159,7 +159,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   // the first build is in flight: a query on it is accepted, checked against that build's columns
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['no_such_column'] } }), (err) => err.field === 'transform' && /no_such_column/.test(err.message));
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], order_by: [{ key: 'player_id_of_internal' }] } }), /order_by/);
-  const q1 = await e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ fn: 'count', column: '*' }], order_by: [{ key: 'count' }] } });
+  const q1 = await e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'count' }], order_by: [{ key: 'count' }] } });
   assert.ok(isStartedTask(q1) && q1.read_with === 'query_pipeline_model');
   await until(() => runner.held.length);
   runner.held.shift()();
@@ -175,7 +175,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   assert.notEqual(built2.model, built1.model);
   assert.equal((await taskResult(e, q2.task_id)).model, built2.model);
   // a sum needs a column: refused by the schema, in the call
-  await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ fn: 'sum' }] } }), /column/);
+  await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'sum' }] } }), /column/);
 });
 
 test('a protocol task refuses a read of the other side at once, instead of waiting out the build', async () => {
@@ -226,7 +226,7 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
   const e1 = make(runner);
   const { draft_id } = await e1.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e1.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  await e1.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
   const build = await e1.build_pipeline_model({ action: 'materialize', draft_id });
   await taskResult(e1, build.task_id);
   const display = { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'n' }] };
@@ -234,7 +234,7 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   e1.close();
   // the server restarts; the card is still open in the conversation
   const e2 = make(runner);
-  const level = await e2.drill_result({ task_id: build.task_id, transform: { group_by: ['event_name'], aggregations: [{ fn: 'sum', column: 'n', as: 'n' }] } });
+  const level = await e2.drill_result({ task_id: build.task_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }] } });
   assert.notEqual(level.ok, false, JSON.stringify(level.error));
   await assert.rejects(() => e2.display_model_result({ task_id: build.task_id, display }), /shown already/, 'and it is still drawn once');
   // a host proxying the card's read without the Apps envelope is still served (the proof is the drawn task)

@@ -38,7 +38,7 @@ export const drill = {
   description: 'Let the person drill down: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a stored result (materialize: true, or a pipeline build) whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view re-aggregates with `agg`: sums and counts add up, but a distinct count, an average or a ratio does not (a user in two platforms counts twice) — be careful with non-additive metrics.',
   properties: {
     levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimensions offered, in the order the menu lists them.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the dimension reads in the menu (default: the column name).' } } } },
-    agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a view fold into its values.' },
+    agg: { enum: ['sum', 'count', 'min', 'max', 'average'], default: 'sum', description: 'How the rows under a view fold into its values.' },
   },
 };
 
@@ -114,7 +114,7 @@ export const display = {
           type: 'object', additionalProperties: false, required: ['column'],
           properties: {
             column: resultColumn,
-            agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a level fold into its value.' },
+            agg: { enum: ['sum', 'count', 'min', 'max', 'average'], default: 'sum', description: 'How the rows under a level fold into its value.' },
             label: { type: 'string', maxLength: 60, description: 'How the value reads to the person (default: the column name).' },
             format: { enum: ['number', 'percent', 'currency'], default: 'number' },
             currency: { type: 'string', pattern: '^[A-Z]{3}$', default: 'USD' },

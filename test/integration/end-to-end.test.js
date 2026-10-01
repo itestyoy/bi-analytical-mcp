@@ -233,7 +233,7 @@ test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_
   assert.equal(reached(r.rows, 'tut2'), 5);
   assert.equal(reached(r.rows, 'tut3'), 3);
   // transform the stored table in place: count users whose furthest step is tut3 = 3
-  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] } });
+  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ agg: 'count', name: 'n' }] } });
   assert.equal(t3.ok, true, JSON.stringify(t3.error));
   assert.equal(num(t3.rows[0].n), 3);
 });

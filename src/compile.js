@@ -270,7 +270,7 @@ export function compileDeclaration(catalog, decl) {
       if (!/^[A-Za-z0-9_+\-*/().,\s]+$/.test(expr)) {
         fail(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`, 'metrics.expr');
       }
-      const aliases = new Set((md.metrics || []).map((x) => x.alias || x.name));
+      const aliases = new Set((md.metrics || []).map((x) => x.name || x.metric));
       const SAFE_FNS = new Set(['nullif', 'coalesce', 'abs', 'round', 'least', 'greatest', 'floor', 'ceil', 'ceiling', 'power', 'sqrt', 'ln', 'log', 'exp', 'mod']);
       for (const tok of expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []) {
         if (!aliases.has(tok) && !SAFE_FNS.has(tok)) {
@@ -279,7 +279,7 @@ export function compileDeclaration(catalog, decl) {
       }
       // input metrics are namespaced; alias each to the raw name so the user's
       // `expr` (written with raw metric names) resolves correctly in MetricFlow.
-      const inputs = md.metrics.map((x) => ({ name: NS(task, x.name), alias: x.alias || x.name }));
+      const inputs = md.metrics.map((x) => ({ name: NS(task, x.metric), alias: x.name || x.metric }));
       addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
     } else if (md.type === 'conversion') {
       const ctp = {

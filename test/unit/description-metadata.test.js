@@ -26,7 +26,7 @@ const engine = () => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
   contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'descr-')) }),
 }));
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
 
 test('a draft keeps its description, reports it, and hands it to the fork', async () => {
   const e = engine();

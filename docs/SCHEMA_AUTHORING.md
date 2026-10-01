@@ -481,7 +481,7 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одна строка на элемент — «на каком шаге ломалось»
-{ stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' }
+{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }
 //   → 20 строк; group_by crumb: level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, …
 
 // длина массива, не меняя грань
@@ -526,11 +526,11 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одно поле элемента, одной стадией — «какие файлы падают»
-{ stage: 'unnest', source: 'stack_frames_of_event_data', as: 'file', field: 'file' }
+{ stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' }
 //   → 16 кадров по 10 отчётам; group_by file: Game.cs 5, Net.cs 4, Engine.cs 3, Shop.cs 2, Decode.cs 1, Ads.cs 1
 
 // несколько полей — элемент целиком, потом json_field по каждому
-{ stage: 'unnest',  source: 'stack_frames_of_event_data', as: 'frame' }
+{ stage: 'unnest',  source: 'stack_frames_of_event_data', name: 'frame' }
 { stage: 'compute', name: 'file',   op: 'json_field', column: 'frame', field: 'file' }
 { stage: 'compute', name: 'line',   op: 'json_field', column: 'frame', field: 'line', type: 'int' }
 { stage: 'compute', name: 'in_app', op: 'json_field', column: 'frame', field: 'in_app' }
@@ -612,7 +612,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 ```js
 { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' }
 { stage: 'derive', name: 'has_cat', op: 'contains',     source: 'words_collected', value: 'cat' }
-{ stage: 'unnest', source: 'rewards', as: 'rw' }          // элемент-структура целиком
+{ stage: 'unnest', source: 'rewards', name: 'rw' }          // элемент-структура целиком
 { stage: 'compute', name: 'item', op: 'json_field', column: 'rw', field: 'item' }
 ```
 

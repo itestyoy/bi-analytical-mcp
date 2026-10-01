@@ -54,7 +54,7 @@ after(() => { try { engine?.close(); } catch { /* noop */ } if (work) rmSync(wor
 // NaN; ddof = 0): mean 33.333…, std 24.607… → p1 −0.1355, p2 −1.1514, p3 +1.2869; p4 stays NaN.
 const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p3: (65 - 100 / 3) / Math.sqrt(1816.6666667 / 3) };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
 const PY = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
@@ -92,7 +92,7 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   // The result IS a table in the warehouse: re-read it, and re-slice it.
   const again = await readTable(engine, r.context_id, r.model);
   assert.equal(again.rows.length, 4);
-  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], aggregations: [{ fn: 'count', as: 'players' }], order_by: [{ key: 'tier' }] } });
+  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], aggregations: [{ agg: 'count', name: 'players' }], order_by: [{ key: 'tier' }] } });
   assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
   // and so is the prep table, under its own name
   const prep = await readTable(engine, r.context_id, r.models[0].model);

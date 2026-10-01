@@ -21,7 +21,7 @@ function engine() {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, fn: 'count' }] });
+const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, agg: 'count' }] });
 const keepEvents = (value) => ({ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value }] });
 const funnel = {
   stage: 'match_recognize',

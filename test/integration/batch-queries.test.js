@@ -100,10 +100,10 @@ test('a batch of projections over a built pipeline model: count, non-NULL count 
   const started = await engine.raw.query_pipeline_model({
     context_id: s.draft_id,
     queries: [
-      { transform: { aggregations: [{ fn: 'count', as: 'rows' }] } },
-      { transform: { aggregations: [{ fn: 'count', column: 'price', as: 'priced' }] } },
-      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ fn: 'sum', column: 'price', as: 'revenue' }] } },
-      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ fn: 'sum', column: 'price', as: 'amount' }], order_by: [{ key: 'event_name' }] } },
+      { transform: { aggregations: [{ agg: 'count', name: 'rows' }] } },
+      { transform: { aggregations: [{ agg: 'count', column: 'price', name: 'priced' }] } },
+      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
+      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');

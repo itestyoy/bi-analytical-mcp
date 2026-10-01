@@ -30,7 +30,7 @@ test('warns when a used field is empty for the scoped bundle+event (triple)', as
   const s = await e.build_pipeline_model({ action: 'start', name: 'triple_empty', source: 'events' });
   await add(e, s.draft_id, { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.colorfit' }] });
   await add(e, s.draft_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['level_started'] }] });
-  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] });
+  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] });
   assert.ok(
     r.recommendations.some((x) => x.includes('ad_type_of_event_data') && /NO values/.test(x) && x.includes('com.omg.colorfit') && x.includes('level_started')),
     JSON.stringify(r.recommendations),
@@ -47,7 +47,7 @@ test('no warning when the field is populated for the scoped bundle+event', async
   const s = await e.build_pipeline_model({ action: 'start', name: 'triple_ok', source: 'events' });
   await add(e, s.draft_id, { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.wordsearch' }] });
   await add(e, s.draft_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_finished'] }] });
-  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] });
+  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] });
   assert.ok(!r.recommendations.some((x) => /NO values/.test(x)), JSON.stringify(r.recommendations));
 });
 
@@ -60,7 +60,7 @@ test('warns from the per-bundle marginal when only the app is scoped', async () 
   });
   const s = await e.build_pipeline_model({ action: 'start', name: 'bundle_only', source: 'events' });
   await add(e, s.draft_id, { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.colorfit' }] });
-  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] });
+  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] });
   assert.ok(r.recommendations.some((x) => x.includes('ad_type_of_event_data') && /NULL for app/.test(x) && x.includes('com.omg.colorfit')), JSON.stringify(r.recommendations));
 });
 
@@ -69,6 +69,6 @@ test('no empty-combination warning when nothing concrete is scoped', async () =>
   const e = engine();
   e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 3, cellCoverage: [{ bundle: 'com.omg.colorfit', event: 'level_started', rowCount: 53, nonNull: 0 }] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'noscope', source: 'events' });
-  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] });
+  const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] });
   assert.ok(!r.recommendations.some((x) => /NO values|NULL for app/.test(x)), JSON.stringify(r.recommendations));
 });

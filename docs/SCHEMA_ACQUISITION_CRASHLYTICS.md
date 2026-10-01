@@ -401,7 +401,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 
 | что случилось | что говорит ошибка |
 |---|---|
-| имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', as: 'events_event_name' }` |
+| имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', name: 'events_event_name' }` |
 | имя уже есть, и это **колонка ключа связи** | `'player_id_of_internal' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs` |
 | два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`as\`` |
 

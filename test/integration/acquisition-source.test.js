@@ -180,7 +180,7 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'spend_date', op: 'date_trunc', column: 'device_time', granularity: 'day' } });
     await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'acquisition', on, attrs: [{ column: 'media_source' }] } });
-    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] } });
     const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
@@ -216,7 +216,7 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
   const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', fn: 'count' }] } });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', agg: 'count' }] } });
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');

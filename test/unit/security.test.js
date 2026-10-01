@@ -32,7 +32,7 @@ test('derived metric expr is restricted to a safe arithmetic grammar', () => {
     semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
     metrics: [
       { name: 'r', type: 'simple', measure: { name: 'r' } },
-      { name: 'bad', type: 'derived', expr: "r) as x, (select 1 from creds--", metrics: [{ name: 'r' }] },
+      { name: 'bad', type: 'derived', expr: "r) as x, (select 1 from creds--", metrics: [{ metric: 'r' }] },
     ],
   }), /unknown identifier|illegal characters/);
 });

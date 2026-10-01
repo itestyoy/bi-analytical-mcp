@@ -1,7 +1,7 @@
 // THE COMPUTE STAGE'S OPS — one table: each op's fields and its SQL. The stage's schema (one form per
 // op, with exactly that op's fields) and its build both read it (src/pipeline/stages.js).
 
-import { rawUnknownColumns, condPred, frameClause, requireCol, requireArrayCol } from './sql.js';
+import { rawUnknownColumns, condPred, frameClause, requireCol, requireArrayCol, sqlAgg } from './sql.js';
 
 // ── The compute stage's ops ─────────────────────────────
 // One entry per op: the fields it requires (`needs`), the ones it may take besides (`may` — what its
@@ -124,8 +124,8 @@ export const COMPUTE_OPS = {
       if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
       // the value a lag/lead/min/max returns is the column's own; a count is a whole number
       else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; type = cols.get(p.column)?.type || 'unknown'; }
-      else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) {
-        call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame);
+      else if (['sum', 'average', 'count', 'min', 'max'].includes(p.fn)) {
+        call = p.fn === 'count' && !p.column ? 'count(*)' : `${sqlAgg(p.fn)}(${col()})`; frame = frameClause(p.frame);
         type = p.fn === 'count' ? 'int' : ['min', 'max'].includes(p.fn) ? (cols.get(p.column)?.type || 'unknown') : 'numeric';
       }
       else throw new Error(`window: bad fn ${p.fn}`);

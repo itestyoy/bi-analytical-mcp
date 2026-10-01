@@ -495,7 +495,7 @@ export class Catalog {
     return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
   }
 
-  /** Numeric event_properties keys (valid for sum/avg/median/percentile). */
+  /** Numeric event_properties keys (valid for sum/average/median/percentile). */
   eventNumericProps(fact) {
     fact = this._fact(fact);
     const props = this.models[fact]?.properties || {};

@@ -211,7 +211,7 @@ export function metricSchema(catalog) {
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
     expr: { type: 'string', description: 'Arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
-    metrics: { type: 'array', description: 'The input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string', description: 'Name of an input metric.' }, alias: { type: 'string', description: 'Optional alias to use for this metric inside `expr`.' } } } },
+    metrics: { type: 'array', minItems: 1, description: 'The input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['metric'], properties: { metric: { type: 'string', pattern: NAME, description: 'An input metric of this task, by its name.' }, name: { type: 'string', pattern: NAME, description: 'The name `expr` uses for it (default: the metric\'s own name).' } } } },
     base_measure: { ...measureRef, description: 'The starting population (must be count_distinct of an entity), e.g. users who launched.' },
     conversion_measure: { ...measureRef, description: 'The converted population (count_distinct of the same entity), e.g. users who purchased.' },
     window: { type: 'string', pattern: WINDOW, description: 'Time window in which the conversion must occur after the base event, e.g. "1 day", "7 day", "1 week".' },

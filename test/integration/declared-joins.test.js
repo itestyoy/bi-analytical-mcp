@@ -229,7 +229,7 @@ async function pipeRows(source, ...stages) {
 async function joinStats(source, joinStage, idColumn) {
   const rows = await pipeRows(source, joinStage, {
     stage: 'aggregate',
-    measures: [{ name: 'n', fn: 'count' }, { name: 'distinct_base', fn: 'count_distinct', column: idColumn }],
+    measures: [{ name: 'n', agg: 'count' }, { name: 'distinct_base', agg: 'count_distinct', column: idColumn }],
   });
   return { n: num(rows[0].n), distinct: num(rows[0].distinct_base) };
 }
@@ -272,7 +272,7 @@ test('3. the windowed join leaves the total spend at 17.50', opts, async (t) => 
   if (skip(t)) return;
   const rows = await pipeRows('acquisition',
     { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+    { stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'cost' }] });
   assert.ok(near(num(rows[0].total), 17.5), `total=${rows[0].total}`);
 });
 
@@ -281,7 +281,7 @@ test('4. spend by country is attributed to the version valid on the spend day', 
   if (skip(t)) return;
   const rows = await pipeRows('acquisition',
     { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', agg: 'sum', column: 'cost' }] });
   const by = mapCol(rows, 'country', 'total');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
   assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
@@ -331,7 +331,7 @@ test('9. summing cost over the event pairing inflates it to 267.75, not 17.50', 
   if (skip(t)) return;
   const rows = await pipeRows('events',
     { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'cost' }] },
-    { stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+    { stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'cost' }] });
   assert.ok(near(num(rows[0].total), 267.75), `total=${rows[0].total}`);
 });
 
@@ -372,7 +372,7 @@ test('13. events by country are attributed point-in-time: US 67 / GB 57 / DE 31 
   if (skip(t)) return;
   const rows = await pipeRows('events',
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', fn: 'count' }] });
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }] });
   const by = mapCol(rows, 'country', 'n');
   assert.equal(by.US, 67);
   assert.equal(by.GB, 57);
@@ -540,7 +540,7 @@ test('24. the real variants are untouched by the pruning: 14 / 12 / 8', opts, as
     const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
     for (const stage of [
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-      { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+      { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
     ]) {
       const r = await phantomEngine.build_pipeline_model({ action: 'add_step', draft_id: st.draft_id, stage });
       assert.ok(!r.error, JSON.stringify(r.error));
@@ -570,7 +570,7 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
   for (const stage of [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'distinct_base', fn: 'count_distinct', column: 'event_id' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'distinct_base', agg: 'count_distinct', column: 'event_id' }] },
   ]) {
     const r = await phantomEngine.build_pipeline_model({ action: 'add_step', draft_id: st.draft_id, stage });
     assert.ok(!r.error, JSON.stringify(r.error));
@@ -761,7 +761,7 @@ test('32. what preview shows is what materialize builds', opts, async (t) => {
   if (skip(t)) return;
   const stages = [
     { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', agg: 'sum', column: 'cost' }] },
   ];
   const direct = mapCol(await runSql(await generatedSql('acquisition', ...stages)), 'country', 'total');
   const built = mapCol(await pipeRows('acquisition', ...stages), 'country', 'total');
@@ -825,7 +825,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     await call('build_pipeline_model', {
       action: 'add_step',
       draft_id: s.draft_id,
-      stage: { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] },
+      stage: { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', agg: 'sum', column: 'cost' }] },
     });
     const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
     assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
@@ -956,7 +956,7 @@ test('39. aggregating the chain: 25.00 across 3 channels, u1 dominating', opts, 
   const rows = await pipeRows('crashlytics',
     ...CHAIN_FROM_CRASH.slice(0, 2),
     { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }] },
-    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', fn: 'sum', column: 'cost' }, { name: 'n', fn: 'count' }] });
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', agg: 'sum', column: 'cost' }, { name: 'n', agg: 'count' }] });
   const spend = mapCol(rows, 'media_source', 'spend');
   const n = mapCol(rows, 'media_source', 'n');
   assert.ok(near(spend.meta, 20.0), `meta=${spend.meta}`);      // u1 8x1.50 + 8x0.50, u3 2x2.00
@@ -1125,19 +1125,19 @@ test('44. any column of a joined model can be listed: 7 crashes / 8 events / 25.
   const rows = await pipeRows('crashlytics', ...CHAIN_LISTED, {
     stage: 'aggregate',
     measures: [
-      { name: 'n', fn: 'count' },
+      { name: 'n', agg: 'count' },
       // crashlytics (the base): its id and an EVENT-SCOPED payload column
-      { name: 'crashes', fn: 'count_distinct', column: 'crash_id' },
-      { name: 'issues', fn: 'count_distinct', column: 'issue_title_of_event_data' },
+      { name: 'crashes', agg: 'count_distinct', column: 'crash_id' },
+      { name: 'issues', agg: 'count_distinct', column: 'issue_title_of_event_data' },
       // events (joined): its id, its funnel key and its own event-scoped payload
-      { name: 'events', fn: 'count_distinct', column: 'event_id' },
-      { name: 'funnels', fn: 'count_distinct', column: 'tracking_id' },
-      { name: 'ad_types', fn: 'count_distinct', column: 'ad_type_of_event_data' },
+      { name: 'events', agg: 'count_distinct', column: 'event_id' },
+      { name: 'funnels', agg: 'count_distinct', column: 'tracking_id' },
+      { name: 'ad_types', agg: 'count_distinct', column: 'ad_type_of_event_data' },
       // acquisition (joined): the AMOUNTS — the fields a dimensions-only join could not reach
-      { name: 'spend', fn: 'sum', column: 'cost' },
-      { name: 'impressions', fn: 'sum', column: 'impressions' },
-      { name: 'clicks', fn: 'sum', column: 'clicks' },
-      { name: 'spend_rows', fn: 'count_distinct', column: 'acquisition_id' },
+      { name: 'spend', agg: 'sum', column: 'cost' },
+      { name: 'impressions', agg: 'sum', column: 'impressions' },
+      { name: 'clicks', agg: 'sum', column: 'clicks' },
+      { name: 'spend_rows', agg: 'count_distinct', column: 'acquisition_id' },
     ],
   });
   const r = rows[0];
@@ -1160,7 +1160,7 @@ test('45. group by a joined attribute, measure joined amounts: meta 18 / organic
   const rows = await pipeRows('crashlytics', ...CHAIN_LISTED, {
     stage: 'aggregate',
     group_by: ['media_source'],
-    measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }, { name: 'impressions', fn: 'sum', column: 'impressions' }],
+    measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }, { name: 'impressions', agg: 'sum', column: 'impressions' }],
   });
   const n = mapCol(rows, 'media_source', 'n');
   const spend = mapCol(rows, 'media_source', 'spend');
@@ -1177,7 +1177,7 @@ test('46. date math between a base time column and a joined one: 2..6 days, 82 i
   if (skip(t)) return;
   const rows = await pipeRows('crashlytics', ...CHAIN_LISTED,
     { stage: 'compute', name: 'days_after_spend', op: 'date_diff', from: { column: 'spend_date' }, to: { column: 'event_time' }, unit: 'day' },
-    { stage: 'aggregate', measures: [{ name: 'lo', fn: 'min', column: 'days_after_spend' }, { name: 'hi', fn: 'max', column: 'days_after_spend' }, { name: 'total', fn: 'sum', column: 'days_after_spend' }] });
+    { stage: 'aggregate', measures: [{ name: 'lo', agg: 'min', column: 'days_after_spend' }, { name: 'hi', agg: 'max', column: 'days_after_spend' }, { name: 'total', agg: 'sum', column: 'days_after_spend' }] });
   assert.equal(num(rows[0].lo), 2);
   assert.equal(num(rows[0].hi), 6);
   assert.equal(num(rows[0].total), 82);
@@ -1190,12 +1190,12 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   const narrow = { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] };
   // the listed one is usable…
   const rows = await pipeRows('crashlytics', narrow,
-    { stage: 'aggregate', measures: [{ name: 'events', fn: 'count_distinct', column: 'event_id' }] });
+    { stage: 'aggregate', measures: [{ name: 'events', agg: 'count_distinct', column: 'event_id' }] });
   assert.equal(num(rows[0].events), 8);
   // …and its neighbours in the joined model are simply not in the pipeline.
   for (const unlisted of ['tracking_id', 'ad_type_of_event_data', 'session_number', 'device_time']) {
     await assert.rejects(
-      () => pipeRows('crashlytics', narrow, { stage: 'aggregate', measures: [{ name: 'x', fn: 'count_distinct', column: unlisted }] }),
+      () => pipeRows('crashlytics', narrow, { stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: unlisted }] }),
       new RegExp(`unknown column '${unlisted}'`),
       `${unlisted} must not appear unasked`,
     );
@@ -1203,7 +1203,7 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   // …and asking for it is all it takes.
   const wider = await pipeRows('crashlytics',
     { ...narrow, attrs: [{ column: 'event_id' }, { column: 'tracking_id' }] },
-    { stage: 'aggregate', measures: [{ name: 'funnels', fn: 'count_distinct', column: 'tracking_id' }] });
+    { stage: 'aggregate', measures: [{ name: 'funnels', agg: 'count_distinct', column: 'tracking_id' }] });
   assert.equal(num(wider[0].funnels), 4);
 });
 
@@ -1244,14 +1244,14 @@ test('48. duplicate names and unknown columns are refused with the fix', opts, a
   await assert.rejects(
     () => joinStep('crashlytics', {
       stage: 'join', with: 'events', via: 'ad_funnel_rewarded',
-      attrs: [{ column: 'event_id', as: 'x' }, { column: 'tracking_id', as: 'x' }],
+      attrs: [{ column: 'event_id', name: 'x' }, { column: 'tracking_id', name: 'x' }],
     }),
     /'event_id' and 'tracking_id' would both be named 'x'/,
   );
   // …and the rename the error printed is accepted, with both sides present.
   const rows = await pipeRows('crashlytics',
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'events_event_name' }] },
-    { stage: 'aggregate', group_by: ['event_name', 'events_event_name'], measures: [{ name: 'n', fn: 'count' }] });
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'events_event_name' }] },
+    { stage: 'aggregate', group_by: ['event_name', 'events_event_name'], measures: [{ name: 'n', agg: 'count' }] });
   const crashSide = {}; const adSide = {};
   for (const r of rows) {
     crashSide[String(r.event_name)] = (crashSide[String(r.event_name)] || 0) + num(r.n);
@@ -1278,12 +1278,12 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
 
   // and it builds, with BOTH versions in the result.
   const rows = await pipeRows('crashlytics',
-    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'app_version', as: 'users_app_version' }, { column: 'country' }] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'app_version', name: 'users_app_version' }, { column: 'country' }] },
     { stage: 'aggregate', measures: [
-      { name: 'n', fn: 'count' },
-      { name: 'crash_versions', fn: 'count_distinct', column: 'app_version' },
-      { name: 'install_versions', fn: 'count_distinct', column: 'users_app_version' },
-      { name: 'countries', fn: 'count_distinct', column: 'country' },
+      { name: 'n', agg: 'count' },
+      { name: 'crash_versions', agg: 'count_distinct', column: 'app_version' },
+      { name: 'install_versions', agg: 'count_distinct', column: 'users_app_version' },
+      { name: 'countries', agg: 'count_distinct', column: 'country' },
     ] });
   assert.equal(num(rows[0].n), 13, 'point-in-time: one install version per crash');
   assert.ok(num(rows[0].crash_versions) >= 1, 'the crash side stayed the base column');
@@ -1459,7 +1459,7 @@ async function perDayMatches(catalog) {
     stage: { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: [{ column: 'cost' }] },
   });
   assert.ok(!j.error, `add_step join: ${JSON.stringify(j.error)}`);
-  await eng.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] } });
+  await eng.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] } });
   const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return { n: num(c.rows[0].n), spend: num(c.rows[0].spend) };

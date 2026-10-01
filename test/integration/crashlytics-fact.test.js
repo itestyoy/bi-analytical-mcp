@@ -247,13 +247,13 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   const a = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
-    stage: { stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' },
+    stage: { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
   });
   assert.equal(a.step_index, 1);
   const g = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
-    stage: { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', fn: 'count' }] },
+    stage: { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }] },
   });
   assert.equal(g.step_index, 2);
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
@@ -276,7 +276,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
   const count = async (conditions) => {
     const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
     const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
@@ -320,7 +320,7 @@ test('columns named like keywords (group, order) flow through the stages as colu
   const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
   await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
     { stage: 'compute', name: 'group', op: 'coalesce', columns: ['app_version'], default: 'none' },
-    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
   ] });
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });

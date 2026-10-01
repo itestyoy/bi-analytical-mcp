@@ -124,7 +124,7 @@ export function buildSchema(catalog) {
         model: { const: model },
         attribute: { type: 'string', enum: catalog.modelDimensionColumns(model), description: `A column of ${model}.` },
         ...(via.length ? { via: { type: 'string', enum: via, description: 'The relationship to reach it by, when the source declares several toward it.' } } : {}),
-        as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the attribute).' },
+        name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the attribute).' },
       },
     };
   }).filter((b) => b.properties.attribute.enum.length);
@@ -138,11 +138,11 @@ export function buildSchema(catalog) {
   const own = (list, what) => ({ type: 'string', enum: list, description: `${what} of the source (each is checked against the source you name).` });
   segmentBranches.push({
     type: 'object', additionalProperties: false, required: ['column'], title: 'source column',
-    properties: { column: column('A column of the source itself'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the column).' } },
+    properties: { column: column('A column of the source itself'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the column).' } },
   });
   if (ownProps.length) segmentBranches.push({
     type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
-    properties: { property: own(ownProps, 'A scalar event_data property'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
+    properties: { property: own(ownProps, 'A scalar event_data property'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
   });
   const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_null', 'is_not_null'] };
   const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; none for is_null/is_not_null).' };

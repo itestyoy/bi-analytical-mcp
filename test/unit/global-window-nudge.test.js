@@ -35,7 +35,7 @@ const engine = (dialect) => {
   return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'win-')) }) }));
 };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] };
 const DERIVE = { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' };
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
@@ -45,7 +45,7 @@ test('a window with no partition_by is named as a global window, with the aggreg
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG });
   const out = await e.build_pipeline_model({
     action: 'add_step', draft_id,
-    stage: { stage: 'compute', name: 'revenue_avg', op: 'window', fn: 'avg', column: 'revenue' },
+    stage: { stage: 'compute', name: 'revenue_avg', op: 'window', fn: 'average', column: 'revenue' },
   });
   const said = [...(out.recommendations || []), ...(out.warnings || [])].join(' ');
   assert.match(said, /Global analytic window/);

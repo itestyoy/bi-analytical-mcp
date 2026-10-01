@@ -25,31 +25,26 @@ export function makeValidators(schemas) {
 }
 
 /**
- * THE SAME FUNCTION, TWO SPELLINGS — because there are two engines underneath. A governed measure
- * is MetricFlow's vocabulary (`average`, the quantile in `percentile`, `field: '*'` for rows); a
- * pipeline stage is SQL's (`avg`, the quantile in `q`, `count` with no column at all). Neither
- * spelling is wrong; each is right in its own path, and a caller that learned one hits a flat
- * refusal in the other.
- *
- * So: the vocabularies stay as they are, and the REFUSAL says which spelling this path uses. The
- * table is symmetric (a → b and b → a) and is consulted only when the name the caller used has a
- * counterpart that IS allowed here — otherwise nothing is added.
+ * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. Every path aggregates with
+ * `agg`, the mean is `average`, a quantile is `percentile` and the name a step produces is `name`;
+ * a caller used to SQL or another tool writes `avg`, `q`, `fn`, `as` — and the refusal says what
+ * this server calls it, when that name is allowed where it was written.
  */
 const CROSS_PATH_SPELLING = {
-  average: 'avg',
   avg: 'average',
   mean: 'average',
-  percentile: 'q',
   q: 'percentile',
-  quantile: 'q',
-  count_distinct: 'count_distinct',
+  quantile: 'percentile',
+  fn: 'agg',
+  as: 'name',
+  alias: 'name',
 };
 
 /** What this path calls `used`, when it has a name for it at all. */
 function otherSpelling(used, allowed) {
   if (typeof used !== 'string') return null;
   const alt = CROSS_PATH_SPELLING[used];
-  if (!alt || alt === used) return null;
+  if (!alt) return null;
   return allowed.includes(alt) ? alt : null;
 }
 
@@ -78,7 +73,7 @@ function oneOf(at, vals, used, alt) {
   const near = typeof used === 'string' && !alt ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
   return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
     + (near.length ? `. Did you mean ${near.map((v) => `'${v}'`).join(' or ')}?` : '')
-    + (alt ? `. Here '${used}' is spelled '${alt}' — '${used}' is the other path's spelling of the same function` : '');
+    + (alt ? `. Here '${used}' is spelled '${alt}'` : '');
 }
 
 /** Turn one Ajv error into a plain-English sentence. `ctx` = { input, schema } for the hints. */
@@ -94,7 +89,7 @@ function describe(e, ctx = {}) {
       // a form of a union names what it takes: the field is not one of them (src/schema-kit.js form)
       const fields = Object.keys(node?.properties || {});
       const takes = node?.title && node.properties ? ` — ${node.title} takes ${fields.length ? fields.join(', ') : 'no fields'}` : '';
-      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}' (${used} is the other path's spelling)` : takes}`;
+      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'` : takes}`;
     }
     case 'enum': {
       // A long enum is the schema being exact; a long MESSAGE is just noise — name enough to act on.
@@ -127,6 +122,10 @@ function describe(e, ctx = {}) {
     case 'oneOfNamed': return `${at} must be exactly one of: ${e.params.names.join(' | ')}`;
     case 'requiresOneOf': return `${at} needs at least one of: ${e.params.keys.join(', ')}`;
     case 'unionOfValues': return `${at} must be ${e.params.title || `one of: ${e.params.names.join(' | ')}`}`;
+    case 'pattern':
+      // SQL's count(*) habit: a row count is the count with no column
+      if (e.data === '*' && /column$/.test(e.instancePath)) return `${at}: '*' is not a column — leave \`column\` out to count rows`;
+      return `${at} ${e.message}`;
     default: return `${at} ${e.message}`;
   }
 }

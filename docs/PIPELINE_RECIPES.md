@@ -20,7 +20,7 @@ contract.
   {stage:"join",   with:"users", via:"user", attrs:[{ column: "country" }]},   // `via` = the relationship the schema declares; add
   //                                                                 between:{value:"device_time",from:…,to:…} if the
   //                                                                 install record is slowly-changing (validity window)
-  {stage:"aggregate", group_by:["country"], measures:[{name:"revenue",fn:"sum",column:"price"}]} ]
+  {stage:"aggregate", group_by:["country"], measures:[{name:"revenue",agg:"sum",column:"price"}]} ]
 ```
 `FROM events |> WHERE event_name='iap_purchase_completed' |> EXTEND … AS price |> JOIN dim_users USING(appsflyer_id) |> AGGREGATE SUM(price) AS revenue GROUP BY country`
 
@@ -29,15 +29,15 @@ contract.
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
   {stage:"derive", name:"price", op:"extract", source:"price_in_usd", type:"numeric"},
   {stage:"aggregate", group_by:[], measures:[
-     {name:"med",fn:"median",column:"price"},
-     {name:"p90",fn:"percentile",column:"price",q:0.9},
-     {name:"sd", fn:"stddev",column:"price"}]} ]
+     {name:"med",agg:"median",column:"price"},
+     {name:"p90",agg:"percentile",column:"price",percentile:0.9},
+     {name:"sd", agg:"stddev",column:"price"}]} ]
 ```
 
 ### Revenue pivoted to per-country columns (dashboard matrix)
 ```jsonc
 [ …where+derive(price)+join(country)…,
-  {stage:"pivot", group_by:[], on:"country", fn:"sum", value_column:"price", values:["US","GB","BR"]} ]
+  {stage:"pivot", group_by:[], on:"country", agg:"sum", value_column:"price", values:["US","GB","BR"]} ]
 ```
 `|> PIVOT(SUM(price) FOR country IN ('US','GB','BR'))`
 
@@ -54,7 +54,7 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
 [ {stage:"where", conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
   {stage:"compute", name:"pseq", op:"window", fn:"row_number", partition_by:["appsflyer_id"], order_by:[{key:"device_time"}]},
   {stage:"where", conditions:[{column:"pseq",op:"gte",value:2}]},
-  {stage:"aggregate", group_by:[], measures:[{name:"repeat_buyers",fn:"count_distinct",column:"appsflyer_id"}]} ]
+  {stage:"aggregate", group_by:[], measures:[{name:"repeat_buyers",agg:"count_distinct",column:"appsflyer_id"}]} ]
 ```
 `|> EXTEND ROW_NUMBER() OVER(PARTITION BY appsflyer_id ORDER BY device_time) AS pseq |> WHERE pseq>=2 …`
 
@@ -92,8 +92,8 @@ to read a sketch's cardinality.
 // distinct buyers across products, deduped (merge), without rescanning raw events:
 [ {stage:"where", conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
   {stage:"derive", name:"pid", op:"extract", source:"product_id", type:"string"},
-  {stage:"aggregate", group_by:["pid"], measures:[{name:"sk", fn:"hll_init", column:"appsflyer_id"}]},
-  {stage:"aggregate", group_by:[],      measures:[{name:"buyers", fn:"hll_merge", column:"sk"}]} ]
+  {stage:"aggregate", group_by:["pid"], measures:[{name:"sk", agg:"hll_init", column:"appsflyer_id"}]},
+  {stage:"aggregate", group_by:[],      measures:[{name:"buyers", agg:"hll_merge", column:"sk"}]} ]
 ```
 BigQuery → `HLL_COUNT.INIT/MERGE/MERGE_PARTIAL/EXTRACT`; DuckDB → an exact,
 mergeable distinct-set fallback. For a rolling N-day unique: `hll_init` per day,
@@ -104,14 +104,14 @@ then merge the trailing-N days' sketches.
 [ …derive(price)…,
   {stage:"compute", name:"tier", op:"case",
      cases:[{when:[{column:"price",op:"lt",value:10}], then:{value:"low"}}], else:{value:"high"}},
-  {stage:"aggregate", group_by:["tier"], measures:[{name:"n",fn:"count"}]} ]
+  {stage:"aggregate", group_by:["tier"], measures:[{name:"n",agg:"count"}]} ]
 ```
 
 ### Item / reward frequency  (unnest)
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"level_completed"}]},
-  {stage:"unnest", source:"words_collected", as:"word"},
-  {stage:"aggregate", group_by:["word"], measures:[{name:"n",fn:"count"}]},
+  {stage:"unnest", source:"words_collected", name:"word"},
+  {stage:"aggregate", group_by:["word"], measures:[{name:"n",agg:"count"}]},
   {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", n:10} ]
 ```
 

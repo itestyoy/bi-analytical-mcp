@@ -64,7 +64,7 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
 
   const total = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], materialize: true });
   assert.equal(total.status, 'done', JSON.stringify(total));
-  const totalR = await readTable(engine, ctx, total.table, { transform: { aggregations: [{ fn: 'sum', column: 'scd_rev_revenue', as: 't' }] } });
+  const totalR = await readTable(engine, ctx, total.table, { transform: { aggregations: [{ agg: 'sum', column: 'scd_rev_revenue', name: 't' }] } });
   assert.equal(num(totalR.rows[0].t), 100, 'point-in-time total revenue = 100 (a fan-out join would give 130)');
 
   const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
@@ -117,7 +117,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
   // and the surviving metric still queries to the point-in-time total
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_revenue'], materialize: true });
-  const r = await readTable(engine, created.context_id, m.table, { transform: { aggregations: [{ fn: 'sum', column: 'scd_drop_revenue', as: 't' }] } });
+  const r = await readTable(engine, created.context_id, m.table, { transform: { aggregations: [{ agg: 'sum', column: 'scd_drop_revenue', name: 't' }] } });
   assert.equal(num(r.rows[0].t), 100);
 });
 
@@ -130,7 +130,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
       { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
-      { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
+      { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
   });
   assert.equal(r.action, 'add_steps');
@@ -154,7 +154,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
       { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }] },
-      { stage: 'aggregate', measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
+      { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
   });
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });

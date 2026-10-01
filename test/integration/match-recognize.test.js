@@ -72,7 +72,7 @@ test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', op
   const count = async (time_range) => {
     const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
     ] } });
     assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
     ctxId = out.context_id;
@@ -89,7 +89,7 @@ test('time_range with a timezone keeps the events on the other UTC day of a part
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' }, stages: [
     { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;
@@ -122,7 +122,7 @@ test('a where on the time axis and a funnel window read the same rows with the p
   const byDay = [
     { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 10:00:00' }, { column: 'device_time', op: 'lt', value: '2026-01-02 10:00:00' }] },
     { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ];
   const funnel = [matchActivation({ filter: { time_range: { start: '2026-01-01 09:30:00', end: '2026-01-02' } }, steps: activationSteps.slice(0, 2) })];
   const pruned = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
@@ -185,7 +185,7 @@ test('pipeline response: output_columns (carried partition key) + the task that 
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
 test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
   if (skip(t)) return;
-  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] }];
+  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }];
   const wide = await engine._buildPipeline({ dry_run: true, name: 'est_wide', pipeline: { source: 'events', stages } });
   const narrow = await engine._buildPipeline({ dry_run: true, name: 'est_narrow', pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
   assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
@@ -323,7 +323,7 @@ test('funnel sliced + aggregated in-pipeline: aggregate count by furthest_step_n
   // semantic-model "users by furthest step".
   const out = await pipe([
     matchActivation(),
-    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'users', direction: 'desc' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.furthest_step_name), num(r.users)]));
@@ -361,7 +361,7 @@ test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 
     { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
-      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'avg', property: 'n_words', step: 'lvl1' }] },
+      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'average', property: 'n_words', step: 'lvl1' }] },
   ]);
   assert.equal(reached(out.rows, 'lvl1'), 12);
   const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.pv_avg_words));
@@ -385,7 +385,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
   assert.equal(by.US, 35); assert.equal(by.GB, 25); assert.equal(by.BR, 25);
@@ -397,7 +397,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
+    { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(out.rows.length, 1);
   assert.equal(num(out.rows[0].US), 35);
@@ -406,7 +406,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
 
 test('_buildPipeline: dry_run returns SQL without building', opts, async (t) => {
   if (skip(t)) return;
-  const dr = await engine._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] }] } });
+  const dr = await engine._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] }] } });
   assert.equal(dr.dry_run, true);
   assert.equal(dr.kind, 'pipeline');
   assert.equal(typeof dr.model_sql, 'string');
@@ -450,7 +450,7 @@ test('pipeline time_range: single date-only day is not collapsed to a midnight i
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `day_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;

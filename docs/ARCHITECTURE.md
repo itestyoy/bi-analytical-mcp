@@ -247,7 +247,7 @@ Declarative pipeline:
     { "stage": "match_recognize", "partition_by": "user", "mode": "ordered",
       "steps": [ { "name": "launch", "event_name": ["first_launch"] },
                  { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "property": "level_id", "op": "eq", "value": 1 } ] } ],
-      "metrics": [ { "name": "avg_words", "type": "agg_at_step", "agg": "avg", "property": "n_words", "step": "lvl1" } ] },
+      "metrics": [ { "name": "avg_words", "type": "agg_at_step", "agg": "average", "property": "n_words", "step": "lvl1" } ] },
     { "stage": "aggregate", "group_by": ["furthest_step_name", "user__platform"], "measures": [ { "name": "users", "agg": "count" } ] }
   ]
 }

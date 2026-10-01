@@ -71,16 +71,16 @@ export function validateBuild(engine, input, physical = null) {
     if (seg.column !== undefined) {
       // a column of the source itself: no join
       if (!own.includes(seg.column)) throw new ToolError(`'${seg.column}' is not a column of '${source}'${suggest(seg.column, own)} (its columns: ${own.join(', ') || 'none declared'})`, { stage: 'validate', field: 'segments.column' });
-      name = seg.as || seg.column;
+      name = seg.name || seg.column;
       out = { column: seg.column, name };
     } else if (seg.property !== undefined) {
       if (!props.includes(seg.property)) throw new ToolError(`'${seg.property}' is not a scalar event property of '${source}'${suggest(seg.property, props)}`, { stage: 'validate', field: 'segments.property' });
-      name = seg.as || seg.property;
+      name = seg.name || seg.property;
       out = { property: seg.property, name };
     } else {
       const dims = c.modelDimensionColumns(seg.model);
       if (!dims.includes(seg.attribute)) throw new ToolError(`'${seg.attribute}' is not an attribute of '${seg.model}'${suggest(seg.attribute, dims)}`, { stage: 'validate', field: 'segments.attribute' });
-      name = seg.as || seg.attribute;
+      name = seg.name || seg.attribute;
       out = { ...seg, name, via: relationshipTo(c, source, seg.model, seg.via) };
     }
     claimSegmentName(name, segNames);
@@ -113,7 +113,7 @@ export function checkWhereValue(w) {
 
 /** A segment's name, once: not one of the eventstream's own columns, nor another segment's. */
 export function claimSegmentName(name, taken) {
-  if (Object.values(ES_COLUMNS).includes(name) || taken.includes(name)) throw new ToolError(`segment name '${name}' is taken — give it another with as`, { stage: 'validate', field: 'segments.as' });
+  if (Object.values(ES_COLUMNS).includes(name) || taken.includes(name)) throw new ToolError(`segment name '${name}' is taken — give it another with name`, { stage: 'validate', field: 'segments.name' });
   taken.push(name);
 }
 
@@ -153,7 +153,7 @@ export function validateTaskBuild(input, base) {
     if (seg.property !== undefined) noCatalog(`the segment names the event property '${seg.property}'`, 'segments.property');
     if (seg.column === undefined) noCatalog(`the segment names ${seg.model}.${seg.attribute}`, 'segments.model');
     known(seg.column, 'segments.column');
-    const name = seg.as || seg.column;
+    const name = seg.name || seg.column;
     claimSegmentName(name, segNames);
     return { column: seg.column, name };
   });

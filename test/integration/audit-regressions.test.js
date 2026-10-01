@@ -294,8 +294,8 @@ test('19. a relationship nobody owns is pipeline only — and the pipeline join 
   const v = await engine.semantic_index({ model: 'crashlytics' });
   assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'pipeline only');
   const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'ev_name' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev_name' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.deepEqual(mapCol(rows, 'event_name', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
 });
@@ -382,7 +382,7 @@ test('27. a time axis on a missing column is dropped and the model still joins: 
   assert.equal(cat.getModel('experiments').time, undefined);
   const rows = await pipeRows('events', [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
-    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', fn: 'count_distinct', column: 'player_id_of_internal' }] },
+    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', agg: 'count_distinct', column: 'player_id_of_internal' }] },
   ], eng);
   assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 });
 });
@@ -458,7 +458,7 @@ test('36. the session key is not a groupable path of the events source', opts, a
 
 test('37. …a pipeline reads the key like any column: sessions 1..4 hold 150 / 26 / 4 / 4 events', opts, async (t) => {
   if (skip(t)) return;
-  const rows = await pipeRows('events', [{ stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', fn: 'count' }] }]);
+  const rows = await pipeRows('events', [{ stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', agg: 'count' }] }]);
   assert.deepEqual(mapCol(rows, 'session_number', 'n'), { 1: 150, 2: 26, 3: 4, 4: 4 });
 });
 
@@ -497,7 +497,7 @@ test('41. pipeline: the same property extracted → the same 10 / 8 / 6', opts, 
   const rows = await pipeRows('events', [
     { stage: 'derive', name: 'ad_type', op: 'extract', source: 'ad_type_of_event_data' },
     { stage: 'where', conditions: [{ column: 'ad_type', op: 'is_not_null' }] },
-    { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.deepEqual(mapCol(rows, 'ad_type', 'n'), { rewarded: 10, interstitial: 8, banner: 6 });
 });
@@ -517,7 +517,7 @@ test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 
   const rows = await pipeRows('events', [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'aggregate', measures: [{ name: 'rev', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].rev), 85); assert.equal(num(rows[0].n), 8);
 });
@@ -553,8 +553,8 @@ test('46. the guide names the real variant relationships, and the first one join
   assert.ok(trig && /ad_funnel_rewarded/.test(trig.do) && /ad_funnel_interstitial/.test(trig.do) && /ad_funnel_banner/.test(trig.do), JSON.stringify(trig));
   assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'nothing domain-specific');
   const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'ev' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].n), 14);
 });

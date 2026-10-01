@@ -46,7 +46,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 const STEPS = [
   { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
   { stage: 'derive', name: 'score', op: 'extract', source: 'daily_level_score_of_event_data', type: 'numeric' },
-  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', fn: 'count' }, { name: 'total_score', fn: 'sum', column: 'score' }] },
+  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', agg: 'count' }, { name: 'total_score', agg: 'sum', column: 'score' }] },
   { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] },
 ];
 
@@ -132,7 +132,7 @@ test('a funnel and a payload read run on top of a materialized event slice, with
     partition_by: ['player_id_of_internal'],
     steps: [{ name: 'started', event_name: ['level_started'] }, { name: 'completed', event_name: ['level_completed'] }],
   };
-  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', fn: 'count' }] };
+  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', agg: 'count' }] };
 
   const whole = await build('cp_fn_whole', [SLICE, FUNNEL, COUNT]);
   const split = await build('cp_fn_split', [SLICE, FUNNEL, COUNT], [1]); // the slice is the prefix
@@ -143,8 +143,8 @@ test('a funnel and a payload read run on top of a materialized event slice, with
   assert.deepEqual(tally(split.result), tally(whole.result));
 
   // The payload column survived the slice too, so a derive on top of the prefix reads it.
-  const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }]);
-  const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }], [1]);
+  const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }]);
+  const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }], [1]);
   assert.equal(splitScore.result.from_checkpoint.at, 1);
   assert.equal(num(splitScore.result.rows[0].total), num(wholeScore.result.rows[0].total));
   assert.ok(num(wholeScore.result.rows[0].total) > 0, 'the payload actually carried values');

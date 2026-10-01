@@ -441,7 +441,7 @@ export const semanticIndexMethods = {
     };
     if (spec.unit && spec.type === 'string') {
       out.cast_hint = 'numeric';
-      out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
+      out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/average.`];
     }
     // Per-app split: which apps populate this property vs leave it empty (non_null=0).
     // Surfaced so the AI sees a property is app-specific before using it cross-app.

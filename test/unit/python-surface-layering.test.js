@@ -136,7 +136,7 @@ test('every failure a shipped recipe answers has a place that names that recipe'
     JSON.stringify(pythonAuthoringGuide(bq, loadRecipes(RECIPES).entriesRequiring('python_models'))),
     JSON.stringify(bq.runHints),
     e._sqlRunMessage('', 'Resources exceeded during query execution'),
-    JSON.stringify(e.advisor.globalWindowWarnings({ stage: 'compute', op: 'window', fn: 'avg', column: 'x' })),
+    JSON.stringify(e.advisor.globalWindowWarnings({ stage: 'compute', op: 'window', fn: 'average', column: 'x' })),
   ].join('\n');
   // each observed failure of the last weeks is answered SOMEWHERE the caller will be standing
   for (const id of [

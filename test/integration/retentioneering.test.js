@@ -376,7 +376,7 @@ test('an analysis the library raises on keeps its error; the call\'s other analy
 test('a where on a segment compares a number as a number, and a negation keeps the rows with no value — as the rows say', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', segments: [{ property: 'level_id_of_event_data', as: 'level' }] });
+  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', segments: [{ property: 'level_id_of_event_data', name: 'level' }] });
   const built = await engine.query_retentioneering_model({ task_id: b.task_id });
   assert.equal(built.status, 'done', JSON.stringify(built.error));
   const ctx = built.context_id;
@@ -553,7 +553,7 @@ test('a column a step makes is an identifier the warehouse stores; a segment nam
   // nor a name the stored eventstream uses for what it carries besides
   await assert.rejects(segmentNamed('event_order'), (e) => e.field === 'step' && /uses that name itself/.test(e.message));
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it
-  const b = await engine.build_retentioneering_model({ context_id: ctx, name: 'keyworded', source: 'events', segments: [{ model: 'users', attribute: 'platform', as: 'group' }] });
+  const b = await engine.build_retentioneering_model({ context_id: ctx, name: 'keyworded', source: 'events', segments: [{ model: 'users', attribute: 'platform', name: 'group' }] });
   const read = await engine.query_retentioneering_model({ task_id: b.task_id });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform')).rows;
@@ -785,7 +785,7 @@ test('the source\'s own columns and event properties filter the paths and carry 
   const b = await engine.build_retentioneering_model({
     name: 'one_app', source: 'events',
     where: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.colorfit' }],
-    segments: [{ column: 'bundle_id', as: 'app' }, { property: 'level_id_of_event_data', as: 'level' }],
+    segments: [{ column: 'bundle_id', name: 'app' }, { property: 'level_id_of_event_data', name: 'level' }],
   });
   const r = await engine.query_retentioneering_model({ task_id: b.task_id });
   assert.equal(r.status, 'done', JSON.stringify(r.error));
@@ -917,7 +917,7 @@ test('an eventstream from a pipeline build: events a window defined, the table\'
   const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: p.draft_id });
   const built = await engine.query_pipeline_model({ task_id: m.task_id });
   assert.equal(built.status, 'done', JSON.stringify(built.error));
-  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', as: 'app' }] });
+  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', name: 'app' }] });
   const r = await engine.query_retentioneering_model({ task_id: b.task_id });
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected);
@@ -976,7 +976,7 @@ test('from the task of a draft\'s rebuild: the eventstream and a pipeline starte
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   assert.equal(r.events, n);
   const q = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: q.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: q.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] } });
   const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: q.draft_id });
   const rows = await engine.query_pipeline_model({ task_id: m.task_id });
   assert.equal(rows.status, 'done', JSON.stringify(rows.error));

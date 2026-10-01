@@ -4,7 +4,7 @@
 // themselves (src/match-recognize.js, src/python-model.js).
 
 import { GRAINS } from '../catalog.js';
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITION, propEnum, sourceProp, operandSql, condPred, aggExpr, addCol, requireCol } from './sql.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITION, propEnum, sourceProp, operandSql, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
 import { COMPUTE_OPS, computeForms } from './compute.js';
 import { form, pick, strEnum } from '../schema-kit.js';
 
@@ -100,7 +100,7 @@ export const STAGES = {
         // (e.g. install_date) — NOT an SCD validity bound like install_time_valid_from, whose
         // open side is a sentinel (e.g. 1970-01-01), which makes retention_day nonsensically huge.
         clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
-        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
+        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/average/min/max.' },
         columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Inputs for coalesce, all of them columns; its literal fallback is `default`.' },
         parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands — each { column } or { value } — for op=concat and for least/greatest: least of two columns is parts [{ column: "a" }, { column: "b" }]; winsorizing at a threshold computed earlier is least with parts [{ column }, { value: <threshold> }].' },
         search: { type: 'string', description: 'Substring to find for op=replace.' },
@@ -119,13 +119,13 @@ export const STAGES = {
         cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of ANDed conditions, `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: CONDITION }, then: OPERAND } } },
         else: OPERAND,
         // op=window
-        fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'avg', 'count', 'min', 'max'], description: 'Window function for op=window.' },
+        fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'average', 'count', 'min', 'max'], description: 'Window function for op=window.' },
         partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' },
         order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' },
         offset: { type: 'integer', minimum: 1, description: 'Row offset for window lag/lead (default 1).' },
         frame: {
           type: 'object', additionalProperties: false,
-          description: 'Window frame for aggregate window fns (sum/avg/count/min/max). ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
+          description: 'Window frame for aggregate window fns (sum/average/count/min/max). ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
           properties: {
             mode: { enum: ['rows', 'range'], description: 'rows = physical rows; range = value-based on the order key.' },
             preceding: { description: 'Lower bound: an integer offset, or "unbounded" (default unbounded).' },
@@ -154,12 +154,12 @@ export const STAGES = {
 
   unnest: {
     schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'source', 'as'],
+      type: 'object', additionalProperties: false, required: ['stage', 'source', 'name'],
       description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
         stage: { enum: ['unnest'] },
         source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by compute op=json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
-        as: { type: 'string', pattern: NAME },
+        name: { type: 'string', pattern: NAME, description: 'The name the element column gets.' },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: { enum: ['int', 'numeric', 'float', 'string'] },
       },
@@ -185,7 +185,7 @@ export const STAGES = {
       // gone, and the unnest would reference a column the relation does not have.
       requireCol(cols, column);
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
-      return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
+      return { op: { op: 'unnest', column, key, as: p.name, field: p.field, type, encoding }, cols: addCol(cols, p.name, type) };
     },
   },
 
@@ -213,7 +213,7 @@ export const STAGES = {
               type: 'object', additionalProperties: false, required: ['column'],
               properties: {
                 column,
-                as: { type: 'string', pattern: NAME, description: 'Name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
+                name: { type: 'string', pattern: NAME, description: 'The name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
               },
             },
           },
@@ -241,7 +241,7 @@ export const STAGES = {
       }
       return {
         type: 'object',
-        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there. VIA: A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at. ATTRS: REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is { column } — or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns. BETWEEN: Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
+        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there. VIA: A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at. ATTRS: REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is { column } — or { column, name } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns. BETWEEN: Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
         anyOf: forms,
       };
     },
@@ -282,10 +282,10 @@ export const STAGES = {
         throw new Error(
           `join '${p.with}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly.`
           + `${joined.size ? ` Columns of '${p.with}': ${avail()}.` : ''}`
-          + ` Use { column, as } to expose one under a different name. semantic_index({ request: { model: '${p.with}' } }) describes them.`,
+          + ` Use { column, name } to expose one under a different name. semantic_index({ request: { model: '${p.with}' } }) describes them.`,
         );
       }
-      const attrs = p.attrs.map((a) => ({ column: a.column, as: a.as || a.column }));
+      const attrs = p.attrs.map((a) => ({ column: a.column, as: a.name || a.column }));
       const byName = new Map();
       for (const a of attrs) {
         if (known && !known.has(a.column)) throw new Error(`join '${p.with}' attrs: '${a.column}' is not a column of '${p.with}' (available: ${avail()})`);
@@ -298,10 +298,10 @@ export const STAGES = {
             `join '${p.with}' attrs: the pipeline already has a column named '${a.as}', so exposing '${p.with}'.${a.column} under that name would leave two columns sharing one name — unaddressable in every later stage.`
             + (isKey
               ? ` '${a.column}' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs.`
-              : ` The two hold different data, so rename the joined one: { column: '${a.column}', as: '${p.with}_${a.column}' }.`),
+              : ` The two hold different data, so rename the joined one: { column: '${a.column}', name: '${p.with}_${a.column}' }.`),
           );
         }
-        if (byName.has(a.as)) throw new Error(`join '${p.with}' attrs: '${byName.get(a.as)}' and '${a.column}' would both be named '${a.as}'. Give each its own \`as\`.`);
+        if (byName.has(a.as)) throw new Error(`join '${p.with}' attrs: '${byName.get(a.as)}' and '${a.column}' would both be named '${a.as}'. Give each its own \`name\`.`);
         byName.set(a.as, a.column);
       }
       const relation = `{{ ref('${m.dbt_model}') }}`;
@@ -341,35 +341,35 @@ export const STAGES = {
       // query execution", with analytic windows as the whole of the accounted memory, and it
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
-      description: `Group rows and compute measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile(q). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles. `
+      description: `Group rows and compute measures (COLLAPSES grain to the group keys). Measures (agg): sum/average/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile (its share in percentile). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles. `
         + `A TABLE-WIDE NUMBER IS THIS STAGE WITH NO group_by — it returns ONE row (a threshold, a mean, a deviation) and is the memory-safe way to get one; an analytic OVER() with no PARTITION BY (op=window without partition_by, or raw SQL) instead keeps all the rows and attaches the value to each, which exhausts the query's memory on a large table ("Resources exceeded during query execution") — the exact percentile worst of all, because it also has to order the values. So: get the numbers here first, then apply them per row in a later pass as literals (compute sub/div/least with { value }). `
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/avg/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
+        measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/average/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
       },
     }),
     build: ({ d, cols }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
-      const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.fn, m.column, m.q) }; });
+      const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile) }; });
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.fn) ? 'sketch' : 'numeric' });
+      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : 'numeric' });
       return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },
 
   pivot: {
     schema: () => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'on', 'fn', 'value_column', 'values'],
+      type: 'object', additionalProperties: false, required: ['stage', 'on', 'agg', 'value_column', 'values'],
       description: 'Turn listed values of `on` into columns, each aggregating `value_column` (the values must be listed explicitly). For dashboard-ready matrices (e.g. revenue as one column per country, or retention day as columns).',
       properties: {
         stage: { enum: ['pivot'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
         on: { type: 'string', description: 'Column whose values become columns.' },
-        fn: { enum: ['sum', 'avg', 'min', 'max', 'count'] },
+        agg: { enum: ['sum', 'average', 'min', 'max', 'count'], description: 'How each pivoted cell aggregates value_column.' },
         value_column: { type: 'string', description: 'Column aggregated into each pivoted column.' },
         values: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^[A-Za-z0-9_]+$' }, description: 'The values of `on` to pivot into columns.' },
       },
@@ -380,7 +380,7 @@ export const STAGES = {
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
       for (const v of p.values) out.set(v, { type: 'numeric' });
-      return { op: { op: 'pivot', groupBy, on: p.on, fn: p.fn, valueCol: p.value_column, values: p.values }, cols: out };
+      return { op: { op: 'pivot', groupBy, on: p.on, fn: sqlAgg(p.agg), valueCol: p.value_column, values: p.values }, cols: out };
     },
   },
 
@@ -483,16 +483,16 @@ export function pipelineStageSchema(catalog) {
  * optional (count counts rows without one; the sketch functions read one when given).
  */
 function aggregateMeasure(fnDescription) {
-  const needColumn = ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median'];
+  const needColumn = ['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median'];
   const optional = AGG_FNS.filter((f) => f !== 'percentile' && !needColumn.includes(f));
   const name = { type: 'string', pattern: NAME };
   const column = { type: 'string' };
   return {
     type: 'object',
     anyOf: [
-      form({ title: `fn: ${needColumn.join(' | ')}`, tag: ['fn', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column } }),
-      form({ title: `fn: ${optional.join(' | ')}`, tag: ['fn', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column } }),
-      form({ title: 'fn: percentile', tag: ['fn', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'q'], properties: { name, column, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1).' } } }),
+      form({ title: `agg: ${needColumn.join(' | ')}`, tag: ['agg', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column } }),
+      form({ title: `agg: ${optional.join(' | ')}`, tag: ['agg', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column } }),
+      form({ title: 'agg: percentile', tag: ['agg', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'percentile'], properties: { name, column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The percentile in (0,1), e.g. 0.95 for p95.' } } }),
     ],
   };
 }

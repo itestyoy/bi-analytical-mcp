@@ -90,14 +90,14 @@ test('a pipeline started FROM a stored result re-slices it without recomputing (
     return built.rows;
   };
   // (a) compress to a single total
-  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'mon_revenue' }] }]);
+  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'mon_revenue' }] }]);
   assert.equal(num(total.total), 85);
   // (b) one country -> exact seed value (US revenue = 35)
-  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] }]);
+  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] }]);
   assert.equal(num(us.rev), 35);
   // (c) group, then keep the groups whose total clears a bar
   const big = await from('big', [
-    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] },
+    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] },
     { stage: 'where', conditions: [{ column: 'rev', op: 'gte', value: 25 }] },
   ]);
   assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25));
@@ -110,11 +110,11 @@ test('a drawn card reads its views from its own task: values are bound as litera
   const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'mon_revenue' }] } });
   assert.equal(card.drawn, true, JSON.stringify(card).slice(0, 300));
   assert.equal(card.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85, 'the top level is the whole result, folded by country');
-  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
   assert.equal(num(us.rows[0].rev), 35);
   // injection/escaping proven on DATA: a value containing a quote+SQL is bound as a literal ->
   // the read runs safely and simply matches nothing.
-  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
   assert.equal(inj.ok, true, JSON.stringify(inj.error));
   assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null);
 });
@@ -131,23 +131,23 @@ test('query_pipeline_model over a built model: count(column) counts NON-NULL onl
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' } });
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const started = await engine.raw.query_pipeline_model({ context_id: s.draft_id, transform: { aggregations: [{ fn: 'count', column: '*', as: 'total' }] } });
+  const started = await engine.raw.query_pipeline_model({ context_id: s.draft_id, transform: { aggregations: [{ agg: 'count', name: 'total' }] } });
   assert.ok(isStartedTask(started), 'a query over a built model is a task too');
   const totalR = await taskResult(engine, started.task_id);
   const read = (transform) => engine.query_pipeline_model({ context_id: s.draft_id, transform });
-  const nnR = await read({ aggregations: [{ fn: 'count', column: 'price', as: 'nn' }] });
-  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ fn: 'count', column: '*', as: 'nulls' }] });
+  const nnR = await read({ aggregations: [{ agg: 'count', column: 'price', name: 'nn' }] });
+  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ agg: 'count', name: 'nulls' }] });
   assert.equal(totalR.ok !== false && nnR.ok !== false && nullR.ok !== false, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
   const total = num(totalR.rows[0].total); const nonNull = num(nnR.rows[0].nn); const nulls = num(nullR.rows[0].nulls);
   assert.ok(nulls > 0, `fixture must have NULL price rows, got ${nulls}`);
   assert.ok(nonNull < total, `count(price)=${nonNull} must exclude NULLs (< total ${total}) — a COUNT(*) regression makes them equal`);
   assert.equal(nonNull + nulls, total, `count(column) + null_count must equal count(*): ${nonNull} + ${nulls} != ${total}`);
   // grouped: the priced rows per event name add back up to the non-NULL count, and only purchase events carry a price
-  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ fn: 'count', column: 'price', as: 'n' }] });
+  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'count', column: 'price', name: 'n' }] });
   assert.ok(byEvent.rows.every((r) => String(r.event_name).startsWith('iap_purchase')), JSON.stringify(byEvent.rows));
   assert.equal(byEvent.rows.reduce((a, r) => a + num(r.n), 0), nonNull);
   // injection/escaping proven on DATA: the literal matches nothing, and the query runs
-  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] });
+  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], aggregations: [{ agg: 'count', name: 'n' }] });
   assert.equal(num(inj.rows[0].n), 0);
   // a semantic context is not a pipeline model
   await assert.rejects(() => engine.query_pipeline_model({ context_id: ctxId }), /no built pipeline model/);
@@ -167,18 +167,18 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ fn: 'count', as: 'n' }] } });
+  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ agg: 'count', name: 'n' }] } });
   assert.ok(prev.rows.every((r) => typeof r.prev_event === 'string' && src.some((x) => x.e === r.prev_event)), 'its values are event names');
   const r = await engine.query_pipeline_model({ context_id: s.draft_id, transform: {
     group_by: ['player_id_of_internal'],
     aggregations: [
-      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], as: 'starts' },
-      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], as: 'completes' },
+      { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], name: 'starts' },
+      { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], name: 'completes' },
     ],
     then: { aggregations: [
-      { fn: 'count', as: 'players' },
-      { fn: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], as: 'completed_once' },
-      { fn: 'sum', column: 'starts', as: 'starts' },
+      { agg: 'count', name: 'players' },
+      { agg: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], name: 'completed_once' },
+      { agg: 'sum', column: 'starts', name: 'starts' },
     ] },
   } });
   assert.equal(r.ok !== false, true, JSON.stringify(r.error));
@@ -188,7 +188,7 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // a second level reads the first's columns only
-  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ fn: 'count', as: 'n' }], then: { aggregations: [{ fn: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
 });
 
 test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {
@@ -220,7 +220,7 @@ test('a described pipeline builds and returns exactly the rows of the same pipel
   const stages = [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'purchases', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'purchases', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'player_id_of_internal', direction: 'asc' }] },
   ];
   const build = async (name, description) => {

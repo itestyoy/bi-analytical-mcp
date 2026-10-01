@@ -157,11 +157,11 @@ test('2. crash → its ad funnel → the install version then → that player\'s
     { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'acquisition_id' }, { column: 'cost' }, { column: 'media_source' }] },
     { stage: 'aggregate', measures: [
-      { name: 'n', fn: 'count' },
-      { name: 'crashes', fn: 'count_distinct', column: 'crash_id' },
-      { name: 'events', fn: 'count_distinct', column: 'event_id' },
-      { name: 'funnels', fn: 'count_distinct', column: 'tracking_id' },
-      { name: 'spend', fn: 'sum', column: 'cost' },
+      { name: 'n', agg: 'count' },
+      { name: 'crashes', agg: 'count_distinct', column: 'crash_id' },
+      { name: 'events', agg: 'count_distinct', column: 'event_id' },
+      { name: 'funnels', agg: 'count_distinct', column: 'tracking_id' },
+      { name: 'spend', agg: 'sum', column: 'cost' },
     ] },
   ]);
   const r = built.rows[0];
@@ -183,7 +183,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   const stats = async (extra) => {
     const built = await mcpPipeline('acquisition', [
       { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: [{ column: 'country' }], ...extra },
-      { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'rows', fn: 'count_distinct', column: 'acquisition_id' }] },
+      { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'rows', agg: 'count_distinct', column: 'acquisition_id' }] },
     ]);
     return { n: num(built.rows[0].n), distinct: num(built.rows[0].rows) };
   };
@@ -209,7 +209,7 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
   if (skip(t)) return;
   const rowsFor = async (variant) => (await mcpPipeline('crashlytics', [
     { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
   ])).rows[0].n;
   assert.equal(num(await rowsFor('rewarded')), 14);
   assert.equal(num(await rowsFor('interstitial')), 12);
@@ -254,8 +254,8 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (c) the rename works, and both sides are readable side by side.
   const built = await mcpPipeline('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'events_event_name' }] },
-    { stage: 'aggregate', group_by: ['event_name', 'events_event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'events_event_name' }] },
+    { stage: 'aggregate', group_by: ['event_name', 'events_event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   const crashSide = {}; const adSide = {};
   for (const r of built.rows) {
@@ -270,7 +270,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
   await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] } });
   const unlisted = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: s,
-    stage: { stage: 'aggregate', measures: [{ name: 'x', fn: 'count_distinct', column: 'tracking_id' }] },
+    stage: { stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] },
   });
   assert.match(unlisted.error.message, /unknown column 'tracking_id'/);
 });
@@ -290,7 +290,7 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
     // after the funnel the per-event time is gone; `first_seen_at` (the funnel's first event) is
     // the instant to attribute the player by.
     { stage: 'join', with: 'users', via: 'user', between: AT('first_seen_at'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country', 'reached_tut1'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['country', 'reached_tut1'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   const cell = {};
   for (const r of built.rows) cell[`${r.country}/${String(r.reached_tut1)}`] = num(r.n);
@@ -342,7 +342,7 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
   // group sizes: distinct players per assigned variant, straight from the experiments source.
   const sizes = await mcpPipeline('events', [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }, { column: 'experiment_name' }] },
-    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'users', fn: 'count_distinct', column: 'player_id_of_internal' }] },
+    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'users', agg: 'count_distinct', column: 'player_id_of_internal' }] },
   ]);
   const n = mapCol(sizes.rows, 'variant_group', 'users');
   assert.deepEqual(n, { control: 6, variant_b: 6 });
@@ -351,7 +351,7 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
   const conv = await mcpPipeline('events', [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
-    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', fn: 'count_distinct', column: 'player_id_of_internal' }] },
+    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] },
   ]);
   const c = mapCol(conv.rows, 'variant_group', 'payers');
   assert.deepEqual(c, { control: 6, variant_b: 1 });
@@ -395,7 +395,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
     return call('build_pipeline_model', { action: 'materialize', draft_id: d.draft_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
-    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] },
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] },
   ]);
   const n = mapCol(sliced.rows, 'media_source', 'n');
   const spend = mapCol(sliced.rows, 'media_source', 'spend');
@@ -405,7 +405,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   // a filter over the stored result is just as cheap.
   const meta = await slice(`e2e_slice_${seq++}`, [
     { stage: 'where', conditions: [{ column: 'media_source', op: 'eq', value: 'meta' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(meta.rows[0].n), 18);
   // the stored result itself pages without recomputing

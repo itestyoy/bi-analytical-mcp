@@ -13,7 +13,7 @@ export const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
 
 export const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null', 'like', 'not_like', 'contains', 'starts_with', 'ends_with'];
 
-export const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile', 'hll_init', 'hll_merge', 'hll_merge_partial'];
+export const AGG_FNS = ['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile', 'hll_init', 'hll_merge', 'hll_merge_partial'];
 
 export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sketch column
 
@@ -170,6 +170,9 @@ export function frameClause(f) {
   return ` ${mode} BETWEEN ${start} AND ${end}`;
 }
 
+/** The SQL function of an aggregation where it differs from its name (the vocabulary is the semantic layer's). */
+export const sqlAgg = (agg) => (agg === 'average' ? 'avg' : agg);
+
 export function aggExpr(d, fn, column, q) {
   if (fn === 'count' && !column) return 'count(*)';
   const c = d.quoteIdent(column);
@@ -179,10 +182,10 @@ export function aggExpr(d, fn, column, q) {
   if (fn === 'hll_merge') return d.hllMerge(c);
   if (fn === 'hll_merge_partial') return d.hllMergePartial(c);
   if (STAT_FNS.has(fn)) {
-    if (fn === 'percentile' && !(typeof q === 'number' && q > 0 && q < 1)) throw new Error("percentile requires q in (0,1)");
+    if (fn === 'percentile' && !(typeof q === 'number' && q > 0 && q < 1)) throw new Error('percentile requires `percentile` in (0,1)');
     return d.statAggExpr(fn, c, q);
   }
-  return `${fn}(${c})`; // sum / avg / min / max
+  return `${sqlAgg(fn)}(${c})`; // sum / average / min / max
 }
 
 export function addCol(cols, name, type) {
@@ -198,7 +201,7 @@ export function requireCol(cols, name) {
   // A stage counts rows by leaving `column` out entirely, so say that instead of listing every
   // column and leaving the caller to guess what a SQL habit translates to here.
   if (name === '*') {
-    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, fn: 'count' }); `field: '*'` is the governed path's spelling (build_semantic_model measures)");
+    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, agg: 'count' }); `field: '*'` is the governed path's spelling (build_semantic_model measures)");
   }
   throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }

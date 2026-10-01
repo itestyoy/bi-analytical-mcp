@@ -26,7 +26,7 @@ export function pivotTransform(display, path) {
   return {
     where: path.map((key, i) => (key === null ? { column: display.levels[i].column, op: 'is_null' } : { column: display.levels[i].column, op: 'eq', value: key })),
     group_by: [display.levels[path.length].column],
-    aggregations: display.values.map((v) => ({ fn: v.agg || 'sum', column: v.column, as: v.column })),
+    aggregations: display.values.map((v) => ({ agg: v.agg || 'sum', column: v.column, name: v.column })),
     // the largest first, an empty value last — the same on every warehouse
     order_by: [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
   };
@@ -49,7 +49,7 @@ export function drillView(display, path = [], step = null) {
   const agg = display.drill?.agg || 'sum';
   const ys = drillYs(display);
   const where = path.map((f) => (f.value === null ? { column: f.column, op: 'is_null' } : { column: f.column, op: 'eq', value: f.value }));
-  const aggregations = ys.map((y) => ({ fn: agg, column: y, as: y }));
+  const aggregations = ys.map((y) => ({ agg, column: y, name: y }));
   const used = new Set(path.map((f) => f.column));
   // the levels left to step into from here
   const rest = (display.drill?.levels || []).filter((l) => !used.has(l.column) && (!step || l.column !== step.level.column));

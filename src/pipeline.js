@@ -42,7 +42,7 @@
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
 //                            Solves: bring user attributes (country/platform/install_date).
-//   aggregate  |> AGGREGATE  group + measures: sum/avg/min/max/count/count_distinct,
+//   aggregate  |> AGGREGATE  group + measures: sum/average/min/max/count/count_distinct,
 //                            approx_count_distinct (HLL++), stddev/variance/median/
 //                            percentile(q). Solves: totals, rates, distributions,
 //                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.

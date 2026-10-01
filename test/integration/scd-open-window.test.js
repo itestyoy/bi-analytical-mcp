@@ -31,7 +31,7 @@ test('a point-in-time join keeps the open-ended current version, and still picks
       ('u2', 'BR', '2026-01-01 00:00:00', NULL);
   `);
 
-  const op = { on: ['player_id'], attrs: [{ column: 'country', as: 'country' }], relation: 'dim', between: AT };
+  const op = { on: ['player_id'], attrs: [{ column: 'country', name: 'country' }], relation: 'dim', between: AT };
   const sql = d.joinCte('ev', op);
   const r = await wh.query(`SELECT id, country, amount FROM (${sql}) x ORDER BY id`);
 

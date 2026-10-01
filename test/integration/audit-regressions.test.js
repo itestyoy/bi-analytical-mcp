@@ -171,7 +171,7 @@ test('2. the response echoes the path the structured reference resolved to', opt
 
 test('3. a where clause addressed by model + attribute: GB has 57 events', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].aeu_evts), 57);
 });
@@ -229,42 +229,42 @@ test('10. a structured attribute and a time grain together: one month, 184 event
 
 test('11. a wrong-cased country on users.country is rejected with the real casing', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'gb' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'gb' }] }),
     /different casing.*'GB'/s);
 });
 
 test('12. …and the correctly cased value returns 57', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
   assert.equal(num(r.rows[0].aeu_evts), 57);
 });
 
 test('13. an IN list is checked value by value: GB + US = 124', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'US'] }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'US'] }] });
   assert.equal(num(r.rows[0].aeu_evts), 124);
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'us'] }] } }), /different casing/);
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'us'] }] }), /different casing/);
 });
 
 test('14. a value absent from a fully indexed small set is rejected outright', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'XX' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'XX' }] }),
     /does not occur in this column/);
 });
 
 test('15. the guard applies to the structured reference too', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'De' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'De' }] }),
     /different casing.*'DE'/s);
-  const ok = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'DE' }] } });
+  const ok = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'DE' }] });
   assert.equal(num(ok.rows[0].aeu_evts), 31);
 });
 
 test("16. the source's own attribute is guarded against its own indexed values", opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'COM.OMG.COLORFIT' }] } }),
+  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'COM.OMG.COLORFIT' }] }),
     /different casing.*'com\.omg\.colorfit'/s);
-  const ok = await q(evCtx, { metrics: ['aev_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'com.omg.colorfit' }] } });
+  const ok = await q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'com.omg.colorfit' }] });
   assert.equal(num(ok.rows[0].aev_evts), 53);
 });
 

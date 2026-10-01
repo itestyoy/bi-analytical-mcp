@@ -35,7 +35,7 @@
   тому, кто уже пришёл именно за этим полем.
 - **Агент никогда не пишет путь соединения.** Атрибут адресуется только тем, где он лежит:
   `group_by: [{ model: 'users', attribute: 'country' }]`,
-  `where: { field: { kind: 'dimension', model: 'users', attribute: 'country' } }`,
+  `where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }]`,
   `order_by: [{ key: { model: 'users', attribute: 'country' } }]`. Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —

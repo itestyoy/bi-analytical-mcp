@@ -5,7 +5,8 @@
 
 import { MEASURE_AGGS, GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
-import { strEnum, anyOfOr, withoutEmpty, form, pick } from '../schema-kit.js';
+import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList } from '../schema-kit.js';
+import { OPS } from '../conditions.js';
 import { CONTEXT_ID } from '../context-manager.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -35,11 +36,14 @@ export function whereItemSchema(catalog, modelKey) {
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
       property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); scope the measure to those event_name(s) or it reads NULL.`),
-      op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
-      value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
+      op: { enum: OPS, description: 'Comparison operator.' },
+      value: { description: 'Literal value(s) to compare against: a scalar; an array for in/not_in, [low, high] for between; a string for the text operators; none for is_null/is_not_null.' },
     },
   };
 }
+
+/** A measure's conditions, in the one condition grammar: all hold, an item may be { or: [...] }. */
+export const measureWhere = (leaf) => conditionList(leaf, D.where_measure);
 
 export function measureFieldSchema(catalog, modelKey) {
   const opts = [{ enum: ['*'], title: 'rows' }];
@@ -124,7 +128,7 @@ export function genericMeasureItem(catalog) {
     cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
     label: { type: 'string', description: D.label },
     event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
-    where: { type: 'array', description: D.where_measure, items: genericWhereItem(catalog) },
+    where: measureWhere(genericWhereItem(catalog)),
   });
 }
 
@@ -167,7 +171,7 @@ export function measureItemSchema(catalog, modelKey) {
     ...(catalog.isFact(modelKey)
       ? {
           event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
-          where: { type: 'array', description: D.where_measure, items: whereItemSchema(catalog, modelKey) },
+          where: measureWhere(whereItemSchema(catalog, modelKey)),
         }
       : {}),
   });
@@ -236,16 +240,15 @@ export function metricSchema(catalog) {
 
 /** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
  *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
-export function projectRef(project, catalog, { withKind = false } = {}) {
+export function projectRef(project, catalog) {
   const names = project.semantic_models.map((m) => m.name);
   return {
-    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'semantic_model', 'dimension'],
-    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ request: { context_id, metric } }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
+    type: 'object', additionalProperties: false, required: ['semantic_model', 'dimension'],
+    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. In group_by its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension; in where the condition compares its values. preview_semantic_model({ request: { context_id, metric } }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
     properties: {
-      ...(withKind ? { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } } : {}),
       semantic_model: { type: 'array', minItems: 1, items: { enum: names }, description: 'Where the dimension lives: the chain of semantic models it is reached through, in order, ending with the one that carries it — one model for its own dimensions or a direct join, several for a chain of joins.' },
       dimension: { type: 'string', description: 'The dimension\'s name, as the project declares it.' },
-      ...(withKind ? {} : { grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' } }),
+      grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' },
     },
   };
 }
@@ -253,14 +256,13 @@ export function projectRef(project, catalog, { withKind = false } = {}) {
 /** An entity of the dbt project's own semantic layer, grouped or filtered by name — the key a project
  *  may declare only as an entity (an app, a country), which MetricFlow groups by as it is. → [] when
  *  the layer declares none, [ref] otherwise. */
-export function projectEntityRef(project, { withKind = false } = {}) {
+export function projectEntityRef(project) {
   const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
   if (!entities.length) return [];
   return [{
-    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'entity'],
-    description: `An entity of one of the dbt project's own semantic models, by name, used in that model's context: a key the project declares as an entity — often a column with no dimension of its own, such as a foreign key. ${withKind ? 'The condition compares the key\'s values.' : 'Grouping by it gives one row per key value; its result column is the entity\'s name.'} Every requested metric has to carry it; preview_semantic_model({ request: { context_id, metric } }) lists a metric's entities under its group_by.entities.`,
+    type: 'object', additionalProperties: false, required: ['entity'],
+    description: `An entity of one of the dbt project's own semantic models, by name, used in that model's context: a key the project declares as an entity — often a column with no dimension of its own, such as a foreign key. Grouping by it gives one row per key value, its result column the entity's name; in where the condition compares the key's values. Every requested metric has to carry it; preview_semantic_model({ request: { context_id, metric } }) lists a metric's entities under its group_by.entities.`,
     properties: {
-      ...(withKind ? { kind: { enum: ['entity'], description: 'Filter on an entity.' } } : {}),
       entity: { enum: entities, description: 'The entity\'s name, as the project declares it.' },
     },
   }];
@@ -311,36 +313,27 @@ export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
 /** A metric_time window, as a metric query and a preview's validation take it. */
 export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
 
+/** The metric time axis at a grain — as group_by, order_by and where name it. */
+export const timeRef = (catalog) => ({ type: 'object', additionalProperties: false, required: ['time'], title: 'the metric time axis', description: 'The metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } });
+
+/**
+ * A query's conditions: `predicate` is one condition — a field named exactly as group_by names it,
+ * an operator, a value — and a where is a list of them (src/schema-kit.js conditionList).
+ */
 export function predicateDefs(catalog, project = null) {
   return {
-    fieldRef: {
-      type: 'object',
-      description: 'The field a condition applies to: a dimension addressed by where it lives ({ kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema) or the metric time axis.',
-      anyOf: [
-        ...attributeRefForms(catalog, { lead: { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } }, required: ['kind'] }),
-        { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { enum: ['metric_time'], description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
-        ...(project ? [projectRef(project, catalog, { withKind: true }), ...projectEntityRef(project, { withKind: true })] : []),
-      ],
-    },
     predicate: {
       type: 'object',
       additionalProperties: false,
       required: ['field', 'op'],
       description: 'A single filter condition (field OP value).',
       properties: {
-        field: { $ref: '#/$defs/fieldRef' },
-        op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'], description: 'Comparison operator. between takes [low, high]; in/not_in take an array; is_null/is_not_null take no value.' },
+        field: {
+          description: 'What is compared, named as group_by names it: { model, attribute } for a dimension (the join path is resolved from the schema), { time: "metric_time", grain } for the metric time axis' + (project ? '; in a context of one of the dbt project\'s own semantic models, { semantic_model, dimension } or { entity }' : '') + '.',
+          anyOf: [timeRef(catalog), ...attributeRefForms(catalog), ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])],
+        },
+        op: { enum: OPS, description: 'Comparison operator. between takes [low, high]; in/not_in take an array; the text operators a string; is_null/is_not_null take no value.' },
         value: { description: 'Value to compare against (scalar, array for in/not_in/between). Bound as an escaped literal.' },
-      },
-    },
-    predicateGroup: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['op', 'conditions'],
-      description: 'A boolean group combining conditions/sub-groups with AND or OR (compose for nested logic).',
-      properties: {
-        op: { enum: ['and', 'or'], description: 'How to combine the `conditions`.' },
-        conditions: { type: 'array', minItems: 1, description: 'Conditions and/or nested groups.', items: { anyOf: [{ $ref: '#/$defs/predicate' }, { $ref: '#/$defs/predicateGroup' }] } },
       },
     },
   };

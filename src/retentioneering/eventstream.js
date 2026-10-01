@@ -20,6 +20,7 @@
 import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
 import { userKeyColumn } from './schema.js';
+import { mapConditions, eachCondition } from '../conditions.js';
 
 /** The fixed columns of every eventstream (segment columns come after them). */
 export const ES_COLUMNS = { user: 'user_id', event: 'event', time: 'event_time', session: 'session_id' };
@@ -59,15 +60,20 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
   // the source's own columns and event properties are read before any join: a filter on them scopes
   // the rows the joins then carry, and a property is surfaced by the pipeline's own `derive` stage
   const segNames = new Set((spec.segments || []).map((seg) => seg.name));
+  // a condition on the source (a column, a property surfaced by a derive) is applied before the joins;
+  // one on a segment — and a group holding one — once the segments are there
   const early = [];
-  (spec.where || []).forEach((c, i) => {
+  const late = [];
+  let derived = 0;
+  const onSegment = (list) => { let seg = false; eachCondition(list, (c) => { if (c.property === undefined && segNames.has(c.column)) seg = true; }); return seg; };
+  const resolved = (list) => mapConditions(list, (c) => {
     const cond = (column) => ({ column, op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) });
-    if (c.property !== undefined) {
-      const col = `es_w${i}`;
-      stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
-      early.push(cond(col));
-    } else if (!segNames.has(c.column)) early.push(cond(c.column));
+    if (c.property === undefined) return cond(c.column);
+    const col = `es_w${derived++}`;
+    stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
+    return cond(col);
   });
+  for (const item of spec.where || []) (onSegment([item]) ? late : early).push(...resolved([item]));
   if (early.length) stages.push({ stage: 'where', conditions: early });
   // events made from an event's parameters (events.split): each rule renames the rows of one event —
   // by the value of a property/column, or by the first case whose conditions hold — in one CASE
@@ -90,7 +96,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     const cases = [];
     splits.forEach((rule, i) => {
       if (rule.cases) {
-        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...cs.where.map(cond)], then: { value: cs.name } });
+        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...mapConditions(cs.where, cond)], then: { value: cs.name } });
         if (rule.else) cases.push({ when: [isEvent(rule.event)], then: { value: rule.else } });
         return;
       }
@@ -154,10 +160,9 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     segments.push({ name, expr: col });
   }
   // a condition on a segment is applied once the segments are there
-  const late = (spec.where || []).filter((c) => c.property === undefined && segNames.has(c.column));
   if (late.length) {
     const exprOf = new Map(segments.map((sg) => [sg.name, sg.expr]));
-    stages.push({ stage: 'where', conditions: late.map((c) => ({ column: exprOf.get(c.column), op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) })) });
+    stages.push({ stage: 'where', conditions: mapConditions(late, (c) => ({ ...c, column: exprOf.get(c.column) ?? c.column })) });
   }
   return { stages, segments, eventColumn: splitCol, pathColumn: pathCol };
 }

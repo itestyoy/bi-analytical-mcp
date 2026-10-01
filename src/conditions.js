@@ -11,9 +11,40 @@ import { sqlLiteral } from './dialects/base.js';
 /** The comparison operators, as the tools spell them → SQL. */
 export const COMPARE_SQL = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
+/** A text pattern operator → the LIKE pattern of its constant. */
+const PATTERN = { like: (v) => v, not_like: (v) => v, contains: (v) => `%${v}%`, starts_with: (v) => `${v}%`, ends_with: (v) => `%${v}` };
+
+/** EVERY operator a condition takes — one vocabulary, the same in every place a condition is written. */
+export const OPS = [...Object.keys(COMPARE_SQL), 'in', 'not_in', 'between', 'is_null', 'is_not_null', ...Object.keys(PATTERN)];
+
+/**
+ * A list of conditions (src/schema-kit.js conditionList) → one SQL per item, all of which hold: a
+ * condition is written by `leaf`, { or: [...] } / { and: [...] } around their items.
+ */
+export function conditionsSql(list, leaf) {
+  const one = (c) => (c.or ? `(${c.or.map(one).join(' OR ')})` : c.and ? `(${c.and.map(one).join(' AND ')})` : leaf(c));
+  return (list || []).map(one);
+}
+
+/** The same list with each condition replaced by `fn(condition)` — its groups kept as they are. */
+export function mapConditions(list, fn) {
+  const one = (c) => (c.or ? { or: c.or.map(one) } : c.and ? { and: c.and.map(one) } : fn(c));
+  return (list || []).map(one);
+}
+
+/** Every condition of a list, groups opened (to check or resolve what each one names). */
+export function eachCondition(list, fn) {
+  for (const c of list || []) {
+    if (c.or) eachCondition(c.or, fn);
+    else if (c.and) eachCondition(c.and, fn);
+    else fn(c);
+  }
+}
+
 /**
  * `lhs op value` → SQL. `op`: eq | neq | gt | gte | lt | lte, in | not_in (a list, or one value),
- * between ([low, high]), is_null | is_not_null. `lit` writes one constant (sqlLiteral unless the
+ * between ([low, high]), is_null | is_not_null, like | not_like | contains | starts_with | ends_with
+ * (a string). `lit` writes one constant (sqlLiteral unless the
  * caller binds a type to it — typedLiteral); an operator outside this set is refused.
  */
 export function comparison(lhs, op, value, { lit = sqlLiteral } = {}) {
@@ -26,6 +57,11 @@ export function comparison(lhs, op, value, { lit = sqlLiteral } = {}) {
   if (op === 'between') {
     if (!Array.isArray(value) || value.length !== 2) throw new Error("'between' needs value: [low, high]");
     return `${lhs} BETWEEN ${lit(value[0])} AND ${lit(value[1])}`;
+  }
+  // a pattern is text whatever the column is: written as a string, never typed to the column
+  if (PATTERN[op]) {
+    if (typeof value !== 'string') throw new Error(`${op} needs a string value`);
+    return `${lhs} ${op === 'not_like' ? 'NOT LIKE' : 'LIKE'} ${sqlLiteral(PATTERN[op](value))}`;
   }
   if (!COMPARE_SQL[op]) throw new Error(`unsupported comparison op: ${op}`);
   return `${lhs} ${COMPARE_SQL[op]} ${lit(value)}`;

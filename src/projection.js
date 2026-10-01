@@ -4,7 +4,7 @@
 // underlying analytics query. No raw SQL from the caller: identifiers are
 // validated, operators come from a fixed set, values are literal-escaped.
 
-import { comparison, COMPARE_SQL } from './conditions.js';
+import { comparison, conditionsSql, eachCondition } from './conditions.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 /** The aggregations a projection (a read's transform, a drill-down) takes — the one list its schema offers. */
@@ -29,7 +29,7 @@ function aggSql(a) {
   // a CONDITIONAL aggregate folds only the rows its `where` holds for: the value becomes NULL on
   // every other row, which every aggregate skips — sum(case when …), count(case when …) — the same
   // on every warehouse
-  const cond = a.where?.length ? a.where.map(predicate).join(' and ') : null;
+  const cond = a.where?.length ? conditionsSql(a.where, predicate).join(' and ') : null;
   const val = (expr) => (cond ? `case when ${cond} then ${expr} end` : expr);
   // count(*) counts rows; count(<column>) counts NON-NULL values of that column. Honour the
   // column when given (no column means row count) — otherwise a NULL check via
@@ -40,7 +40,6 @@ function aggSql(a) {
 }
 
 function havingPredicate(h) {
-  if (!COMPARE_SQL[h.op]) throw new Error(`unsupported having op: ${h.op}`);
   return comparison(aggSql(h), h.op, h.value);
 }
 
@@ -60,9 +59,9 @@ export function buildProjection(relation, t = {}) {
   const aggCols = (t.aggregations || []).map((a) => `${aggSql(a)} as ${ident(aggName(a))}`);
   const select = [...groupCols, ...aggCols];
   let sql = `select ${select.length ? select.join(', ') : '*'} from ${relation}`;
-  if (t.where?.length) sql += ` where ${t.where.map(predicate).join(' and ')}`;
+  if (t.where?.length) sql += ` where ${conditionsSql(t.where, predicate).join(' and ')}`;
   if (groupCols.length) sql += ` group by ${groupCols.join(', ')}`;
-  if (t.having?.length) sql += ` having ${t.having.map(havingPredicate).join(' and ')}`;
+  if (t.having?.length) sql += ` having ${conditionsSql(t.having, havingPredicate).join(' and ')}`;
   if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => `${ident(o.key)} ${o.direction === 'desc' ? 'desc' : 'asc'}${o.nulls === 'first' ? ' nulls first' : o.nulls === 'last' ? ' nulls last' : ''}`).join(', ')}`;
   if (typeof t.limit === 'number') sql += ` limit ${Math.trunc(t.limit)}`;
   return sql;
@@ -78,10 +77,10 @@ export function projectionProblems(t = {}, columns = null, at = '') {
   const have = new Set(columns || []);
   const problems = [];
   const need = (c, where) => { if (columns && c && !have.has(c)) problems.push(`${at}${where}: '${c}' is not a column of ${at ? 'the first level\'s result' : 'this model'}`); };
-  for (const w of t.where || []) need(w.column, 'where');
+  eachCondition(t.where, (w) => need(w.column, 'where'));
   for (const g of t.group_by || []) need(g, 'group_by');
-  for (const a of t.aggregations || []) { need(a.column, `aggregations.${a.agg}`); for (const w of a.where || []) need(w.column, `aggregations.${a.agg}.where`); }
-  for (const h of t.having || []) { need(h.column, `having.${h.agg}`); for (const w of h.where || []) need(w.column, `having.${h.agg}.where`); }
+  for (const a of t.aggregations || []) { need(a.column, `aggregations.${a.agg}`); eachCondition(a.where, (w) => need(w.column, `aggregations.${a.agg}.where`)); }
+  eachCondition(t.having, (h) => { need(h.column, `having.${h.agg}`); eachCondition(h.where, (w) => need(w.column, `having.${h.agg}.where`)); });
   // what the projection returns is what it can be sorted by — and what a second level reads
   const aggregated = (t.group_by || []).length || (t.aggregations || []).length;
   const out = aggregated

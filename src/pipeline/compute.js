@@ -2,6 +2,7 @@
 // op, with exactly that op's fields) and its build both read it (src/pipeline/stages.js).
 
 import { rawUnknownColumns, condPred, frameClause, requireCol, requireArrayCol, sqlAgg } from './sql.js';
+import { conditionsSql } from '../conditions.js';
 
 // ── The compute stage's ops ─────────────────────────────
 // One entry per op: the fields it requires (`needs`), the ones it may take besides (`may` — what its
@@ -108,7 +109,7 @@ export const COMPUTE_OPS = {
     may: ['else', 'type'],
     sql: ({ d, cols, operand, p }) => {
       if (!p.cases?.length) throw new Error('case: needs at least one branch');
-      const branches = p.cases.map((cs) => `WHEN ${cs.when.map((c) => condPred(d, cols, c)).join(' AND ')} THEN ${operand(cs.then, 'then')}`);
+      const branches = p.cases.map((cs) => `WHEN ${conditionsSql(cs.when, (c) => condPred(d, cols, c)).join(' AND ')} THEN ${operand(cs.then, 'then')}`);
       return { expr: `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${operand(p.else, 'else')}` : ''} END`, type: p.type || 'string' };
     },
   },

@@ -7,6 +7,7 @@ import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { userKeyColumn, sourceColumns, NAME } from './schema.js';
 import { ES_COLUMNS } from './eventstream.js';
+import { eachCondition } from '../conditions.js';
 
 export function suggest(value, known) {
   const near = rankFuzzy(value, known, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => m.item);
@@ -60,7 +61,7 @@ export function validateBuild(engine, input, physical = null) {
   (input.events?.split || []).forEach((rule, i) => {
     checkEvents(c, source, [rule.event], `events.split.${i}.event`);
     if (rule.by) checkRef(rule.by, `events.split.${i}.by`);
-    for (const cs of rule.cases || []) cs.where.forEach((w) => { checkRef(w, `events.split.${i}.cases.where`); checkBetween(w, `events.split.${i}.cases.where`); });
+    for (const cs of rule.cases || []) eachCondition(cs.where, (w) => { checkRef(w, `events.split.${i}.cases.where`); checkBetween(w, `events.split.${i}.cases.where`); });
   });
   // what one path is, when not the user: columns and properties of the source
   (input.path || []).forEach((ref) => checkRef(ref, 'path'));
@@ -86,7 +87,7 @@ export function validateBuild(engine, input, physical = null) {
     claimSegmentName(name, segNames);
     return out;
   });
-  for (const w of input.where || []) {
+  eachCondition(input.where, (w) => {
     const field = w.property !== undefined ? 'where.property' : 'where.column';
     if (w.property !== undefined) {
       if (!props.includes(w.property)) throw new ToolError(`'${w.property}' is not a scalar event property of '${source}'${suggest(w.property, props)}`, { stage: 'validate', field });
@@ -95,7 +96,7 @@ export function validateBuild(engine, input, physical = null) {
       throw new ToolError(`where filters on a column of '${source}' or a declared segment — '${w.column}' is neither${suggest(w.column, known)} (columns: ${own.join(', ') || 'none'}; segments: ${segNames.join(', ') || 'none'})`, { stage: 'validate', field });
     }
     checkWhereValue(w);
-  }
+  });
   return { ...input, segments };
 }
 
@@ -142,11 +143,11 @@ export function validateTaskBuild(input, base) {
   (input.events?.split || []).forEach((rule, i) => {
     if (rule.by?.property !== undefined) noCatalog(`events.split.${i}.by names the event property '${rule.by.property}'`, `events.split.${i}.by`);
     if (rule.by) known(rule.by.column, `events.split.${i}.by`);
-    for (const cs of rule.cases || []) for (const w of cs.where) {
+    for (const cs of rule.cases || []) eachCondition(cs.where, (w) => {
       if (w.property !== undefined) noCatalog(`a case of events.split.${i} names the event property '${w.property}'`, `events.split.${i}.cases.where`);
       known(w.column, `events.split.${i}.cases.where`);
       checkBetween(w, `events.split.${i}.cases.where`);
-    }
+    });
   });
   const segNames = [];
   const segments = (input.segments || []).map((seg) => {
@@ -157,10 +158,10 @@ export function validateTaskBuild(input, base) {
     claimSegmentName(name, segNames);
     return { column: seg.column, name };
   });
-  for (const w of input.where || []) {
+  eachCondition(input.where, (w) => {
     if (w.property !== undefined) noCatalog(`where names the event property '${w.property}'`, 'where.property');
     if (!segNames.includes(w.column)) known(w.column, 'where.column');
     checkWhereValue(w);
-  }
+  });
   return { ...input, segments };
 }

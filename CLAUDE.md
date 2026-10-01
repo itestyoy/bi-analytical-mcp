@@ -147,6 +147,15 @@
   Every call shape written in this file, the descriptions and the guides is the CONTENT of `request`
   unless it is spelled `tool({ request: { … } })`. `MIN_FOLD` (100) is the smallest repeated subtree
   the transport folds into `$defs`.
+- ONE VOCABULARY PER CONCEPT, IN EVERY TOOL (HARD RULE): an aggregation is `agg` (`average`, a
+  quantile in `percentile`), the name a step produces is `name`, a time bucket is `grain`, tasks are
+  read with `task_ids`, and every `where` is ONE condition grammar — a list that all hold, an item a
+  condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
+  every condition taking the same operators (`OPS`, src/conditions.js, written by its one
+  `comparison`). Only what a condition compares differs by place: a column, an event property, or —
+  in a metric query — the field as group_by names it. A caller who brings another tool's spelling
+  (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
+  the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the

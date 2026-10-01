@@ -21,7 +21,8 @@ import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
-import { anyOfOr, form, pick, stringOtherThan } from '../schema-kit.js';
+import { anyOfOr, form, pick, stringOtherThan, conditionList } from '../schema-kit.js';
+import { OPS } from '../conditions.js';
 
 let factsCache;
 /** The facts sheet (read once). */
@@ -144,13 +145,13 @@ export function buildSchema(catalog) {
     type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
     properties: { property: own(ownProps, 'A scalar event_data property'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
   });
-  const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_null', 'is_not_null'] };
-  const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; none for is_null/is_not_null).' };
+  const OP = { enum: OPS };
+  const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; a string for the text operators; none for is_null/is_not_null).' };
   // one condition on the source's own column or on a scalar event property — the filter's and a split case's
   const condition = {
     anyOf: [
-      { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OPS, value: VALUE } },
-      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property'), op: OPS, value: VALUE } }] : []),
+      { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OP, value: VALUE } },
+      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property'), op: OP, value: VALUE } }] : []),
     ],
   };
   const parameter = {
@@ -176,7 +177,7 @@ export function buildSchema(catalog) {
           type: 'object', additionalProperties: false, required: ['event', 'cases'], title: 'by conditions',
           properties: {
             event,
-            cases: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'where'], properties: { name: { type: 'string', pattern: NAME, description: 'The new event\'s name.' }, where: { type: 'array', minItems: 1, items: condition, description: 'Conditions that all hold.' } } }, description: 'The first case whose conditions hold names the row.' },
+            cases: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'where'], properties: { name: { type: 'string', pattern: NAME, description: 'The new event\'s name.' }, where: conditionList(condition, 'Conditions that all hold (an item may be { or: [...] }).') } }, description: 'The first case whose conditions hold names the row.' },
             else: { type: 'string', pattern: NAME, description: 'The name for the event\'s other rows (omit: they keep the event\'s name).' },
           },
         },
@@ -238,16 +239,12 @@ export function buildSchema(catalog) {
         description: 'Columns to carry on every event as segments — what segment_overview, metric_distribution, diff and in_segment read: an attribute of a model the source reaches by a declared relationship ({ model, attribute }), a column of the source itself ({ column }), or a scalar event property ({ property }).',
         items: anyOfOr(segmentBranches),
       },
-      where: {
-        type: 'array', minItems: 1,
-        description: 'Keep only the events matching every condition — on a column of the source itself or a segment declared above ({ column }), or on a scalar event property ({ property }). Applied in SQL before the paths are built.',
-        items: {
-          anyOf: [
-            { ...condition.anyOf[0], properties: { ...condition.anyOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `as` or attribute name)') } },
-            ...condition.anyOf.slice(1),
-          ],
-        },
-      },
+      where: conditionList({
+        anyOf: [
+          { ...condition.anyOf[0], properties: { ...condition.anyOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `name` or attribute name)') } },
+          ...condition.anyOf.slice(1),
+        ],
+      }, 'Keep only the events matching every condition — on a column of the source itself or a segment declared above ({ column }), or on a scalar event property ({ property }); an item may be { or: [...] }, any of its conditions holds. Applied in SQL before the paths are built.'),
       sessions: {
         type: 'object', additionalProperties: false, required: ['gap_minutes'],
         description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "sessions"). (A split_sessions step splits them by other rules: a timeout, a separator event, bounds.)',

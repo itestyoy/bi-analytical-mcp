@@ -4,14 +4,14 @@
 // columns (add one, require one to exist, require an array).
 
 import { getDialect } from '../dialects/index.js';
-import { COMPARE_SQL, typedLiteral } from '../conditions.js';
-import { form } from '../schema-kit.js';
+import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
+import { form, conditionList } from '../schema-kit.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
 export const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
 
-export const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null', 'like', 'not_like', 'contains', 'starts_with', 'ends_with'];
+export const CMP = OPS;
 
 export const AGG_FNS = ['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile', 'hll_init', 'hll_merge', 'hll_merge_partial'];
 
@@ -59,6 +59,9 @@ export const CONDITION = {
 };
 
 export const OPSYM = COMPARE_SQL;
+
+/** The conditions a stage keeps rows by (a where, a CASE branch): a list that all hold, with { or } / { and } groups. */
+export const CONDITIONS = (description) => conditionList(CONDITION, description);
 
 // A string constrained to event-property `values`, but never an empty enum (ajv
 // rejects `enum: []` at compile time). When the catalog has no such properties
@@ -121,37 +124,23 @@ export function condPred(d, cols, c) {
   if (c.left !== undefined) lhs = operandSql(d, cols, c.left, 'left');
   else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.quoteIdent(c.column); }
   else throw new Error('condition needs `column` or `left`');
-  if (c.op === 'is_null') return `${lhs} IS NULL`;
-  if (c.op === 'is_not_null') return `${lhs} IS NOT NULL`;
   // the column a constant is compared with, and what it is called in a refusal
   const leftType = sideType(cols, c, 'left');
   const rightType = sideType(cols, c, 'right');
   const colName = c.left ? c.left.column : c.column;
   const lit = (v, type = leftType, name = colName) => typedLiteral(type, v, `'${name}'`);
-  if (c.op === 'in' || c.op === 'not_in') {
-    const arr = c.right?.value ?? c.value;
-    if (!Array.isArray(arr)) throw new Error(`${c.op} needs an array value`);
-    return `${lhs} ${c.op === 'in' ? 'IN' : 'NOT IN'} (${arr.map((v) => lit(v)).join(', ')})`;
+  const right = c.right;
+  // a constant on the right (`value`, or right: { value }) — the one comparison writer, in the column's type
+  if (right === undefined || (right.value !== undefined && right.column === undefined && !right.now)) {
+    const value = right ? right.value : c.value;
+    if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
+    return comparison(lhs, c.op, value, { lit: (v) => lit(v) });
   }
-  if (c.op === 'between') {
-    const arr = c.right?.value ?? c.value;
-    if (!Array.isArray(arr) || arr.length !== 2) throw new Error('between needs [low, high]');
-    return `${lhs} BETWEEN ${lit(arr[0])} AND ${lit(arr[1])}`;
-  }
-  if (['like', 'not_like', 'contains', 'starts_with', 'ends_with'].includes(c.op)) {
-    const v = c.right?.value ?? c.value;
-    if (typeof v !== 'string') throw new Error(`${c.op} needs a string value`);
-    const pat = c.op === 'like' || c.op === 'not_like' ? v : c.op === 'contains' ? `%${v}%` : c.op === 'starts_with' ? `${v}%` : `%${v}`;
-    return `${lhs} ${c.op === 'not_like' ? 'NOT LIKE' : 'LIKE'} ${d.sqlLiteral(pat)}`;
-  }
-  if (!OPSYM[c.op]) throw new Error(`unsupported comparison op: ${c.op}`);
-  let rhs;
+  // an operand on the right (a column, now): a plain comparison of the two
+  if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with a column or now`);
   // a constant on the left compared with a column on the right is written in that column's type
-  if (c.left?.value !== undefined && c.right?.column !== undefined) lhs = lit(c.left.value, rightType, c.right.column);
-  if (c.right !== undefined) rhs = c.right.value !== undefined && !c.right.column ? lit(c.right.value) : operandSql(d, cols, c.right, 'right');
-  else if (c.value !== undefined) rhs = lit(c.value);
-  else throw new Error('condition needs `value` or `right`');
-  return `${lhs} ${OPSYM[c.op]} ${rhs}`;
+  if (c.left?.value !== undefined && right.column !== undefined) lhs = lit(c.left.value, rightType, right.column);
+  return `${lhs} ${OPSYM[c.op]} ${operandSql(d, cols, right, 'right')}`;
 }
 
 // Window frame clause, e.g. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or

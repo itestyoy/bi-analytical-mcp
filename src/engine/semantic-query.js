@@ -7,7 +7,7 @@
 import { ToolError } from '../validate.js';
 import { measureRefs } from '../compile.js';
 import { PARTITION_DIM } from '../yaml-render.js';
-import { renderWhereClauses } from '../predicate.js';
+import { renderWhereClauses, wherePredicates } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
@@ -286,7 +286,7 @@ export const semanticQueryMethods = {
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     if (input.where) {
-      const translated = clone(input.where);
+      const translated = wherePredicates(clone(input.where));
       walkPredicates(translated, (p) => {
         if (p.field?.kind !== 'entity' && p.field?.kind !== 'dimension') return;
         const item = pick(p.field, 'where');
@@ -447,7 +447,7 @@ export const semanticQueryMethods = {
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     if (input.where) {
-      const translated = clone(input.where);
+      const translated = wherePredicates(clone(input.where));
       const specs = [];
       walkPredicates(translated, (p) => {
         // a field named the way a project semantic model's context names it is refused with that

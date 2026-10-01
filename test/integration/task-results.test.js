@@ -47,7 +47,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], ...input });
 const byCountry = [{ model: 'users', attribute: 'country' }];
-const paying = { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }] };
+const paying = [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }];
 
 test('a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse\'s rows', opts, async (t) => {
   if (skip(t)) return;
@@ -72,7 +72,7 @@ test('a query task keeps its grouping and the caller-facing column names', opts,
 test('a query that FAILS in the warehouse is a task that ended in error', opts, async (t) => {
   if (skip(t)) return;
   // a filter on a value the warehouse cannot compare fails in the warehouse
-  const done = await q({ where: { op: 'and', conditions: [{ field: { kind: 'metric_time' }, op: 'eq', value: 'not-a-date' }] } }).catch((e) => ({ refused: e }));
+  const done = await q({ where: [{ field: { time: 'metric_time' }, op: 'eq', value: 'not-a-date' }] }).catch((e) => ({ refused: e }));
   if (done.refused) return; // refused before running is fine too
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');

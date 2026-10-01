@@ -5,7 +5,7 @@
 import { isNumericType } from './dialects/base.js';
 import { getDialect } from './dialects/index.js';
 import { NUMERIC_AGGS } from './catalog.js';
-import { comparison } from './conditions.js';
+import { comparison, conditionsSql } from './conditions.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -49,7 +49,7 @@ function propCond(catalog, modelKey, cond) {
 /** Combine event_name scope + property conditions into one boolean (or null). */
 function measureScope(catalog, modelKey, decl, smScope) {
   const evScope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
-  const propParts = (decl.where || []).map((c) => propCond(catalog, modelKey, c));
+  const propParts = conditionsSql(decl.where, (c) => propCond(catalog, modelKey, c));
   return [evScope, ...propParts].filter(Boolean).join(' AND ') || null;
 }
 

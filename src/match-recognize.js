@@ -18,8 +18,8 @@
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
-import { comparison, typedAs } from './conditions.js';
-import { anyOfOr, strEnum } from './schema-kit.js';
+import { OPS, comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
+import { anyOfOr, strEnum, conditionList } from './schema-kit.js';
 import { sqlAgg } from './pipeline/sql.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -46,7 +46,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   const evCol = m.event_name.column;
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
-  const props = (step.where || []).map((c) => {
+  const props = conditionsSql(step.where, (c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
       return comparePred(c.property, c.op, c.value, prepCols.get(c.property)?.type || null);
@@ -91,15 +91,15 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
   for (const c of timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []) clauses.push(comparePred(c.column, c.op, c.value));
   if (f.event_name?.length) clauses.push(comparison(evNameCol, 'in', factEventNames(catalog, source, f.event_name)));
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
-  for (const c of f.where || []) {
+  clauses.push(...conditionsSql(f.where, (c) => {
     const p = (m.properties || {})[c.property];
     if (!p) {
       // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property))); continue; }
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
-    clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property));
-  }
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
+  }));
   return clauses.join(' AND ');
 }
 
@@ -117,7 +117,8 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
   want(m.event_name?.column, 'the event name');
   want(spec.order_by || m.time?.column, 'the sequence order');
-  const tested = [...(spec.filter?.where || []), ...(spec.steps || []).flatMap((st) => st.where || [])];
+  const tested = [];
+  for (const list of [spec.filter?.where, ...(spec.steps || []).map((st) => st.where)]) eachCondition(list, (c) => tested.push(c));
   for (const c of tested) {
     if (availableCols.has(c.property)) continue; // already a real column here (upstream stage / prepare)
     if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
@@ -393,9 +394,8 @@ function relationshipNames(catalog) {
 
 /** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 function matchRecognizeSchema(catalog) {
-  const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
-  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
-  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
+  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: OPS }, value: { description: 'The constant (an array for in/not_in, [low, high] for between, a string for the text operators, none for is_null/is_not_null).' } } };
+  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: conditionList(stepWhere, 'Extra conditions narrowing the step: all of them hold (an item may be { or: [...] }).') } };
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'average', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
@@ -426,7 +426,7 @@ function matchRecognizeSchema(catalog) {
         properties: {
           time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' }, timezone: { type: 'string', description: 'IANA timezone the bounds are wall-clock times in (default: as stored).' } }, description: 'Event-time window (ISO); a date-only end includes that whole day.' },
           event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
-          where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
+          where: conditionList(stepWhere, 'event_data/column conditions across the scan: all of them hold (an item may be { or: [...] }).'),
         },
       },
       steps: { type: 'array', minItems: 2, items: step, description: 'The ordered funnel steps (>= 2).' },

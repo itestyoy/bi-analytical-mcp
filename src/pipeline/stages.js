@@ -4,9 +4,10 @@
 // themselves (src/match-recognize.js, src/python-model.js).
 
 import { GRAINS } from '../catalog.js';
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITION, propEnum, sourceProp, operandSql, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITIONS, propEnum, sourceProp, operandSql, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
 import { COMPUTE_OPS, computeForms } from './compute.js';
 import { form, pick, strEnum } from '../schema-kit.js';
+import { conditionsSql } from '../conditions.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -14,13 +15,13 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column. A constant is compared in the column\'s own type: a boolean column takes true / false ("true" is read as true), a numeric one a number; one of another type is refused here, since the warehouse would refuse it.',
+      description: 'Keep only rows where all conditions hold — an item may be a group: { or: [...] } keeps a row when any of its conditions holds (each a condition or { and: [...] }). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column (eq … lte; every other operator compares with a constant). Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column. A constant is compared in the column\'s own type: a boolean column takes true / false ("true" is read as true), a numeric one a number; one of another type is refused here, since the warehouse would refuse it.',
       properties: {
         stage: { enum: ['where'] },
-        conditions: { type: 'array', minItems: 1, items: CONDITION },
+        conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
       },
     }),
-    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: p.conditions.map((c) => condPred(d, cols, c)) }, cols }),
+    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c)) }, cols }),
   },
 
   derive: {
@@ -116,7 +117,7 @@ export const STAGES = {
         default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
         type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type. cast is SAFE — a value that will not convert becomes NULL rather than failing the query.' },
         // op=case
-        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of ANDed conditions, `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: CONDITION }, then: OPERAND } } },
+        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: OPERAND } } },
         else: OPERAND,
         // op=window
         fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'average', 'count', 'min', 'max'], description: 'Window function for op=window.' },

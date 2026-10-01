@@ -72,6 +72,21 @@ export function form({ title, description, tag, tagDescription, optionalTag = fa
 }
 
 /**
+ * ONE CONDITION GRAMMAR — what every `where` is written in, wherever it sits: a list of conditions
+ * that ALL hold, each item a condition (`leaf`, the place's own: a column, an event property, a
+ * dimension) or a group — { or: [...] }, at least one holds, whose items may be { and: [...] }, all
+ * of them hold. A list of ors is every boolean condition there is (with the negated operators at the
+ * leaves), and it nests no deeper, so no schema recursion is needed. The groups are told apart from a
+ * condition by the field each requires (`or` / `and`, a condition its `op`).
+ */
+export function conditionList(leaf, description, { minItems = 1 } = {}) {
+  const leaves = leaf.anyOf && !leaf.properties ? leaf.anyOf : [leaf];
+  const all = form({ title: 'all of', required: ['and'], properties: { and: { type: 'array', minItems: 2, items: { anyOf: leaves }, description: 'Conditions that all hold.' } } });
+  const any = form({ title: 'any of', required: ['or'], properties: { or: { type: 'array', minItems: 2, items: { anyOf: [...leaves, all] }, description: 'Conditions of which at least one holds — each a condition, or { and: [...] } for several that hold together.' } } });
+  return { type: 'array', minItems, description, items: { anyOf: [...leaves, any] } };
+}
+
+/**
  * A string that is anything but `value` — the one rule `not: { const }` would say, written in the
  * portable subset: a string of another length, or one that differs from `value` at some position. Each
  * alternative is a plain pattern (a character class and a count), so it reads the same everywhere.

@@ -4,6 +4,19 @@
 
 import { comparison } from './conditions.js';
 
+/**
+ * A query's `where`, as the caller writes it — the one condition grammar (src/schema-kit.js
+ * conditionList: a list that all hold, { or } / { and } groups), each condition's `field` named the
+ * way group_by names it ({ model, attribute }, { time: 'metric_time', grain }, { semantic_model,
+ * dimension }, { entity }) — as the predicate tree the query resolves and renders: { op, conditions }
+ * groups, each field with its `kind`.
+ */
+export function wherePredicates(list) {
+  const kindOf = (f) => (f?.time ? { kind: 'metric_time', ...(f.grain ? { grain: f.grain } : {}) } : f?.entity ? { kind: 'entity', entity: f.entity } : { kind: 'dimension', ...f });
+  const one = (c) => (c.or ? { op: 'or', conditions: c.or.map(one) } : c.and ? { op: 'and', conditions: c.and.map(one) } : { ...c, field: kindOf(c.field) });
+  return { op: 'and', conditions: (list || []).map(one) };
+}
+
 /** Render a fieldRef into its Jinja wrapper (left-hand side of a predicate). */
 export function renderField(field) {
   if (!field || typeof field !== 'object') throw new Error('predicate.field required');

@@ -68,7 +68,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
       { metrics: ['mon_revenue'] },
       { metrics: ['mon_revenue'], group_by: byCountry },
       { metrics: ['mon_revenue'], group_by: byCountry, materialize: true },
-      { metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }] } },
+      { metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);

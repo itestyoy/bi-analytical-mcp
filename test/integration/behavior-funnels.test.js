@@ -195,20 +195,14 @@ test('monetization: payers = 7 (distinct buyers across the whole month)', opts, 
 test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 50', opts, async (t) => {
   if (skip(t)) return;
   // GB paid payers: u3(5), u7(10); US paid payers: u1(15), u10(20) -> 5+10+15+20 = 50
-  const r = await q('mon', { metrics: ['mon_revenue'], where: { op: 'and', conditions: [
-    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB'] },
-    { field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' },
-  ] } });
+  const r = await q('mon', { metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB'] }, { field: { model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(sumCol(r.rows, 'mon_revenue'), 50);
 });
 
 test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], where: { op: 'or', conditions: [
-    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'US' },
-    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'BR' },
-  ] } });
+  const r = await q('mon', { metrics: ['mon_revenue'], where: [{ or: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }, { field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'BR' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(sumCol(r.rows, 'mon_revenue'), 60);
 });
@@ -222,7 +216,7 @@ test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limi
 
   const top = await q('mon', {
     metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }],
-    where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'product_id_of_event_data' }, op: 'is_not_null' }] },
+    where: [{ field: { model: 'events', attribute: 'product_id_of_event_data' }, op: 'is_not_null' }],
     order_by: [{ key: 'mon_revenue', direction: 'desc' }], limit: 1,
   });
   assert.equal(top.ok, true, JSON.stringify(top.error));

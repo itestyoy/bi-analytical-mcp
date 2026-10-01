@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, genericMeasureItem, genericDimensionItem, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, MAX_BATCH, terse } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, genericMeasureItem, genericDimensionItem, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, terse } from './schema/fields.js';
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
@@ -21,7 +21,7 @@ import { form, pick } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
 import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
-export { MAX_WAIT_SECONDS, MAX_BATCH, transportSchema };
+export { MAX_WAIT_SECONDS, transportSchema };
 
 /**
  * THE INPUT CONTRACTS OF THE ENGINE'S OWN METHODS — not tools. A tool hands its input to one of these
@@ -157,7 +157,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `With task_id: how long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
   };
   taskRead.cancel = { type: 'boolean', const: true, description: 'With task_id / task_ids: CANCEL those tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' };
-  taskRead.task_ids = { type: 'array', minItems: 1, maxItems: MAX_BATCH, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: `READ up to ${MAX_BATCH} tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one's result, in this order.` };
+  taskRead.task_ids = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'READ several tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one\'s result, in this order.' };
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
   // batch (context_id + queries), read one task (task_id), read several (task_ids), cancel either.
   // Told apart by the fields each requires; each takes only its own.
@@ -171,7 +171,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   ];
   // a read of one task may page what it returns
   const paged = (modes, paging) => modes.map((m) => (m.title === 'read a task' ? { ...m, properties: { ...m.properties, ...paging } } : m));
-  const batchOf = (item, what) => ({ type: 'array', minItems: 1, maxItems: MAX_BATCH, description: `START up to ${MAX_BATCH} ${what} on this context in one call, run side by side: each item takes the fields of a single query (described above; context_id stays at the top). All are checked first — one mistake refuses the whole batch. Returns task_ids, in this order: read them together with { task_ids }.`, items: item });
+  const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `START several ${what} on this context in one call, run side by side: each item takes the fields of a single query (described above; context_id stays at the top). All are checked first — one mistake refuses the whole batch. Returns task_ids, in this order: read them together with { task_ids }.`, items: item });
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
@@ -199,7 +199,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where.`);
   const query = {
     type: 'object',
-    description: `Start a metric query against a context (or up to ${MAX_BATCH} at once with queries) — or, with task_id / task_ids, read semantic tasks back.`,
+    description: 'Start a metric query against a context (or several at once with queries) — or, with task_id / task_ids, read semantic tasks back.',
     $defs: pdefs,
     anyOf: paged(
       queryModes({ context_id: semanticContextId, fields: semanticQueryFields }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries')),
@@ -243,7 +243,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     query_semantic_model: query,
     query_pipeline_model: {
       type: 'object',
-      description: `Query a built pipeline model (or up to ${MAX_BATCH} queries at once with queries) — or, with task_id / task_ids, read pipeline tasks back.`,
+      description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_id / task_ids, read pipeline tasks back.',
       anyOf: paged(
         queryModes(
           { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },

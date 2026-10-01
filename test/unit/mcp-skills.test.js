@@ -61,6 +61,13 @@ test('skills/get returns the listed entry by URI and refuses a non-skill with -3
   const [first] = (await c.request({ method: 'skills/list', params: {} }, Listed)).skills;
   assert.deepEqual((await c.request({ method: 'skills/get', params: { uri: first.uri } }, Got)).skill, first);
   await assert.rejects(() => c.request({ method: 'skills/get', params: { uri: 'skill://nope/SKILL.md' } }, Got), (e) => e.code === -32602);
+  // the extension requires resultType and the caching hints on skills/list and skills/get alike
+  for (const [method, params] of [['skills/list', {}], ['skills/get', { uri: first.uri }]]) {
+    const { body } = await s.modern(method, params, { caps: SKILLS_CAPS });
+    assert.equal(body.result.resultType, 'complete', method);
+    assert.ok(Number.isInteger(body.result.ttlMs) && body.result.ttlMs >= 0, `${method} ttlMs`);
+    assert.ok(['public', 'private'].includes(body.result.cacheScope), `${method} cacheScope`);
+  }
 });
 
 test('a recipe file carries the same payload the recipe tool returns (one source of truth)', async () => {

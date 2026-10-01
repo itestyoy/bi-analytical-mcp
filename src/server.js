@@ -110,8 +110,7 @@ export async function makeEngine(opts = {}) {
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
   const dbPath = opts.dbPath || S.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
-  // Ensure the parent dir exists so a custom path persists (a missing dir would make the
-  // open fail and silently fall back to an in-memory store).
+  // Ensure the parent dir exists so a custom path persists (a missing dir would make the open fail).
   try { mkdirSync(dirname(dbPath), { recursive: true }); } catch { /* best effort */ }
   // MCP_DB_RESET wipes the store (jobs + value index) on startup. DEFAULT OFF so state
   // (the value index, job history) SURVIVES a restart — opt IN to a clean slate with
@@ -264,6 +263,9 @@ export function createApp(engine, opts = {}) {
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {
     logRequest(req, res);
+    // the transport asks for it on an SSE response: a buffering proxy (nginx) then passes each event
+    // through as it is written — a progress heartbeat, a list_changed on a listen stream
+    res.setHeader('X-Accel-Buffering', 'no');
     if (answerTaskRequest(services.tasks, req, res, services.serverInfo)) return;
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)

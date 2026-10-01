@@ -65,6 +65,7 @@ test('no task without the extension: the call answers inline, tasks/* are -32021
     assert.deepEqual(g.body.error.data.requiredCapabilities, { extensions: { 'io.modelcontextprotocol/tasks': {} } });
     const unknown = await s.modern('tasks/get', { taskId: '00000000-0000-4000-8000-000000000000' }, { caps: TASK_CAPS });
     assert.equal(unknown.body.error.code, -32602);
+    assert.equal(unknown.status, 200, 'a task the server does not know is the handler\'s answer: in-band, not an HTTP failure');
     const misrouted = await s.modern('tasks/get', { taskId: 'abc' }, { caps: TASK_CAPS, headers: { 'mcp-name': 'other' } });
     assert.equal(misrouted.body.error.code, -32020, 'Mcp-Name must be the taskId (SEP-2663 routing header)');
   } finally { await s.stop(); }

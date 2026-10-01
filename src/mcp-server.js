@@ -153,7 +153,8 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
       if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
       const s = services.skills.get(uri);
       if (!s) throw new ProtocolError(-32602, `Not a skill this server serves: ${uri}`);
-      return { skill: s };
+      // the extension requires the caching hints on skills/get as on skills/list
+      return { skill: s, ...PER_CLIENT };
     });
   }
 

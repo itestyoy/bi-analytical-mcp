@@ -313,9 +313,6 @@ export function predicateDefs(catalog, project = null) {
 // Declared here because both the schema text and the engine's clamp must say the same number.
 export const MAX_WAIT_SECONDS = 30;
 
-// How many queries one call to a query tool may start (`queries`) or read back (`task_ids`).
-export const MAX_BATCH = 5;
-
 /** A copy of a schema without its descriptions: the same checks, told once where it is described. */
 export function terse(schema) {
   if (Array.isArray(schema)) return schema.map(terse);

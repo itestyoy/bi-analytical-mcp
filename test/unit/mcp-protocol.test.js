@@ -98,3 +98,11 @@ test('closing the request cancels the call — the work stops, not just the resp
     assert.ok(outcome.waited_seconds < 5, `it stopped when the client left (waited ${outcome.waited_seconds}s)`);
   } finally { s.engine.time = real; }
 });
+
+test('an event-stream response asks a proxy not to buffer it (X-Accel-Buffering: no)', async () => {
+  await s.post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+  const res = await s.post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'mcp-protocol-version': '2025-11-25' });
+  await res.text();
+  assert.match(res.headers.get('content-type'), /text\/event-stream/);
+  assert.equal(res.headers.get('x-accel-buffering'), 'no');
+});

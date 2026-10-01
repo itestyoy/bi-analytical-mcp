@@ -57,10 +57,12 @@ export function answerTaskRequest(tasks, req, res, serverInfo = SERVER_INFO) {
   if (!declaresExtension(envelopeCapabilities(body, CLIENT_CAPABILITIES_META_KEY), TASKS_EXTENSION)) {
     return fail(400, -32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
   }
+  // a task this server does not know is the handler's answer, so it is in-band (HTTP 200) like every
+  // handler error — only the entry checks above (-32020, -32021, the classifier's) are HTTP 400
   const t = typeof taskId === 'string' ? tasks.get(taskId) : null;
-  if (!t) return fail(400, -32602, 'Failed to retrieve task: Task not found (it never existed, or it ended more than its TTL ago)');
+  if (!t) return fail(200, -32602, 'Failed to retrieve task: Task not found (it never existed, or it ended more than its TTL ago)');
 
   if (body.method === 'tasks/cancel') tasks.cancel(t.taskId, 'Cancelled by the client (tasks/cancel).');
   const result = body.method === 'tasks/get' ? tasks.detailed(t) : {};
-  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: { name: serverInfo.name, version: serverInfo.version } } } });
+  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: serverInfo } } });
 }

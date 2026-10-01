@@ -128,7 +128,7 @@ export const semanticQueryMethods = {
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     const project = ctx.state.engine === 'project';
     const work = project ? (q) => this._projectQueryWork(ctx, q) : (q) => this._semanticQueryWork(ctx, q);
-    // A BATCH (queries: up to MAX_BATCH): every query is validated before any starts, and they run
+    // A BATCH (queries): every query is validated before any starts, and they run
     // side by side — one task each, read together with { task_ids }.
     if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => work({ ...q, context_id: ctx.id }));
     // The project's context is never written after start (nothing is built on it) and every

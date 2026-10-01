@@ -307,12 +307,13 @@ test('one mistake refuses the whole batch, naming the query — and nothing in i
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for the batch');
 });
 
-test('a batch takes at most five queries, and each mode takes only its own fields', async () => {
+test('a batch takes any number of queries, and each mode takes only its own fields', async () => {
   const e = engine(orderedRunner());
   const created = await e.build_semantic_model(TASK);
   const ctx = created.context_id;
   const q = { metrics: ['task_cnt'] };
-  await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q, q, q, q, q, q] }));
+  const many = await e.query_semantic_model({ context_id: ctx, queries: Array.from({ length: 12 }, () => q) });
+  assert.equal(new Set(many.task_ids).size, 12, 'one task per query, however many');
   await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q], metrics: ['task_cnt'] }), 'a query field beside queries');
   await assert.rejects(() => e.query_semantic_model({ queries: [q] }), 'a batch names its context');
   await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id], offset: 1 }), 'task_ids does not page');

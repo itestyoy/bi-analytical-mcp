@@ -27,10 +27,9 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 export const isTerminal = (status) => TERMINAL.has(status);
 
 export class TaskRegistry {
-  constructor({ ttlMs = 3600000, pollIntervalMs = 2000, maxTasks = 2000 } = {}) {
+  constructor({ ttlMs = 3600000, pollIntervalMs = 2000 } = {}) {
     this.ttlMs = ttlMs;
     this.pollIntervalMs = pollIntervalMs;
-    this.maxTasks = maxTasks;
     this.tasks = new Map();
     this._sweep = setInterval(() => this.sweep(), Math.min(ttlMs, 60000));
     this._sweep.unref?.();
@@ -43,7 +42,6 @@ export class TaskRegistry {
    */
   create({ ttlMs, run, ctl: given }) {
     this.sweep();
-    if (this.tasks.size >= this.maxTasks) throw Object.assign(new Error(`too many tasks in flight (${this.maxTasks}) — wait for some to finish`), { code: -32603 });
     const now = new Date().toISOString();
     // `ctl` — the controller of work that was ALREADY running before it became a task (a call
     // that outgrew its inline window keeps its own cancellation)

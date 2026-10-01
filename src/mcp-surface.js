@@ -74,7 +74,7 @@ WHERE THE DETAIL IS
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
 const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (one or more events facts + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
 
-// WHAT A TOOL IS — its title, description, annotations, whether it is listed, the task side it starts
+// WHAT A TOOL IS — its title, description, annotations, the task side it starts
 // and reads, whether it draws — is its definition (src/tools/define.js): the core's in
 // src/tools/core.js, a feature's in its module, all in the engine's one registry (`engine.tools`).
 // The surface below reads nothing else. Without an engine (a card's result checked on its own) it
@@ -94,7 +94,7 @@ const toolsOf = (engine) => engine?.tools || CORE_REGISTRY;
  * draw is refused (runTool).
  */
 export function buildToolDefs(engine) {
-  return toolsOf(engine).values().filter((def) => def.listed).map((def) => ({
+  return toolsOf(engine).values().map((def) => ({
     name: def.name,
     title: def.title,
     description: def.description,
@@ -106,24 +106,13 @@ export function buildToolDefs(engine) {
   }));
 }
 
-// A RENAMED TOOL stays callable under the name a client learned — its definition's `aliases`, never
-// advertised, the same call under the new name (so a task one started is read back as before).
-// get_task_result is not an alias: it was not renamed but split, each side's query tool reading its
-// own tasks, and a call to it is answered with that (see runTool).
-const REMOVED_TOOLS = {
-  get_task_result: 'a task is read back by the query tool of its side: query_semantic_model({ request: { task_id } }) for a semantic model or a metric query, query_pipeline_model({ request: { task_id } }) for a pipeline build or a query over one',
-  get_query_result: 'a task is read back by the query tool of its side ({ task_id }); a built pipeline model is queried with query_pipeline_model({ request: { context_id, transform } })',
-};
-/** What a call to a name that is not a tool is told — with the replacement, for a tool that was removed. */
+/** What a call to a name that is not a tool is told. */
 export function unknownToolMessage(name) {
-  return REMOVED_TOOLS[name] ? `${name} no longer exists: ${REMOVED_TOOLS[name]}` : `unknown tool: ${name}`;
+  return `unknown tool: ${name}`;
 }
-/** The tool a name dispatches to: itself, or the current name of a renamed tool. */
-export const canonicalTool = (name, engine = null) => toolsOf(engine).canonical(name);
 
-/** Every name that dispatches: the tools the registry defines (listed or not) and the old names of
- *  renamed ones — and nothing else. The engine is an object with private methods (`_draftStart`,
- *  `close`, `gc`); a tool name is never a free method lookup. */
+/** Every name that dispatches: the tools the registry defines — and nothing else. The engine is an
+ *  object with private methods (`_draftStart`, `close`, `gc`); a tool name is never a free method lookup. */
 export function isCallableTool(engine, name) {
   return typeof name === 'string' && toolsOf(engine).has(name);
 }
@@ -132,17 +121,11 @@ export function isCallableTool(engine, name) {
  * The input of a call: the value of its one field, `request`. A call written some other way — its
  * fields at the top, or nothing at all — is refused with the shape to use, the fields it gave moved
  * where they belong, so the next call is right.
- *
- * `legacy`: the call came under one of the OLD names — an alias (src/tools/define.js) or a tool kept
- * unlisted since it was folded into another (ab_test into experiment) — kept so a client that learned
- * it keeps working; such a client learned it before the envelope too, so its flat call is its input as
- * it was. A listed tool under its own name takes the envelope only.
  */
-export function requestOf(name, args, { legacy = false } = {}) {
+export function requestOf(name, args) {
   const given = isPlainObject(args) ? args : {};
   const keys = Object.keys(given);
   if (keys.length === 1 && keys[0] === 'request' && isPlainObject(given.request)) return { request: given.request };
-  if (legacy && !keys.includes('request')) return { request: given };
   const others = keys.filter((k) => k !== 'request');
   const call = others.length
     ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request`
@@ -184,24 +167,23 @@ const PROGRESS_EVERY_MS = setting('MCP_PROGRESS_INTERVAL_MS'); // 0: no heartbea
  * tool. `signal` stops the processes the call started; `onProgress(params)` receives heartbeats.
  * Returns { result: CallToolResult, raw } — `raw` is the engine's value (null on error).
  */
-export async function runTool(engine, calledAs, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
+export async function runTool(engine, name, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
   const started = Date.now();
-  logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
+  logLine(name, `▶ call ${summarizeArgs(args)}`);
   // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
   // (the arguments are kept as they came, so a failure is replayed by the same call)
   // (a call refused for not using the envelope still carried its ids — at the top)
   const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
   const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : null });
-  if (!isCallableTool(engine, calledAs)) {
-    logLine(calledAs, '✗ unknown tool');
-    failed(calledAs, unknownToolMessage(calledAs), { stage: 'validate' });
-    return { result: errorResult(unknownToolMessage(calledAs), 'validate'), raw: null, unknown: true };
+  if (!isCallableTool(engine, name)) {
+    logLine(name, '✗ unknown tool');
+    failed(name, unknownToolMessage(name), { stage: 'validate' });
+    return { result: errorResult(unknownToolMessage(name), 'validate'), raw: null, unknown: true };
   }
-  const def = toolsOf(engine).get(calledAs);
-  const name = def.name;
+  const def = toolsOf(engine).get(name);
   // every tool takes its input under `request` (src/schema/transport.js wireSchema); the rest of the
   // call sees that input and nothing else
-  const call = requestOf(name, args, { legacy: calledAs !== name || !def.listed });
+  const call = requestOf(name, args);
   if (call.error) {
     logLine(name, '✗ not under request');
     failed(name, call.error, { stage: 'validate', field: 'request' });
@@ -258,12 +240,11 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
  * the model calling again. A call that STARTS work returns its task_id at once, as always — it is
  * never held.
  */
-export async function runToCompletion(engine, calledAs, args, { signal, renders = true } = {}) {
-  const def = toolsOf(engine).get(calledAs);
-  const name = def?.name ?? calledAs;
+export async function runToCompletion(engine, name, args, { signal, renders = true } = {}) {
+  const def = toolsOf(engine).get(name);
   // what the call asks, read as runTool reads it — a call it refuses is refused at once, never after a wait
-  const call = def ? requestOf(name, args, { legacy: calledAs !== name || !def.listed }) : { error: 'unknown tool' };
-  if (call.error) return runTool(engine, calledAs, args, { signal, renders });
+  const call = def ? requestOf(name, args) : { error: 'unknown tool' };
+  if (call.error) return runTool(engine, name, args, { signal, renders });
   const input = call.request;
   // the tasks the call reads: one (task_id), or a batch (task_ids) — followed until every one is done
   const ids = typeof input.task_id === 'string' ? [input.task_id] : Array.isArray(input.task_ids) ? input.task_ids.filter((id) => typeof id === 'string') : [];
@@ -292,7 +273,7 @@ export async function runToCompletion(engine, calledAs, args, { signal, renders 
       return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'task'), err?.field, cancelled ? undefined : err?.code), raw: null };
     }
   }
-  return runTool(engine, calledAs, args, { signal, renders });
+  return runTool(engine, name, args, { signal, renders });
 }
 
 export { SERVER_DESCRIPTION, SERVER_SUMMARY, coreInstructions };

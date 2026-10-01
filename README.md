@@ -82,7 +82,7 @@ boolean measure, the aggregation chosen per question, a governed measure),
 `joins` (an attribute of another model, a cohort grid on two time axes, two
 independent sources, a pipeline join by relationship name, a point-in-time
 join), `pipeline` (window lag, episodes by gap, an age axis, an ordered
-sequence, unnest, reshape, a volume/coverage check), `ab_test` (proportion,
+sequence, unnest, reshape, a volume/coverage check), `ab_test` (the A/B family, tested with `experiment`: proportion,
 mean, CUPED, ratio, SRM, power) and `bigframes` (below). A real question
 combines two or three of them. Domain recipes — your events, your funnels, your
 conventions — go in a deployment file via `RECIPES_PATH`, which is merged on top

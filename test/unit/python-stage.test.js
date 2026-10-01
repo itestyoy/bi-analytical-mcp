@@ -121,7 +121,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = stageBranch(e.schemas.register_native_model, 'python', 'stages');
+  const items = stageBranch(e.contracts.register_native_model, 'python', 'stages');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
@@ -194,7 +194,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
-  const pkgEnum = () => stageUnion(e.schemas.register_native_model, 'stages')
+  const pkgEnum = () => stageUnion(e.contracts.register_native_model, 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
@@ -249,7 +249,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
   if (skipNoPy(t)) return;
   const e = engine();
   for (const tool of ['build_pipeline_model', 'register_native_model']) {
-    const root = e.schemas[tool];
+    const root = e.schemas[tool] || e.contracts[tool];
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
     const py = stageBranch(root, 'python', tool === 'build_pipeline_model' ? 'stage' : 'stages');

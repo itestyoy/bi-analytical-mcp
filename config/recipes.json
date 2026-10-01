@@ -1306,7 +1306,8 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "proportion",
         "group_field": "variant_group",
         "n_field": "n",
@@ -1624,7 +1625,8 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "mean",
         "group_field": "variant_group",
         "n_field": "n",
@@ -1864,7 +1866,8 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "cuped",
         "group_field": "variant_group",
         "n_field": "n",
@@ -1894,7 +1897,8 @@
       "metric_types": [
         "ratio"
       ],
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "ratio",
         "group_field": "variant_group",
         "n_field": "n",
@@ -2111,7 +2115,8 @@
       "metric_types": [
         "srm"
       ],
-      "srm_check": {
+      "experiment": {
+        "action": "check_split",
         "group_field": "variant_group",
         "n_field": "n"
       },
@@ -2798,7 +2803,7 @@
         "mean",
         "proportion"
       ],
-      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ request: { metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ request: { metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
+      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then experiment({ request: { action: 'analyze', metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then experiment({ request: { action: 'analyze', metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final experiment step on example per-group aggregates.",
       "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE experiment({ request: { action: \"analyze\" } }) call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
       "tool_calls": [
         {

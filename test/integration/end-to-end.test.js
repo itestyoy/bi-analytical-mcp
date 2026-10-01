@@ -329,7 +329,7 @@ test('5a. build_pipeline_model fed the conversion recipe stages → per-variant 
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));
   S.abCtx = commit.context_id;
 
-  const map = r.ab_test;
+  const map = r.experiment;
   const byGroup = {};
   for (const row of commit.rows) byGroup[String(row[map.group_field])] = row;
   assert.equal(num(byGroup.control.n), 6);

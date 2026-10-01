@@ -82,16 +82,16 @@ for (const r of recipes.list) {
     }
 
     // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
-    // declares an ab_test or srm_check mapping — feed its per-group rows into the tool.
+    // declares an experiment mapping (analyze, or check_split) — feed its per-group rows into the test.
     if (r.register_payload) {
       const out = await engine.register_native_model(r.register_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
       // A recipe that feeds a two-group test needs its groups; one that collapses the table to a
       // single row of statistics (the table-wide aggregate) is correct at exactly one row.
-      const least = (r.ab_test || r.srm_check) ? 2 : 1;
+      const least = r.experiment ? 2 : 1;
       assert.ok(Array.isArray(out.rows) && out.rows.length >= least, `${r.id} expected >=${least} row(s), got ${out.rows?.length}`);
-      if (r.ab_test) {
-        const map = r.ab_test;
+      if (r.experiment?.action === 'analyze') {
+        const map = r.experiment;
         const arms = out.rows.map((row) => {
           const arm = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
           if (map.conversions_field) arm.conversions = Number(row[map.conversions_field]);
@@ -105,8 +105,8 @@ for (const r of recipes.list) {
         assert.equal(res.results.length, variants.length);
         for (const v of res.results) assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1, `bad p_value for ${r.id}`);
       }
-      if (r.srm_check) {
-        const map = r.srm_check;
+      if (r.experiment?.action === 'check_split') {
+        const map = r.experiment;
         const groups = out.rows.map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
         const res = engine.srm_check({ groups, ...(map.expected_ratio ? { expected_ratio: map.expected_ratio } : {}) });
         assert.equal(res.ok, true, `srm_check failed for ${r.id}: ${JSON.stringify(res)}`);

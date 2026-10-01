@@ -23,7 +23,7 @@ Use a pipeline with a `match_recognize` stage.
    or a tutorial chain. Add `between_steps` if repeats may occur.
 3. (optional) `add_step` a downstream `join` (users) / `aggregate` to slice conversion by a
    player attribute (country/platform).
-4. `materialize`, then `get_query_result` — read `reached_*` / `completed` / `furthest_step_name`.
+4. `materialize`, then `query_pipeline_model` ({ task_id }) — read `reached_*` / `completed` / `furthest_step_name`.
 - **Governed sibling:** *Game Completion Rate* = completed ÷ started ×100%
   ([def](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4502290434)) — prefer it for the
   headline rate; use the funnel for step-by-step drop-off.

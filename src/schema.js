@@ -23,6 +23,14 @@ import { memorySchema } from './schema/memory.js';
 import { abTestSchema, srmCheckSchema, sampleSizeSchema, experimentSchema } from './schema/experiment.js';
 export { MAX_WAIT_SECONDS, MAX_BATCH, transportSchema };
 
+/**
+ * THE INPUT CONTRACTS OF THE ENGINE'S OWN METHODS — not tools. A tool hands its input to one of these
+ * methods (experiment → ab_test / srm_check / sample_size, delete_context → drop_context, a pipeline
+ * build → register_native_model …), and the method holds it to the exact contract below. They are
+ * validated, never listed or called by a client: every tool is listed and called by its one name.
+ */
+export const METHOD_CONTRACTS = new Set(['update_semantic_model', 'register_native_model', 'list_query_jobs', 'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model', 'ab_test', 'srm_check', 'sample_size']);
+
 export function buildSchemas(catalog, { project = null, projectContexts = [] } = {}) {
   // a context_id that may be a PRESET one — the dbt project's own semantic models, each a context
   // read at start and named after it — or any id a build returned: the presets are offered as values

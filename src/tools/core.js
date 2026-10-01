@@ -20,7 +20,6 @@ export const CORE_TOOLS = [
   }),
   defineTool({
     name: 'build_semantic_model',
-    aliases: ['create_semantic_model'],
     title: 'Build Semantic Model',
     description: 'Declare reusable, named metrics for a task — semantic models (one per source; several sources may sit side by side, e.g. spend next to an event measure) plus metrics — in an isolated context, then query them many ways with query_semantic_model (group_by, time grain, filters). Use it for measurable metrics such as DAU, revenue, conversion or retention; for a one-off derived table whose rows are the answer (a funnel, sessions, a window, a pivot) use build_pipeline_model instead. Omit context_id to start a task; pass it to extend the same one. To change a task already in a context — add or remove measures, dimensions or metrics on one model without restating the rest — call it with action:"update" (context_id, semantic_model, the add_*/remove_* fields). The declaration is validated in the call; parsing it is a task, so the call returns only { task_id, context_id } and does not wait. query_semantic_model({ request: { task_id } }) returns the parse, the metrics and what they can be grouped by; a query on the context can be started right away (it waits for the parse). preview_semantic_model shows the context\'s layer as parsed and checks it.',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -29,7 +28,6 @@ export const CORE_TOOLS = [
   }),
   defineTool({
     name: 'build_pipeline_model',
-    aliases: ['build_native_model'],
     title: 'Build Pipeline Model',
     description: 'Build a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the named metrics of build_semantic_model cannot express; for reusable metrics sliced many ways, use build_semantic_model instead. The pipeline is composed step by step with `action`: start a draft, add_step one stage at a time (where / derive / compute / unnest / join / aggregate / pivot / unpivot / window / order_by / limit / match_recognize), optionally preview the SQL, then materialize. Each add_step validates the stage and returns the columns available to the next one; nothing runs in the warehouse until materialize. A join names the relationship the schema declares (via: <name>) rather than its columns, and joins stack, so one pipeline can reach several sources. materialize returns only a task_id and does not wait: query_pipeline_model({ request: { task_id } }) returns the rows, and query_pipeline_model({ request: { context_id, transform } }) filters or regroups the built table later (query_semantic_model does not read pipelines). start with from_task re-slices the stored table of a finished task (a materialized query, an earlier build) without recomputing it. A `python` stage is a dbt Python model of its own, run on the warehouse\'s Python runtime; it may appear anywhere in the pipeline, more than once, and carries only what SQL cannot say. Its own description holds the rules — what belongs in it, what this warehouse\'s frame raises, and the recipes to study before writing one. Its table is read with query_pipeline_model like any pipeline.',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -76,7 +74,6 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   }),
   defineTool({
     name: 'display_model_result',
-    aliases: ['display_result'],
     title: 'Display Model Result',
     description: 'Show a finished model result — a semantic query or a pipeline — to the person as a card, in a host that renders MCP Apps; it is the only tool that draws a model\'s rows. Use it once, for the result the person should see; reading a task for your own analysis goes through its query tool and needs no card. It reads the task the way the query tools do and draws it once — a second call for the same task is refused, so one question gets one card. `display` says how the rows are drawn (a chart, KPI tiles, a funnel, a sankey, a drill-down pivot…; its schema lists each kind and the fields it needs), over the result\'s columns. A task still running is refused: wait for it with its query tool ({ task_id }) first. An experiment is not a model result: it draws its own card with card: true.',
     // draws a card, once per task: a second call is refused, not repeated
@@ -143,109 +140,6 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
     description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a timer that touches no data and follows no task. To wait for a task, call its query tool with { task_id } instead (query_semantic_model or query_pipeline_model): it returns the moment the task is done.`,
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.time(input),
-  }),
-
-  // ── callable by name, not listed: folded into the tools above, kept for a client that learned them ──
-  defineTool({
-    name: 'update_semantic_model',
-    title: 'Update Semantic Model',
-    // folded into build_semantic_model({ request: { action: 'update' } })
-    description: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    listed: false,
-    side: 'semantic',
-    run: (engine, input) => engine.update_semantic_model(input),
-  }),
-  defineTool({
-    name: 'register_native_model',
-    title: 'Register Native Model',
-    // the all-at-once path behind the incremental build_pipeline_model
-    description: 'Build a whole pipeline in one call (the path behind build_pipeline_model).',
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    listed: false,
-    side: 'pipeline',
-    run: (engine, input) => engine.register_native_model(input),
-  }),
-  defineTool({
-    name: 'list_query_jobs',
-    title: 'List Query Jobs',
-    // folded into semantic_index({ request: { status } })
-    description: 'The background tasks this server knows.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.list_query_jobs(input),
-  }),
-  defineTool({
-    name: 'list_contexts',
-    title: 'List Contexts',
-    // folded into context({ request: { action: 'list' } })
-    description: 'Every active context.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.list_contexts(input),
-  }),
-  defineTool({
-    name: 'describe_context',
-    title: 'Describe Context',
-    // folded into context({ request: { action: 'describe' } })
-    description: 'One context in depth.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.describe_context(input),
-  }),
-  defineTool({
-    name: 'drop_context',
-    title: 'Drop Context',
-    // folded into delete_context({ request: { context_id } })
-    description: 'Tear a context down.',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.drop_context(input),
-  }),
-  defineTool({
-    name: 'delete_native_model',
-    title: 'Delete Native Model',
-    // folded into delete_context({ request: { what: 'pipeline_model' } })
-    description: 'Remove the pipeline model of a context.',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.delete_native_model(input),
-  }),
-  defineTool({
-    name: 'delete_semantic_model',
-    title: 'Delete Semantic Model',
-    // folded into delete_context({ request: { what: 'semantic_model' } })
-    description: 'Remove one model\'s task additions from a context.',
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    listed: false,
-    run: (engine, input) => engine.delete_semantic_model(input),
-  }),
-  defineTool({
-    name: 'ab_test',
-    title: 'A/B Test',
-    // folded into experiment({ request: { action: 'analyze' } })
-    description: 'The significance test on per-group aggregates.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.ab_test(input),
-  }),
-  defineTool({
-    name: 'srm_check',
-    title: 'Sample Ratio Check',
-    // folded into experiment({ request: { action: 'check_split' } })
-    description: 'The sample-ratio-mismatch check.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.srm_check(input),
-  }),
-  defineTool({
-    name: 'sample_size',
-    title: 'Sample Size',
-    // folded into experiment({ request: { action: 'plan' } })
-    description: 'Power and sample-size planning.',
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    listed: false,
-    run: (engine, input) => engine.sample_size(input),
   }),
 ];
 

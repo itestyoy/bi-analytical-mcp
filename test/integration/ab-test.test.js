@@ -56,7 +56,7 @@ async function aggregatesFor(id) {
   const r = recipe(id);
   const out = await engine.register_native_model(r.register_payload);
   assert.equal(out.build.ok, true, `build failed for ${id}: ${JSON.stringify(out.error || out.build)}`);
-  const map = r.ab_test;
+  const map = r.experiment;
   const byGroup = {};
   for (const row of out.rows) byGroup[String(row[map.group_field])] = row;
   return { map, byGroup, context_id: out.context_id };

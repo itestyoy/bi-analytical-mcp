@@ -49,7 +49,7 @@ export const semanticBuildMethods = {
     // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_id } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
-    const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
+    const taskId = this._startTask(existing, 'build_pipeline_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
     return this._taskStarted(taskId, { context_id: ctxId });
   },
 
@@ -145,11 +145,8 @@ export const semanticBuildMethods = {
   },
 
   /**
-   * The INCREMENTAL path on an existing task. It is reachable two ways and the body is one: as
-   * build_semantic_model({ request: { action: 'update', … } }) — the mode the tool listing advertises — and as
-   * update_semantic_model({ request: { … } }), kept callable for a client that learned that name, but no longer
-   * advertised, because the two schemas repeat the same vocabulary and the listing is what every
-   * request carries.
+   * The INCREMENTAL path on an existing task — build_semantic_model({ request: { action: 'update', … } })
+   * hands its input here, held to its own contract (METHOD_CONTRACTS, src/schema.js).
    */
   async update_semantic_model(input) {
     this._validate('update_semantic_model', input);

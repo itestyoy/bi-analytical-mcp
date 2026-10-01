@@ -20,7 +20,7 @@ export function abTest(input) {
   const alternative = input.alternative || 'two_sided';
   const correction = input.correction || 'holm';
   const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
-  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`ab_test metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
+  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`experiment analyze, metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
 
   // Cross-field guard the schema cannot express: for a proportion, a group's success
   // count cannot exceed its sample size (a rate > 100% is impossible). Reject it instead
@@ -141,14 +141,14 @@ export function sampleSize(input) {
   const base = { ok: true, metric, power, confidence, alternative };
   if (metric === 'proportion') {
     const { baseline } = input;
-    if (baseline === undefined) throw new ToolError('sample_size metric=proportion requires baseline', { stage: 'validate', field: 'baseline' });
+    if (baseline === undefined) throw new ToolError('experiment plan, metric=proportion: requires baseline', { stage: 'validate', field: 'baseline' });
     if (input.n !== undefined) { const mde = mdeProportion({ baseline, n: input.n, ...common }); return { ...base, n_per_group: input.n, baseline, mde, relative_mde: mde / baseline }; }
     if (input.mde !== undefined) { const n = sampleSizeProportion({ baseline, mde: input.mde, ...common }); return { ...base, n_per_group: n, total_n: 2 * n, baseline, mde: input.mde, relative_mde: input.mde / baseline }; }
-    throw new ToolError('sample_size requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
+    throw new ToolError('experiment plan: requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
   }
   const { stddev } = input;
-  if (stddev === undefined) throw new ToolError('sample_size metric=mean requires stddev', { stage: 'validate', field: 'stddev' });
+  if (stddev === undefined) throw new ToolError('experiment plan, metric=mean: requires stddev', { stage: 'validate', field: 'stddev' });
   if (input.n !== undefined) { const mde = mdeMean({ stddev, n: input.n, ...common }); return { ...base, n_per_group: input.n, stddev, mde }; }
   if (input.mde !== undefined) { const n = sampleSizeMean({ stddev, mde: input.mde, ...common }); return { ...base, n_per_group: n, total_n: 2 * n, stddev, mde: input.mde }; }
-  throw new ToolError('sample_size requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
+  throw new ToolError('experiment plan: requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
 }

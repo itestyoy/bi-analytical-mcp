@@ -82,8 +82,8 @@
   site. MetricFlow allows such a model exactly one join key, as its natural key: a
   second `primary`/`unique` key there is rejected at catalog load, and measures on it
   are dropped with a warning (count on an events source instead).
-- A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js; the
-  folded `ab_test` stays callable by name) over per-group aggregates (proportion → z-test; mean →
+- A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js) over
+  per-group aggregates (proportion → z-test; mean →
   Welch t-test).
 - A FACT ABOUT AN EXTERNAL LIBRARY IS GENERATED FROM THAT LIBRARY, NEVER WRITTEN IN PROSE (HARD
   RULE). Signatures, which methods raise, what a class returns: extracted by a script into a
@@ -128,9 +128,10 @@
   required field is `request`, the tool's own schema as its value, `$defs` at the root — the one root
   every host's API takes (Anthropic's refuses a union there, OpenAI's strict mode a root anyOf). The
   surface unwraps it at ONE point (`requestOf`, runTool) and the engine validates `request` against
-  the same schema it published, so what the model sees and what is checked are one schema. An OLD
-  name (an alias, or a tool kept unlisted since it was folded — ab_test) also takes the flat call its
-  clients learned before the envelope; a listed tool under its own name takes the envelope only. A tool's
+  the same schema it published, so what the model sees and what is checked are one schema. There are no
+  old names: every tool is listed and called by its one name (no alias, no unlisted tool). What a tool
+  hands its input to — ab_test, register_native_model, drop_context … — is an engine METHOD with an
+  input contract of its own (`METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
   modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
   distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
   a field a mode does not read is refused, not ignored; a union of VALUES (a pattern, an enum, a type)
@@ -161,7 +162,7 @@
 - BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
   tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
   `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
-  pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
+  pipeline materialize) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
   never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order). A query tool also takes a

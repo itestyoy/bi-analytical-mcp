@@ -439,14 +439,6 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
     add_metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
   });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
-  // the old name is no longer advertised but still answers, so a client that learned it keeps working
-  const legacy = await call('update_semantic_model', {
-    context_id: ctx,
-    semantic_model: 'acquisition',
-    add_measures: [{ name: 'impressions', agg: 'sum', field: 'impressions' }],
-    add_metrics: [{ name: 'impressions', type: 'simple', measure: { name: 'impressions' } }],
-  });
-  assert.equal(legacy.parse?.ok, true, JSON.stringify(legacy.parse));
 
   const after = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] });
   assert.equal(after.ok, true, JSON.stringify(after.error));

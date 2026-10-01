@@ -86,8 +86,8 @@ test('context lists and describes, delete_context removes — and a read never r
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
-  // what context used to remove is refused there, with the call that does it
-  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /delete_context\(\{ request: \{ context_id \} \}\)/);
+  // context only reads: an action that would remove is not one of its actions
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /must be one of: list, describe/);
   assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
   // delete_context: semantic_model needs its model; context forbids the model's fields
   await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);

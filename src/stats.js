@@ -1,6 +1,6 @@
 // Minimal statistics for A/B testing — pure JS, no dependencies. The AI computes
 // per-group aggregates via the pipeline (n, conversions, or mean+stddev) and calls
-// the ab_test tool, which runs the appropriate test here on the numbers.
+// experiment({ action: 'analyze' }), which runs the appropriate test here on the numbers.
 
 // ── distribution helpers ─────────────────────────────────────────────────────
 

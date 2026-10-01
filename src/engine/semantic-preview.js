@@ -253,4 +253,4 @@ export const semanticPreviewMethods = {
 };
 
 // the tasks that change a context's semantic manifest (a parse follows them)
-const SEMANTIC_BUILDS = new Set(['build_semantic_model', 'update_semantic_model']);
+const SEMANTIC_BUILDS = new Set(['build_semantic_model']);

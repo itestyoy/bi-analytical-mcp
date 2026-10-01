@@ -24,7 +24,7 @@
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
 //   engine/task-results.js        reading a task back, query_pipeline_model, display_model_result
 
-import { buildSchemas, transportSchema, MAX_WAIT_SECONDS } from './schema.js';
+import { buildSchemas, transportSchema, MAX_WAIT_SECONDS, METHOD_CONTRACTS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { abTest, srmCheck, sampleSize } from './experiment.js';
@@ -127,7 +127,10 @@ export class Engine {
     for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
     for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
-    this.schemas = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
+    // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js)
+    const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
+    this.schemas = Object.fromEntries(Object.entries(built).filter(([name]) => !METHOD_CONTRACTS.has(name)));
+    this.contracts = Object.fromEntries(Object.entries(built).filter(([name]) => METHOD_CONTRACTS.has(name)));
     // THE TOOLS — ONE REGISTRY (src/tools/define.js): the core's (src/tools/core.js) and those of the
     // features this deployment runs (src/features.js). A feature that is off adds nothing, so its tools
     // are neither listed nor callable. A core tool's schema is built with the others from the catalog
@@ -168,7 +171,7 @@ export class Engine {
           + `A source with no known events, or a model with nothing groupable, must render as an open field; an optional key is omitted, never set to undefined — see src/schema-kit.js.`);
       }
     }
-    this.validators = makeValidators(this.schemas);
+    this.validators = makeValidators({ ...this.schemas, ...this.contracts });
     this.ctxs = contextManager || new ContextManager({});
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
     this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, onFailure: (...a) => this._recordTaskError(...a) });
@@ -376,14 +379,10 @@ export class Engine {
   }
 
   /**
-   * ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
-   * drop_context / delete_native_model / delete_semantic_model. Delegates to the internal
-   * handlers (kept private so the all-at-once register path + tests reuse them).
+   * The context tool reads (list, describe); delete_context removes. Each hands its input to the
+   * method that does the work, held to that method's own contract.
    */
   async context(input = {}) {
-    // what context used to remove is delete_context's now: said so, rather than a bare enum refusal
-    const moved = { drop: 'delete_context({ request: { context_id } })', delete_model: "delete_context({ request: { context_id, what: 'pipeline_model' } })", delete_semantic_model: "delete_context({ request: { context_id, what: 'semantic_model', semantic_model } })" };
-    if (Object.hasOwn(moved, input?.action)) throw new ToolError(`context only reads (list, describe); removing is ${moved[input.action]}`, { stage: 'validate', field: 'action' });
     this._validate('context', input);
     return input.action === 'list' ? this.list_contexts() : this.describe_context({ context_id: input.context_id });
   }
@@ -436,10 +435,9 @@ export class Engine {
   }
 
   /**
-   * ONE A/B-experiment lifecycle tool (action-driven), folding in the three stat tools.
-   * plan → sample_size (power/MDE), check_split → srm_check (SRM guardrail), analyze →
-   * ab_test (significance). Validates the action shape, then delegates to the internal
-   * handler which re-validates the exact per-metric contract. The lifecycle order
+   * The A/B-experiment tool (action-driven): plan → sample_size (power/MDE), check_split → srm_check
+   * (SRM guardrail), analyze → ab_test (significance) — methods, not tools. Validates the action
+   * shape, then delegates to the method, which holds the input to its exact per-metric contract. The lifecycle order
    * (plan → check_split → analyze) is the recommended sequence.
    */
   experiment(input) {

@@ -196,14 +196,14 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
   await taskResult(e, build.task_id);
 });
 
-test('a renamed tool answers under its old name; a removed one says what replaced it', async () => {
+test('a name that is not a tool is refused as unknown — no old name dispatches', async () => {
   const { runTool } = await import('../../src/mcp-surface.js');
   const e = engine(orderedRunner());
-  const { raw } = await runTool(e, 'build_native_model', { request: { action: 'start', name: 'old_name', source: 'events' } });
-  assert.match(raw.draft_id, /^[a-z0-9]+$/, 'build_native_model still starts a draft');
-  const gone = await runTool(e, 'get_task_result', { request: { task_id: 'aabbccddeeff' } });
-  assert.equal(gone.result.isError, true);
-  assert.match(JSON.parse(gone.result.content[0].text).error.message, /query_semantic_model.*query_pipeline_model/);
+  for (const name of ['build_native_model', 'get_task_result']) {
+    const r = await runTool(e, name, { request: { task_id: 'aabbccddeeff' } });
+    assert.equal(r.result.isError, true);
+    assert.equal(r.unknown, true, name);
+  }
 });
 
 test('the tool that started a task is persisted with it, so its side survives a restart', async () => {

@@ -41,7 +41,7 @@ on which block holds which field; `semantic_index({ search })` finds it in the l
    → real values/cardinality; `({ search })` → map a term/value to its event + block. Check
    `semantic_index` for value-index freshness.
 2. Funnels/paths: a `build_pipeline_model` pipeline with a `match_recognize` stage (a step =
-   event + an `event_data` value), then read rows with `get_query_result`.
+   event + an `event_data` value), then read rows with `query_pipeline_model` ({ task_id }).
 3. Governed rates/volumes: `build_semantic_model` + `query_semantic_model` (after reading
    the metric's definition page) — prefer governed metrics over hand-rolled aggregates.
 

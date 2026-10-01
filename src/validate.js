@@ -6,6 +6,7 @@
 // than the client's is how the two could disagree about the same argument.
 import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
+import { isPlainObject } from './engine/helpers.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -113,6 +114,8 @@ function describe(e, ctx = {}) {
     case 'oneOf':
     case 'anyOf': return `${at} must match exactly one of the allowed configurations (provide the fields for exactly one mode)`;
     case 'oneOfNamed': return `${at} must be exactly one of: ${e.params.names.join(' | ')}`;
+    case 'requiresOneOf': return `${at} needs at least one of: ${e.params.keys.join(', ')}`;
+    case 'unionOfValues': return `${at} must be ${e.params.title || `one of: ${e.params.names.join(' | ')}`}`;
     default: return `${at} ${e.message}`;
   }
 }
@@ -124,12 +127,13 @@ function describe(e, ctx = {}) {
  * vocabulary offered at three sites, the whole stage union offered as both `stage` and `stages`),
  * so ajv's schemaPath now walks through refs. A reader that stopped at the first `{ $ref }` would
  * silently lose what the refusal is built from — the branch titles of a union, the sibling field
- * names behind "here that field is called 'q'" — so it jumps instead.
+ * names behind "here that field is called 'q'" — so it jumps instead. A pointer into the shared
+ * `$defs` document a node validator compiles against (DEFS_ID) is read the same way.
  */
 function atPointer(schema, pointer, depth = 0) {
   const deref = (node) => (node && typeof node === 'object' && node.$ref && depth < 20 ? atPointer(schema, node.$ref, depth + 1) : node);
   let node = schema;
-  for (const seg of String(pointer).replace(/^#\/?/, '').split('/').filter(Boolean)) {
+  for (const seg of String(pointer).replace(DEFS_ID, '').replace(/^#\/?/, '').split('/').filter(Boolean)) {
     node = deref(node);
     node = node?.[seg.replace(/~1/g, '/').replace(/~0/g, '~')];
     if (node === undefined) return undefined;
@@ -145,6 +149,16 @@ function deref(root, node) {
 /** What a branch of a union is CALLED, for "expected one of: …". */
 function branchTitle(branch, i) {
   return branch?.title || String(branch?.description || `option ${i + 1}`).split(/[:.]/)[0].trim();
+}
+
+/** What a branch of a union of VALUES (not of forms) takes, said plainly. */
+function valueBranch(b) {
+  if (b.title) return b.title;
+  if (Array.isArray(b.enum)) return b.enum.length === 1 ? JSON.stringify(b.enum[0]) : `one of ${b.enum.slice(0, 15).join(', ')}${b.enum.length > 15 ? ', …' : ''}`;
+  if (b.const !== undefined) return JSON.stringify(b.const);
+  const a = (t) => `${/^[aeiou]/.test(t) ? 'an' : 'a'} ${t}`;
+  if (b.pattern) return `${a(b.type || 'string')} matching ${b.pattern}`;
+  return b.type ? a([].concat(b.type).join(' or ')) : 'another value';
 }
 
 /** The values each key is pinned to in a branch (its `const` / `enum`), a branch that is itself a union
@@ -171,22 +185,55 @@ function requires(schema, branch, key) {
   return Array.isArray(b?.required) && b.required.includes(key);
 }
 
-// One node of a tool schema, validated on its own (the refusal of a union reads its branches one by
-// one): compiled with the tool's `$defs` beside it, so every `#/$defs/…` inside still resolves; once per
-// node of a document.
-const nodeAjv = new Ajv({ allErrors: true, strict: false, verbose: true });
-addFormats(nodeAjv);
-const compiledNodes = new WeakMap();
+// ONE NODE OF A TOOL SCHEMA, VALIDATED ON ITS OWN (a union's refusal reads its branches one by one). Each
+// tool schema has an ajv of its own, held only as long as the schema is (a WeakMap on the root — ajv keeps
+// everything it compiled, so one module-wide instance kept every engine's schemas for the process's life),
+// with the root's `$defs` added ONCE as their own document: a node is compiled with its `#/$defs/…`
+// pointed at that document, so a folded subtree is compiled once per tool, not once per node reaching it.
+const DEFS_ID = 'https://tool-defs.invalid/schema';
+const perRoot = new WeakMap();
 function nodeValidator(root, node) {
-  let perRoot = compiledNodes.get(root);
-  if (!perRoot) { perRoot = new WeakMap(); compiledNodes.set(root, perRoot); }
-  let v = perRoot.get(node);
-  if (!v) { v = nodeAjv.compile(root.$defs && !node.$defs ? { ...node, $defs: root.$defs } : node); perRoot.set(node, v); }
+  let r = perRoot.get(root);
+  if (!r) {
+    const ajv = new Ajv({ allErrors: true, strict: false, verbose: true });
+    addFormats(ajv);
+    if (root.$defs) ajv.addSchema({ $id: DEFS_ID, $defs: root.$defs });
+    r = { ajv, nodes: new WeakMap() };
+    perRoot.set(root, r);
+  }
+  let v = r.nodes.get(node);
+  if (!v) { v = r.ajv.compile(rebased(node)); r.nodes.set(node, v); }
   return v;
 }
 
+/** A node with its local `#/$defs/…` pointers aimed at the shared `$defs` document (and its own `$defs` left there). */
+function rebased(node) {
+  const walk = (n) => {
+    if (Array.isArray(n)) return n.map(walk);
+    if (!isPlainObject(n)) return n;
+    const out = {};
+    for (const [k, v] of Object.entries(n)) {
+      if (k === '$defs' && n === node) continue;
+      out[k] = k === '$ref' && typeof v === 'string' && v.startsWith('#/$defs/') ? `${DEFS_ID}${v}` : walk(v);
+    }
+    return out;
+  };
+  return walk(node);
+}
+
 const within = (path, base) => path === base || path.startsWith(`${base}/`);
-const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// A union's own keywords beside its branches (a type, a closed object, a minLength), as one node —
+// kept per union, so its compiled validator is found again.
+const siblingsOf = new WeakMap();
+function unionSiblings(n) {
+  if (!siblingsOf.has(n)) {
+    const { anyOf: _branches, ...siblings } = n;
+    const says = Object.keys(siblings).some((k) => !['description', 'title', 'type', '$defs', 'default'].includes(k));
+    siblingsOf.set(n, says ? siblings : null);
+  }
+  return siblingsOf.get(n);
+}
 
 /**
  * WHY A VALUE IS REFUSED, AS THE ERRORS OF WHAT IT MEANT — every union read branch by branch.
@@ -198,34 +245,67 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
  * a value no branch takes is refused as that, with the values there are — and where nothing is pinned
  * (or the value left it out), the branch the value came CLOSEST to, with the modes there are said. That
  * branch is validated on its own, so what is reported is its errors and nothing else, and a union
- * inside it is read the same way. `at` is where the value sits in the call.
+ * inside it is read the same way.
+ *
+ * Paths in what it returns are relative to the value; `memo` holds each (node, value) explained once in
+ * one refusal, so a tree of nested unions (a where tree of and/or groups) costs what its size does, not
+ * what every branch tried at every level would.
  */
-function explain(root, node, value, at = '') {
+function explain(root, node, value, memo) {
   const n = deref(root, node);
+  let byValue = memo.get(n);
+  if (!byValue) { byValue = new Map(); memo.set(n, byValue); }
+  if (byValue.has(value)) return byValue.get(value);
+  byValue.set(value, []); // a cycle reads as no complaint rather than recursing
+  const out = explainNode(root, n, value, memo);
+  byValue.set(value, out);
+  return out;
+}
+
+const under = (at, errors) => errors.map((e) => ({ ...e, instancePath: `${at}${e.instancePath}`, ...(e.params?.at !== undefined ? { params: { ...e.params, at: `${at}${e.params.at}` } } : {}) }));
+
+function explainNode(root, n, value, memo) {
   const v = nodeValidator(root, n);
   if (v(value)) return [];
-  const errors = (v.errors || []).map((e) => ({ ...e, instancePath: `${at}${e.instancePath}` }));
+  const errors = v.errors || [];
   if (!Array.isArray(n.anyOf)) {
-    // a union inside this node is read on its own: its errors replace every error under it
-    const unions = errors.filter((e) => e.keyword === 'anyOf' && isObject(e.parentSchema));
+    // a union inside this node is read on its own: its errors replace every error under it. Only the
+    // OUTERMOST unions are read — one inside another is part of what reading the outer one decides
+    // (ajv reports an inner union's errors too, from branches the outer reading may throw away).
+    const unions = errors.filter((e) => e.keyword === 'anyOf' && isPlainObject(e.parentSchema));
+    const outer = unions.filter((u, i) => !unions.some((o, j) => j !== i && (o.instancePath === u.instancePath ? j > i : within(u.instancePath, o.instancePath))));
     let kept = errors.filter((e) => e.keyword !== 'anyOf');
-    for (const u of unions) {
+    for (const u of outer) {
       kept = kept.filter((e) => !within(e.instancePath, u.instancePath));
-      kept.push(...explain(root, u.parentSchema, valueAt(value, u.instancePath.slice(at.length)), u.instancePath));
+      kept.push(...under(u.instancePath, explain(root, u.parentSchema, valueAt(value, u.instancePath), memo)));
     }
     return dedupe(kept);
   }
   // the node IS a union: what its own siblings say (a type, a closed object), then its branches
-  const { anyOf: branchNodes, ...siblings } = n;
-  const own = Object.keys(siblings).some((k) => !['description', 'title', 'type', '$defs', 'default'].includes(k)) ? explainSiblings(root, siblings, value, at) : [];
-  const branches = branchNodes.map((b) => deref(root, b));
+  const siblings = unionSiblings(n);
+  const own = siblings ? explain(root, siblings, value, memo) : [];
+  const branches = n.anyOf.map((b) => deref(root, b));
+  // a value one branch takes fails only on the siblings
+  if (branches.some((b) => nodeValidator(root, b)(value))) return own;
+  // a union of constraints rather than of forms is said as what it asks for, in one sentence
+  if (branches.every((b) => Object.keys(b).length === 1 && Array.isArray(b.required))) {
+    return dedupe([...own, { keyword: 'requiresOneOf', instancePath: '', params: { keys: branches.flatMap((b) => b.required) } }]);
+  }
+  if (branches.every((b) => !b.properties && !b.anyOf && !b.required)) {
+    // one branch of the value's own type: its refusal is the one that says what is wrong (a pattern)
+    const kind = Array.isArray(value) ? 'array' : value === null ? 'null' : Number.isInteger(value) ? 'integer' : typeof value;
+    const typed = branches.filter((b) => !b.type || [].concat(b.type).some((t) => t === kind || (t === 'number' && kind === 'integer')));
+    if (typed.length === 1) return dedupe([...own, ...explain(root, typed[0], value, memo)]);
+    return dedupe([...own, { keyword: 'unionOfValues', instancePath: '', params: { title: n.title || null, names: branches.map(valueBranch) } }]);
+  }
   const pins = branches.map((b) => pinsOf(root, b));
   let candidates = branches.map((_, i) => i);
   let named = false;
+  let defaults = null;
   // the fields that tell the branches apart — pinned in every one, to different values — narrow them in
-  // turn (an `action`, then a `metric`): the value given picks, or its absence picks the branches that
-  // may leave the field out
-  if (isObject(value)) {
+  // turn (an `action`, then a `metric`): the value given picks; left out, the forms that may leave it
+  // out are the default ones, preferred on a tie but not assumed — the caller may have forgotten it
+  if (isPlainObject(value)) {
     const tried = new Set();
     for (;;) {
       const key = candidates.length > 1 && [...pins[candidates[0]].keys()].find((k) => !tried.has(k)
@@ -235,12 +315,12 @@ function explain(root, node, value, at = '') {
       tried.add(key);
       if (key in value) {
         const taking = candidates.filter((i) => pins[i].get(key).includes(value[key]));
-        if (!taking.length) return [...own, { keyword: 'pinnedNone', instancePath: `${at}/${key}`, params: { at: `${at}/${key}`, values: [...new Set(candidates.flatMap((i) => pins[i].get(key)))] } }];
+        if (!taking.length) return [...own, { keyword: 'pinnedNone', instancePath: `/${key}`, params: { at: `/${key}`, values: [...new Set(candidates.flatMap((i) => pins[i].get(key)))] } }];
         candidates = taking;
         named = true;
-      } else {
+      } else if (!defaults) {
         const optional = candidates.filter((i) => !requires(root, branches[i], key));
-        if (optional.length && optional.length < candidates.length) { candidates = optional; named = true; }
+        if (optional.length && optional.length < candidates.length) defaults = new Set(optional);
       }
     }
   }
@@ -249,15 +329,11 @@ function explain(root, node, value, at = '') {
   // required field means they meant it and left something out; a bad enum/const value means they DID
   // name it and got the value wrong — that is the message worth showing, so it costs least.
   const weight = (e) => ({ additionalProperties: 10, type: 8, required: 6, pinnedNone: 3 }[e.keyword] ?? 1);
-  const scored = candidates.map((i) => { const es = explain(root, branches[i], value, at); return { i, es, score: es.reduce((s, e) => s + weight(e), 0) }; });
-  const best = scored.sort((a, b) => a.score - b.score)[0];
-  const label = named && candidates.length === 1 ? [] : [{ keyword: 'oneOfNamed', instancePath: at, params: { names: [...new Set(candidates.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
+  const scored = candidates.map((i) => { const es = explain(root, branches[i], value, memo); return { i, es, score: es.reduce((s, e) => s + weight(e), 0) }; });
+  const best = scored.sort((a, b) => a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
+  // the modes are named unless the value named its own — or meant the default one, which it need not name
+  const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(candidates.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);
-}
-
-/** What a union's own keywords (beside its branches) say about a value. */
-function explainSiblings(root, siblings, value, at) {
-  return explain(root, siblings, value, at);
 }
 
 function dedupe(errors) {
@@ -272,7 +348,7 @@ export function validateInput(validator, input) {
   const seen = new Set();
   const errors = [];
   const ctx = { input, schema: validator.schema };
-  for (const e of explain(validator.schema, validator.schema, input)) {
+  for (const e of explain(validator.schema, validator.schema, input, new Map())) {
     const msg = describe(e, ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
   }

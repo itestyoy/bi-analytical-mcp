@@ -92,7 +92,7 @@ export function semanticIndexSchema(catalog) {
     // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
     // so the branch union narrows the shape but never replaces it.
     type: 'object',
-    description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
+    description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass an empty request ({ request: {} }) for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
     // One closed form per view (an `anyOf` — src/schema-kit.js says why), each with its own required
     // set, so exactly one matches. A NAME is never offered without its owner: the { source, event }
     // and { source, property } forms enumerate one source's names each.

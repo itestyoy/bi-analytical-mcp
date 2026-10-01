@@ -5,6 +5,7 @@
 
 import { getDialect } from '../dialects/index.js';
 import { COMPARE_SQL, typedLiteral } from '../conditions.js';
+import { form } from '../schema-kit.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -33,17 +34,28 @@ export function statAccuracyNote(catalog) {
 
 // A scalar operand: exactly one of a column reference, a literal value, or the
 // `now` token (current timestamp). Shared by `where`, `compute`, and `case`.
-export const OPERAND = { type: 'object', additionalProperties: false, properties: { column: { type: 'string' }, value: {}, now: { type: 'boolean' } }, description: 'One of: { column }, { value }, or { now: true }.' };
+export const OPERAND = {
+  type: 'object',
+  description: 'One of: { column }, { value }, or { now: true }.',
+  anyOf: [
+    form({ title: 'a column', required: ['column'], properties: { column: { type: 'string' } } }),
+    form({ title: 'a constant', required: ['value'], properties: { value: {} } }),
+    form({ title: 'the current time', required: ['now'], properties: { now: { const: true } } }),
+  ],
+};
 
 // One comparison, used identically by `where` and `case` branches. Either side is
 // a column / constant / now: shorthand `{column, op, value}` (column vs constant)
 // or `{left, op, right}` (column-vs-column, constant-vs-column, …). in/not_in take
 // an array via `value` or `right.value`.
 export const CONDITION = {
-  type: 'object', additionalProperties: false, required: ['op'],
-  anyOf: [{ required: ['column'] }, { required: ['left'] }], // a left side is mandatory
+  type: 'object',
   description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
-  properties: { column: { type: 'string' }, value: {}, left: OPERAND, right: OPERAND, op: { enum: CMP } },
+  // the left side is a column named outright or an operand — one of the two, never both
+  anyOf: [
+    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: {}, right: OPERAND } }),
+    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: OPERAND, op: { enum: CMP }, value: {}, right: OPERAND } }),
+  ],
 };
 
 export const OPSYM = COMPARE_SQL;

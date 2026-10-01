@@ -20,11 +20,11 @@
 import { detached, withSignal, isolatedTarget, currentSignal } from './request-context.js';
 import { ToolError, RESULT_GONE } from './validate.js';
 import { MAX_WAIT_SECONDS } from './schema.js';
+import { isPlainObject } from './engine/helpers.js';
 
 const KEEP_MAX = 200;
 const KEEP_TTL_MS = 3600000;
 
-const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 export class TaskRunner {
   /**

@@ -9,6 +9,7 @@ import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta } from './apps.js';
 import { wireSchema } from './schema/transport.js';
+import { isPlainObject } from './engine/helpers.js';
 import { buildViewModel } from './apps/result-view-model.js';
 import { toolRegistry } from './tools/define.js';
 import { CORE_TOOLS } from './tools/core.js';
@@ -127,17 +128,21 @@ export function isCallableTool(engine, name) {
   return typeof name === 'string' && toolsOf(engine).has(name);
 }
 
-const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-
 /**
  * The input of a call: the value of its one field, `request`. A call written some other way — its
  * fields at the top, or nothing at all — is refused with the shape to use, the fields it gave moved
  * where they belong, so the next call is right.
+ *
+ * `legacy`: the call came under one of the OLD names — an alias (src/tools/define.js) or a tool kept
+ * unlisted since it was folded into another (ab_test into experiment) — kept so a client that learned
+ * it keeps working; such a client learned it before the envelope too, so its flat call is its input as
+ * it was. A listed tool under its own name takes the envelope only.
  */
-export function requestOf(name, args) {
+export function requestOf(name, args, { legacy = false } = {}) {
   const given = isPlainObject(args) ? args : {};
   const keys = Object.keys(given);
   if (keys.length === 1 && keys[0] === 'request' && isPlainObject(given.request)) return { request: given.request };
+  if (legacy && !keys.includes('request')) return { request: given };
   const others = keys.filter((k) => k !== 'request');
   const call = others.length
     ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request`
@@ -184,7 +189,8 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
   // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
   // (the arguments are kept as they came, so a failure is replayed by the same call)
-  const inner = isPlainObject(args?.request) ? args.request : {};
+  // (a call refused for not using the envelope still carried its ids — at the top)
+  const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
   const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : null });
   if (!isCallableTool(engine, calledAs)) {
     logLine(calledAs, '✗ unknown tool');
@@ -195,7 +201,7 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   const name = def.name;
   // every tool takes its input under `request` (src/schema/transport.js wireSchema); the rest of the
   // call sees that input and nothing else
-  const call = requestOf(name, args);
+  const call = requestOf(name, args, { legacy: calledAs !== name || !def.listed });
   if (call.error) {
     logLine(name, '✗ not under request');
     failed(name, call.error, { stage: 'validate', field: 'request' });
@@ -255,8 +261,10 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
 export async function runToCompletion(engine, calledAs, args, { signal, renders = true } = {}) {
   const def = toolsOf(engine).get(calledAs);
   const name = def?.name ?? calledAs;
-  // what the call asks, under `request` (a call not written so is refused by runTool below)
-  const input = isPlainObject(args?.request) ? args.request : {};
+  // what the call asks, read as runTool reads it — a call it refuses is refused at once, never after a wait
+  const call = def ? requestOf(name, args, { legacy: calledAs !== name || !def.listed }) : { error: 'unknown tool' };
+  if (call.error) return runTool(engine, calledAs, args, { signal, renders });
+  const input = call.request;
   // the tasks the call reads: one (task_id), or a batch (task_ids) — followed until every one is done
   const ids = typeof input.task_id === 'string' ? [input.task_id] : Array.isArray(input.task_ids) ? input.task_ids.filter((id) => typeof id === 'string') : [];
   // (a cancel is answered at once: it never waits for the task it stops)

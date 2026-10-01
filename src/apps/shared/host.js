@@ -15,3 +15,10 @@ export function applyHostContext(ctx) {
     for (const side of ['top', 'right', 'bottom', 'left']) root.setProperty(`--safe-${side}`, `${Number(ctx.safeAreaInsets[side]) || 0}px`);
   }
 }
+
+/** The tool's input as the host sends it (`ui/notifications/tool-input`): every tool takes its input
+ *  under one field, `request` (src/schema/transport.js wireSchema), so what the card reads is inside it. */
+export function toolInputOf(params) {
+  const args = params?.arguments;
+  return args && typeof args.request === 'object' && args.request !== null ? args.request : null;
+}

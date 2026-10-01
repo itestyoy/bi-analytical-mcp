@@ -87,7 +87,13 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
   test(`every union of objects is closed, named and told apart — anyOf as strict as oneOf (${label} catalog)`, () => {
     for (const [name, schema] of Object.entries(allSchemas(path))) {
       for (const union of unionsOf(schema)) {
-        const objects = union.anyOf.flatMap((b) => forms(schema, b)).filter((b) => b && b.type === 'object' && b.properties);
+        const branches = union.anyOf.flatMap((b) => forms(schema, b));
+        // a union is of FORMS (each a closed object) or of VALUES (a pattern, an enum, a type) — never a
+        // bare constraint on fields beside open properties ({ required: [...] }), which no form closes
+        for (const b of branches) {
+          assert.ok(!(b && b.required && !b.properties), `${name}: a union branch requires fields it does not declare (${JSON.stringify(b)}) — write the modes as closed forms`);
+        }
+        const objects = branches.filter((b) => b && b.type === 'object' && b.properties);
         if (objects.length < 2) continue;
         for (const [i, b] of objects.entries()) {
           assert.equal(b.additionalProperties, false, `${name}: a form of a union is open — an unknown field would be accepted by SOME form (${b.title || i})`);

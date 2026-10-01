@@ -27,7 +27,7 @@
  * server runs too; this file only draws it, with the result view's shadcn pieces and theme.
  */
 import { App } from '@modelcontextprotocol/ext-apps';
-import { applyHostContext } from '../../shared/host.js';
+import { applyHostContext, toolInputOf } from '../../shared/host.js';
 import { retentioneeringViewModel, byText } from '../../../retentioneering/view-model.js';
 import { el, badge, card, stat, formatNumber, formatShare } from '../../shared/ui.js';
 import { icon } from '../../shared/icons.js';
@@ -776,7 +776,7 @@ function handleHostContextChanged(ctx) {
 }
 
 const app = new App({ name: 'Path Analysis', version: '1.0.0' });
-app.ontoolinput = (params) => { state.toolInput = params.arguments ?? null; };
+app.ontoolinput = (params) => { state.toolInput = toolInputOf(params); };
 app.ontoolresult = (result) => render(result);
 app.ontoolcancelled = () => showStatus('The call was cancelled.');
 app.onhostcontextchanged = handleHostContextChanged;

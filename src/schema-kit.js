@@ -11,7 +11,7 @@
 // form matches any input, so the `anyOf` means what a `oneOf` would, in the spelling all of them read.
 // A rule "in this mode that field is required, this one is not allowed" is not a condition bolted on
 // beside the fields (`if/then`, `not`) but the form itself: the field is in its required list, or it is
-// not among its properties. test/unit/tool-schema-portability.test.js holds every published schema to
+// not among its properties. test/unit/schema-portability.test.js holds every published schema to
 // that subset.
 //
 // EMPTY CONSTRUCTS. A catalog decides every vocabulary in this server: which events a source
@@ -81,7 +81,8 @@ export function stringOtherThan(value, rest = {}) {
   const esc = (c) => c.replace(/[\\\]^-]/g, (x) => `\\${x}`);
   const lengths = [...(v.length ? [`^[\\s\\S]{0,${v.length - 1}}$`] : []), `^[\\s\\S]{${v.length + 1},}$`];
   const positions = [...v].map((c, i) => `^[\\s\\S]{${i}}[^${esc(c)}][\\s\\S]{${v.length - i - 1}}$`);
-  return { type: 'string', ...rest, anyOf: [...lengths, ...positions].map((pattern) => ({ pattern })) };
+  // the title is what a refusal says (src/validate.js): the alternatives are patterns, not something to read
+  return { type: 'string', title: `any value other than ${JSON.stringify(v)}`, ...rest, anyOf: [...lengths, ...positions].map((pattern) => ({ pattern })) };
 }
 
 /** Drop the keys whose value is undefined — for spreading an `anyOfOr` that came back empty. */

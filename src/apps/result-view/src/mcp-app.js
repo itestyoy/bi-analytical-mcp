@@ -29,6 +29,7 @@
 import { ArcElement, BarController, BarElement, CategoryScale, Chart, DoughnutController, Filler, LinearScale, LineController, LineElement, PointElement, Tooltip } from 'chart.js';
 import { icon } from '../../shared/icons.js';
 import { el } from '../../shared/ui.js';
+import { toolInputOf } from '../../shared/host.js';
 import '../../shared/global.css';
 import '../../shared/components.css';
 import { log, mainEl, chartCanvas, fullscreenBtn, backBtn, chartMenu, loadingEl, statusEl, state, app } from './page.js';
@@ -76,7 +77,7 @@ app.onteardown = async () => {
 };
 
 app.ontoolinput = (params) => {
-  state.toolInput = params.arguments ?? null;
+  state.toolInput = toolInputOf(params);
 };
 
 app.ontoolresult = (result) => {

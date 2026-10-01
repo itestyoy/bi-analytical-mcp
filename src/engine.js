@@ -151,16 +151,9 @@ export class Engine {
     // Constrain the recipe view to real ids when recipes are configured.
     // The recipe view offers the ids this server actually has — the schema says what exists.
     if (recipes) {
-      const si = this.schemas.semantic_index;
-      const branch = (si?.anyOf || si?.oneOf || []).find((b) => b.properties?.recipe);
-      // The ids are injected AFTER the schemas were built and folded, so the two sites that take
-      // a recipe id would each carry the whole list again (~1.4 KB apiece on a real recipe set).
-      // They share one definition instead — the same fold the built schemas get, applied here.
-      si.$defs = { ...(si.$defs || {}), recipe_ids: { type: 'string', enum: recipes.ids() } };
-      const withIds = (prop) => ({ $ref: '#/$defs/recipe_ids', ...(prop.description ? { description: prop.description } : {}) });
-      if (branch) branch.properties.recipe = withIds(branch.properties.recipe);
-      // …and in the flat root map too, which is what a client that strips the union is left with.
-      if (si?.properties?.recipe) si.properties.recipe = withIds(si.properties.recipe);
+      // one form takes a recipe id ({ recipe }); the ids are known only now, after the schemas were built
+      const branch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.recipe);
+      if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), ...(branch.properties.recipe.description ? { description: branch.properties.recipe.description } : {}) };
     }
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the

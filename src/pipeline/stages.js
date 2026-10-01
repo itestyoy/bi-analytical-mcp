@@ -192,12 +192,8 @@ export const STAGES = {
   join: {
     keepsSourceRows: true,
     recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
-    schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'with'],
-      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
-      anyOf: [{ required: ['via'] }, { required: ['on'] }],
-      properties: {
-        stage: { enum: ['join'] },
+    schema: (catalog) => {
+      const fields = {
         with: { type: 'string', enum: catalog.modelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
         via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at.' },
         on: {
@@ -232,8 +228,15 @@ export const STAGES = {
           },
         },
         kind: { enum: ['left', 'inner'], default: 'left' },
-      },
-    }),
+      };
+      // two closed forms: by a declared relationship (via) or by columns both sides name alike (on) — never both
+      const by = (title, key) => form({ title, tag: ['stage', 'join'], required: ['stage', 'with', key], properties: pick(fields, ['with', key, 'attrs', 'between', 'kind']) });
+      return {
+        type: 'object',
+        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
+        anyOf: [by('join by a declared relationship (via)', 'via'), by('join on columns both sides name alike (on)', 'on')],
+      };
+    },
     build: ({ catalog, cols, source }, p) => {
       const m = catalog.getModel(p.with);
       if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);

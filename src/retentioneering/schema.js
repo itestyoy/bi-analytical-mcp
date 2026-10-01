@@ -188,7 +188,7 @@ export function buildSchema(catalog) {
   return buildForms(event, {
     description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
     properties: {
-      action: { enum: BUILD_ACTIONS, description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${offeredOps().join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
+      action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
       eventstream: { type: 'string', pattern: NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
       step: { ...stepSchema(), description: 'add_step / edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
       steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: several steps, applied in order.' },
@@ -253,10 +253,8 @@ export function buildSchema(catalog) {
         description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "sessions"). (A split_sessions step splits them by other rules: a timeout, a separator event, bounds.)',
         properties: { gap_minutes: { type: 'integer', minimum: 1 } },
       },
-      sample: {
-        type: 'object', additionalProperties: false, anyOf: [{ required: ['share'] }, { required: ['events'] }],
-        description: 'Make the eventstream smaller, in SQL, before it is materialized — deterministic (a hash, not a random draw), so every build keeps the same rows. `share` keeps that share of USERS with all their events: the paths stay whole, so every analysis stays exact for the users kept. `events` keeps only a share of the rows of the named events ({ "ad_finished": 0.05 }), each row chosen by a hash of its user, time and name, and every other event whole: for an event so frequent it drowns the rest. A sampled event is under-counted by its share and drops out between its neighbours in the rest of the path, so transitions into and out of it (and counts, funnels and metrics over it) are no longer exact — use it when that event is context rather than the question. Both may be given.',
-        properties: {
+      sample: (() => {
+        const kept = {
           share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The share of users kept (0 < share ≤ 1).' },
           events: {
             type: 'object', minProperties: 1,
@@ -264,8 +262,15 @@ export function buildSchema(catalog) {
             additionalProperties: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
             description: 'The share of rows kept per event: { "<event>": share }. An event of the source or one events.split makes; groups apply after.',
           },
-        },
-      },
+        };
+        // by users, by events, or both — three closed forms, told apart by what each requires
+        const by = (title, keys) => form({ title, required: keys, properties: pick(kept, keys) });
+        return {
+          type: 'object',
+          description: 'Make the eventstream smaller, in SQL, before it is materialized — deterministic (a hash, not a random draw), so every build keeps the same rows. `share` keeps that share of USERS with all their events: the paths stay whole, so every analysis stays exact for the users kept. `events` keeps only a share of the rows of the named events ({ "ad_finished": 0.05 }), each row chosen by a hash of its user, time and name, and every other event whole: for an event so frequent it drowns the rest. A sampled event is under-counted by its share and drops out between its neighbours in the rest of the path, so transitions into and out of it (and counts, funnels and metrics over it) are no longer exact — use it when that event is context rather than the question. Both may be given.',
+          anyOf: [by('a share of users', ['share']), by('a share of some events', ['events']), by('both', ['share', 'events'])],
+        };
+      })(),
     },
     $defs: { [CONDITION_DEF]: f.condition_schema },
   });
@@ -273,6 +278,20 @@ export function buildSchema(catalog) {
 
 /** The build's actions, the pipeline builder's own words for the same moves. */
 export const BUILD_ACTIONS = ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize'];
+
+/** What each build action does — said once, on the form of that action (and joined for the field that lists them all). */
+const ACTION_SAYS = () => ({
+  start: 'declares the eventstream and builds it in SQL (a task); the default',
+  add_step: `appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
+  add_steps: 'appends several steps, all or none, each checked as add_step checks one',
+  edit_step: 'replaces step `index`, re-checking every step after it and naming the first one it breaks',
+  insert_step: 'inserts a step before step `index`, re-checking every step after it',
+  delete_step: 'removes step `index`, re-checking every step after it',
+  truncate: 'keeps steps 1..`after`',
+  fork: 'copies steps 1..`after` into a new eventstream (`name`), to try a variant without touching this one',
+  preview: 'lists the steps with what each changed',
+  materialize: 'runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized',
+});
 
 /**
  * The build as forms, one per action (and two for a start: from an events source, or from a task's
@@ -289,7 +308,7 @@ function buildForms(event, schema) {
   const free = { type: 'string', minLength: 1, description: 'An event name: of the source, or one the from_task table holds.' };
   const relax = (node) => (node === event ? free : Array.isArray(node) ? node.map(relax) : node && typeof node === 'object' ? Object.fromEntries(Object.entries(node).map(([k, v]) => [k, relax(v)])) : node);
   const lifted = event.enum ? relax(F) : F;
-  const action = (value) => ({ tag: ['action', value], tagDescription: F.action.description });
+  const action = (value) => ({ tag: ['action', value], tagDescription: [].concat(value).map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') });
   const declaration = ['context_id', 'name', 'description', 'time_range', 'path', 'events', 'segments', 'where', 'sessions', 'sample'];
   const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: pick(F, ['context_id', 'eventstream', ...required, ...optional]) });
   return {

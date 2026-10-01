@@ -128,10 +128,14 @@
   required field is `request`, the tool's own schema as its value, `$defs` at the root — the one root
   every host's API takes (Anthropic's refuses a union there, OpenAI's strict mode a root anyOf). The
   surface unwraps it at ONE point (`requestOf`, runTool) and the engine validates `request` against
-  the same schema it published, so what the model sees and what is checked are one schema. A tool's
+  the same schema it published, so what the model sees and what is checked are one schema. An OLD
+  name (an alias, or a tool kept unlisted since it was folded — ab_test) also takes the flat call its
+  clients learned before the envelope; a listed tool under its own name takes the envelope only. A tool's
   modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
   distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
-  a field a mode does not read is refused, not ignored. The portable subset is the only one used:
+  a field a mode does not read is refused, not ignored; a union of VALUES (a pattern, an enum, a type)
+  is the other kind, and a bare `{ required: [...] }` branch beside open properties is neither (an "at
+  least one of" is written as its forms: one, the other, both). The portable subset is the only one used:
   `anyOf`, `$defs`/`$ref`, `enum`/`const`, `pattern` — no oneOf / allOf / not / if-then-else /
   discriminator, in a core or a feature schema, or in the generated facts sheet
   (test/unit/schema-portability.test.js holds every listed schema to it, and every union to being

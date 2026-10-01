@@ -115,3 +115,24 @@ test('an error carries what reproduces it: the draft a refused step was added to
   assert.deepEqual(task.context.state.draft.stages.length, 1);
   assert.equal(task.args.action, 'materialize');
 });
+
+test('a call refused for leaving out the envelope is kept with the ids it carried at the top', async () => {
+  const engine = makeEngine({ recipes: false });
+  const r = await runTool(engine, 'query_semantic_model', { task_id: 'abcdef123456' });
+  assert.equal(r.result.isError, true);
+  const page = payload(await runTool(engine, 'explore_errors', { request: { task_id: 'abcdef123456' } }));
+  assert.equal(page.total, 1, 'found by the task it named');
+  assert.equal(page.errors[0].field, 'request');
+});
+
+test('an old name of a tool still takes the call as its clients learned it, before the envelope; the listed name does not', async () => {
+  const engine = makeEngine({ recipes: false });
+  const flat = { action: 'analyze', metric: 'proportion', control: { n: 1000, conversions: 100 }, variants: [{ label: 'b', n: 1000, conversions: 130 }] };
+  const listed = await runTool(engine, 'experiment', flat);
+  assert.equal(listed.result.isError, true, 'the listed name takes the envelope only');
+  const old = await runTool(engine, 'ab_test', { metric: flat.metric, control: flat.control, variants: flat.variants });
+  assert.equal(old.result.isError, undefined, JSON.stringify(old.result));
+  assert.equal(payload(old).results[0].variant, 'b');
+  // and the envelope under the old name as well
+  assert.equal((await runTool(engine, 'ab_test', { request: { metric: flat.metric, control: flat.control, variants: flat.variants } })).result.isError, undefined);
+});

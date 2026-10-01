@@ -191,7 +191,11 @@ test('the A/B card reads the split check and the detectable effect in the unit i
   const { buildViewModel } = await import('../../src/apps/result-view-model.js');
   const args = { action: 'analyze', metric: 'proportion', expected_ratio: [1, 1], control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 10600, conversions: 1030 }] };
   const r = await engine.experiment(args);
-  const m = buildViewModel('experiment', r, args);
+  // the input as the card has it: what the host sends as the call's arguments, the envelope unwrapped
+  const { toolInputOf } = await import('../../src/apps/shared/host.js');
+  const m = buildViewModel('experiment', r, toolInputOf({ arguments: { request: args } }));
+  assert.equal(m.variants[0].n_control, 10000, 'the group sizes reach the card');
+  assert.equal(m.variants[0].n_variant, 10600);
   assert.equal(m.split.detected, true);
   assert.equal(m.split.p_value, r.split.p_value);
   const v = m.variants[0];

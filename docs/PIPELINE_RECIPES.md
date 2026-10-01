@@ -115,7 +115,7 @@ then merge the trailing-N days' sketches.
   {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", n:10} ]
 ```
 
-### Multi-step funnel  (match_recognize — via register_native_model)
+### Multi-step funnel  (match_recognize — via build_pipeline_model)
 ```jsonc
 { sequence:{ partition_by:"user", mode:"ordered",
   steps:[{name:"launch",event_name:["first_launch"]},

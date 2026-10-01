@@ -53,17 +53,17 @@ export const semanticBuildMethods = {
     return this._taskStarted(taskId, { context_id: ctxId });
   },
 
-  /** Delete a registered native model: remove its files + state and re-parse. */
+  /** Delete a pipeline model: remove its files + state and re-parse. */
   async _deletePipelineModel(input) {
     this._validate('delete_context.pipeline_model', input);
     const ctx = this._ctxToWrite(input.context_id);
-    if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
+    if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no pipeline model registered in this context' };
     const model = ctx.state.model;
     // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
     // do the models of its earlier builds (`_cN`): the base name owns the whole family.
     const consumers = this._checkpointConsumers(ctx.id); // forks reading a table built here
     const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model.replace(/_c\d+$/, ''));
-    delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
+    delete ctx.state.engine; delete ctx.state.model; delete ctx.state.pipeline_model;
     if (ctx.state.draft) ctx.state.draft.checkpoints = []; // their tables are gone with the files
     delete ctx.state.checkpoint_consumers;
     for (const c of consumers) { // a fork that read one of these prefixes has to recompute it now

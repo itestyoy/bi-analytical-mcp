@@ -106,7 +106,7 @@ export function dbtSchemaToCatalog(doc) {
     const dimensions = {};
     const flatProps = {}; // fact-only: flattened event_data__* payload columns
     const columnDescriptions = {};
-    const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
+    const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in pipelines
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
       // A VALIDITY MARK only means something on a groupable time dimension — that is the only
@@ -124,7 +124,7 @@ export function dbtSchemaToCatalog(doc) {
           throw new Error(`column '${col.name}' of model '${model.name}' is marked meta.mcp.dimension.validity: ${v}, but that column is ${taken}, so it never becomes a groupable time dimension and the window would be ignored. A validity window is a PAIR of separate time columns (start and end) on a slowly-changing dimension model.`);
         }
       }
-      // Expose every REAL column to native pipelines — except the raw is_event_data
+      // Expose every REAL column to pipelines — except the raw is_event_data
       // payload marker, which may not exist as a physical column once flattened.
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc

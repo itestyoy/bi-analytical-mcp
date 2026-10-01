@@ -243,8 +243,8 @@ export class ContextManager {
       // says what is in a context, never why it exists — which is the thing you need when several
       // drafts are open and one of them is the one to continue.
       ...(Object.keys(c.state.task_notes || {}).length ? { task_notes: c.state.task_notes } : {}),
-      ...(c.state.native?.description || c.state.draft?.description
-        ? { description: c.state.native?.description || c.state.draft?.description }
+      ...(c.state.pipeline_model?.description || c.state.draft?.description
+        ? { description: c.state.pipeline_model?.description || c.state.draft?.description }
         : {}),
       semantic_models: Object.keys(c.state.additions || {}),
       metrics: (c.state.metrics || []).map((m) => m.name),

@@ -1,5 +1,5 @@
 // END-TO-END on the REAL stack (dbt + MetricFlow + DuckDB) for the SLOWLY-CHANGING (SCD-2)
-// dimension cycle — the governed point-in-time join, the native-pipeline join.between, and the
+// dimension cycle — the governed point-in-time join, the pipeline join.between, and the
 // "incomplete join" nudge. The fixture is built so POINT-IN-TIME and a naive key-only join give
 // DIFFERENT numbers, so the tests actually prove correctness (not just "it ran").
 //
@@ -121,8 +121,8 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.equal(num(r.rows[0].t), 100);
 });
 
-// 4) NATIVE PIPELINE point-in-time join via join.between: same point-in-time numbers as governed.
-test('native pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
+// 4) PIPELINE point-in-time join via join.between: same point-in-time numbers as governed.
+test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_pipeline_model({
@@ -146,7 +146,7 @@ test('native pipeline join.between: point-in-time revenue by country = US 50 / G
 
 // 5) The SAME pipeline WITHOUT between fans out (u1's purchases match both versions): total inflates
 //    to 130 and there are 6 joined rows. This is exactly what the join-completeness nudge warns about.
-test('native pipeline key-only join (no between) fans out: total inflates to 130 / 6 rows', opts, async (t) => {
+test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 rows', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
   await engine.build_pipeline_model({
@@ -166,7 +166,7 @@ test('native pipeline key-only join (no between) fans out: total inflates to 130
 
 // 6) The join-completeness nudge fires in the pipeline response for an SCD key-only join, naming the
 //    REAL schema columns to fix it (the caller's key + the event-time + validity columns).
-test('native pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
+test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
   const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'] } });

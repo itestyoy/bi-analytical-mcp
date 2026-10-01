@@ -71,7 +71,7 @@ test('python stage: one declaration lands as prep TABLE + Python model under the
   const files = pipeFiles(e, r.context_id);
   assert.deepEqual(files, [`${r.model}.py`, `${r.model}.yml`, `${r.model}_s1.sql`]);
   // the context records the split
-  const n = e.ctxs.get(r.context_id).state.native;
+  const n = e.ctxs.get(r.context_id).state.pipeline_model;
   assert.equal(n.model, r.model);
   assert.deepEqual(n.chain.map((m) => m.model), [`${r.model}_s1`, r.model]);
   assert.equal(r.build.executed, false, 'no runner → written, not run');
@@ -86,7 +86,7 @@ test('python stage: a rebuild WITHOUT the stage removes the Python files (dbt al
   const r2 = await e._buildPipeline({ name: 'seg', context_id: r1.context_id, pipeline: { source: 'events', stages: [AGG] } });
   assert.equal(r2.model, r1.model);
   assert.deepEqual(pipeFiles(e, r1.context_id), [`${r1.model}.sql`]);
-  assert.equal(e.ctxs.get(r1.context_id).state.native.python, undefined);
+  assert.equal(e.ctxs.get(r1.context_id).state.pipeline_model.python, undefined);
 });
 
 // A python stage may sit ANYWHERE, any number of times: every one is a dbt model of its own, and
@@ -621,7 +621,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
       assert.ok(body.reference.version, `${id} must name the version it was read from`);
       assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
     } else {
-      assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.pipeline_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
       assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
     }
   }

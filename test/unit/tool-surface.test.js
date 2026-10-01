@@ -104,7 +104,7 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   assert.ok(Array.isArray(overview.recipes) && overview.recipes.some((r) => r.id === 'conversion_metric_window'), 'overview lists recipe ids');
   const r = await e.semantic_index({ recipe: 'conversion_metric_window' });
   assert.equal(r.id, 'conversion_metric_window');
-  assert.ok(r.hack && (r.create_payload || r.register_payload), 'recipe payload + hack returned');
+  assert.ok(r.hack && (r.semantic_payload || r.pipeline_payload), 'recipe payload + hack returned');
   assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
   await assert.rejects(() => e.semantic_index({ recipe: 'conversion_metric_window', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);

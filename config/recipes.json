@@ -13,7 +13,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "active_users",
         "semantic_models": [
           {
@@ -111,7 +111,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "rev_segment",
         "use_base_models": [
           "users"
@@ -241,7 +241,7 @@
         "simple",
         "conversion"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "tut_funnel",
         "semantic_models": [
           {
@@ -379,7 +379,7 @@
       "metric_types": [
         "conversion"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "retention",
         "semantic_models": [
           {
@@ -474,7 +474,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "cohort_grid",
         "use_base_models": [
           "users"
@@ -563,7 +563,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "behavior",
         "semantic_models": [
           {
@@ -644,7 +644,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "progression",
         "semantic_models": [
           {
@@ -764,7 +764,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "monetization",
         "use_base_models": [
           "users"
@@ -901,7 +901,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "ads",
         "semantic_models": [
           {
@@ -1022,7 +1022,7 @@
         "simple",
         "derived"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "economy",
         "semantic_models": [
           {
@@ -1129,7 +1129,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "stickiness",
         "semantic_models": [
           {
@@ -1184,8 +1184,8 @@
       "hack": "Query the SAME count_distinct at two grains (day vs month) and divide the results: because count_distinct is re-counted per grain, the two numbers are genuinely different questions. One model, two queries — not two models."
     },
     {
-      "id": "ab_test_conversion",
-      "task_type": "ab_test",
+      "id": "experiment_conversion",
+      "task_type": "experiment",
       "title": "A/B test — conversion rate by variant (with significance)",
       "when_to_use": "Compare a conversion rate (e.g. purchase) between experiment variants and test whether the difference is significant.",
       "required_events": [
@@ -1199,7 +1199,7 @@
       "metric_types": [
         "proportion"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_checkout_conversion",
         "pipeline": {
           "source": "events",
@@ -1313,7 +1313,7 @@
         "n_field": "n",
         "conversions_field": "conversions"
       },
-      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
+      "notes": "The pipeline-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
       "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ request: { action: 'analyze' } }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
@@ -1331,7 +1331,7 @@
       "metric_types": [
         "cumulative"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "cumulative_rev",
         "semantic_models": [
           {
@@ -1411,7 +1411,7 @@
         "simple",
         "derived"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "blended",
         "semantic_models": [
           {
@@ -1489,8 +1489,8 @@
       "hack": "type: \"derived\" with an `expr` over metric NAMES computes in the layer, so every consumer gets the same formula: unit conversion (x/100), sums of streams, differences, shares. A composite is a formula over metrics, never a new measure over the fact."
     },
     {
-      "id": "ab_test_revenue",
-      "task_type": "ab_test",
+      "id": "experiment_revenue",
+      "task_type": "experiment",
       "title": "A/B test — revenue per user by variant (Welch t-test)",
       "when_to_use": "Compare a CONTINUOUS metric (revenue/ARPU/time per user) between experiment variants and test significance.",
       "required_events": [
@@ -1506,7 +1506,7 @@
       "metric_types": [
         "mean"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_revenue_per_user",
         "pipeline": {
           "source": "events",
@@ -1637,8 +1637,8 @@
       "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest."
     },
     {
-      "id": "ab_test_cuped",
-      "task_type": "ab_test",
+      "id": "experiment_cuped",
+      "task_type": "experiment",
       "title": "A/B test — CUPED variance reduction (pre-experiment covariate)",
       "when_to_use": "Compare a continuous metric between variants with MORE POWER by adjusting for each user's pre-experiment value of the same metric (CUPED).",
       "required_events": [
@@ -1654,7 +1654,7 @@
       "metric_types": [
         "cuped"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_revenue_cuped",
         "pipeline": {
           "source": "events",
@@ -1881,8 +1881,8 @@
       "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
     },
     {
-      "id": "ab_test_ratio",
-      "task_type": "ab_test",
+      "id": "experiment_ratio",
+      "task_type": "experiment",
       "title": "A/B test — ratio metric via the delta method (e.g. level completion rate)",
       "when_to_use": "Compare a RATIO metric between variants where the unit of analysis is finer than the randomization unit — e.g. levels completed per level started, or clicks per impression, when users (not attempts) are randomized.",
       "required_events": [
@@ -1908,9 +1908,9 @@
         "sumDen2_field": "sum_den2",
         "sumNumDen_field": "sum_numden"
       },
-      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ request: { action: 'analyze', metric: ratio } }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ request: { action: 'analyze', metric: ratio } }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
       "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ request: { action: 'analyze', metric: ratio } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_level_completion_ratio",
         "pipeline": {
           "source": "events",
@@ -2100,8 +2100,8 @@
       }
     },
     {
-      "id": "ab_test_srm",
-      "task_type": "ab_test",
+      "id": "experiment_srm",
+      "task_type": "experiment",
       "title": "A/B guardrail — Sample Ratio Mismatch (SRM) check",
       "when_to_use": "BEFORE trusting any lift: verify the observed per-variant split matches the intended one. A mismatch means randomization or logging is broken and the whole experiment is invalid.",
       "required_events": [
@@ -2120,9 +2120,9 @@
         "group_field": "variant_group",
         "n_field": "n"
       },
-      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "notes": "The pipeline-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
       "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ request: { action: 'check_split' } }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_srm_counts",
         "pipeline": {
           "source": "events",
@@ -2202,8 +2202,8 @@
       }
     },
     {
-      "id": "ab_test_power",
-      "task_type": "ab_test",
+      "id": "experiment_power",
+      "task_type": "experiment",
       "title": "A/B planning — sample size & minimum detectable effect (power)",
       "when_to_use": "BEFORE launching, to size the test (how many users per variant to detect a target effect), or given the traffic you have, to find the smallest effect you can detect (MDE). Also AFTER an inconclusive test, to tell 'no effect' apart from 'underpowered'.",
       "required_events": [],
@@ -2262,7 +2262,7 @@
       "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute `window` stage with no partition_by, or op=raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
       "notes": "Say which kind of number you are reporting: on BigQuery `percentile`/`median` here are APPROX_QUANTILES — a sketch, which is exactly why they need no ordering and no global memory; on Postgres they are exact (percentile_cont). The stage description states this per warehouse. An exact percentile over a huge table is the one form that needs a total order, so it is the most expensive thing you can ask for — take the approximate one unless the difference changes a decision, and label it.",
       "hack": "Two passes instead of one query: pass 1 collapses the table to ONE row of statistics (no group_by, no window, no ordering), pass 2 uses those numbers as literals on the rows. Anything you were tempted to write as OVER () belongs in pass 1; a window is only for a value within a group — per player, per day, per session — and then partition_by names that group.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "table_wide_stats",
         "pipeline": {
           "source": "events",
@@ -2343,7 +2343,7 @@
       "instead_of": "Recomputing the same statistics per row with AVG/STDDEV/PERCENTILE_CONT OVER () — the global window that exhausts the query's memory. Also: a `sample` stage to make the window affordable, which changes the answer instead of the shape of the query.",
       "notes": "The literals belong to the window of data pass 1 measured — re-run pass 1 when the period or the filter changes, or the z-scores quietly describe a different population. Keep them in the model's description (build_pipeline_model's `description`) so the next reader knows where the numbers came from. div guards against a zero deviation by itself (a NULL, not a division error).",
       "hack": "A number about the whole table enters the row-level query as a constant. Pass 1 (one row of statistics) → pass 2 (arithmetic per row with those constants): the pair replaces every OVER () that had no PARTITION BY, and each pass stays a plain dbt model.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "scaled_player_features",
         "pipeline": {
           "source": "events",
@@ -2430,7 +2430,7 @@
         "install_date"
       ],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "dn_retention_curve",
         "pipeline": {
           "source": "events",
@@ -2502,7 +2502,7 @@
       "required_properties": [],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "gap_sessions",
         "pipeline": {
           "source": "events",
@@ -2652,7 +2652,7 @@
       ],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "revenue_pop",
         "pipeline": {
           "source": "events",
@@ -2753,7 +2753,7 @@
       "required_properties": [],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "event_volume_audit",
         "pipeline": {
           "source": "events",
@@ -2792,7 +2792,7 @@
     },
     {
       "id": "two_sample_significance",
-      "task_type": "ab_test",
+      "task_type": "experiment",
       "title": "Two-sample significance for ANY two groups (no experiment needed)",
       "when_to_use": "You have TWO groups from the SAME pipeline and want to know if a difference is statistically real — NOT a randomized experiment. E.g. mean time-to-first vs time-to-last occurrence, conversion of cohort A vs B, a metric before vs after a date, organic vs paid. There is NO experiments-assignment table involved.",
       "required_events": [],
@@ -2858,7 +2858,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "lookup_merge",
         "pipeline": {
           "source": "events",
@@ -2950,7 +2950,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "group_back_to_rows",
         "pipeline": {
           "source": "events",
@@ -3041,7 +3041,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "distinct_pairs",
         "pipeline": {
           "source": "events",
@@ -3114,7 +3114,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "top_payers",
         "pipeline": {
           "source": "events",
@@ -3193,7 +3193,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "series_ops",
         "pipeline": {
           "source": "events",
@@ -3287,7 +3287,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "frame_statistics",
         "pipeline": {
           "source": "events",
@@ -3371,7 +3371,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "distribution_cut",
         "pipeline": {
           "source": "events",
@@ -3462,7 +3462,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "filter_by_other",
         "pipeline": {
           "source": "events",
@@ -3546,7 +3546,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_predict_column",
         "pipeline": {
           "source": "events",
@@ -3664,7 +3664,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_estimator_params",
         "pipeline": {
           "source": "events",
@@ -3789,7 +3789,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_output_shape",
         "pipeline": {
           "source": "events",
@@ -3896,7 +3896,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the estimator's own parameters, and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_supervised",
         "pipeline": {
           "source": "events",
@@ -4031,7 +4031,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_model_score",
         "pipeline": {
           "source": "events",
@@ -4161,7 +4161,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for PCA's parameters (n_components, svd_solver), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_pca_components",
         "pipeline": {
           "source": "events",
@@ -4277,7 +4277,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ml_categorical_features",
         "pipeline": {
           "source": "events",
@@ -4444,7 +4444,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "cache_intermediate",
         "pipeline": {
           "source": "events",
@@ -4530,7 +4530,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "bbq_functions",
         "pipeline": {
           "source": "events",
@@ -4618,7 +4618,7 @@
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "pandas_last_resort",
         "pipeline": {
           "source": "events",
@@ -4712,7 +4712,7 @@
       "required_roles": [
         "acquisition"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "ua_spend",
         "use_base_models": [
           "users"
@@ -4865,7 +4865,7 @@
       "required_roles": [
         "acquisition"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "gov",
         "use_base_models": [
           "users"
@@ -4948,7 +4948,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "mix",
         "semantic_models": [
           {
@@ -5045,7 +5045,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "crash_ad_funnel",
         "pipeline": {
           "source": "crashlytics",
@@ -5102,7 +5102,7 @@
       "task_type": "joins",
       "title": "Joining a slowly-changing model: state the window",
       "when_to_use": "Joining attributes that CHANGE (an install record, a plan, a price list) — anything with a validity window.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "spend_by_country_pit",
         "pipeline": {
           "source": "acquisition",
@@ -5167,7 +5167,7 @@
       "task_type": "pipeline",
       "title": "An ORDERED sequence per entity (row-pattern match)",
       "when_to_use": "When the order matters: did A happen before B, how far along an ordered path each entity got, time between steps.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "activation_sequence",
         "pipeline": {
           "source": "events",
@@ -5244,7 +5244,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "breadcrumb_frequency",
         "pipeline": {
           "source": "crashlytics",
@@ -5302,7 +5302,7 @@
       "task_type": "pipeline",
       "title": "Reshape the result: columns into rows (and back)",
       "when_to_use": "When the shape is wrong for what reads it: several measure columns that should be (name, value) rows, or categories that should be columns.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "revenue_long",
         "pipeline": {
           "source": "events",

@@ -130,8 +130,9 @@
   surface unwraps it at ONE point (`requestOf`, runTool) and the engine validates `request` against
   the same schema it published, so what the model sees and what is checked are one schema. There are no
   old names: every tool is listed and called by its one name (no alias, no unlisted tool). What a tool
-  hands its input to — ab_test, register_native_model, drop_context … — is an engine METHOD with an
-  input contract of its own (`METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
+  hands its input to is a private engine METHOD (`_analyzeExperiment`, `_buildPipeline`, `_dropContext` …)
+  with an input contract named `<tool>.<mode>` (`experiment.analyze`, `build_pipeline_model.pipeline`,
+  `delete_context.context` …; `METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
   modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
   distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
   a field a mode does not read is refused, not ignored; a union of VALUES (a pattern, an enum, a type)
@@ -146,7 +147,7 @@
   Every call shape written in this file, the descriptions and the guides is the CONTENT of `request`
   unless it is spelled `tool({ request: { … } })`. `MIN_FOLD` (100) is the smallest repeated subtree
   the transport folds into `$defs`.
-- Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
+- Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the
   pivot's only, Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral

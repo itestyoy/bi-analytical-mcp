@@ -657,7 +657,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 (`src/python-guide.js`) публикует этот лист как рецепты, которые можно ЗАБРАТЬ ПО ID посреди
 написания кода: `bf_ml_signatures` (конструкторы всех оценщиков `bigframes.ml` с разделением на
 позиционные и keyword-only) и `bf_frame_method_rules` (какие методы фрейма требуют порядка, какие
-— индекса, и подписи, которые удивляют). У такого рецепта нет `register_payload` — его тело это
+— индекса, и подписи, которые удивляют). У такого рецепта нет `pipeline_payload` — его тело это
 поле `reference`; он подчиняется тем же правилам видимости (`requires`, `runtime`), у него
 `origin: generated`, и развёртывание всё равно может переопределить его id своим файлом. Правило
 простое: список, который агент рискует вспомнить неправильно, генерируется из источника и
@@ -687,7 +687,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 `semantic_index({ recipe })` возвращает рецепт как есть плюс две рамки: имена метрик
 **намеспейсятся именем задачи** (`<name>_<metric>` — в `example_queries` уже полные имена), и
 рецепт — **строительный блок**: взять `hack`, адаптировать payload под точный вопрос, отдать
-`create_payload` в `build_semantic_model`, а pipeline — в `build_pipeline_model`.
+`semantic_payload` в `build_semantic_model`, а pipeline — в `build_pipeline_model`.
 
 Поэтому самое ценное поле — не payload, а **`hack`**: обобщённый приём, из которого агент
 собирает решение задачи, для которой рецепта нет. Payload — доказательство, что приём работает.
@@ -705,12 +705,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
-| `create_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
-| `register_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
+| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
+| `pipeline_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
-| `example_queries` | для `create_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
-| `ab_test` | для A/B | сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })` | см. таблицу ниже |
-| `srm_check` | для SRM | `{ group_field, n_field, expected_ratio? }` | → `experiment({ action: 'check_split' })` |
+| `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
+| `experiment` | для A/B | `{ action: 'analyze', metric, … }` — сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, n_field, expected_ratio? }` → `experiment({ action: 'check_split' })` | см. таблицу ниже |
 | `approach` | для приёма | форма, которая работает | одна строка кода в обратных кавычках + чем она является; только в рецепте-приёме |
 | `instead_of` | для приёма | форма, которая падает, и почему | называйте класс ошибки (`NullIndexError`, `OrderRequiredError`) или в чём тихая неправильность |
 | `read_first` | для python | куда пойти ДО написания функции | `semantic_index({ guide: "python" })` — правила рантайма; рецепт есть один приём оттуда |
@@ -724,7 +723,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `metric_types` | губернируемые метрики: простая по метрик-тайму, ratio, derived, cumulative, conversion-окно, boolean-мера, выбор агрегации под вопрос, губернируемая мера из схемы, воронка из шагов-свойств, две шкалы событий и нетто, одна мера на двух гранах, мера не-событийного источника |
 | `joins` | связи: группировка по атрибуту другой модели, когортная сетка по двум временным осям, метрики двух независимых источников, джойн пайплайна по имени связи, point-in-time джойн |
 | `pipeline` | шаблоны стадий: оконный lag и дельта, эпизоды по разрыву, ось возраста через date_diff, упорядоченная последовательность (match_recognize), unnest массива, переформатирование (unpivot/pivot), проверка объёма и покрытия |
-| `ab_test` | статистика: proportion, mean (Welch), CUPED, ratio (delta-метод), SRM, планирование мощности, две любые группы без эксперимента |
+| `experiment` | статистика: proportion, mean (Welch), CUPED, ratio (delta-метод), SRM, планирование мощности, две любые группы без эксперимента |
 | `bigframes` | ходы на python-рантайме: правильная форма одной операции над фреймом рядом с падающей (см. четвёртую форму ниже) |
 
 Семейства ВАШЕГО слоя — какие захотите (`trends`, `monetization`, `ads`, `economy`,
@@ -737,7 +736,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 ### Четыре формы рецепта
 
-**Управляемая метрика** — `create_payload` + `example_queries`. Самая частая форма. Агент
+**Управляемая метрика** — `semantic_payload` + `example_queries`. Самая частая форма. Агент
 может не только выполнить пример, но и **переспросить** тот же контекст любым другим срезом.
 
 ```json
@@ -750,7 +749,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "required_properties": ["price_in_usd"],
   "required_user_attrs": ["country", "platform", "media_source", "acquisition_type"],
   "metric_types": ["simple", "ratio"],
-  "create_payload": {
+  "semantic_payload": {
     "name": "rev_segment",
     "use_base_models": ["users"],
     "semantic_models": [{
@@ -776,16 +775,16 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Pipeline** — `register_payload` c `pipeline`, часто с `ab_test` / `srm_check`. Для того, чего
+**Pipeline** — `pipeline_payload` c `pipeline`, часто с `experiment`. Для того, чего
 управляемая метрика не выражает. Результат — таблица; тест требует **не меньше двух строк**.
 
 ```json
 {
-  "id": "ab_test_conversion",
-  "task_type": "ab_test",
+  "id": "experiment_conversion",
+  "task_type": "experiment",
   "required_roles": ["experiments"],
   "metric_types": ["proportion"],
-  "register_payload": {
+  "pipeline_payload": {
     "name": "ab_checkout_conversion",
     "pipeline": {
       "source": "events",
@@ -806,13 +805,13 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
       ]
     }
   },
-  "ab_test": { "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
+  "experiment": { "action": "analyze", "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
   "notes": "Rows are n + conversions per variant (exposed = users with in-window events). Control = the control variant_group row, variants = the rest.",
   "hack": "Join experiments, window events to [assigned_at, ended_at], flag conversion per user (case → max), aggregate n + conversions per variant, call experiment({ action: 'analyze' }). Extrapolate: any per-variant rate."
 }
 ```
 
-Сопоставление `ab_test` — какие колонки результата нужны для какого теста:
+Сопоставление `experiment` (`action: 'analyze'`) — какие колонки результата нужны для какого теста:
 
 | `metric` | обязательные поля сопоставления | что должен отдать pipeline на каждую группу |
 |---|---|---|
@@ -828,8 +827,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 ```json
 {
-  "id": "ab_test_power",
-  "task_type": "ab_test",
+  "id": "experiment_power",
+  "task_type": "experiment",
   "metric_types": ["power"],
   "required_events": [], "required_properties": [], "required_user_attrs": [], "required_roles": [],
   "tool_calls": [
@@ -841,7 +840,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Приём работы с python-рантаймом** — `register_payload` со стадией `python`, `requires:
+**Приём работы с python-рантаймом** — `pipeline_payload` со стадией `python`, `requires:
 "python_models"`, `runtime: "<рантайм>"` и парой `approach` / `instead_of`. Такой рецепт описан
 НЕ по бизнес-задаче, а по ОДНОМУ ДЕЙСТВИЮ над фреймом: подставить значение из справочника,
 вернуть агрегат группы на строки, взять топ-N, посчитать порог, предсказать модель, закешировать
@@ -871,7 +870,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "requires": "python_models",
   "runtime": "bigframes",
   "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-  "register_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
+  "pipeline_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
   "notes": "…",
   "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group."
 }
@@ -895,10 +894,10 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 | форма | что проверяется |
 |---|---|
-| `create_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
-| `register_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `ab_test` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `srm_check` — то же для `check_split` |
+| `semantic_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
+| `pipeline_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
-| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `register_native_model({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
+| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `_buildPipeline({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
 
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не
@@ -936,7 +935,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 - [ ] `id` по задаче, `task_type` из существующих семейств (или осознанно новое);
 - [ ] `when_to_use` — формулировками вопроса; `title` — что считаем;
-- [ ] ровно одна форма: `create_payload` + `example_queries` / `register_payload` (+ `ab_test`/`srm_check`) / `tool_calls`;
+- [ ] ровно одна форма: `semantic_payload` + `example_queries` / `pipeline_payload` (+ `experiment`) / `tool_calls`;
 - [ ] все имена в payload существуют в фикстуре; первый пример возвращает строки;
 - [ ] для A/B: результат отсортирован по группе, контроль первой строкой, сопоставление полей полное;
 - [ ] `required_*` заполнены честно, `required_roles` — если нужна роль кроме событий и пользователей;

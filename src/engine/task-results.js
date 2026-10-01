@@ -178,7 +178,7 @@ export const taskResultMethods = {
     const building = ctx.state.draft?.building?.task_id ? ctx.state.draft.building : null;
     // (an edit during the build may have retired its checkpoint: then the model standing is what is known)
     const buildingCp = building ? (ctx.state.draft.checkpoints || []).find((cp) => cp.task_id === building.task_id) : null;
-    const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.native?.columns || [] : null;
+    const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.pipeline_model?.columns || [] : null;
     const columns = buildingCp ? buildingCp.columns.map((c) => c.name) : building ? (standing || []) : standing;
     if (!columns) {
       throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });

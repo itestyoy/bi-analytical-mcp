@@ -67,7 +67,7 @@ const AT_EVENT = { value: 'device_time', from: 'install_time_valid_from', to: 'i
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
-test('native pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
+test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
   if (skip(t)) return;
   const count = async (time_range) => {
     const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range, stages: [
@@ -446,7 +446,7 @@ test('semantic_index: overview lists models, then { model } drills into the usab
 });
 
 // #2: a date-only time_range bound includes the WHOLE day (not collapsed to midnight).
-test('native pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
+test('pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `day_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },

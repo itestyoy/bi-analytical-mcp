@@ -118,7 +118,7 @@ models:
             mcp:
               is_event_data: true
               # COMPLEX properties live on the raw JSON (no flat column) — usable only
-              # via the _buildPipeline pipeline (array_length/contains/unnest/struct_field).
+              # via a pipeline (array_length/contains/unnest/struct_field).
               properties:
                 words_collected: { type: array, items: string, description: "Words collected on a completed level." }
                 rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted on level completion (item + quantity)." }

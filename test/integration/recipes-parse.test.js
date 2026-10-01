@@ -1,4 +1,4 @@
-// Every recipe must be RUNNABLE end-to-end: its create_payload parses (dbt parse)
+// Every recipe must be RUNNABLE end-to-end: its semantic_payload parses (dbt parse)
 // and its first example query executes (mf query). This guarantees the recipes we
 // hand to the agent actually build valid models and compute metrics.
 
@@ -53,7 +53,7 @@ for (const r of recipes.list) {
       assert.ok(r.reference.version, `${r.id}: a reference must name the version it was read from`);
       assert.ok(Object.keys(r.reference).length > 3, `${r.id}: the reference carries no lists`);
       assert.ok(r.approach && r.instead_of && r.hack, `${r.id}: a reference still says how to use it`);
-      assert.ok(!r.register_payload, `${r.id}: a reference declares no model`);
+      assert.ok(!r.pipeline_payload, `${r.id}: a reference declares no model`);
       return;
     }
 
@@ -61,10 +61,10 @@ for (const r of recipes.list) {
       const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
       pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
       const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY_BIN }));
-      const out = await pyEngine._buildPipeline({ ...r.register_payload, dry_run: true });
+      const out = await pyEngine._buildPipeline({ ...r.pipeline_payload, dry_run: true });
       assert.equal(out.dry_run, true, `${r.id}: ${JSON.stringify(out.error || {})}`);
       assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
-      const declared = r.register_payload.pipeline.stages.flatMap((st) => st.output?.columns || []);
+      const declared = r.pipeline_payload.pipeline.stages.flatMap((st) => st.output?.columns || []);
       for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
       assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
       assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
@@ -83,8 +83,8 @@ for (const r of recipes.list) {
 
     // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
     // declares an experiment mapping (analyze, or check_split) — feed its per-group rows into the test.
-    if (r.register_payload) {
-      const out = await engine._buildPipeline(r.register_payload);
+    if (r.pipeline_payload) {
+      const out = await engine._buildPipeline(r.pipeline_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
       // A recipe that feeds a two-group test needs its groups; one that collapses the table to a
       // single row of statistics (the table-wide aggregate) is correct at exactly one row.
@@ -117,7 +117,7 @@ for (const r of recipes.list) {
     }
 
     // Semantic-model recipe: create + run its first example query.
-    const out = await engine.build_semantic_model(r.create_payload);
+    const out = await engine.build_semantic_model(r.semantic_payload);
     assert.equal(out.parse.ok, true, `parse failed for ${r.id}: ${JSON.stringify(out.parse.error || out.parse)}`);
     const example = (r.example_queries || [])[0];
     if (example) {

@@ -121,7 +121,7 @@ test('a drawn card reads its views from its own task: values are bound as litera
 
 // QUERYING A BUILT PIPELINE MODEL: query_pipeline_model({ context_id, transform }) filters, groups
 // and aggregates the stored table without recomputing it. A count with a `column` must count
-// NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on DATA: a native pipeline derives
+// NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on DATA: a pipeline derives
 // `price` (populated only on iap_purchase_completed, NULL on every other event), so count(price) <
 // count(*), and count(price) + (rows where price IS NULL) == count(*). A regression to COUNT(*) makes
 // them equal. A value carrying SQL is bound as a literal.

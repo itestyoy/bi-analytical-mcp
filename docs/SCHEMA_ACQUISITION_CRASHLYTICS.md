@@ -417,7 +417,7 @@ semantic_index({ model: 'acquisition' }) describes them.
   "attrs": [{ "column": "app_version", "as": "users_app_version" }, "country"] }
 ```
 
-Так же ведёт себя и путь «конвейер целиком» — `register_native_model`, в том числе
+Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
 `dry_run`: тот же отказ, а не тихо собранная модель без поля.
 
 ### Несколько соединений подряд

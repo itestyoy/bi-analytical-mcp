@@ -11,7 +11,7 @@ export function dimTypeFromDataType(dataType) {
   return TIME_DATA_TYPES.has(String(dataType || '').toLowerCase()) ? 'time' : 'categorical';
 }
 
-/** Coarse pipeline type for a physical column (so native pipelines can reference it). */
+/** Coarse pipeline type for a physical column (so pipelines can reference it). */
 export function pipelineColumnType(cm, col) {
   if (cm.is_time) return 'time';
   if (cm.is_event_data) return 'json';

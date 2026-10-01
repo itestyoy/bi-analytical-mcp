@@ -1,4 +1,4 @@
-// The `python` PIPELINE STAGE — a dbt PYTHON model anywhere in a native pipeline.
+// The `python` PIPELINE STAGE — a dbt PYTHON model anywhere in a pipeline.
 //
 // One declaration, a CHAIN of dbt models under the hood: the SQL stages before a python stage land
 // as a table, the python stage becomes the one `.py` file dbt expects (`def model(dbt, session)`)

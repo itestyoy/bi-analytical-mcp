@@ -230,7 +230,7 @@ test('BackgroundIndexer records a failed sync (errors logged, status error/parti
 
 // Triple-cell collection: when the combined coverage query returns (event × app) rows, the
 // indexer persists each cell so cellCoverage(prop, {bundle, event}) reflects the seeded fill
-// (powers the native-model "field empty for this app+event" warning). Stub runner, no warehouse.
+// (powers the pipeline-model "field empty for this app+event" warning). Stub runner, no warehouse.
 test('BackgroundIndexer stores per (bundle × event) triple cells', async () => {
   const catalog = loadCatalog(CATALOG, {});
   // ad_finished@words populated (nn=10), level_started@relax empty (nn=0); combined coverage

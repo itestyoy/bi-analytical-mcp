@@ -81,7 +81,7 @@ export function sqlRunHints(text) {
 
 /** Initial columns available from a catalog source model. Every REAL physical column
  *  is exposed (incl. flattened event payload + envelope columns like main_data__app_id),
- *  so a native pipeline can filter/group/compute on them WITHOUT a users-join. */
+ *  so a pipeline can filter/group/compute on them WITHOUT a users-join. */
 function sourceColumns(catalog, key, physicalCols = null) {
   const m = catalog.getModel(key);
   const cols = new Map();

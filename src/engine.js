@@ -17,7 +17,7 @@
 //   this file                     the constructor, contexts, the task delegates, the small tools
 //                                 (context, delete_context, memory, time, experiment, explore_errors), the time spine
 //   engine/semantic-index.js      semantic_index and its catalog views, recipes
-//   engine/semantic-build.js      build / update / delete a semantic model, a native model
+//   engine/semantic-build.js      build / update / delete a semantic model, a pipeline model
 //   engine/semantic-query.js      query_semantic_model: references, the metric-query shell
 //   engine/semantic-preview.js    preview_semantic_model
 //   engine/pipeline-draft.js      build_pipeline_model's draft: steps, checkpoints, preview
@@ -306,7 +306,7 @@ export class Engine {
     const owner = this.ctxs.get(job.contextId).state;
     const typed = kept?.output_columns || (Array.isArray(kept?.columns) && kept.columns.every(isPlainObject) ? kept.columns : null);
     const columns = typed ? typed.map((c) => ({ name: c.name, type: c.type || 'unknown' }))
-      : owner.native?.model === job.table ? (owner.native.columns || []).map((name) => ({ name, type: 'unknown' })) : null;
+      : owner.pipeline_model?.model === job.table ? (owner.pipeline_model.columns || []).map((name) => ({ name, type: 'unknown' })) : null;
     if (!columns?.length) throw new ToolError(`the columns of task ${job.id}'s table are not known here any more (the server restarted since it ran) — run it again, then start from the new task`, { stage: 'validate', field: 'from_task' });
     const fact = (owner.usedModels || []).filter((k) => this.catalog.isFact(k));
     const source = input.source || (owner.draft?.source ?? owner.pipeline_origin?.source) || (fact.length === 1 ? fact[0] : null);
@@ -519,7 +519,7 @@ export class Engine {
     // Report its model name and the output columns you can read — its rows come from its build's
     // task. The columns are grounded to the real relation below.
     if (ctx.state.engine === 'pipeline') {
-      const n = ctx.state.native || {};
+      const n = ctx.state.pipeline_model || {};
       let columns = n.columns || [];
       if (this.runner && n.model) {
         // Bounded like every other warehouse enrichment: a slow introspection leaves the

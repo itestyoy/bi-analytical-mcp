@@ -153,7 +153,7 @@ export const semanticQueryMethods = {
     // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
-      const built = ctx.state.native?.task_id;
+      const built = ctx.state.pipeline_model?.task_id;
       throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_id: '${built}' } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them

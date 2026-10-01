@@ -332,7 +332,7 @@ export class SqliteBackend {
     // is empty for one app but populated for another is visible (the { bundle } index view).
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (source TEXT, property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle))');
     // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
-    // combo — so a native-model step scoped to a concrete bundle_id AND event_name can warn the
+    // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
     // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');

@@ -455,7 +455,7 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
 
 // Triple (property × bundle × event) coverage from the REAL warehouse: the seed puts level
 // events on com.omg.colorfit, so ad_type is NULL there while result IS present — the exact
-// per-cell fill that powers the native-model "field is empty for this app+event" warning.
+// per-cell fill that powers the pipeline-model "field is empty for this app+event" warning.
 test('triple coverage: per (bundle × event) cell fill matches the seeded data', opts, async (t) => {
   if (skip(t)) return;
   // ad_type_of_event_data is NULL on colorfit's level_started rows (it only carries on ad_*).

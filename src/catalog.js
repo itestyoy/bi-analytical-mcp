@@ -511,7 +511,7 @@ export class Catalog {
     return Object.keys(props).filter((k) => isNumericType(props[k].type));
   }
 
-  /** Every physical column of a model as { name, type } — referenceable in native pipelines. */
+  /** Every physical column of a model as { name, type } — referenceable in pipelines. */
   modelColumns(key) {
     return this.getModel(key).columns || [];
   }

@@ -71,7 +71,7 @@ test('a recipe file carries the same payload the recipe tool returns (one source
     const id = r.uri.split('/').pop().replace(/\.md$/, '');
     const recipe = await s.engine.semantic_index({ recipe: id });
     const md = (await c.readResource({ uri: r.uri })).contents[0].text;
-    for (const key of ['create_payload', 'register_payload', 'example_queries']) {
+    for (const key of ['semantic_payload', 'pipeline_payload', 'example_queries']) {
       if (recipe[key] === undefined) continue;
       const heading = key.replace(/_/g, ' ').replace(/^\w/, (ch) => ch.toUpperCase());
       const block = new RegExp(`## ${heading}\\n\\n\`\`\`json\\n([\\s\\S]*?)\\n\`\`\``).exec(md);

@@ -18,15 +18,15 @@ export const semanticIndexMethods = {
     // A recipe ships as ONE payload for every catalog, but whether a join needs a point-in-time
     // window is a property of THIS catalog's schema — so the payload is fitted to it before it is
     // handed over, and what was fitted is said out loud.
-    const { payload, fitted } = this._fitRecipePipeline(r.register_payload);
+    const { payload, fitted } = this._fitRecipePipeline(r.pipeline_payload);
     // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
-      ...(payload ? { register_payload: payload } : {}),
+      ...(payload ? { pipeline_payload: payload } : {}),
       ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; a payload is a tool\'s request — a create_payload is build_semantic_model({ request: <create_payload> }), a pipeline payload goes to build_pipeline_model the same way, an example query is query_semantic_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is built in three calls — build_pipeline_model({ request: { action: \'start\', name, source, time_range } }) from its name and pipeline.source / pipeline.time_range, then { action: \'add_steps\', draft_id, stages: <pipeline.stages> }, then { action: \'materialize\', draft_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
     };
   },
 
@@ -217,7 +217,7 @@ export const semanticIndexMethods = {
         out.bundle_column = c.bundleColumn(k);
         out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
-      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } })). The \`columns\` above are what you can reference in a native pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
+      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } })). The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
     } else {
       // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
       // keys them by (this model, column), so each source has its own value space.
@@ -658,10 +658,10 @@ export const semanticIndexMethods = {
     ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views and via { search }; list/manage with the memory tool.' } } : {}),
     // How attributes are REACHED: addressed by the model that carries them in metric queries
     // (the semantic layer resolves the declared key and joins), or an explicit join stage in
-    // native pipelines. The fact holds only per-event columns — user/experiment attributes
+    // pipelines. The fact holds only per-event columns — user/experiment attributes
     // always come via their model.
     join_note: userModel
-      ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in build_semantic_model) — never spell a join path. In native pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
+      ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
       : null,
     value_index_status: sync ? {
       ready: (sync.indexed_properties || 0) > 0,

@@ -5,7 +5,7 @@
 //                    value search, asserting the rewarded → ad_type → ad_finished
 //                    provenance fact from the value index.
 //   2. INDEX STATE — semantic_index reports the value-index sync after refresh().
-//   3. NATIVE PIPE — build_pipeline_model (start/add_step/preview/commit) builds the
+//   3. PIPELINE — build_pipeline_model (start/add_step/preview/commit) builds the
 //                    activation funnel; rows read back via query_pipeline_model; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
@@ -190,7 +190,7 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
   assert.equal(sv[0].value, 'rewarded', 'highest-frequency match first');
 });
 
-// ───────────────────────── 3. NATIVE PIPELINE (incremental) ─────────────────────────
+// ───────────────────────── 3. PIPELINE (incremental) ─────────────────────────
 test('3a. build_pipeline_model: start → add_step (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
@@ -318,9 +318,9 @@ test('5a. build_pipeline_model fed the conversion recipe stages → per-variant 
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
   // stages one at a time, then commit. (_buildPipeline with the same payload
   // is the documented fallback; here we prove the add_step path also works.)
-  const r = recipes.list.find((x) => x.id === 'ab_test_conversion');
-  const stages = r.register_payload.pipeline.stages;
-  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.register_payload.pipeline.source });
+  const r = recipes.list.find((x) => x.id === 'experiment_conversion');
+  const stages = r.pipeline_payload.pipeline.stages;
+  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.pipeline.source });
   for (const stage of stages) {
     const a = await engine.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage });
     assert.ok(Number.isInteger(a.step_index), 'each add_step advances the draft');
@@ -366,9 +366,9 @@ test('5c. experiment({check_split}) on the warehouse-computed split: clean 6 vs 
 
 test('5d. experiment({plan}) matches the recipe tool_calls outputs (data-grounded)', opts, async (t) => {
   if (skip(t)) return;
-  // Use the ab_test_power recipe's declared tool_calls so the asserted numbers are
+  // Use the experiment_power recipe's declared tool_calls so the asserted numbers are
   // the recipe's own ground truth (the recipes-parse suite runs these too).
-  const power = recipes.list.find((x) => x.id === 'ab_test_power');
+  const power = recipes.list.find((x) => x.id === 'experiment_power');
   for (const call of power.tool_calls) {
     const res = engine[call.tool](call.args);
     assert.equal(res.ok, true, JSON.stringify(res));
@@ -390,14 +390,14 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
   const overview = await engine.semantic_index();
   assert.ok(Array.isArray(overview.recipes) && overview.recipes.length > 0, 'recipes listed in the overview');
   const ids = overview.recipes.map((r) => r.id);
-  for (const want of ['ab_test_conversion', 'ratio_metric', 'funnel_from_event_property_steps', 'ab_test_power']) {
+  for (const want of ['experiment_conversion', 'ratio_metric', 'funnel_from_event_property_steps', 'experiment_power']) {
     assert.ok(ids.includes(want), `recipe '${want}' present`);
   }
-  const conv = await engine.semantic_index({ recipe: 'ab_test_conversion' });
-  assert.equal(conv.id, 'ab_test_conversion');
-  assert.ok(conv.register_payload && conv.register_payload.pipeline, 'A/B recipe carries a register_payload pipeline');
+  const conv = await engine.semantic_index({ recipe: 'experiment_conversion' });
+  assert.equal(conv.id, 'experiment_conversion');
+  assert.ok(conv.pipeline_payload && conv.pipeline_payload.pipeline, 'A/B recipe carries a pipeline_payload pipeline');
   assert.ok(typeof conv.hack === 'string' && conv.hack.length > 0, 'recipe carries a generalizable hack');
-  const power = await engine.semantic_index({ recipe: 'ab_test_power' });
+  const power = await engine.semantic_index({ recipe: 'experiment_power' });
   assert.ok(Array.isArray(power.tool_calls) && power.tool_calls.length > 0, 'tool-only recipe carries tool_calls');
 });
 

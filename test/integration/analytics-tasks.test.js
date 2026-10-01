@@ -1,6 +1,6 @@
 // Coverage proof: EACH analytics task family in config/recipes.json can be served
 // by a dbt Semantic Layer model built through this engine. For every family we
-// build the recipe's model ONCE via engine._recipe(id).create_payload (writes
+// build the recipe's model ONCE via engine._recipe(id).semantic_payload (writes
 // YAML + dbt parse), then run several query_semantic_model calls and assert on
 // DATA: res.ok === true plus EXACT figures from fixtures/SEED_DATA.md and
 // invariants (grouped sum == grand total; rate in [0,1]; DAU <= MAU; completers
@@ -57,7 +57,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 // Build a recipe's model once via the published _recipe payload.
 async function buildRecipe(t, id) {
-  const out = await engine.build_semantic_model(engine._recipe({ id }).create_payload);
+  const out = await engine.build_semantic_model(engine._recipe({ id }).semantic_payload);
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }

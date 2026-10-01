@@ -54,7 +54,7 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // keyed by variant_group (control / variant_b), plus a cleanup handle.
 async function aggregatesFor(id) {
   const r = recipe(id);
-  const out = await engine._buildPipeline(r.register_payload);
+  const out = await engine._buildPipeline(r.pipeline_payload);
   assert.equal(out.build.ok, true, `build failed for ${id}: ${JSON.stringify(out.error || out.build)}`);
   const map = r.experiment;
   const byGroup = {};
@@ -73,7 +73,7 @@ function arm(map, row) {
 
 test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs variant 1/6)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_conversion');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
   try {
     // preliminary counts computed IN the warehouse
     assert.equal(Number(byGroup.control.n), 6);
@@ -94,7 +94,7 @@ test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs varian
 
 test('revenue/user: DB aggregates → Welch t-test (means 10.833 vs 3.333)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_revenue');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_revenue');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
@@ -113,7 +113,7 @@ test('revenue/user: DB aggregates → Welch t-test (means 10.833 vs 3.333)', opt
 
 test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-period)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_cuped');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_cuped');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
@@ -136,7 +136,7 @@ test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-peri
 
 test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 10/12)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_ratio');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_ratio');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
@@ -156,7 +156,7 @@ test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 1
 
 test('SRM: per-variant sizes computed in the DB pass the guardrail (6 vs 6)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_conversion');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
   try {
     // feed the warehouse-computed group sizes into the SRM check — a clean 6/6 split
     const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));

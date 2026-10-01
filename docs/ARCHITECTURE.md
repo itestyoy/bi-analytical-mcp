@@ -170,7 +170,7 @@ with the YAML config header. Two consumption modes, unchanged:
    stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
 
 `build_semantic_model` stays the declarative way to define measures/metrics over
-the **scalar** two-source models. **`register_native_model` is the pipeline
+the **scalar** two-source models. **A pipeline built in one call (`_buildPipeline`) is the pipeline
 creator**: it accepts either a `sequence` (an ordered MATCH_RECOGNIZE funnel with a
 MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
 general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
@@ -227,7 +227,7 @@ Steps to reach the target:
    the top-level pipeline; give each stage a `plan()` (schema/grain contract)
    alongside `emit()`.
 2. **Promote `match_recognize` to a stage** (`emit` = current renderers; `plan`
-   = its per-match output columns). The bespoke `register_native_model` path
+   = its per-match output columns). The bespoke one-call pipeline path (`_buildPipeline`)
    becomes "pipeline ending in a `match_recognize` stage".
 3. **Add `aggregate` (group_by) and `join` stages** to the registry.
 4. **Add the BigQuery pipe-syntax emitter** next to the CTE lowering; pick per

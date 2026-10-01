@@ -12,7 +12,7 @@
 >   `campaign` as `primary`).
 >
 > Everything below is constrained to the columns/properties in
-> [`config/catalog.json`](../config/catalog.json) and the constructs in
+> [`config/catalog.yml`](../config/catalog.yml) and the constructs in
 > [`dbt-semantic-layer-spec.md`](./dbt-semantic-layer-spec.md). No invented columns.
 
 > **On the ids in this document.** The SYSTEM recipe file (`config/recipes.json`) does not ship

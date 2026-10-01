@@ -24,9 +24,13 @@ import { InMemoryServerEventBus } from '@modelcontextprotocol/server';
 /** How long a client may cache the lists and server/discover: a change reaches it within this. */
 export const LIST_TTL_MS = 60 * 1000;
 
-/** How long after a start that CHANGED the surface a new subscription is told so: the longest a
- *  client may still hold a list from before. */
-export const CHANGE_WINDOW_MS = LIST_TTL_MS;
+/**
+ * How long after a start that CHANGED the surface a new subscription is told so. It counts from the
+ * start, not from a client's reconnect: a listen stream that comes back with backoff, or a container
+ * that takes a while to be reached, must still hear it — and a host that ignores ttlMs may hold a list
+ * for as long as an hour, the lifetime lists once had.
+ */
+export const CHANGE_WINDOW_MS = 60 * 60 * 1000;
 
 const FINGERPRINT_KEY = 'surface_fingerprint';
 

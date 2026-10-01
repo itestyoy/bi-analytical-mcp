@@ -220,13 +220,8 @@ export class Dialect {
   /** The K most frequent values WITH their counts in one aggregate, as a JSON string
    *  ([{ value, count }]), or null where the warehouse has none that carries the counts. */
   approxTopK(_expr, _k) { return null; }
-  /** One cell of approxTopK's output as [{ value, freq }] ([] when it is not that shape). */
-  parseTopK(raw) {
-    let arr = raw;
-    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { return []; } }
-    if (!Array.isArray(arr)) return [];
-    return arr.filter((e) => e && typeof e === 'object' && e.value != null).map((e) => ({ value: e.value, freq: Number(e.count) || 0 }));
-  }
+  /** One cell of approxTopK's output as [{ value, freq }] — read by the dialect that writes it. */
+  parseTopK(_raw) { throw new Error('abstract parseTopK'); }
   // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────
   /** Build a sketch over a column (aggregate). */
   hllInit(_columnSql) { throw new Error('abstract hllInit'); }

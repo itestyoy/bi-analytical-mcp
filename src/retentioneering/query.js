@@ -176,7 +176,7 @@ export async function query(engine, feature, input) {
   const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   // which eventstream, and which of its tables, a result was computed from — carried, so a later read
   // (and its card) speaks of those rows, whatever the eventstream became after
-  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model, analyses: analyses.map((a) => a.id) };
+  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model, analyses: analyses.map((a) => a.id), rows_per_table: true };
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
   const expiry = engine.host.expiryConfig('python');
   if (Object.keys(expiry).length) engine.ctxs.writeFile(ctx.id, `${modelName}.yml`, yaml.dump({ version: 2, models: [{ name: modelName, config: expiry }] }, { lineWidth: 200, noRefs: true }));
@@ -215,9 +215,17 @@ export async function readResult(engine, feature, dir, model, { context_id, even
   return { ok: true, kind: 'analyses', context_id, eventstream, analyses: parseResultRows(res.rows, order) };
 }
 
-/** Where a query task's result came from: its eventstream and the table of it the analyses read. */
+/**
+ * Where a query task's result came from: its eventstream and the table of it the analyses read. Its
+ * rows are numbered within each table (`rows_per_table`), which is what lets a read keep each table's
+ * first rows; a result stored without that numbering cannot be cut right, so it is refused — the same
+ * query run again stores it as it is read now.
+ */
 export function resultOrigin(state, table) {
-  return state?.results?.[table] || { eventstream: null, table: null };
+  const r = state?.results?.[table];
+  if (!r) return { eventstream: null, table: null };
+  if (typeof r !== 'object' || !r.rows_per_table) throw new ToolError(`the result in ${table} was stored by an earlier version of this server, before its rows were numbered within their tables — run the same query again to read it`, { stage: 'validate', field: 'task_id' });
+  return r;
 }
 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */

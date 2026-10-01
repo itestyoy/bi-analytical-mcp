@@ -133,7 +133,7 @@ npm install
 DBT_BASE_PROJECT=/path/to/dbt_project \
 DBT_PROFILES_DIR=/path/to/dbt_project \
 DBT_ENV=dbt-v2 \
-CATALOG_PATH=./config/catalog.json \
+CATALOG_PATH=./config/catalog.yml \
 npm start            # streamable-HTTP MCP on :3000/mcp
 ```
 

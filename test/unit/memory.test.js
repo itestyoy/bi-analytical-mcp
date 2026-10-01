@@ -277,3 +277,13 @@ test('a memory target is stored structurally and read back without decoding', as
   assert.deepEqual(again.target, { source: 'events', name: 'ad_type_of_event_data' });
   assert.ok(again.notes.some((n) => n.id === rec.id));
 });
+
+test('a note an earlier server stored with bare-string targets is read with each one as the phrase it is', async () => {
+  const { MemoryStore } = await import('../../src/memory.js');
+  const store = openStore({});
+  store.memory.add({ id: 'old1', note: 'ad_type is empty on purchases', targets: ['property:events.ad_type', 'model:users'], created_at: 1 });
+  const mem = new MemoryStore({ store });
+  assert.deepEqual(mem.get('old1').targets, [{ kind: 'term', term: 'property:events.ad_type' }, { kind: 'term', term: 'model:users' }]);
+  assert.deepEqual(mem.forTargets(['term:model:users']).map((n) => n.id), ['old1']);
+  assert.deepEqual((await mem.search('ad_type', { fuzzy: false })).notes.map((n) => n.id), ['old1']);
+});

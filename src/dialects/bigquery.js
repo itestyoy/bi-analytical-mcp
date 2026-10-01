@@ -175,8 +175,16 @@ export class BigQueryDialect extends Dialect {
   recentSince(col, days) { return `${col} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${Math.floor(Number(days))} DAY)`; }
   sinceTimestampMs(col, ms) { return `${col} > TIMESTAMP_MILLIS(${Math.floor(Number(ms))})`; }
   // wrapped in a JSON STRING: APPROX_TOP_COUNT returns a nested ARRAY<STRUCT> that `dbt show --output
-  // json` cannot serialize (the query runs, the show step errors); parseApproxTopK reads it back
+  // json` cannot serialize (the query runs, the show step errors); parseTopK reads it back
   approxTopK(expr, k) { return `TO_JSON_STRING(APPROX_TOP_COUNT(${expr}, ${Math.max(1, Math.floor(Number(k) || 50))}))`; }
+  /** The cell approxTopK writes — TO_JSON_STRING of ARRAY<STRUCT<value, count>> — as [{ value, freq }];
+   *  [] when it is not that (the indexer then counts the property exactly, and says so). */
+  parseTopK(raw) {
+    let arr = raw;
+    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { return []; } }
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((e) => e && typeof e === 'object' && e.value != null).map((e) => ({ value: e.value, freq: Number(e.count) || 0 }));
+  }
 
   // Native HLL++ mergeable sketches — the additive distinct-count workflow.
   hllInit(c) { return `HLL_COUNT.INIT(${c})`; }

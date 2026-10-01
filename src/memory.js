@@ -27,6 +27,12 @@ export function targetWords(t) {
   return t.kind === 'term' ? String(t.term) : [t.source, t.name].filter(Boolean).join('.');
 }
 
+/**
+ * A note as read: every target a structure. A bare string an earlier server stored names nothing
+ * this catalog can address, so it is read as the phrase it is — searchable, never taken apart.
+ */
+const asRead = (e) => e && { ...e, targets: (e.targets || []).map((t) => (t && typeof t === 'object' ? t : { kind: 'term', term: String(t) })) };
+
 // Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
 // genuinely related-but-differently-worded texts well above this; noise stays below).
 const SEMANTIC_FLOOR = 0.3;
@@ -63,13 +69,13 @@ export class MemoryStore {
     return entry;
   }
 
-  get(id) { return this.store.memory.get(id); }
+  get(id) { return asRead(this.store.memory.get(id)); }
 
   /** Delete one note by id. Returns whether a row existed. */
   forget(id) { return this.store.memory.remove(id); }
 
   /** All notes, most recent first. */
-  all(opts = {}) { return this.store.memory.all(opts); }
+  all(opts = {}) { return this.store.memory.all(opts).map(asRead); }
 
   /** { notes } — coverage counts. */
   counts() { return this.store.memory.counts(); }

@@ -3,7 +3,8 @@
 ## Data model (HARD RULE)
 - Sources are identified by their `meta.mcp.role` — NOT by name. (That block lives under `config:`
   on the model and on every column — `config.meta.mcp` — the place dbt 1.10+ and dbt Fusion read,
-  and the only place the loader reads.) The dbt model /
+  and the only place the loader reads; a block at the top-level `meta:`, or a key the loader does not
+  read, is refused at load, naming where it sits.) The dbt model /
   SQL file can be named anything; the role is the identity, and exactly one model
   per role. Sanctioned roles:
   1. **an events SOURCE** — one row per event, detected by its event_name/

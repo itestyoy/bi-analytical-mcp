@@ -332,3 +332,11 @@ test('the errors the library check counts as the call\'s are the library\'s own 
   assert.deepEqual(unknown, [], 'every counted error is one the library defines (regenerate the sheet if it renamed one)');
   assert.ok(CONFIG_ERRORS.every((name) => name !== 'RetentioneeringError'), 'the base class would count every error the library raises, the rows\' own too');
 });
+
+test('a query result stored before its rows were numbered within their tables is refused, never cut across them', async () => {
+  const { resultOrigin } = await import('../../src/retentioneering/query.js');
+  const state = { results: { q_new: { eventstream: 'es', table: 'rete_es', analyses: ['a'], rows_per_table: true }, q_old: { eventstream: 'es', table: 'rete_es', analyses: ['a'] }, q_str: 'es' } };
+  assert.equal(resultOrigin(state, 'q_new').eventstream, 'es');
+  assert.deepEqual(resultOrigin(state, 'q_none'), { eventstream: null, table: null });
+  for (const t of ['q_old', 'q_str']) assert.throws(() => resultOrigin(state, t), /stored by an earlier version .* run the same query again/);
+});

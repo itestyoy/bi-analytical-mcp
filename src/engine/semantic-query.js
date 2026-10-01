@@ -356,11 +356,14 @@ export const semanticQueryMethods = {
     const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
     const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
     const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
+    // a string key is a name the caller is handed — a metric, a result column — never the token it is
+    // resolved to: that spelling is the server's own, and is free to change
+    const sayable = new Set(orderableKeys);
     const orderBy = (input.order_by || []).map((o) => {
       let key = o.key;
       if (typeof key === 'object' && key) key = resolveKey(key);
       else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
-      else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key); // a result column name
+      else if (typeof key === 'string') key = sayable.has(key) ? byFriendly.get(key) || key : null;
       if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? label(o.key) : o.key}' is not a requested metric or group_by column. Orderable: ${orderableKeys.join(', ')}`, { stage: 'validate', field: 'order_by' });
       return `${o.direction === 'desc' ? '-' : ''}${key}`;
     });

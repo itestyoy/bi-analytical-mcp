@@ -127,6 +127,12 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
   assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time_day
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
+  // a key is the result column it is handed as — the same 7 days, desc puts the latest first — never
+  // the token the server resolves it to
+  const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day', direction: 'desc' }] });
+  assert.equal(byColumn.row_count, 7);
+  assert.deepEqual(byColumn.rows.map((r) => String(r.metric_time_day)), sorted.rows.map((r) => String(r.metric_time_day)).reverse());
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time__day' }] }), /Orderable:/);
 });
 
 // ── 2. joins: group_by_joined_attribute ──────────────────────────────────────

@@ -17,7 +17,7 @@ import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { isBooleanType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
-import { mcpOf, dbtSchemaToCatalog, primaryEntityName, asPrimaryEntity } from './catalog/from-dbt-schema.js';
+import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
 export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
@@ -26,16 +26,10 @@ export function loadCatalog(path, opts = {}) {
   // A directory => a dbt project: discover the MCP-tagged models from its own
   // schema YAMLs (no separate catalog file needed).
   if (existsSync(path) && statSync(path).isDirectory()) return loadCatalogFromProject(path, opts);
-  const text = readFileSync(path, 'utf8');
-  let raw;
-  if (/\.ya?ml$/i.test(path)) {
-    const doc = yaml.load(text);
-    // dbt model-schema notation (models: [ {name, columns, meta} ]) -> registry.
-    // A plain registry object (models: {events:{..}}) is also accepted as-is.
-    raw = Array.isArray(doc?.models) ? dbtSchemaToCatalog(doc) : doc;
-  } else {
-    raw = JSON.parse(text);
-  }
+  // A file => a dbt model-schema YAML (models: [ { name, columns, config: { meta } } ]).
+  const doc = /\.ya?ml$/i.test(path) ? yaml.load(readFileSync(path, 'utf8')) : null;
+  if (!Array.isArray(doc?.models)) throw new Error(`catalog ${path}: expected a dbt project directory or a dbt model-schema YAML (models: [...])`);
+  const raw = dbtSchemaToCatalog(doc);
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, report: (r) => { raw.dialect_fallback = r; } });
@@ -53,6 +47,7 @@ export function loadCatalog(path, opts = {}) {
 export function loadCatalogFromProject(projectDir, opts = {}) {
   const models = [];
   for (const mp of readModelPaths(projectDir)) collectSchemaModels(join(projectDir, mp), models);
+  for (const m of models) refuseTopLevelMcp(m);
   const mcpModels = models.filter((m) => mcpOf(m)?.role);
   if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with config.meta.mcp.role)`);
   const byRole = new Map();
@@ -73,20 +68,15 @@ export class Catalog {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
     // Whether dbt can run PYTHON models on the active profile (resolvePythonRuntime): the `python`
-    // pipeline stage exists in the tool schemas only when it can. A plain registry object without
-    // a profile is treated as "no runtime" unless it says otherwise.
-    this.pythonRuntime = raw.python_runtime || { available: false, reason: 'no dbt profile — Python models unavailable' };
+    // pipeline stage exists in the tool schemas only when it can.
+    this.pythonRuntime = raw.python_runtime;
     // Set when dbt's adapter is one this server writes no SQL for, so the SQL is rendered in
     // another dialect's syntax against it: { profile_type, rendering_as, explicit }.
     this.dialectFallback = raw.dialect_fallback || null;
-    this.models = raw.models || {};
-    // one shape for a primary entity, whoever wrote the registry (a schema file, a test's object)
-    for (const m of Object.values(this.models)) if (m && m.primary_entity != null) m.primary_entity = asPrimaryEntity(m.primary_entity);
-    // `facts` = every events source; they are equal, each is addressed by name, and none is a
-    // default. Declared by the schema converter, or derived here for a plain registry object:
-    // a model with an event_name column is an events source.
-    this.facts = (Array.isArray(raw.facts) && raw.facts.length ? raw.facts : Object.keys(this.models).filter((k) => this.models[k]?.event_name || this.models[k]?.event_data_column)).filter((k) => this.models[k]);
-    if (!this.facts.length) throw new Error('no events source in the catalog: at least one model must declare an event_name column');
+    this.models = raw.models;
+    // `facts` = every events source (the schema converter refuses a catalog without one); they are
+    // equal, each is addressed by name, and none is a default
+    this.facts = raw.facts;
     // Cost guardrail per SOURCE: a catalog-wide override, else that source's own
     // meta.mcp.require_time_range. A partitioned source can demand a bounded window even when
     // another source does not (see requireTimeRangeFor).

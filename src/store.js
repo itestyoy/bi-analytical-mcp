@@ -280,6 +280,70 @@ export class MemoryBackend {
 }
 
 // ───────────────────────── SQLite backend (node:sqlite) ─────────────────────────
+// The store's tables, each declared ONCE: its columns, its key, and whether it is a CACHE the server
+// rebuilds on its own (the value index and its runs, which the background scan repopulates).
+const TABLES = [
+  // `tool`: the tool that started a task, which says which query tool reads it back;
+  // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
+  { name: 'jobs', key: ['id'], columns: ['id TEXT', 'context_id TEXT', 'table_name TEXT', 'status TEXT', 'error TEXT', 'started_at INTEGER', 'ready_at INTEGER', 'tool TEXT', 'drawn INTEGER'] },
+  // Every index table is keyed by (SOURCE, property): each catalog source — an events fact, the users
+  // dimension — owns its own index space, so two facts may carry the same property name.
+  { name: 'prop_values', cache: true, key: ['source', 'property', 'value'], columns: ['source TEXT', 'property TEXT', 'value TEXT', 'freq INTEGER'] },
+  //  null_count       — nulls per property.
+  //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
+  //                     so subsequent syncs SKIP it (indexed once, then left alone).
+  //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
+  //                     only rows newer than this and ADDS the new counts to what is stored.
+  { name: 'prop_stats', cache: true, key: ['source', 'property'], columns: ['source TEXT', 'property TEXT', 'distinct_count INTEGER', 'total_count INTEGER', 'null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER', 'indexed_at INTEGER'] },
+  // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
+  // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
+  { name: 'prop_coverage', cache: true, key: ['source', 'property', 'event_name'], columns: ['source TEXT', 'property TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
+  // is empty for one app but populated for another is visible (the { bundle } index view).
+  { name: 'prop_bundle_coverage', cache: true, key: ['source', 'property', 'bundle'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
+  // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
+  // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
+  { name: 'prop_bundle_event_coverage', cache: true, key: ['source', 'property', 'bundle', 'event_name'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  { name: 'index_runs', cache: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'started_at INTEGER', 'finished_at INTEGER', 'status TEXT', 'properties_indexed INTEGER', 'values_written INTEGER', 'errors INTEGER', 'error TEXT'] },
+  // Per-property timing within a run — detailed stats drilled into via semantic_index.
+  // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
+  { name: 'index_run_props', cache: true, key: ['run_id', 'source', 'property'], columns: ['run_id INTEGER', 'source TEXT', 'property TEXT', 'ms INTEGER', 'values_written INTEGER', 'distinct_count INTEGER', 'total_count INTEGER', 'status TEXT', 'error TEXT'] },
+  // Run-level events surfaced in semantic_index({ request: { status } })/({ run }), e.g. "a batch fell
+  // back to per-property because the combined scan failed: <reason>".
+  { name: 'index_run_notes', cache: true, key: [], columns: ['run_id INTEGER', 'note TEXT', 'at INTEGER'] },
+  // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
+  { name: 'memory', key: ['id'], columns: ['id TEXT', 'note TEXT', 'question TEXT', 'targets TEXT', 'aliases TEXT', 'links TEXT', 'created_at INTEGER', 'embedding TEXT', 'embedding_model TEXT'] },
+  // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
+  { name: 'memory_vec_meta', key: ['only_row'], columns: ['only_row INTEGER PRIMARY KEY CHECK (only_row = 1)', 'dims INTEGER', 'model TEXT'] },
+  { name: 'server_meta', key: ['key'], columns: ['key TEXT', 'value TEXT'] },
+  // with what reproduces an error: the context's state, the code of the model that failed, the runtime
+  { name: 'errors', key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
+];
+
+/**
+ * A database is brought to the declared tables, whichever version of the server wrote it: a missing
+ * table is created and a missing column added (SQLite has no ADD COLUMN IF NOT EXISTS, so only what
+ * the table lacks — a failure to add it is the error it is). A table keyed otherwise cannot be
+ * widened in place (every ON CONFLICT on the declared key would be rejected): a cache is dropped and
+ * recreated — its rows are rebuilt — and any other table is refused, naming both keys.
+ */
+function bringToSchema(db, { name, key, columns, cache = false }) {
+  const have = db.prepare(`PRAGMA table_info(${name})`).all();
+  if (have.length) {
+    const keyed = have.filter((c) => c.pk > 0).sort((x, y) => x.pk - y.pk).map((c) => c.name); // pk: 1-based position in the key
+    if (keyed.join() !== key.join()) {
+      if (!cache) throw new Error(`store: table ${name} is keyed by (${keyed.join(', ')}), this server keys it by (${key.join(', ')}) — it cannot be changed in place`);
+      db.exec(`DROP TABLE ${name}`);
+    } else {
+      const names = new Set(have.map((c) => c.name));
+      for (const def of columns) if (!names.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${name} ADD COLUMN ${def}`);
+    }
+  }
+  const inline = columns.some((d) => /PRIMARY KEY/.test(d));
+  db.exec(`CREATE TABLE IF NOT EXISTS ${name} (${columns.join(', ')}${key.length && !inline ? `, PRIMARY KEY(${key.join(', ')})` : ''})`);
+}
+
 // All SQL is encapsulated here. Prepared statements are cached per SQL string.
 export class SqliteBackend {
   constructor(db) {
@@ -287,46 +351,11 @@ export class SqliteBackend {
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
-    // `tool`: the tool that started a task, which says which query tool reads it back;
-    // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
-    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT, drawn INTEGER)');
-    // Every index table is keyed by (SOURCE, property): each catalog source — an events fact, the users
-    // dimension — owns its own index space, so two facts may carry the same property name.
-    db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
-    //  null_count       — nulls per property.
-    //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
-    //                     so subsequent syncs SKIP it (indexed once, then left alone).
-    //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
-    //                     only rows newer than this and ADDS the new counts to what is stored.
-    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, high_cardinality INTEGER, data_watermark INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
-    // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
-    // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
-    db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (source TEXT, property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, event_name))');
-    // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
-    // is empty for one app but populated for another is visible (the { bundle } index view).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (source TEXT, property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle))');
-    // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
-    // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
-    // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
-    db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
-    // Per-property timing within a run — detailed stats drilled into via semantic_index.
-    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
-    db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
-    // Run-level events surfaced in semantic_index({ request: { status } })/({ run }), e.g. "a batch fell
-    // back to per-property because the combined scan failed: <reason>".
-    db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
-    // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
-    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
+    for (const table of TABLES) bringToSchema(db, table);
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
     try { require('sqlite-vec').load(db); this._vec = true; } catch { /* extension unavailable */ }
-    // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
-    db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
-    db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
-    // with what reproduces an error: the context's state, the code of the model that failed, the runtime
-    db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT, context TEXT, files TEXT, runtime TEXT)');
     db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
     const s = this;
     // every row a table holds for one (source, property), replaced by `rows` — each row the values of
@@ -596,14 +625,12 @@ export function storeBackends() { return [...BACKENDS.keys()]; }
 // sqlite or a path is unavailable, so openStore falls back to the in-memory backend.
 registerStoreBackend('sqlite', ({ dbPath }) => {
   if (!dbPath) return null;
-  try {
-    const { DatabaseSync } = require('node:sqlite');
-    // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
-    // when the extension is absent (the backend falls back to in-SQL cosine).
-    return new SqliteBackend(new DatabaseSync(dbPath, { allowExtension: true }));
-  } catch {
-    return null;
-  }
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch { return null; } // a Node without node:sqlite: the in-memory store
+  // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
+  // when the extension is absent (the backend falls back to in-SQL cosine). A database that cannot
+  // be opened or brought to the declared tables is the error it is — never a silent in-memory store.
+  return new SqliteBackend(new DatabaseSync(dbPath, { allowExtension: true }));
 });
 
 /**

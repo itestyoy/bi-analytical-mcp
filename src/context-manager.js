@@ -140,7 +140,7 @@ export class ContextManager {
     // generated models/YAML under a scanned path — otherwise dbt never sees them and the compiled
     // semantic_manifest has zero semantic models + zero time spines ("none were found"). A project
     // with a custom model-paths (e.g. ["marts"]) does NOT include the default "models".
-    this.modelPaths = this.baseProjectDir ? readModelPaths(this.baseProjectDir).map(String) : ['models'];
+    this.modelPaths = this.baseProjectDir ? readModelPaths(this.baseProjectDir) : ['models'];
     this.contexts = new Map(); // id -> { id, createdAt, lastUsedAt, state }
     this.leases = new Map(); // id -> count of in-flight ops
     mkdirSync(this.workspaceRoot, { recursive: true });

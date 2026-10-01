@@ -10,6 +10,25 @@ import { dimTypeFromDataType, pipelineColumnType } from './column-types.js';
 /** A model's or a column's MCP block: `config.meta.mcp`. */
 export const mcpOf = (node) => node?.config?.meta?.mcp;
 
+// The keys an MCP block may carry — what this loader reads, on a model and on a column. Any other key
+// is refused at load: read past, a mistyped or retired key would leave its declaration unapplied.
+const MODEL_KEYS = ['role', 'primary_entity', 'known_events', 'measures', 'entities', 'event_semantics', 'partition_column', 'partition_late_days', 'require_time_range'];
+const COLUMN_KEYS = ['entity', 'is_time', 'granularity', 'is_event_name', 'is_event_data', 'properties', 'property', 'array', 'measure', 'unit', 'dimension', 'index'];
+
+function refuseUnknownKeys(mcp, allowed, where) {
+  const unknown = Object.keys(mcp || {}).filter((k) => !allowed.includes(k));
+  if (unknown.length) throw new Error(`${where}: config.meta.mcp has no key${unknown.length > 1 ? 's' : ''} ${unknown.map((k) => `'${k}'`).join(', ')} — it takes ${allowed.join(', ')}`);
+}
+
+/**
+ * A block at the top-level `meta:` is refused, naming where it sits: dbt Fusion drops that key, and
+ * read past in silence it would leave the model out of the catalog, or a column a plain dimension.
+ */
+export function refuseTopLevelMcp(model) {
+  const at = [model?.meta?.mcp ? `model '${model.name}'` : null, ...(model?.columns || []).filter((c) => c?.meta?.mcp).map((c) => `column '${model.name}.${c.name}'`)].filter(Boolean);
+  if (at.length) throw new Error(`meta.mcp at the top level of ${at.join(', ')}: it is read under config: — move it to config.meta.mcp`);
+}
+
 /**
  * Transform a dbt model-schema document into the internal catalog registry.
  * MCP semantics are read from `config.meta.mcp` at the model level (key/role/
@@ -20,6 +39,9 @@ export function dbtSchemaToCatalog(doc) {
   // the warehouse dialect is not the catalog's to say: loadCatalog resolves it from the env / profile
   const out = { models: {} };
   for (const model of doc.models || []) {
+    refuseTopLevelMcp(model);
+    refuseUnknownKeys(mcpOf(model), MODEL_KEYS, `model '${model.name}'`);
+    for (const col of model.columns || []) refuseUnknownKeys(mcpOf(col), COLUMN_KEYS, `column '${model.name}.${col.name}'`);
     const mcp = mcpOf(model) || {};
     // The ROLE is the logical name — the dbt model can be named anything. Nothing is hardcoded to a specific name.
     const key = mcp.role;

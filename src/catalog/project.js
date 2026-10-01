@@ -15,7 +15,8 @@ export function readPaths(projectDir, key, dflt) {
   try {
     const dp = yaml.load(readFileSync(join(projectDir, 'dbt_project.yml'), 'utf8')) || {};
     const v = dp[key] ?? dflt;
-    return Array.isArray(v) ? v : [v];
+    const list = (Array.isArray(v) ? v : [v]).map(String);
+    return list.length ? list : dflt; // an empty list is no paths configured: dbt's default
   } catch {
     return dflt;
   }

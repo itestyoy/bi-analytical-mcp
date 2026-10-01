@@ -73,7 +73,24 @@ test('a table that is not a cache, keyed otherwise than declared, is refused nam
   const old = new DatabaseSync(dbPath);
   old.exec('CREATE TABLE memory (note TEXT PRIMARY KEY, targets TEXT)');
   old.close();
-  assert.throws(() => openStore({ dbPath }), /memory is keyed by \(note\), this server keys it by \(id\)/);
+  assert.throws(() => openStore({ dbPath }), /memory is keyed by \(note\), this server keys it by \(id\) — it cannot be changed in place$/);
+  assert.throws(() => openStore({ dbPath, reset: true }), /memory is keyed by \(note\)/, 'MCP_DB_RESET keeps memory, so it does not rebuild it either');
+});
+
+test('a table MCP_DB_RESET wipes, keyed otherwise, is refused naming the reset — and rebuilt under it, the kept tables kept', () => {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-reset-key-')), 'mcp.sqlite');
+  const old = new DatabaseSync(dbPath);
+  old.exec('CREATE TABLE jobs (context_id TEXT PRIMARY KEY, status TEXT)');
+  old.exec('CREATE TABLE memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER)');
+  old.exec(`INSERT INTO memory (id, note, targets, aliases, links, created_at) VALUES ('m1', 'kept', '[]', '[]', '[]', 1)`);
+  old.close();
+  assert.throws(() => openStore({ dbPath }), /jobs is keyed by \(context_id\).*MCP_DB_RESET=1 clears it/);
+  const store = openStore({ dbPath, reset: true });
+  const jobs = new JobManager({ store });
+  const id = jobs.create({ contextId: 'c1', tool: 'query_pipeline_model' });
+  assert.equal(jobs.get(id).contextId, 'c1');
+  assert.equal(store.memory.get('m1').note, 'kept');
+  store.close();
 });
 
 test('a custom backend can be registered and selected (database is swappable)', () => {
@@ -128,4 +145,7 @@ test('a task stored before tasks recorded their tool is refused by either side, 
   const sides = { query_semantic_model: 'semantic', query_pipeline_model: 'pipeline' };
   const runner = new TaskRunner({ jobs, ctxs: null, sideOf: (tool) => sides[tool] || null, readers: { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' } });
   for (const side of ['semantic', 'pipeline']) assert.throws(() => runner.forSide('aaaaaaaaaaaa', side), (e) => /records no tool that started it/.test(e.message) && e.code === 'result_gone');
+  // a task whose tool is no longer served (its feature off) says so, not that it records none
+  const off = jobs.create({ contextId: 'c2', tool: 'query_retentioneering_model' });
+  assert.throws(() => runner.forSide(off, 'semantic'), /started by query_retentioneering_model, which this server does not serve now/);
 });

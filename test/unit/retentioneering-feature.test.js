@@ -337,6 +337,6 @@ test('a query result stored before its rows were numbered within their tables is
   const { resultOrigin } = await import('../../src/retentioneering/query.js');
   const state = { results: { q_new: { eventstream: 'es', table: 'rete_es', analyses: ['a'], rows_per_table: true }, q_old: { eventstream: 'es', table: 'rete_es', analyses: ['a'] }, q_str: 'es' } };
   assert.equal(resultOrigin(state, 'q_new').eventstream, 'es');
-  assert.deepEqual(resultOrigin(state, 'q_none'), { eventstream: null, table: null });
-  for (const t of ['q_old', 'q_str']) assert.throws(() => resultOrigin(state, t), /stored by an earlier version .* run the same query again/);
+  assert.equal(resultOrigin(state, 'q_new').gone, undefined);
+  for (const t of ['q_old', 'q_str', 'q_none']) assert.match(resultOrigin(state, t).gone, /stored by an earlier version .* run the same query again/);
 });

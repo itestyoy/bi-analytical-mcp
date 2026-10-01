@@ -323,6 +323,27 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   index.close();
 });
 
+// A top-K cell the dialect cannot read: each property is counted exactly, and the run says so once
+// per batch, naming the properties — not once per property.
+test('a combined top-k that reads nothing is counted exactly and noted once per batch', async () => {
+  const catalog = loadCatalog(CATALOG, { dialect: 'bigquery' });
+  const cells = (pick) => new Proxy({}, { get: (_t, k) => pick(String(k)) });
+  const runner = { show: async (_dir, sql) => {
+    if (/APPROX_TOP_COUNT/.test(sql)) return { ok: true, rows: [cells((k) => (/^v\d+$/.test(k) ? 'not a top-k cell' : undefined))] };
+    if (/ AS d0/.test(sql)) return { ok: true, rows: [cells((k) => (k === 'rows_total' ? 5 : /^[dt]\d+$/.test(k) ? 3 : undefined))] };
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    return { ok: true, rows: [] };
+  } };
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
+  await bi.refresh();
+  const notes = index.runNotes(index.syncStatus().last_run.id).filter((n) => /read no values/.test(n.note));
+  const props = catalog.scalarEventProps('events');
+  assert.ok(notes.length >= 1 && notes.length < props.length, `one note per batch, not per property: ${notes.length} for ${props.length}`);
+  assert.deepEqual(index.sampleValues('events', props[0]), [{ value: 'x', freq: 3 }]);
+  index.close();
+});
+
 // The FULL fallback reason is surfaced THROUGH the tools: semantic_index({ status }) + ({ run }).
 test('semantic_index({ status })/({ run }) surface the full batch fallback reason', async () => {
   const { ContextManager } = await import('../../src/context-manager.js');

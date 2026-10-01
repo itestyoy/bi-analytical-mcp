@@ -88,7 +88,10 @@ test('a meta.mcp block at the top level is refused, naming the model or column i
 test('a key the loader does not read is refused at load, on a model and on a column, with the keys it takes', () => {
   const onModel = usersYml.replace('mcp: { role: users }', 'mcp: { role: users, anchor: true }');
   const onColumn = eventsYml.replace('mcp: { is_time: true }', 'mcp: { is_time: true, values: [a] }');
-  for (const [files, where] of [[{ 'users.yml': onModel, 'events.yml': eventsYml }, /model 'dim_users': config\.meta\.mcp has no key 'anchor' — it takes role,/], [{ 'events.yml': onColumn, 'users.yml': usersYml }, /column 'fct_events\.ts': config\.meta\.mcp has no key 'values' — it takes entity,/]]) {
+  const mistypedRole = usersYml.replace('mcp: { role: users }', 'mcp: { rol: users }');
+  const columnOnly = usersYml.replace('config: { meta: { mcp: { role: users } } }', 'description: users');
+  for (const [files, where] of [[{ 'users.yml': onModel, 'events.yml': eventsYml }, /model 'dim_users': config\.meta\.mcp has no key 'anchor' — it takes role,/], [{ 'events.yml': onColumn, 'users.yml': usersYml }, /column 'fct_events\.ts': config\.meta\.mcp has no key 'values' — it takes entity,/],
+    [{ 'users.yml': mistypedRole, 'events.yml': eventsYml }, /model 'dim_users': config\.meta\.mcp has no key 'rol'/], [{ 'users.yml': columnOnly, 'events.yml': eventsYml }, /catalog model 'dim_users' is missing config\.meta\.mcp\.role/]]) {
     const dir = project(files);
     try { assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), where); } finally { rmSync(dir, { recursive: true, force: true }); }
   }
@@ -112,10 +115,10 @@ test('primary_entity: null is no primary entity — the model loads and its keys
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("model-paths: [] is no paths configured — the models are read from dbt's default, models/", () => {
+test('model-paths: [] is refused — dbt parses no model then, so none this server reads would be seen', () => {
   const dir = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
   try {
     writeFileSync(join(dir, 'dbt_project.yml'), 'name: test\nprofile: test\nmodel-paths: []\n');
-    assert.deepEqual(Object.keys(loadCatalogFromProject(dir, { dialect: 'duckdb' }).models).sort(), ['events', 'users']);
+    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), /model-paths is empty, so dbt parses no model/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

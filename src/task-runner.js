@@ -157,8 +157,11 @@ export class TaskRunner {
   forSide(id, side) {
     const job = this.known(id);
     const own = this.sideOf(job.tool);
-    // a task stored before tasks recorded the tool that started them has no side to be read on
-    if (!own) throw new ToolError(`task ${job.id} records no tool that started it, so neither side can read it back — start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    // no side to be read on: a task stored before tasks recorded the tool that started them, or one
+    // started by a tool this server does not serve now (a feature switched off)
+    if (!own) throw new ToolError(job.tool
+      ? `task ${job.id} was started by ${job.tool}, which this server does not serve now (its feature is off), so no tool reads it back`
+      : `task ${job.id} records no tool that started it, so neither side can read it back — start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
     if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_id: '${job.id}' } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }

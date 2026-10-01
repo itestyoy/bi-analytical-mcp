@@ -26,11 +26,12 @@ export const LIST_TTL_MS = 60 * 1000;
 
 /**
  * How long after a start that CHANGED the surface a new subscription is told so. It counts from the
- * start, not from a client's reconnect: a listen stream that comes back with backoff, or a container
- * that takes a while to be reached, must still hear it — and a host that ignores ttlMs may hold a list
- * for as long as an hour, the lifetime lists once had.
+ * start, not from a client's reconnect, so it outlasts a listen stream coming back with backoff or a
+ * container that takes a while to be reached. It is short because the bus cannot tell a reconnect
+ * from a new client: every subscription within it is told again. A host that ignores ttlMs past it
+ * still sees the change in serverInfo.version.
  */
-export const CHANGE_WINDOW_MS = 60 * 60 * 1000;
+export const CHANGE_WINDOW_MS = 5 * 60 * 1000;
 
 const FINGERPRINT_KEY = 'surface_fingerprint';
 

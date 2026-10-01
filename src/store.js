@@ -280,8 +280,9 @@ export class MemoryBackend {
 }
 
 // ───────────────────────── SQLite backend (node:sqlite) ─────────────────────────
-// The store's tables, each declared ONCE: its columns, its key, and whether it is a CACHE the server
-// rebuilds on its own (the value index and its runs, which the background scan repopulates).
+// The store's tables, each declared ONCE: its columns, its key, whether it is a CACHE the server
+// rebuilds on its own (the value index and its runs, which the background scan repopulates), and
+// whether it is KEPT by MCP_DB_RESET (curated memory and the error log are not re-derivable).
 const TABLES = [
   // `tool`: the tool that started a task, which says which query tool reads it back;
   // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
@@ -313,12 +314,12 @@ const TABLES = [
   // back to per-property because the combined scan failed: <reason>".
   { name: 'index_run_notes', cache: true, key: [], columns: ['run_id INTEGER', 'note TEXT', 'at INTEGER'] },
   // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
-  { name: 'memory', key: ['id'], columns: ['id TEXT', 'note TEXT', 'question TEXT', 'targets TEXT', 'aliases TEXT', 'links TEXT', 'created_at INTEGER', 'embedding TEXT', 'embedding_model TEXT'] },
+  { name: 'memory', kept: true, key: ['id'], columns: ['id TEXT', 'note TEXT', 'question TEXT', 'targets TEXT', 'aliases TEXT', 'links TEXT', 'created_at INTEGER', 'embedding TEXT', 'embedding_model TEXT'] },
   // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
-  { name: 'memory_vec_meta', key: ['only_row'], columns: ['only_row INTEGER PRIMARY KEY CHECK (only_row = 1)', 'dims INTEGER', 'model TEXT'] },
-  { name: 'server_meta', key: ['key'], columns: ['key TEXT', 'value TEXT'] },
+  { name: 'memory_vec_meta', kept: true, key: ['only_row'], columns: ['only_row INTEGER PRIMARY KEY CHECK (only_row = 1)', 'dims INTEGER', 'model TEXT'] },
+  { name: 'server_meta', kept: true, key: ['key'], columns: ['key TEXT', 'value TEXT'] },
   // with what reproduces an error: the context's state, the code of the model that failed, the runtime
-  { name: 'errors', key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
+  { name: 'errors', kept: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
 ];
 
 /**
@@ -326,14 +327,15 @@ const TABLES = [
  * table is created and a missing column added (SQLite has no ADD COLUMN IF NOT EXISTS, so only what
  * the table lacks — a failure to add it is the error it is). A table keyed otherwise cannot be
  * widened in place (every ON CONFLICT on the declared key would be rejected): a cache is dropped and
- * recreated — its rows are rebuilt — and any other table is refused, naming both keys.
+ * recreated — its rows are rebuilt — as is a table MCP_DB_RESET wipes when the store is opened with
+ * `reset`; a table it keeps is refused, naming both keys.
  */
-function bringToSchema(db, { name, key, columns, cache = false }) {
+function bringToSchema(db, { name, key, columns, cache = false, kept = false }, { reset = false } = {}) {
   const have = db.prepare(`PRAGMA table_info(${name})`).all();
   if (have.length) {
     const keyed = have.filter((c) => c.pk > 0).sort((x, y) => x.pk - y.pk).map((c) => c.name); // pk: 1-based position in the key
     if (keyed.join() !== key.join()) {
-      if (!cache) throw new Error(`store: table ${name} is keyed by (${keyed.join(', ')}), this server keys it by (${key.join(', ')}) — it cannot be changed in place`);
+      if (!cache && (kept || !reset)) throw new Error(`store: table ${name} is keyed by (${keyed.join(', ')}), this server keys it by (${key.join(', ')}) — it cannot be changed in place${kept ? '' : '; MCP_DB_RESET=1 clears it'}`);
       db.exec(`DROP TABLE ${name}`);
     } else {
       const names = new Set(have.map((c) => c.name));
@@ -346,12 +348,12 @@ function bringToSchema(db, { name, key, columns, cache = false }) {
 
 // All SQL is encapsulated here. Prepared statements are cached per SQL string.
 export class SqliteBackend {
-  constructor(db) {
+  constructor(db, { reset = false } = {}) {
     this.kind = 'sqlite';
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
-    for (const table of TABLES) bringToSchema(db, table);
+    for (const table of TABLES) bringToSchema(db, table, { reset });
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
@@ -599,7 +601,7 @@ export class SqliteBackend {
    */
   reset() {
     this._tx(() => {
-      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
+      for (const t of TABLES) if (!t.kept) this._run(`DELETE FROM ${t.name}`);
     });
   }
 
@@ -621,29 +623,30 @@ export function registerStoreBackend(name, factory) { BACKENDS.set(name, factory
 /** Names of the registered backends (for diagnostics / discovery). */
 export function storeBackends() { return [...BACKENDS.keys()]; }
 
-// Built-in backend: node:sqlite (zero external deps, synchronous). Returns null when
-// sqlite or a path is unavailable, so openStore falls back to the in-memory backend.
-registerStoreBackend('sqlite', ({ dbPath }) => {
+// Built-in backend: node:sqlite (zero external deps, synchronous). Returns null when no path is set
+// or this Node has no node:sqlite — then openStore uses the in-memory backend. A database that cannot
+// be opened or brought to the declared tables is the error it is, never a silent in-memory store.
+registerStoreBackend('sqlite', ({ dbPath, reset = false }) => {
   if (!dbPath) return null;
   let DatabaseSync;
-  try { ({ DatabaseSync } = require('node:sqlite')); } catch { return null; } // a Node without node:sqlite: the in-memory store
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch { return null; }
   // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
-  // when the extension is absent (the backend falls back to in-SQL cosine). A database that cannot
-  // be opened or brought to the declared tables is the error it is — never a silent in-memory store.
-  return new SqliteBackend(new DatabaseSync(dbPath, { allowExtension: true }));
+  // when the extension is absent (the backend falls back to in-SQL cosine)
+  const db = new DatabaseSync(dbPath, { allowExtension: true });
+  try { return new SqliteBackend(db, { reset }); } catch (e) { db.close(); throw e; }
 });
 
 /**
  * Open the shared store. The backend is selectable (default 'sqlite', override via
  * MCP_DB_BACKEND or the `backend` arg) — the single switch point for changing databases.
- * ALWAYS returns a backend: falls back to the in-memory backend when no persistent one is
- * available, so callers never branch on null.
+ * ALWAYS returns a backend: the in-memory one when the selected backend declines (no path, no
+ * node:sqlite), so callers never branch on null; a database that fails to open throws.
  */
 export function openStore({ dbPath, backend, reset = false } = {}) {
   const name = backend || setting('MCP_DB_BACKEND');
   const factory = BACKENDS.get(name);
   if (!factory) throw new Error(`unknown store backend '${name}'. Registered: ${storeBackends().join(', ')}`);
-  const store = factory({ dbPath }) || new MemoryBackend();
+  const store = factory({ dbPath, reset }) || new MemoryBackend();
   if (reset) store.reset?.(); // wipe all state BEFORE any manager reads it (MCP_DB_RESET)
   return store;
 }

@@ -405,22 +405,26 @@ export class BackgroundIndexer {
     }
 
     const out = new Map();
+    const exact = []; // the properties whose combined top-k read nothing though they have values
     for (let j = 0; j < batch.length; j += 1) {
       const t = batch[j];
       const distinct = crow[`d${j}`] != null ? Number(crow[`d${j}`]) : null;
       const total = crow[`t${j}`] != null ? Number(crow[`t${j}`]) : null;
       const rowsTotal = crow.rows_total != null ? Number(crow.rows_total) : null;
       let values = combineTopK ? getDialect(c.dialect).parseTopK(topRow[`v${j}`]) : ((await this._topValuesExact(ref, t.expr, andWin)) || []);
-      // if combined top-k yielded nothing but the column has data, take the exact path — and say so: a
-      // cell the dialect cannot read would otherwise turn every batch into one exact scan per property
+      // if combined top-k yielded nothing but the column has data, take the exact path — and say so,
+      // once for the batch: a cell the dialect cannot read turns it into one exact scan per property
       if (combineTopK && !values.length && total) {
         values = (await this._topValuesExact(ref, t.expr, andWin)) || [];
-        const note = `combined top-k of ${label(t)} read no values from ${JSON.stringify(topRow[`v${j}`])?.slice(0, 120)} though it has ${total} → counted exactly`;
-        this.logger?.(`sync #${runId} ${note}`);
-        this.index.recordRunNote?.(runId, note);
+        exact.push({ t, cell: topRow[`v${j}`] });
       }
       const cov = covRows ? this._coverageFromRows(covRows, `nn${j}`, label(t), runId) : { coverage: [], bundleCoverage: [], cellCoverage: [] };
       out.set(t, { values, distinct, total, rowsTotal, nullCount: (rowsTotal != null && total != null) ? rowsTotal - total : null, ...cov });
+    }
+    if (exact.length) {
+      const note = `combined top-k of ${exact.length} of ${batch.length} from ${ref} read no values though they have them → counted exactly: ${exact.map((x) => label(x.t)).join(', ')} (first cell: ${String(JSON.stringify(exact[0].cell)).slice(0, 120)})`;
+      this.logger?.(`sync #${runId} ${note}`);
+      this.index.recordRunNote?.(runId, note);
     }
     return { results: out, maxTime };
   }

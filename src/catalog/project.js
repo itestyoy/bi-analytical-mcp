@@ -15,15 +15,18 @@ export function readPaths(projectDir, key, dflt) {
   try {
     const dp = yaml.load(readFileSync(join(projectDir, 'dbt_project.yml'), 'utf8')) || {};
     const v = dp[key] ?? dflt;
-    const list = (Array.isArray(v) ? v : [v]).map(String);
-    return list.length ? list : dflt; // an empty list is no paths configured: dbt's default
+    return (Array.isArray(v) ? v : [v]).map(String);
   } catch {
     return dflt;
   }
 }
 
+/** The project's model-paths. An empty list is refused: dbt parses no model then, and every model
+ *  this server reads or writes would be one dbt never sees. */
 export function readModelPaths(projectDir) {
-  return readPaths(projectDir, 'model-paths', ['models']);
+  const paths = readPaths(projectDir, 'model-paths', ['models']);
+  if (!paths.length) throw new Error(`${join(projectDir, 'dbt_project.yml')}: model-paths is empty, so dbt parses no model — list the directories the models are in (dbt's default is models)`);
+  return paths;
 }
 
 /** Basenames (without extension) of files matching `extRe` under the given dirs. */

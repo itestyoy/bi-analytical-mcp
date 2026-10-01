@@ -218,14 +218,14 @@ export async function readResult(engine, feature, dir, model, { context_id, even
 /**
  * Where a query task's result came from: its eventstream and the table of it the analyses read. Its
  * rows are numbered within each table (`rows_per_table`), which is what lets a read keep each table's
- * first rows; a result stored without that numbering cannot be cut right, so it is refused — the same
- * query run again stores it as it is read now.
+ * first rows. A result recorded without that numbering — or not recorded at all — cannot be cut
+ * right, so it is `gone`: that task's read says so (the same query run again stores it as it is read
+ * now), and the other tasks of a read go on.
  */
 export function resultOrigin(state, table) {
   const r = state?.results?.[table];
-  if (!r) return { eventstream: null, table: null };
-  if (typeof r !== 'object' || !r.rows_per_table) throw new ToolError(`the result in ${table} was stored by an earlier version of this server, before its rows were numbered within their tables — run the same query again to read it`, { stage: 'validate', field: 'task_id' });
-  return r;
+  if (r && typeof r === 'object' && r.rows_per_table) return r;
+  return { eventstream: null, table: null, gone: `the result in ${table} was stored by an earlier version of this server, before its rows were numbered within their tables — run the same query again to read it` };
 }
 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
@@ -295,6 +295,7 @@ export async function taskOutput(engine, feature, job, { rows = feature.keptRows
   const dir = engine.ctxs.dir(job.contextId);
   if (job.tool === QUERY) {
     const origin = resultOrigin(ctx.state.retentioneering, job.table);
+    if (origin.gone) return { ok: false, error: { stage: 'task', code: RESULT_GONE, message: origin.gone } };
     const out = await readResult(engine, feature, dir, job.table, { context_id: job.contextId, eventstream: origin.eventstream, order: origin.analyses || [], rows, analysis });
     if (out.ok && !analysis && rows === feature.keptRows) engine.tasks.keep(job.id, { tool: job.tool, input: null, out });
     return out;

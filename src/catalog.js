@@ -48,11 +48,14 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
   const models = [];
   for (const mp of readModelPaths(projectDir)) collectSchemaModels(join(projectDir, mp), models);
   for (const m of models) refuseTopLevelMcp(m);
-  const mcpModels = models.filter((m) => mcpOf(m)?.role);
+  // every model that carries an MCP block, on itself or a column, is the catalog's: one without a role
+  // (a mistyped `role` included) is refused by the converter with its keys checked, never dropped
+  const mcpModels = models.filter((m) => mcpOf(m) || (m.columns || []).some((c) => mcpOf(c)));
   if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with config.meta.mcp.role)`);
   const byRole = new Map();
   for (const m of mcpModels) {
-    const { role } = mcpOf(m);
+    const role = mcpOf(m)?.role;
+    if (!role) continue; // refused by dbtSchemaToCatalog, naming the model
     if (byRole.has(role)) throw new Error(`config error: more than one model declares role '${role}' (${byRole.get(role)} and ${m.name}); exactly one model per role`);
     byRole.set(role, m.name);
   }

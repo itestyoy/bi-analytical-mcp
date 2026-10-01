@@ -87,7 +87,7 @@ test('update: semantic_model must be a known model key', () => {
 // TWO MODES, ONE TOOL. Declaring a task and editing the task already in a context used to be two
 // tools with the same catalog vocabulary in both — and a listing carries every tool's schema on
 // every request, so the deployment's payload properties were shipped twice over. They are one tool
-// now, picked by `action`, and the old name stays callable for a client that learned it.
+// now, picked by `action`.
 //
 // Input-validation checks: what each mode requires, and that neither mode is asked for the other's
 // fields.

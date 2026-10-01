@@ -19,17 +19,22 @@ export function isTimeType(type) {
   return TIME_TYPES.has(String(type || '').toLowerCase());
 }
 
+/** A safe SQL literal — written the same way by every dialect. */
+export function sqlLiteral(value) {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
+  return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
+}
+
 export class Dialect {
   /* eslint-disable class-methods-use-this */
   get name() { throw new Error('abstract'); }
 
   /** A safe SQL string/number/boolean literal (shared across dialects). */
   sqlLiteral(value) {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'number') return String(value);
-    if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-    // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
-    return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
+    return sqlLiteral(value);
   }
 
   /** Validate a SQL identifier (column/alias/json key) — guards injection. */
@@ -215,6 +220,13 @@ export class Dialect {
   /** The K most frequent values WITH their counts in one aggregate, as a JSON string
    *  ([{ value, count }]), or null where the warehouse has none that carries the counts. */
   approxTopK(_expr, _k) { return null; }
+  /** One cell of approxTopK's output as [{ value, freq }] ([] when it is not that shape). */
+  parseTopK(raw) {
+    let arr = raw;
+    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { return []; } }
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((e) => e && typeof e === 'object' && e.value != null).map((e) => ({ value: e.value, freq: Number(e.count) || 0 }));
+  }
   // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────
   /** Build a sketch over a column (aggregate). */
   hllInit(_columnSql) { throw new Error('abstract hllInit'); }

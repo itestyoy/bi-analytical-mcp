@@ -139,9 +139,8 @@ targets either dialect:
 
 Exactly **two dialects** are supported — `duckdb` and `bigquery` — each a class
 in its own file (`src/dialects/duckdb.js`, `src/dialects/bigquery.js`)
-implementing the abstract `Dialect` (`src/dialects/base.js`). `src/dialect.js` is
-a thin functional facade that delegates to them (so existing callers are
-unchanged). The same op IR lowers two ways:
+implementing the abstract `Dialect` (`src/dialects/base.js`); callers take one
+with `getDialect(name)` (`src/dialects/index.js`). The same op IR lowers two ways:
 
 - **BigQuery → native pipe syntax.** Each stage emits its `|>` operator; the
   result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> PIVOT …`).
@@ -218,7 +217,7 @@ refusal that names the consumers, unless forced.
 ## 7. Migration path (from today's code)
 
 Already in place: the stage registry pattern (`src/prepare.js`), chained-CTE
-lowering, dialect array/struct helpers (`src/dialect.js`), catalog complex-type
+lowering, dialect array/struct helpers (`src/dialects/`), catalog complex-type
 declarations + scalar guards, SQL config headers (`src/sql-header.js`), and
 MATCH_RECOGNIZE as a generator with a CTE equivalent (DuckDB).
 

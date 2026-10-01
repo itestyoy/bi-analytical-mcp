@@ -97,27 +97,29 @@ test('semantic_index: strict view contract (exactly one view, scoped params)', a
 const SINGLE_SOURCE = `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp:
-        role: events
-        primary_entity: event
-        known_events: [login, purchase]
+    config:
+      meta:
+        mcp:
+          role: events
+          primary_entity: event
+          known_events: [login, purchase]
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
 
 const SECOND_SOURCE = `  - name: fct_crash
-    meta:
-      mcp:
-        role: crashlytics
-        primary_entity: crash
-        known_events: [boom]
+    config:
+      meta:
+        mcp:
+          role: crashlytics
+          primary_entity: crash
+          known_events: [boom]
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
 
 function engineFor(yaml) {

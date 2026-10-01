@@ -99,9 +99,7 @@ export function buildToolDefs(engine) {
     title: def.title,
     description: def.description,
     inputSchema: wireSchema(engine.schemas[def.name]),
-    // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
-    // read the older annotations location. `name` remains the stable programmatic identifier.
-    annotations: { title: def.title, openWorldHint: false, ...def.annotations },
+    annotations: { openWorldHint: false, ...def.annotations },
     _meta: viewMeta(def),
   }));
 }

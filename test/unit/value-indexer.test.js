@@ -287,13 +287,12 @@ test('BackgroundIndexer combines top-values via approx_top_k on a capable dialec
   index.close();
 });
 
-// parseApproxTopK normalises both the BigQuery {value,count} and Snowflake [value,count] shapes.
-test('parseApproxTopK normalises dialect array shapes', async () => {
-  const { parseApproxTopK } = await import('../../src/dialect.js');
-  assert.deepEqual(parseApproxTopK([{ value: 'a', count: 5 }, { value: 'b', count: 2 }]), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
-  assert.deepEqual(parseApproxTopK([['a', 5], ['b', 2]]), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
-  assert.deepEqual(parseApproxTopK(JSON.stringify([{ value: 'a', count: 5 }])), [{ value: 'a', freq: 5 }]); // JSON-string encoded
-  assert.deepEqual(parseApproxTopK('not json'), []); // unparseable → empty (caller falls back)
+// the top-K cell BigQuery's approxTopK writes (TO_JSON_STRING of APPROX_TOP_COUNT) read back as [{ value, freq }]
+test('a top-K cell is read back as values with their counts', async () => {
+  const { getDialect } = await import('../../src/dialects/index.js');
+  const bq = getDialect('bigquery');
+  assert.deepEqual(bq.parseTopK(JSON.stringify([{ value: 'a', count: 5 }, { value: 'b', count: 2 }])), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
+  assert.deepEqual(bq.parseTopK('not json'), []); // unparseable → empty (caller falls back)
 });
 
 // Observability: when the COMBINED batch scan fails but per-property succeeds, the fallback

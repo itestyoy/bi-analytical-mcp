@@ -79,14 +79,6 @@ export class Engine {
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
     this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.notes = new MemoryTool({ catalog, store: this.memoryStore, validate: (tool, input) => this._validate(tool, input) }); // the `memory` tool (engine.memory → notes.run)
-    // Target keys written before a target carried its source ('property:ad_type_of_event_data')
-    // name an entity no source owns. Attributing one to a source now would be guessing which
-    // entity was meant, so each is demoted ONCE to a searchable term instead: the note stays
-    // findable, and every stored key that addresses a view is (kind, source, name).
-    try {
-      const moved = this.memoryStore.retarget((canon) => this.notes.canonForward(canon));
-      if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
-    } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ request: { search } })
     this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs }); // what semantic_index shows of the value index
     this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
@@ -624,9 +616,7 @@ export class Engine {
   }
 
   async _buildTimeSpine(ctxId, ctx) {
-    // Self-heal: make sure the spine files exist even for a reused/persisted context that never
-    // went through create()'s ensureTimeSpine — then build the table we generated.
-    try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort */ }
+    // the spine create() wrote: build its table (a spine the base project provides is built already)
     if (!this.ctxs.generatedTimeSpine?.(ctxId)) { ctx.state._timeSpineBuilt = true; return; }
     const r = await this.runner.run(this.ctxs.dir(ctxId), 'metricflow_time_spine');
     if (r.ok) { ctx.state._timeSpineBuilt = true; this.ctxs.touch(ctxId); }
@@ -634,11 +624,6 @@ export class Engine {
 
   async _parse(ctxId) {
     if (!this.runner) return { ok: true, executed: false, reason: 'no runner configured — not parsed (unit mode)' };
-    // Guarantee a time spine is CONFIGURED before parsing. The semantic manifest is invalid
-    // without one ("At least one time spine must be configured"), and a REUSED context (passed
-    // context_id) or one PERSISTED from before spine generation existed would otherwise fail
-    // parse. ensureTimeSpine is idempotent — a no-op once a `time_spine:` config is present.
-    try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort — parse will surface a real miss */ }
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) return dbtFailure('parse', r);
     return { ok: true, manifest: r.manifest };

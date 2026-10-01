@@ -21,62 +21,66 @@ function load(models) {
 
 // An events source carrying the ad-funnel key: several rows share one funnel id.
 const EVENTS = `  - name: fct_events
-    meta:
-      mcp:
-        role: events
-        primary_entity: event
-        known_events: [login]
-        entities:
-          ad_funnel: { type: foreign, key: [tracking_id, user_id] }
+    config:
+      meta:
+        mcp:
+          role: events
+          primary_entity: event
+          known_events: [login]
+          entities:
+            ad_funnel: { type: foreign, key: [tracking_id, user_id] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
       - { name: tracking_id, data_type: string }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
 
 // The crash source records one funnel id PER AD FORMAT — the variants of one relationship.
 const CRASH = `  - name: fct_crash
-    meta:
-      mcp:
-        role: crashlytics
-        primary_entity: crash
-        known_events: [boom]
-        entities:
-          ad_funnel:
-            type: foreign
-            variants:
-              rewarded: { key: [rewarded_track, user_id] }
-              banner:   { key: [banner_track, user_id] }
+    config:
+      meta:
+        mcp:
+          role: crashlytics
+          primary_entity: crash
+          known_events: [boom]
+          entities:
+            ad_funnel:
+              type: foreign
+              variants:
+                rewarded: { key: [rewarded_track, user_id] }
+                banner:   { key: [banner_track, user_id] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
       - { name: rewarded_track, data_type: string }
       - { name: banner_track, data_type: string }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
 
 /** A plain (non-SCD) install record. `extra` injects further entity declarations. */
 const USERS = (extra = '') => `  - name: dim_users
-    meta:
-      mcp:
-        role: users
+    config:
+      meta:
+        mcp:
+          role: users
 ${extra}    columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
 
 /** A SLOWLY-CHANGING install record: one row per player per validity window. */
 const USERS_SCD = (extra = '') => `  - name: dim_users
-    meta:
-      mcp:
-        role: users
+    config:
+      meta:
+        mcp:
+          role: users
 ${extra}    columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: track, data_type: string }
       - { name: country, data_type: string }
-      - { name: valid_from, data_type: timestamp, meta: { mcp: { dimension: { validity: start } } } }
-      - { name: valid_until, data_type: timestamp, meta: { mcp: { dimension: { validity: end } } } }
+      - { name: valid_from, data_type: timestamp, config: { meta: { mcp: { dimension: { validity: start } } } } }
+      - { name: valid_until, data_type: timestamp, config: { meta: { mcp: { dimension: { validity: end } } } } }
 `;
 
 test('a key naming a column the model does not have is rejected', () => {
@@ -95,7 +99,7 @@ test('an unknown entity type is rejected with the allowed set', () => {
 });
 
 test('two models owning the same entity is rejected — a join has one target', () => {
-  const claims = USERS('        entities:\n          event: { type: unique, key: [user_id] }\n');
+  const claims = USERS('          entities:\n            event: { type: unique, key: [user_id] }\n');
   assert.throws(() => load(EVENTS + claims), /both OWN entity 'event'|both declare primary entity 'event'/);
 });
 
@@ -105,19 +109,19 @@ test('the two sides of a key must be built from the same number of parts', () =>
 });
 
 test('a primary entity may not be split into variants', () => {
-  const bad = USERS('        entities:\n          alt: { type: primary, variants: { a: { key: [user_id] } } }\n');
+  const bad = USERS('          entities:\n            alt: { type: primary, variants: { a: { key: [user_id] } } }\n');
   assert.throws(() => load(EVENTS + bad), /primary entity is the model's single identity and cannot have variants/);
 });
 
 test('a model may not declare two primary entities', () => {
-  const two = USERS('        entities:\n          other: { type: primary, key: [country] }\n');
+  const two = USERS('          entities:\n            other: { type: primary, key: [country] }\n');
   assert.throws(() => load(EVENTS + two), /declares two primary entities/);
 });
 
 // MetricFlow refuses a manifest where a model with validity params also has a primary/unique
 // entity, so catch it at load — where we can say what to do instead.
 test('a slowly-changing model may not own a second join key', () => {
-  const bad = USERS_SCD('        entities:\n          tracked: { type: unique, key: [track, user_id] }\n');
+  const bad = USERS_SCD('          entities:\n            tracked: { type: unique, key: [track, user_id] }\n');
   assert.throws(() => load(EVENTS + bad),
     /declares a validity window .* and also owns join key\(s\) 'tracked' as primary\/unique/s);
 });
@@ -134,33 +138,33 @@ test('a slowly-changing model with only its natural key loads fine', () => {
 
 test('two columns claiming the identity is rejected, with the composite form named', () => {
   const bad = USERS().replace('- { name: country, data_type: string }',
-    '- { name: country, data_type: string, meta: { mcp: { entity: { name: place, type: primary } } } }');
+    '- { name: country, data_type: string, config: { meta: { mcp: { entity: { name: place, type: primary } } } } }');
   assert.throws(() => load(EVENTS + bad),
     /columns 'user_id' and 'country' both declare a PRIMARY entity.*composite key/s);
 });
 
 test('a column claiming a different identity than the model declares is rejected', () => {
-  const bad = USERS('        primary_entity: household\n');
+  const bad = USERS('          primary_entity: household\n');
   assert.throws(() => load(EVENTS + bad), /declares meta\.mcp\.primary_entity 'household', but column 'user_id' declares primary entity 'user'/);
 });
 
 test('one relationship declared on two columns is rejected', () => {
   const bad = CRASH.replace('- { name: banner_track, data_type: string }',
-    '- { name: banner_track, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }');
+    '- { name: banner_track, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }');
   assert.throws(() => load(bad + EVENTS + USERS()),
     /entity 'user' is declared on two columns \('user_id' and 'banner_track'\)/);
 });
 
 test('the same relationship at column level and model level is rejected', () => {
-  const bad = EVENTS.replace('          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
-    '          ad_funnel: { type: foreign, key: [tracking_id, user_id] }\n          user: { type: foreign, key: [tracking_id] }');
+  const bad = EVENTS.replace('            ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+    '            ad_funnel: { type: foreign, key: [tracking_id, user_id] }\n            user: { type: foreign, key: [tracking_id] }');
   assert.throws(() => load(bad + USERS()),
     /entity 'user' is declared both on column 'user_id' \(meta\.mcp\.entity\) and in meta\.mcp\.entities/);
 });
 
 test("a relationship named after the model's own identity is rejected", () => {
-  const bad = EVENTS.replace('          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
-    '          event: { type: unique, key: [tracking_id] }');
+  const bad = EVENTS.replace('            ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+    '            event: { type: unique, key: [tracking_id] }');
   assert.throws(() => load(bad + USERS()), /already the model's PRIMARY entity/);
 });
 
@@ -177,19 +181,19 @@ test('type: natural is rejected, pointing at the validity window instead', () =>
 test('a validity window on an events source is rejected', () => {
   const bad = EVENTS.replace('      - { name: tracking_id, data_type: string }',
     `      - { name: tracking_id, data_type: string }
-      - { name: valid_from, data_type: timestamp, meta: { mcp: { dimension: { validity: start } } } }
-      - { name: valid_until, data_type: timestamp, meta: { mcp: { dimension: { validity: end } } } }`);
+      - { name: valid_from, data_type: timestamp, config: { meta: { mcp: { dimension: { validity: start } } } } }
+      - { name: valid_until, data_type: timestamp, config: { meta: { mcp: { dimension: { validity: end } } } } }`);
   assert.throws(() => load(bad + USERS()),
     /events source 'events' declares a validity window .*'valid_from \(start\)', 'valid_until \(end\)'/s);
 });
 
 test('a validity mark on a column that is not a dimension is rejected', () => {
-  const onKey = USERS_SCD().replace('{ name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }',
-    '{ name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary }, dimension: { validity: start } } } }');
+  const onKey = USERS_SCD().replace('{ name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }',
+    '{ name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary }, dimension: { validity: start } } } } }');
   assert.throws(() => load(EVENTS + onKey), /is a join key \(meta\.mcp\.entity\), so it never becomes a groupable time dimension/);
 
   const onAxis = USERS_SCD().replace('{ name: country, data_type: string }',
-    '{ name: seen_at, data_type: timestamp, meta: { mcp: { is_time: true, dimension: { validity: end } } } }');
+    '{ name: seen_at, data_type: timestamp, config: { meta: { mcp: { is_time: true, dimension: { validity: end } } } } }');
   assert.throws(() => load(EVENTS + onAxis), /is the model's time axis \(meta\.mcp\.is_time\), so it never becomes a groupable time dimension/);
 });
 
@@ -214,49 +218,27 @@ test('event accessors refuse an omitted source, whatever the catalog holds', () 
 
 // ── THE SCHEMA MARKS A PROPERTY; THE INDEX MEASURES THE REST ───────────────────────────────
 // Which events carry a property and which values it takes are observed by the value index, per
-// source. The former meta.mcp.events / meta.mcp.values lists only went stale in silence, so they
-// are refused with the replacement; a scalar payload column is marked meta.mcp.property: true.
+// source; a scalar payload column is marked meta.mcp.property: true.
 const withCol = (base, colLine) => base.replace('      - { name: tracking_id, data_type: string }', `      - { name: tracking_id, data_type: string }\n${colLine}`);
 
 test('meta.mcp.property marks a flat column as an event property; the index measures its events', () => {
-  const c = load(withCol(EVENTS, '      - { name: price_usd, data_type: numeric, meta: { mcp: { property: true, unit: usd } } }') + USERS());
+  const c = load(withCol(EVENTS, '      - { name: price_usd, data_type: numeric, config: { meta: { mcp: { property: true, unit: usd } } } }') + USERS());
   assert.ok(c.eventProps('events').includes('price_usd'));
   assert.equal(c.eventPropertySpec('price_usd', 'events').type, 'numeric');
-  assert.equal(c.eventPropertySpec('price_usd', 'events').events, undefined, 'no declared event list exists any more');
   // an unmarked column of a fact is a plain column, not a property
   assert.ok(!c.eventProps('events').includes('tracking_id'));
 });
 
-test('meta.mcp.events is refused, naming the property marker', () => {
-  assert.throws(() => load(withCol(EVENTS, '      - { name: price_usd, data_type: numeric, meta: { mcp: { events: [login] } } }') + USERS()),
-    /meta\.mcp\.events is no longer a schema key.*measured by the value index.*meta\.mcp\.property: true/s);
-});
-
-test('meta.mcp.values is refused on a property and on an attribute', () => {
-  assert.throws(() => load(withCol(EVENTS, '      - { name: result, data_type: string, meta: { mcp: { property: true, values: [win, lose] } } }') + USERS()),
-    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ request: \{ source, property \} \}\)/s);
-  const dimVals = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { values: [US, GB] } } }');
-  assert.throws(() => load(EVENTS + dimVals), /meta\.mcp\.values is no longer a schema key/);
-  const blobVals = EVENTS.replace('      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }',
-    "      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }\n      - { name: payload, data_type: jsonb, meta: { mcp: { is_event_data: true, properties: { mode: { type: string, values: [a, b] } } } } }");
-  assert.throws(() => load(blobVals + USERS()), /'values' \/ 'events' are no longer schema keys/);
-});
-
 test('meta.mcp.property on a dimension model is refused (every attribute is already groupable there)', () => {
-  const bad = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { property: true } } }');
+  const bad = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, config: { meta: { mcp: { property: true } } } }');
   assert.throws(() => load(EVENTS + bad), /marks an EVENT-PAYLOAD property, which only an events source has/);
-});
-
-test('meta.mcp.anchor is refused: there is no default source', () => {
-  const bad = EVENTS.replace('        role: events\n', '        role: events\n        anchor: true\n');
-  assert.throws(() => load(bad + USERS()), /meta\.mcp\.anchor is no longer a schema key.*no default source/s);
 });
 
 // A column that is BOTH an amount and an attribute keeps both roles — the measure marking used
 // to be dropped in silence when `dimension` was present as well.
 test('a column marked measure AND dimension is aggregatable and groupable', () => {
   const both = USERS().replace('- { name: country, data_type: string }',
-    '- { name: country, data_type: string }\n      - { name: level, data_type: integer, meta: { mcp: { measure: { unit: level }, dimension: {} } } }');
+    '- { name: country, data_type: string }\n      - { name: level, data_type: integer, config: { meta: { mcp: { measure: { unit: level }, dimension: {} } } } }');
   const c = load(EVENTS + both);
   assert.ok(c.aggregatableFields('users').some((a) => a.name === 'level'), 'aggregatable');
   assert.ok(Object.keys(c.getModel('users').dimensions).includes('level'), 'and a groupable attribute');
@@ -266,7 +248,7 @@ test('a column marked measure AND dimension is aggregatable and groupable', () =
 // (meta.mcp.dimension) is the only way a key becomes an attribute.
 test('a session-named key is not a fact attribute unless marked dimension like any column', () => {
   const withSession = EVENTS.replace('      - { name: tracking_id, data_type: string }',
-    '      - { name: tracking_id, data_type: string }\n      - { name: sess, data_type: integer, meta: { mcp: { entity: { name: session, type: foreign } } } }');
+    '      - { name: tracking_id, data_type: string }\n      - { name: sess, data_type: integer, config: { meta: { mcp: { entity: { name: session, type: foreign } } } } }');
   const c = load(withSession + USERS());
   assert.ok(!c.modelDimensionColumns('events').includes('sess'));
 });
@@ -276,19 +258,20 @@ test('a session-named key is not a fact attribute unless marked dimension like a
 // and matches (almost) nothing — a wrong NUMBER, from a query that looks right. The load-time
 // check used to compare only how MANY parts each side had, never their grains.
 const SPEND = (dayGrain) => `  - name: fct_spend
-    meta:
-      mcp:
-        role: acquisition
-        entities:
-          user_day: { type: unique, key: [{ column: user_id }, { column: spend_date${dayGrain ? ', grain: day' : ''} }] }
+    config:
+      meta:
+        mcp:
+          role: acquisition
+          entities:
+            user_day: { type: unique, key: [{ column: user_id }, { column: spend_date${dayGrain ? ', grain: day' : ''} }] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: spend_date, data_type: date, meta: { mcp: { is_time: true } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: spend_date, data_type: date, config: { meta: { mcp: { is_time: true } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `;
 const EVENTS_DAY = (dayGrain) => EVENTS.replace(
-  '          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
-  `          user_day: { type: foreign, key: [{ column: user_id }, { column: ts${dayGrain ? ', grain: day' : ''} }] }`,
+  '            ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+  `            user_day: { type: foreign, key: [{ column: user_id }, { column: ts${dayGrain ? ', grain: day' : ''} }] }`,
 );
 
 test('both sides of a key must be joined at the SAME grain', () => {
@@ -312,21 +295,22 @@ test('the same grain on both sides loads, and so does no grain at all', () => {
 // that entity just like any other side — a variant cannot quietly join at another grain.
 test('a variant is held to the shape of the entity it expands into', () => {
   const variants = `  - name: fct_crash2
-    meta:
-      mcp:
-        role: crashlytics
-        primary_entity: crash
-        known_events: [boom]
-        entities:
-          user_day:
-            type: foreign
-            variants:
-              a: { key: [{ column: user_id }, { column: ts, grain: day }] }
-              b: { key: [{ column: user_id }, { column: ts }] }
+    config:
+      meta:
+        mcp:
+          role: crashlytics
+          primary_entity: crash
+          known_events: [boom]
+          entities:
+            user_day:
+              type: foreign
+              variants:
+                a: { key: [{ column: user_id }, { column: ts, grain: day }] }
+                b: { key: [{ column: user_id }, { column: ts }] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
   assert.throws(() => load(EVENTS_DAY(true) + SPEND(true) + variants + USERS()),
     /entity 'user_day_b' is joined at a different grain on each side/);

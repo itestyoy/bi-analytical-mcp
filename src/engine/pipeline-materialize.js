@@ -326,8 +326,8 @@ export const pipelineMaterializeMethods = {
     ctx.state.pipeline_model = { model: modelName, materialized, kind: 'pipeline', ...(taskId ? { task_id: taskId } : {}), columns: [...out.columns.keys()], ...(input.description ? { description: input.description } : {}), ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
-    // Honest status: `executed` makes it unambiguous whether the model was actually built
-    // and run, vs only written to disk (no runner). `ok` stays for backward-compatible checks.
+    // `ok` as every step of a build says it (parse, run, show); `executed` says whether the model was
+    // actually built and run, or only written to disk (no runner)
     let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
     let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {

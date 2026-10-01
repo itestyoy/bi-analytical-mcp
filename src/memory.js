@@ -17,7 +17,6 @@ import { rankFuzzy } from './fuzzy.js';
 
 /** The lookup key of a target: assembled from its parts, never parsed back. */
 export function targetKey(t) {
-  if (!t || typeof t !== 'object') return String(t); // a key from an older store: opaque, as-is
   if (t.kind === 'term') return `term:${String(t.term).toLowerCase()}`;
   if (t.kind === 'model') return `model:${t.source}`;
   return `${t.kind}:${t.source}.${t.name}`;
@@ -25,7 +24,6 @@ export function targetKey(t) {
 
 /** The words of a target, for search and embedding — the parts, not the assembled key. */
 export function targetWords(t) {
-  if (!t || typeof t !== 'object') return String(t);
   return t.kind === 'term' ? String(t.term) : [t.source, t.name].filter(Boolean).join('.');
 }
 
@@ -63,29 +61,6 @@ export class MemoryStore {
     const entry = { id, note: String(note), question: question || null, targets, aliases, links, created_at: Date.now() };
     this.store.memory.add(entry);
     return entry;
-  }
-
-  /**
-   * Rewrite stored target keys in place. `rule(canon)` -> a replacement key, or null to keep it.
-   * Used ONCE at open to bring keys written by an older layout onto the current canonical form —
-   * the caller supplies the rule because only it holds the catalog. Returns { notes, targets }.
-   */
-  retarget(rule) {
-    let notes = 0; let targets = 0;
-    for (const e of this.all({ limit: 100000 })) {
-      let changed = false;
-      const next = [];
-      const seen = new Set();
-      for (const t of e.targets || []) {
-        const to = rule(t);
-        const keep = to || t;
-        if (to) { changed = true; targets += 1; }
-        const k = targetKey(keep);
-        if (!seen.has(k)) { seen.add(k); next.push(keep); }
-      }
-      if (changed && this.store.memory.setTargets(e.id, next)) notes += 1;
-    }
-    return { notes, targets };
   }
 
   get(id) { return this.store.memory.get(id); }

@@ -122,7 +122,6 @@ export const semanticPreviewMethods = {
     }
     if (!parsed) shown.unshift({ severity: 'error', message: running ? 'the context has not been parsed yet — its build is running' : 'the context has no parsed semantic manifest — its build did not parse' });
     const groupable = project ? null : this._groupableSplit(ctx).now;
-    const own = ctx.state.semantic_model;
     // what each metric can be grouped by is MetricFlow's list (src/group-by-items.js), never worked out here
     const { groupBys } = listed;
     if (parsed && !groupBys) shown.push({ severity: 'note', message: `MetricFlow did not list what the metrics can be grouped by${listed.error ? `: ${listed.error}` : ''} — group_by below is left out` });

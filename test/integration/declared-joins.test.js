@@ -112,8 +112,8 @@ before(async () => {
   const M = Object.fromEntries(doc.models.map((m) => [m.name, m]));
   // (a) a validity window whose BOTH columns are missing
   M.fct_player_acquisition.columns.push(
-    { name: 'ghost_valid_from', data_type: 'timestamp', meta: { mcp: { dimension: { validity: 'start' } } } },
-    { name: 'ghost_valid_until', data_type: 'timestamp', meta: { mcp: { dimension: { validity: 'end' } } } },
+    { name: 'ghost_valid_from', data_type: 'timestamp', config: { meta: { mcp: { dimension: { validity: 'start' } } } } },
+    { name: 'ghost_valid_until', data_type: 'timestamp', config: { meta: { mcp: { dimension: { validity: 'end' } } } } },
   );
   // (b) a relationship a model OWNS, on a column that is missing. It goes on the experiments
   // source, not on the one above: a validity window and an owned key cannot coexist, and the
@@ -175,7 +175,7 @@ before(async () => {
     const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
     if (declareColumn) {
       M.fct_crashlytics_events.columns.push({
-        name: declareColumn, data_type: 'string', meta: { mcp: { index: false } },
+        name: declareColumn, data_type: 'string', config: { meta: { mcp: { index: false } } },
         description: 'The one ad funnel this crash report belongs to; unique per report.',
       });
     }

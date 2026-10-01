@@ -1,10 +1,9 @@
 # Project conventions
 
 ## Data model (HARD RULE)
-- Sources are identified by their `meta.mcp.role` — NOT by name. (Since dbt 1.10 that block lives
-  under `config:` on the model and on every column — `config.meta.mcp` — which is the only place dbt
-  Fusion reads; the loader still accepts the pre-1.10 top-level `meta:`, with `config` winning per
-  key, and `scripts/meta-to-config.py` moves an existing file.) The dbt model /
+- Sources are identified by their `meta.mcp.role` — NOT by name. (That block lives under `config:`
+  on the model and on every column — `config.meta.mcp` — the place dbt 1.10+ and dbt Fusion read,
+  and the only place the loader reads.) The dbt model /
   SQL file can be named anything; the role is the identity, and exactly one model
   per role. Sanctioned roles:
   1. **an events SOURCE** — one row per event, detected by its event_name/
@@ -113,7 +112,7 @@
   (protocol 2026-07-28; it also serves clients that open with the 2025 `initialize`, from the same
   factory). `src/mcp-server.js` only says WHAT is offered — tools, resources, skills, the Apps view,
   tasks — using `src/mcp-surface.js` (+ `tasks.js`, `skills.js`, `apps.js`). A TOOL IS ONE DEFINITION
-  (`defineTool`, src/tools/define.js — name, aliases, title, description, annotations, listed, side /
+  (`defineTool`, src/tools/define.js — name, title, description, annotations, side /
   reads, waits / precheck, view / appsOnly / appCallable / cardField, run): the core's in
   src/tools/core.js, a feature's in its own module, all in the engine's one registry (`engine.tools`),
   and the surface reads nothing else — no table of titles, hints or hidden names beside it; a core

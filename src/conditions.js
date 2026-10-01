@@ -6,7 +6,7 @@
 // constant's TYPE should be is the other half of the rule, typedLiteral below, used where the type
 // of what is compared is known.
 
-import { sqlLiteral } from './dialect.js';
+import { sqlLiteral } from './dialects/base.js';
 
 /** The comparison operators, as the tools spell them → SQL. */
 export const COMPARE_SQL = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };

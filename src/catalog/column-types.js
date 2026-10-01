@@ -1,7 +1,7 @@
 // A COLUMN'S TYPE, AS THE CATALOG READS IT — a warehouse data type seen as a dimension type (time or
 // categorical), as a pipeline column type, and whether it is a boolean.
 
-import { isNumericType } from '../dialect.js';
+import { isNumericType } from '../dialects/base.js';
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
 export const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);

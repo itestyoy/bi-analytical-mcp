@@ -7,7 +7,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { SUPPORTED_DIALECTS } from '../dialect.js';
+import { SUPPORTED_DIALECTS } from '../dialects/index.js';
 import { setting } from '../settings.js';
 
 /** A configured path list from dbt_project.yml (e.g. model-paths), with a default. */
@@ -22,7 +22,7 @@ export function readPaths(projectDir, key, dflt) {
 }
 
 export function readModelPaths(projectDir) {
-  return readPaths(projectDir, 'model-paths', readPaths(projectDir, 'source-paths', ['models']));
+  return readPaths(projectDir, 'model-paths', ['models']);
 }
 
 /** Basenames (without extension) of files matching `extRe` under the given dirs. */
@@ -107,11 +107,11 @@ export function collectSchemaModels(dir, acc) {
  *   1. explicit `dialect` argument
  *   2. WAREHOUSE_DIALECT env var
  *   3. the active dbt profile's output `type` (what dbt actually connects with)
- *   4. `fallback` (legacy catalogs) / 'duckdb'
+ *   4. 'duckdb'
  */
-export function resolveDialect({ dialect, profilesDir, projectDir, fallback, report } = {}) {
+export function resolveDialect({ dialect, profilesDir, projectDir, report } = {}) {
   const fromProfile = dialectFromProfile(profilesDir, projectDir);
-  const d = dialect || setting('WAREHOUSE_DIALECT') || fromProfile || fallback || 'duckdb';
+  const d = dialect || setting('WAREHOUSE_DIALECT') || fromProfile || 'duckdb';
   if (!SUPPORTED_DIALECTS.has(d)) {
     throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
   }

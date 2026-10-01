@@ -79,24 +79,3 @@ test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => 
   assert.equal(idx2.syncStatus().total_runs, 0, 'run log cleared');
   fresh.close();
 });
-
-test('an older database gets the columns added since, and keeps its rows', async () => {
-  const { DatabaseSync } = await import('node:sqlite').catch(() => ({}));
-  if (!DatabaseSync) return; // no node:sqlite here
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-old-')), 'mcp.sqlite');
-  const old = new DatabaseSync(dbPath);
-  old.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
-  old.exec("INSERT INTO jobs (id, context_id, status) VALUES ('j1', 'c1', 'ready')");
-  old.exec('CREATE TABLE errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
-  old.close();
-  const store = openStore({ dbPath });
-  store.close();
-  const db = new DatabaseSync(dbPath);
-  const cols = (t) => db.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name);
-  assert.ok(['tool', 'drawn'].every((c) => cols('jobs').includes(c)), cols('jobs').join(','));
-  assert.ok(['context', 'files', 'runtime'].every((c) => cols('errors').includes(c)));
-  assert.equal(db.prepare("SELECT context_id FROM jobs WHERE id = 'j1'").get().context_id, 'c1');
-  // opened again, nothing more to add — and no error
-  db.close();
-  openStore({ dbPath }).close();
-});

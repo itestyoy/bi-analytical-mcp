@@ -2,7 +2,8 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 
-import { isNumericType, castExpr } from './dialect.js';
+import { isNumericType } from './dialects/base.js';
+import { getDialect } from './dialects/index.js';
 import { NUMERIC_AGGS } from './catalog.js';
 import { comparison } from './conditions.js';
 
@@ -109,7 +110,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     }
     valueExpr = field;
   }
-  if (decl.cast) valueExpr = castExpr(catalog.dialect, valueExpr, decl.cast);
+  if (decl.cast) valueExpr = getDialect(catalog.dialect).castExpr(valueExpr, decl.cast);
 
   const m = { name, agg, expr: applyScope(valueExpr, scope) };
   if (decl.agg === 'percentile') {
@@ -121,8 +122,8 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 }
 
 /**
- * One declared dimension → its manifest form. `_task` / `_attribute` record what the caller
- * DECLARED (the task it belongs to, the attribute name it was given) next to the namespaced name
+ * One declared dimension → its manifest form. `_attribute` records what the caller DECLARED (the
+ * attribute name it was given) next to the namespaced name
  * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
  * stripped before the manifest is written (see yaml-render). Recovering them from the generated
  * identifier instead would mis-split the moment one task name is a prefix of another.
@@ -133,10 +134,10 @@ function compileDimension(catalog, task, modelKey, decl) {
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
     if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _task: task, _attribute: found.name };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _attribute: found.name };
   }
   if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _task: task, _attribute: decl.column };
+    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _attribute: decl.column };
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }
@@ -144,12 +145,12 @@ function compileDimension(catalog, task, modelKey, decl) {
 }
 
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure, a conversion's
- *  base and conversion measures (and the legacy measures / input_measures lists). */
+ *  base and conversion measures. */
 function ownMeasures(metric) {
   const tp = metric?.type_params || {};
   const ctp = tp.conversion_type_params || {};
   const name = (v) => (typeof v === 'string' ? v : v?.name);
-  return [tp.measure, ctp.base_measure, ctp.conversion_measure, ...(tp.measures || []), ...(tp.input_measures || [])].map(name).filter(Boolean);
+  return [tp.measure, ctp.base_measure, ctp.conversion_measure].map(name).filter(Boolean);
 }
 
 /** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */

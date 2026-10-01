@@ -174,7 +174,7 @@ export const STAGES = {
         }
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
-        else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // legacy JSON-blob property
+        else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // a property inside the JSON blob
       } else if (cols.has(p.source) && cols.get(p.source).type === 'array') {
         column = p.source; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
       } else {

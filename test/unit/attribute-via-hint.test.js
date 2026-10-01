@@ -16,32 +16,32 @@ import { settle } from '../helpers/settle.js';
 const CATALOG = `version: 2
 models:
   - name: fct_events
-    meta: { mcp: { role: events, primary_entity: event, known_events: [first_launch] } }
+    config: { meta: { mcp: { role: events, primary_entity: event, known_events: [first_launch] } } }
     columns:
       - name: player_id
         data_type: string
-        meta: { mcp: { entity: { name: user, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
       - name: referrer_code
         data_type: string
-        meta: { mcp: { entity: { name: referrer, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: referrer, type: foreign } } } }
       - name: device_time
         data_type: timestamp
-        meta: { mcp: { is_time: true } }
+        config: { meta: { mcp: { is_time: true } } }
       - name: event_name
         data_type: string
-        meta: { mcp: { is_event_name: true } }
+        config: { meta: { mcp: { is_event_name: true } } }
       - name: event_data
         data_type: jsonb
-        meta: { mcp: { is_event_data: true } }
+        config: { meta: { mcp: { is_event_data: true } } }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
       - name: player_id
         data_type: string
-        meta: { mcp: { entity: { name: user, type: primary } } }
+        config: { meta: { mcp: { entity: { name: user, type: primary } } } }
       - name: referral_code
         data_type: string
-        meta: { mcp: { entity: { name: referrer, type: unique } } }
+        config: { meta: { mcp: { entity: { name: referrer, type: unique } } } }
       - name: country
         data_type: string
 `;

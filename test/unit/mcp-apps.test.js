@@ -1,8 +1,7 @@
 // MCP APPS — a tool result rendered as an interactive view in the host's conversation.
 //
-// Two halves. The protocol half (lifecycle): the viewed tools carry the view in both spellings the
-// official ext-apps `registerAppTool` writes (`_meta.ui.resourceUri` and the flat `ui/resourceUri`
-// older hosts read), for every client in either protocol revision; the resource is one
+// Two halves. The protocol half (lifecycle): the viewed tools carry the view (`_meta.ui.resourceUri`),
+// for every client in either protocol revision; the resource is one
 // `text/html;profile=mcp-app` document; the result carries `structuredContent` next to its text;
 // and the checked-in build of the view is the build of its sources. The data half: the view model
 // (src/apps/result-view-model.js, the function the page runs) turns a result into the numbers the
@@ -33,15 +32,13 @@ before(async () => { s = await startServer(); });
 after(async () => { await s.stop(); });
 
 const VIEWED = ['display_model_result', 'experiment'];
-const APPS_ONLY = ['display_model_result', 'drill_result'];
 
-test('the two drawing tools carry the view, in both spellings — for a client that declares MCP Apps in its request', async () => {
+test('the two drawing tools carry the view — for a client that declares MCP Apps in its request', async () => {
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
   const tools = (await c.listTools()).tools;
   for (const t of tools) {
     const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
     assert.equal(t._meta?.ui?.resourceUri, want, t.name);
-    assert.equal(t._meta?.['ui/resourceUri'], want, `${t.name} (flat key)`);
   }
   // a tool's input is its `request` (src/schema/transport.js wireSchema)
   const takes = (name, f) => { const s = tools.find((t) => t.name === name).inputSchema; return fieldNames(s, s.properties.request).includes(f); };

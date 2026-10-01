@@ -30,21 +30,22 @@ const engineFor = (yaml) => {
 };
 
 const EVENTS = (extra = '') => `  - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-${extra}      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+${extra}      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
 `;
-const USER_KEY = '      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }\n';
+const USER_KEY = '      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }\n';
 
 // An events source with no relationship at all: nothing to partition a funnel BY, by name.
 const NO_RELATIONSHIPS = `version: 2
 models:
 ${EVENTS('      - { name: event_id, data_type: string }\n')}  - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
 
@@ -53,9 +54,9 @@ ${EVENTS('      - { name: event_id, data_type: string }\n')}  - name: dim_users
 const NO_DIMENSIONS = `version: 2
 models:
 ${EVENTS(USER_KEY)}  - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
 `;
 
 // An events source with NO declared event vocabulary. `known_events` is optional (the vocabulary is
@@ -64,15 +65,16 @@ ${EVENTS(USER_KEY)}  - name: dim_users
 const NO_EVENT_NAMES = `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event }
     columns:
-${USER_KEY}      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+${USER_KEY}      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
 

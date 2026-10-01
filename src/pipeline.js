@@ -86,19 +86,9 @@ function sourceColumns(catalog, key, physicalCols = null) {
   const m = catalog.getModel(key);
   const cols = new Map();
   for (const c of catalog.modelColumns(key)) cols.set(c.name, { type: c.type });
-  // Fallbacks for catalogs that predate column capture (keep entity/time/event_name/dims).
-  if (catalog.isFact(key)) {
-    if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
-    if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
-    if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
-    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
-  } else {
-    // the primary entity's key can span several columns, and each of them is a real column of the
-    // relation — the same shape the fact branch above reads (the old single `.column` form is gone)
-    for (const p of m.primary_entity?.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
-    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
-    for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
-  }
+  // the event_data blob is not one of a model's listed columns (its payload properties are), yet a
+  // stage that reads a blob property reads it
+  if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
   // GROUNDING: when the caller supplies the relation's PHYSICAL column names (lowercased),
   // drop any declared column the physical table does not have — the pipeline can only
   // reference what truly exists, so a phantom catalog column fails as a normal "unknown

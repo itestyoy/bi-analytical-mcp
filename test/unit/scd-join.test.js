@@ -9,12 +9,11 @@ import { renderBaseModel, renderContext } from '../../src/yaml-render.js';
 // MetricFlow + an SCD fixture (integration).
 
 const scdCatalog = {
-  anchor: 'events',
   facts: ['events'],
   isFact: (k) => k === 'events',
   getModel: () => ({
     dbt_model: 'dim_users',
-    primary_entity: { name: 'user', column: 'internal_player_id' },
+    primary_entity: { name: 'user', key: [{ column: 'internal_player_id' }] },
     scd: true,
     entities: {},
     dimensions: {
@@ -28,9 +27,7 @@ const scdCatalog = {
 // DEFAULT (markers present, flag unset): natural entity + validity_params NESTED UNDER type_params
 // — the exact shape dbt-semantic-interfaces expects (verified via `dbt parse`, exit 0).
 test('SCD-2 by default → natural entity + validity_params nested under type_params', () => {
-  const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  delete process.env.MCP_SCD_VALIDITY_PARAMS;
-  try {
+  {
     const sm = renderBaseModel(scdCatalog, 'users');
     assert.equal(sm.entities[0].type, 'natural', 'SCD key is natural (not primary — it is not unique)');
     // dbt requires a model-level primary_entity when the model has dimensions (verified via
@@ -44,36 +41,20 @@ test('SCD-2 by default → natural entity + validity_params nested under type_pa
     assert.ok(!('validity_params' in vf) && !('validity_params' in vt), 'NOT emitted at the dimension top level');
     assert.equal(vf.type, 'time'); assert.equal(vt.type, 'time');
     assert.equal(sm.dimensions.find((d) => d.name === 'country').type, 'categorical');
-  } finally { if (prev !== undefined) process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
-});
-
-// ESCAPE HATCH MCP_SCD_VALIDITY_PARAMS=false → plain primary-key model (for older DSI that rejects
-// validity_params). No natural entity, no validity_params anywhere.
-test('SCD-2 with MCP_SCD_VALIDITY_PARAMS=false → plain primary entity, no validity_params', () => {
-  const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  process.env.MCP_SCD_VALIDITY_PARAMS = 'false';
-  try {
-    const sm = renderBaseModel(scdCatalog, 'users');
-    assert.equal(sm.entities[0].type, 'primary', 'disabled → primary entity (parses on any MetricFlow)');
-    assert.equal(sm.primary_entity, undefined, 'no extra model-level primary_entity when disabled');
-    assert.ok(sm.dimensions.every((d) => !d.type_params?.validity_params && !d.validity_params), 'no validity_params when disabled');
-  } finally { if (prev === undefined) delete process.env.MCP_SCD_VALIDITY_PARAMS; else process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
+  }
 });
 
 // MetricFlow HARD CONSTRAINT: a model with validity_params may NOT also have measures
 // ("Semantic model users has both measures and validity param dimensions defined. This is not
 // currently supported!"). The renderer must emit an SCD model dimension-only.
 test('SCD model with a catalog measure → measure is NOT emitted (dimension-only)', () => {
-  const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  delete process.env.MCP_SCD_VALIDITY_PARAMS;
-  try {
+  {
     const cat = {
-      anchor: 'events',
       facts: ['events'],
       isFact: (k) => k === 'events',
       getModel: () => ({
         dbt_model: 'dim_users',
-        primary_entity: { name: 'user', column: 'internal_player_id' },
+        primary_entity: { name: 'user', key: [{ column: 'internal_player_id' }] },
         scd: true,
         entities: {},
         dimensions: {
@@ -87,20 +68,17 @@ test('SCD model with a catalog measure → measure is NOT emitted (dimension-onl
     const sm = renderBaseModel(cat, 'users');
     assert.ok(!sm.measures || sm.measures.length === 0, 'no measures on an SCD model');
     assert.ok(sm.dimensions.some((d) => d.type_params?.validity_params?.is_start), 'validity_params kept');
-  } finally { if (prev !== undefined) process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
+  }
 });
 
 test('renderContext drops a task measure + its metric on an SCD model, with a warning', () => {
-  const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  delete process.env.MCP_SCD_VALIDITY_PARAMS;
-  try {
+  {
     const cat = {
-      anchor: 'events',
       facts: ['events'],
       isFact: (k) => k === 'events',
       getModel: (k) => (k === 'users' ? {
         dbt_model: 'dim_users',
-        primary_entity: { name: 'user', column: 'internal_player_id' },
+        primary_entity: { name: 'user', key: [{ column: 'internal_player_id' }] },
         scd: true,
         entities: {},
         dimensions: { install_time_valid_from: { type: 'time', granularity: 'day', validity: 'start' }, install_time_valid_until: { type: 'time', granularity: 'day', validity: 'end' }, country: { type: 'categorical' } },
@@ -117,17 +95,16 @@ test('renderContext drops a task measure + its metric on an SCD model, with a wa
     assert.equal(r.metricNames.includes('users_count'), false, 'dependent metric dropped');
     assert.ok(r.warnings.some((w) => /join-only/i.test(w) && /users_count/.test(w)), 'warns about the drop');
     void users;
-  } finally { if (prev !== undefined) process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
+  }
 });
 
 test('a non-SCD dimension model keeps a primary entity and no validity_params', () => {
   const plain = {
-    anchor: 'events',
     facts: ['events'],
     isFact: (k) => k === 'events',
     getModel: () => ({
       dbt_model: 'dim_users',
-      primary_entity: { name: 'user', column: 'internal_player_id' },
+      primary_entity: { name: 'user', key: [{ column: 'internal_player_id' }] },
       entities: {},
       dimensions: { country: { type: 'categorical' }, install_date: { type: 'time', granularity: 'day' } },
     }),

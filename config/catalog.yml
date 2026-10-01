@@ -1535,7 +1535,7 @@ models:
               entity: { name: user, type: primary }
         # Non-entity columns of this dimension model are groupable dimensions; their
         # type is inferred from the native `data_type` (date/timestamp -> time, else
-        # categorical). Only value hints / non-day granularity live in meta.
+        # categorical). Only a non-day granularity lives in meta.
         # ── VALIDITY WINDOW: this table is SLOWLY-CHANGING (one row per player per window) ──
         # Every join to it is point-in-time — see the note above the models list. Delete these two
         # columns if your install record really is one flat row per player.

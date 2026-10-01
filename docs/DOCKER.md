@@ -54,11 +54,8 @@ models:
       - name: country
         data_type: string
 ```
-`meta` sits under `config:` because **dbt 1.10 moved it there**: dbt Core 1.11 still reads the old
-top-level `meta:` and only warns, but dbt Fusion calls that key unknown (`UnusedConfigKey`, dbt1060)
-and drops it — which would leave this server with an empty catalog. The loader accepts both places
-(`config` wins per key), and `python3 scripts/meta-to-config.py --check <path>` moves an existing
-project (`--write` to apply; it keeps your comments and verifies the result before writing).
+`meta` sits under `config:` — the place dbt 1.10+ and dbt Fusion read it, and the only place the
+loader reads.
 Two models claiming the same role is a config error. Prefer a standalone catalog
 file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 

@@ -24,11 +24,9 @@ import { InMemoryServerEventBus } from '@modelcontextprotocol/server';
 /** How long a client may cache the lists and server/discover: a change reaches it within this. */
 export const LIST_TTL_MS = 60 * 1000;
 
-/**
- * How long after a start that CHANGED the surface a new subscription is told so: the longest a
- * client may still hold a list from before — the one-hour lifetime this server used to grant.
- */
-export const CHANGE_WINDOW_MS = 60 * 60 * 1000;
+/** How long after a start that CHANGED the surface a new subscription is told so: the longest a
+ *  client may still hold a list from before. */
+export const CHANGE_WINDOW_MS = LIST_TTL_MS;
 
 const FINGERPRINT_KEY = 'surface_fingerprint';
 

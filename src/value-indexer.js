@@ -3,7 +3,7 @@
 // coverage per event and per app, distinct counts), exact or incremental since the last run, each run
 // and each property's timing recorded. It writes; ValueIndex reads.
 
-import { jsonArrayLength, arrayLength, jsonColumnArrayLength, recentSince, sinceTimestampMs, approxCountDistinct, approxTopK, parseApproxTopK } from './dialect.js';
+import { getDialect } from './dialects/index.js';
 
 // Max (event × bundle) cells stored per property for the triple coverage (busiest kept) —
 // bounds prop_bundle_event_coverage on a portfolio with many apps × events.
@@ -124,12 +124,12 @@ export class BackgroundIndexer {
    * COUNT() over an ARRAY (which BigQuery rejects). NULL → NULL → not counted, on every path.
    */
   _complexPresence(name, spec, fact) {
-    const d = this.catalog.dialect;
+    const d = getDialect(this.catalog.dialect);
     if (spec.column) {
-      if (spec.encoding === 'native') return `${arrayLength(d, spec.column)} > 0`;
-      return `${jsonColumnArrayLength(d, spec.column)} > 0`; // JSON array in a STRING or a JSON-typed column
+      if (spec.encoding === 'native') return `${d.arrayLength(spec.column)} > 0`;
+      return `${d.jsonColumnArrayLength(spec.column)} > 0`; // JSON array in a STRING or a JSON-typed column
     }
-    return `${jsonArrayLength(d, this.catalog.eventDataColumn(fact), name)} > 0`; // inside the event_data blob
+    return `${d.jsonArrayLength(this.catalog.eventDataColumn(fact), name)} > 0`; // inside the event_data blob
   }
 
   /**
@@ -280,7 +280,7 @@ export class BackgroundIndexer {
   /** Per-property recency window predicate (fact scans only), bounded on THAT fact's own
    *  time column, or '' when there is no window / no time axis. */
   _winClauses(eventCol, timeCol) {
-    const win = (eventCol && this.windowDays && timeCol) ? recentSince(this.catalog.dialect, timeCol, this.windowDays) : null;
+    const win = (eventCol && this.windowDays > 0 && timeCol) ? getDialect(this.catalog.dialect).recentSince(timeCol, this.windowDays) : null;
     return { andWin: win ? ` AND ${win}` : '', whereWin: win ? ` WHERE ${win}` : '' };
   }
 
@@ -319,7 +319,7 @@ export class BackgroundIndexer {
     const c = this.catalog;
     const { andWin, whereWin } = this._winClauses(t.eventCol, t.timeCol);
     const values = (await this._topValuesExact(t.ref, t.expr, andWin)) || [];
-    const distinctExpr = (this.approxDistinct && approxCountDistinct(c.dialect, t.expr)) || `COUNT(DISTINCT ${t.expr})`;
+    const distinctExpr = (this.approxDistinct && getDialect(c.dialect).approxCountDistinct(t.expr)) || `COUNT(DISTINCT ${t.expr})`;
     const card = await this.runner.show(this.baseProjectDir, `SELECT ${distinctExpr} AS d, COUNT(${t.expr}) AS t, COUNT(*) AS rows_total FROM ${t.ref}${whereWin}`, 1, this.scanTimeout);
     const stat = card.ok && card.rows?.[0] ? card.rows[0] : {};
     const distinct = stat.d != null ? Number(stat.d) : null;
@@ -364,7 +364,7 @@ export class BackgroundIndexer {
     // 1) combined cardinality (one row: rows_total + d{j}/t{j} per property, + MAX(time) for merge)
     const cardSel = ['COUNT(*) AS rows_total'];
     batch.forEach((t, j) => {
-      const de = (this.approxDistinct && approxCountDistinct(c.dialect, t.expr)) || `COUNT(DISTINCT ${t.expr})`;
+      const de = (this.approxDistinct && getDialect(c.dialect).approxCountDistinct(t.expr)) || `COUNT(DISTINCT ${t.expr})`;
       cardSel.push(`${de} AS d${j}`, `COUNT(${t.expr}) AS t${j}`);
     });
     if (timeCol) cardSel.push(`MAX(${timeCol}) AS wm`);
@@ -390,10 +390,10 @@ export class BackgroundIndexer {
     // The top-k scan is the fragile part (40 array aggregates in one query → can hit type/
     // resource limits on BigQuery). If it fails, DON'T discard the batch — keep the combined
     // cardinality+coverage that already succeeded and degrade ONLY top-values to per-property.
-    let combineTopK = !!approxTopK(c.dialect, 'x', this.maxValues);
+    let combineTopK = !!getDialect(c.dialect).approxTopK('x', this.maxValues);
     let topRow = null;
     if (combineTopK) {
-      const topSel = batch.map((t, j) => `${approxTopK(c.dialect, t.expr, this.maxValues)} AS v${j}`);
+      const topSel = batch.map((t, j) => `${getDialect(c.dialect).approxTopK(t.expr, this.maxValues)} AS v${j}`);
       const tk = await this.runner.show(this.baseProjectDir, `SELECT ${topSel.join(', ')} FROM ${ref}${whereWin}`, 1, this.scanTimeout);
       if (tk.ok) { topRow = tk.rows?.[0] || {}; }
       else {
@@ -410,7 +410,7 @@ export class BackgroundIndexer {
       const distinct = crow[`d${j}`] != null ? Number(crow[`d${j}`]) : null;
       const total = crow[`t${j}`] != null ? Number(crow[`t${j}`]) : null;
       const rowsTotal = crow.rows_total != null ? Number(crow.rows_total) : null;
-      let values = combineTopK ? parseApproxTopK(topRow[`v${j}`]) : ((await this._topValuesExact(ref, t.expr, andWin)) || []);
+      let values = combineTopK ? getDialect(c.dialect).parseTopK(topRow[`v${j}`]) : ((await this._topValuesExact(ref, t.expr, andWin)) || []);
       // Self-heal: if combined top-k yielded nothing but the column has data, take the exact path.
       if (combineTopK && !values.length && total) values = (await this._topValuesExact(ref, t.expr, andWin)) || [];
       const cov = covRows ? this._coverageFromRows(covRows, `nn${j}`, label(t), runId) : { coverage: [], bundleCoverage: [], cellCoverage: [] };
@@ -427,7 +427,7 @@ export class BackgroundIndexer {
     // There is deliberately no default: falling back to another source's time axis would build
     // `WHERE <other fact's column> > …` against this table and fail on every sync.
     if (!timeCol) throw new Error('value index: a delta scan needs the source\'s own time column');
-    return sinceTimestampMs(this.catalog.dialect, timeCol, watermarkMs);
+    return Number.isFinite(Number(watermarkMs)) ? getDialect(this.catalog.dialect).sinceTimestampMs(timeCol, watermarkMs) : null;
   }
 
   /** Read the CURRENTLY-STORED stats for a property back into the merge shape. */
@@ -479,7 +479,7 @@ export class BackgroundIndexer {
     const w = where ? ` WHERE ${where}` : '';
     const andW = where ? ` AND ${where}` : '';
     const values = (await this._topValuesExact(t.ref, t.expr, andW)) || [];
-    const distinctExpr = (this.approxDistinct && approxCountDistinct(c.dialect, t.expr)) || `COUNT(DISTINCT ${t.expr})`;
+    const distinctExpr = (this.approxDistinct && getDialect(c.dialect).approxCountDistinct(t.expr)) || `COUNT(DISTINCT ${t.expr})`;
     const wmSel = timeCol ? `, MAX(${timeCol}) AS wm` : '';
     const card = await this.runner.show(this.baseProjectDir, `SELECT ${distinctExpr} AS d, COUNT(${t.expr}) AS t, COUNT(*) AS rows_total${wmSel} FROM ${t.ref}${w}`, 1, this.scanTimeout);
     const stat = card.ok && card.rows?.[0] ? card.rows[0] : {};

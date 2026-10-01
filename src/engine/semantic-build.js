@@ -7,7 +7,7 @@ import { compileDeclaration, measureRefs } from '../compile.js';
 import { renderContext } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
-import { clone, declaredAttribute } from './helpers.js';
+import { clone } from './helpers.js';
 
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
@@ -174,15 +174,13 @@ export const semanticBuildMethods = {
       // never shown, so matching on it made every removal a silent no-op that still reported
       // success. Match on the attribute the dimension declares, and refuse a name that matches
       // nothing rather than pretending to have removed it.
-      const tasks = state.tasks || [];
-      const attrOf = (d) => declaredAttribute(d, tasks);
       for (const name of input.remove_dimensions) {
-        if (!add.dimensions.some((d) => attrOf(d) === name || d.name === name)) {
-          const have = [...new Set(add.dimensions.map(attrOf))];
+        if (!add.dimensions.some((d) => d._attribute === name || d.name === name)) {
+          const have = [...new Set(add.dimensions.map((d) => d._attribute))];
           throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
         }
       }
-      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(attrOf(d)) && !input.remove_dimensions.includes(d.name));
+      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d._attribute) && !input.remove_dimensions.includes(d.name));
     }
 
     mergeCompiled(state, compiled);

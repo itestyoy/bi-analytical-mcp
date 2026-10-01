@@ -19,7 +19,7 @@ const ROOT = new URL('..', import.meta.url).pathname;
 const SRC = join(ROOT, 'src');
 
 // Each rule: what is forbidden, and why. `allow` lists the occurrences that are reading CALLER
-// INPUT (a legacy spelling someone typed) rather than recovering discarded structure — with the
+// INPUT rather than recovering discarded structure — with the
 // reason, so a new one has to be argued for rather than added quietly.
 const RULES = [
   {
@@ -27,7 +27,6 @@ const RULES = [
     re: /\.(split|indexOf|lastIndexOf)\(\s*['"`](__|_)['"`]\s*\)/g,
     why: "taking a generated name apart — carry what it encodes next to it instead",
     allow: {
-      'engine/semantic-query.js': ["p.split('__')"], // _suggestRef: reads a path the CALLER typed, to answer with the structured form
       'mcp-surface.js': ["String(name).split('_')"], // titleFromName: formatting a tool name for humans, not resolving anything
     },
   },
@@ -36,7 +35,6 @@ const RULES = [
     re: /\.(startsWith|endsWith)\(\s*`\$\{/g,
     why: 'matching a generated name by prefix — one name may be a prefix of another',
     allow: {
-      'engine/helpers.js': ['startsWith(`${tk}_`)'], // declaredAttribute: the fallback for contexts persisted before `_task`/`_attribute` existed
       'validate.js': ['startsWith(`${base}/`)'], // a JSON pointer inside a refused call (ajv's instancePath), cut at a `/` — not a name
     },
   },

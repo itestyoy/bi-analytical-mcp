@@ -5,7 +5,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { retentioneeringFacts } from './schema.js';
 import { truncatedTables } from './results.js';
-import { retentioneeringViewModel, hasCard, diffForm, DIFF_CARD_KINDS } from './view-model.js';
+import { retentioneeringViewModel, hasCard, diffForm } from './view-model.js';
 import { SIDE, QUERY, DISPLAY } from './names.js';
 import { readResult, resultOrigin, taskOutput } from './query.js';
 
@@ -59,11 +59,7 @@ export async function drawOne(engine, feature, ctx, input) {
   if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field: 'analysis' });
   if (result.error) throw new ToolError(`'${input.analysis}' did not compute — the library said ${result.error.type}: ${result.error.message} — so there is nothing to draw; the call's other analyses have their results`, { stage: 'validate', field: 'analysis' });
   if (!hasCard(result.kind, diffForm(result))) {
-    // a diff of a kind that has its card, stored in the form an earlier version wrote, is drawn by running the query again
-    const earlier = result.diff && DIFF_CARD_KINDS.includes(result.kind);
-    throw new ToolError(earlier
-      ? `'${input.analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers query_retentioneering_model({ request: { task_id } }) returned`
-      : `'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ request: { task_id } }) returned`, { stage: 'validate', field: 'analysis' });
+    throw new ToolError(`'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ request: { task_id } }) returned`, { stage: 'validate', field: 'analysis' });
   }
   if (held && truncatedTables(result)) {
     const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [input.analysis], rows: Infinity, analysis: input.analysis });

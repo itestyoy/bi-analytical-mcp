@@ -57,7 +57,6 @@ function heldRunner() {
 }
 
 const tick = (ms = 0) => new Promise((resolve) => { setTimeout(resolve, ms); });
-const settled = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
 /** Wait until a build is actually in flight (compiling + gating a python stage takes a moment). */
 const untilHeld = async (runner) => { for (let i = 0; i < 400 && !runner.held.length; i += 1) await tick(5); };
 /** Let the build a started task is waiting on finish, and return what the task produced. */

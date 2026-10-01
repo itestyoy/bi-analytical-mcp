@@ -16,37 +16,6 @@ export class MemoryTool {
   }
 
   /**
-   * One stored memory target brought onto the current form. Older stores kept a target as a STRING
-   * key ('property:ad_type', 'model:users'); a target is now the STRUCTURE it names, so the rewrite
-   * returns an OBJECT — otherwise one note ends up holding both shapes and the key's own prefix
-   * leaks into the text that is searched and embedded.
-   *
-   * A property/event key written without a source names no entity this catalog can address, and
-   * which one was meant is not recoverable from the name — so it becomes a searchable term rather
-   * than a guess. Returns null when the target is already structural.
-   */
-  canonForward(stored) {
-    if (stored && typeof stored === 'object') return null; // already a target, not a legacy key
-    const raw = String(stored);
-    const i = raw.indexOf(':');
-    const kind = i > 0 ? raw.slice(0, i) : '';
-    const key = i > 0 ? raw.slice(i + 1) : raw;
-    if (kind === 'term') return memoryTarget('term', key).target;
-    const dot = key.indexOf('.');
-    // 'model:<source>' and the scoped 'property:<source>.<name>' name a real entity — keep what
-    // they name, as the structure. A model the CATALOG DECLARES counts even when grounding set it
-    // aside this run (its table was being rebuilt, the warehouse blinked): the migration is
-    // one-way, and demoting its notes to terms would lose the link for good once the table is back.
-    const declared = (m) => !!(this.catalog.models[m] || this.catalog.unavailable?.[m]);
-    if (kind === 'model' && declared(key)) return memoryTarget('model', key).target;
-    if ((kind === 'property' || kind === 'event') && dot > 0) {
-      const source = key.slice(0, dot); const name = key.slice(dot + 1);
-      if (declared(source)) return memoryTarget(kind, source, name).target;
-    }
-    return memoryTarget('term', key.toLowerCase()).target;
-  }
-
-  /**
    * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
    * semantic_index view. `{ source, name }` names an attribute, payload property or event of that
    * source exactly; `{ source }` alone names the model; `{ term }` is a phrase the catalog has no

@@ -10,14 +10,15 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
-import { isNumericType, SUPPORTED_DIALECTS, jsonExtract as jsonExtractSql } from './dialect.js';
+import { isNumericType } from './dialects/base.js';
+import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { isBooleanType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
-import { mcpMetaOf, dbtSchemaToCatalog, primaryEntityName, asPrimaryEntity } from './catalog/from-dbt-schema.js';
-export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpMetaOf, dbtSchemaToCatalog, primaryEntityName };
+import { mcpOf, dbtSchemaToCatalog, primaryEntityName, asPrimaryEntity } from './catalog/from-dbt-schema.js';
+export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
 
@@ -37,7 +38,7 @@ export function loadCatalog(path, opts = {}) {
   }
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, report: (r) => { raw.dialect_fallback = r; } });
   raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir, projectDir: opts.projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
@@ -52,19 +53,16 @@ export function loadCatalog(path, opts = {}) {
 export function loadCatalogFromProject(projectDir, opts = {}) {
   const models = [];
   for (const mp of readModelPaths(projectDir)) collectSchemaModels(join(projectDir, mp), models);
-  // `meta` may sit at the top level (dbt ≤ 1.9) or under `config:` (dbt 1.10+, and the only place
-  // Fusion reads) — mcpMetaOf takes it from either.
-  const mcpModels = models.filter((m) => { const mcp = mcpMetaOf(m); return mcp && (mcp.role || mcp.key); });
-  if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with config.meta.mcp.role + role's key; the pre-1.10 top-level meta.mcp is read too)`);
+  const mcpModels = models.filter((m) => mcpOf(m)?.role);
+  if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with config.meta.mcp.role)`);
   const byRole = new Map();
   for (const m of mcpModels) {
-    const declared = mcpMetaOf(m);
-    const role = declared.role || declared.key;
+    const { role } = mcpOf(m);
     if (byRole.has(role)) throw new Error(`config error: more than one model declares role '${role}' (${byRole.get(role)} and ${m.name}); exactly one model per role`);
     byRole.set(role, m.name);
   }
   const raw = dbtSchemaToCatalog({ models: mcpModels });
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, report: (r) => { raw.dialect_fallback = r; } });
   raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir || projectDir, projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
@@ -361,7 +359,7 @@ export class Catalog {
     if (!spec) throw new Error(`unknown event property '${name}' on '${fact}'`);
     const col = this.propertyBackingColumn(fact, name); // the ONE rule for which column this reads
     const q = qualifier ? `${qualifier}.${col}` : col;
-    return spec.column ? q : jsonExtractSql(dialect, q, name, type || spec.type);
+    return spec.column ? q : getDialect(dialect).jsonExtract(q, name, type || spec.type);
   }
 
   /**

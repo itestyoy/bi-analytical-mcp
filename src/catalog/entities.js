@@ -38,10 +38,7 @@ export function normalizeKeyParts(raw, { where, columns }) {
   return parts;
 }
 
-/**
- * Normalise ONE declared join key into { type, key: [parts], column?, variants? }. `column` is
- * kept for the plain single-column case so everything that already reads it keeps working.
- */
+/** Normalise ONE declared join key into { type, key: [parts], variants? }. */
 export function normalizeEntityKey(name, decl, { model, columns }) {
   const where = `entity '${name}' of model '${model}'`;
   if (!name) throw new Error(`${model}: an entity declaration needs a name`);
@@ -54,10 +51,10 @@ export function normalizeEntityKey(name, decl, { model, columns }) {
   for (const [vName, vDecl] of Object.entries(decl.variants || {})) {
     if (!/^[a-z][a-z0-9_]*$/.test(vName)) throw new Error(`${where}: variant name '${vName}' must be lowercase snake_case`);
     if (vName.includes('__')) throw new Error(`${where}: variant name '${vName}' may not contain '__'`);
-    const vRaw = Array.isArray(vDecl) || typeof vDecl === 'string' ? vDecl : (vDecl || {}).key ?? (vDecl || {}).column;
+    const vRaw = Array.isArray(vDecl) || typeof vDecl === 'string' ? vDecl : (vDecl || {}).key;
     variants[vName] = normalizeKeyParts(vRaw, { where: `${where} variant '${vName}'`, columns });
   }
-  const raw = decl.key !== undefined ? decl.key : decl.column;
+  const raw = decl.key;
   if (raw === undefined) {
     if (!Object.keys(variants).length) throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
     return { type, variants }; // variants only: this side has no single canonical key

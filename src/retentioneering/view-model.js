@@ -38,7 +38,7 @@ export const DIFF_CARD_KINDS = kindsWhere((k) => k.diff);
 export const CHARTED_DIFF_KINDS = kindsWhere((k) => k.diffCharted);
 
 /** How a stored result holds its diff: 'charted' (the analysis's own shape), 'tables' (the library's
- *  tables — every diff stored before a funnel's kept its shape too), or false for no diff. */
+ *  tables), or false for no diff. */
 export const diffForm = (r) => (r?.diff ? (r.diff_charted ? 'charted' : 'tables') : false);
 
 /** Whether an analysis of this kind has a card — decided by kind, and for a diff by the form the

@@ -1,62 +1,32 @@
-// A dbt SCHEMA FILE READ AS A CATALOG — each model's `config.meta.mcp` (or the pre-1.10 top-level
-// `meta`, config winning per key) turned into the catalog's own shape: its role, its time axis, its
-// entities, measures and dimensions, and every mistake in it refused at load.
+// A dbt SCHEMA FILE READ AS A CATALOG — each model's `config.meta.mcp` (the one place dbt 1.10+ and
+// dbt Fusion read it) turned into the catalog's own shape: its role, its time axis, its entities,
+// measures and dimensions, and every mistake in it refused at load.
 
-import { isNumericType } from '../dialect.js';
+import { isNumericType } from '../dialects/base.js';
 import { normalizeMeasure, normalizeAggregatable } from './measures.js';
 import { normalizeEntityKey } from './entities.js';
 import { dimTypeFromDataType, pipelineColumnType } from './column-types.js';
 
-/**
- * WHERE `meta` LIVES IN A dbt SCHEMA FILE — both places, because dbt moved it.
- *
- * Up to dbt 1.9 a model or a column carried `meta:` as a property of its own. dbt 1.10 moved it
- * under `config:`; 1.11 still reads the old place and only warns (PropertyMovedToConfigDeprecation),
- * but dbt Fusion treats the top-level key as unknown (UnusedConfigKey, dbt1060) and DROPS it. A
- * catalog read from a Fusion-parsed project would then have no roles, no dimensions and no
- * measures at all — the whole MCP surface is in that block.
- *
- * So this reader takes it from either place, with `config.meta` winning key by key (dbt's own
- * precedence) for a project caught half-way through the move. Everything downstream keeps reading
- * `meta.mcp`, because this is the only door the two shapes come through.
- */
-export function mcpMetaOf(node) {
-  const legacy = node?.meta?.mcp;
-  const moved = node?.config?.meta?.mcp;
-  if (!legacy) return moved;
-  if (!moved) return legacy;
-  return { ...legacy, ...moved };
-}
-
-/** The same node with its MCP block in ONE place, so the rest of this file reads `meta.mcp`. */
-export function withNormalizedMeta(node) {
-  const mcp = mcpMetaOf(node);
-  if (!mcp || node.meta?.mcp === mcp) return node;
-  return { ...node, meta: { ...(node.meta || {}), mcp } };
-}
+/** A model's or a column's MCP block: `config.meta.mcp`. */
+export const mcpOf = (node) => node?.config?.meta?.mcp;
 
 /**
  * Transform a dbt model-schema document into the internal catalog registry.
- * MCP semantics are read from `meta.mcp` at the model level (key/role/
+ * MCP semantics are read from `config.meta.mcp` at the model level (key/role/
  * primary_entity/known_events/measures) and the column level (entity/is_time/
  * is_event_name/is_event_data+properties/dimension).
  */
 export function dbtSchemaToCatalog(doc) {
-  // warehouse_dialect is intentionally NOT read from the catalog here; loadCatalog
-  // resolves it from env/profile. `fallback` carries any legacy value if present.
-  const out = { warehouse_dialect: doc.warehouse_dialect, models: {} };
-  for (const raw of doc.models || []) {
-    // dbt 1.10 moved `meta` under `config:` — on the model and on every column. Both shapes are
-    // folded into one here (see mcpMetaOf), so nothing below has to know which file it came from.
-    const model = { ...withNormalizedMeta(raw), ...(raw.columns ? { columns: raw.columns.map(withNormalizedMeta) } : {}) };
-    const mcp = model.meta?.mcp || {};
-    // The ROLE is the logical name — the dbt model can be named anything. (`key`
-    // is still accepted as a legacy alias.) Nothing is hardcoded to a specific name.
-    const key = mcp.role || mcp.key;
-    if (!key) throw new Error(`catalog model '${model.name}' is missing config.meta.mcp.role (dbt 1.10+ keeps meta under config:; the pre-1.10 top-level meta.mcp is still read)`);
+  // the warehouse dialect is not the catalog's to say: loadCatalog resolves it from the env / profile
+  const out = { models: {} };
+  for (const model of doc.models || []) {
+    const mcp = mcpOf(model) || {};
+    // The ROLE is the logical name — the dbt model can be named anything. Nothing is hardcoded to a specific name.
+    const key = mcp.role;
+    if (!key) throw new Error(`catalog model '${model.name}' is missing config.meta.mcp.role`);
     const m = { dbt_model: model.name };
     if (model.description) m.description = model.description;
-    if (mcp.role) m.role = mcp.role;
+    m.role = mcp.role;
     // an explicit null is no primary entity (the model owns none), as leaving it out is
     if (mcp.primary_entity != null) m.primary_entity = asPrimaryEntity(mcp.primary_entity);
     if (mcp.known_events) m.known_events = mcp.known_events;
@@ -93,12 +63,8 @@ export function dbtSchemaToCatalog(doc) {
     // owns its event vocabulary (known_events + event-scoped properties) and its own
     // space in the value index, and the SOURCE is always a separate argument. A model
     // with neither column is not a fact even if it declares a time axis (a measures
-    // source such as acquisition). There is NO default or "anchor" source: a source may
-    // be omitted only when the catalog has exactly one.
-    if (mcp.anchor !== undefined) {
-      throw new Error(`model '${model.name}': meta.mcp.anchor is no longer a schema key — there is no default source. Every events source is addressed by name (semantic_index({ request: { source } }), build_pipeline_model({ request: { source } }), semantic_models[].from); a source may be omitted only when the catalog has exactly one.`);
-    }
-    const isFact = (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data; });
+    // source such as acquisition). There is no default source: every source is named.
+    const isFact = (model.columns || []).some((c) => { const cm = mcpOf(c) || {}; return cm.is_event_name || cm.is_event_data; });
     if (isFact) (out.facts ||= []).push(key);
 
     const entities = {};
@@ -108,7 +74,7 @@ export function dbtSchemaToCatalog(doc) {
     const columnDescriptions = {};
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in pipelines
     for (const col of model.columns || []) {
-      const cm = col.meta?.mcp || {};
+      const cm = mcpOf(col) || {};
       // A VALIDITY MARK only means something on a groupable time dimension — that is the only
       // place it can become validity_params. On a column that is a join key, a measure, the
       // model's time axis or an opted-out dimension, the branches below take the column first
@@ -196,23 +162,9 @@ export function dbtSchemaToCatalog(doc) {
       if (cm.is_event_data) {
         m.event_data_column = col.name;
         if (cm.properties) {
-          for (const [pn, ps] of Object.entries(cm.properties)) {
-            if (ps && (ps.values !== undefined || ps.events !== undefined)) throw new Error(`property '${pn}' of model '${model.name}' (meta.mcp.properties): 'values' / 'events' are no longer schema keys — both are measured by the value index. Keep type / items / fields / description.`);
-          }
           m.properties = cm.properties;
         }
         continue;
-      }
-      // WHICH EVENTS CARRY A PROPERTY AND WHICH VALUES IT TAKES ARE MEASURED, NOT DECLARED. The
-      // value index observes both per source and serves them everywhere (the { event },
-      // { source, property } and { search } views, the filter-value guard, the event-scope warnings). A
-      // declared list would only go stale in silence, so the schema no longer carries one: the
-      // former meta.mcp.events / meta.mcp.values keys are refused with the replacement.
-      if (cm.events !== undefined) {
-        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.events is no longer a schema key — which events carry a property is measured by the value index. To mark the column as an event-payload PROPERTY use meta.mcp.property: true (an array column needs only meta.mcp.array).`);
-      }
-      if (cm.values !== undefined || (cm.dimension && typeof cm.dimension === 'object' && cm.dimension.values !== undefined)) {
-        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ request: { source, property } })). Remove it; put the MEANING of special values in the description instead.`);
       }
       // Flattened event payload: on a FACT, a column marked meta.mcp.property (scalar) or
       // meta.mcp.array (array / array<struct>) is a per-event PROPERTY. These are REAL physical
@@ -254,8 +206,7 @@ export function dbtSchemaToCatalog(doc) {
       // Dimensions: on a non-fact (dimension) model, every remaining column is
       // a groupable dimension. Its TYPE comes from the native dbt `data_type`
       // (date/timestamp -> time, else categorical) — not from meta. Only the bits
-      // dbt has no native field for stay in meta: time `granularity` (non-day)
-      // and categorical `values` hints. `meta.mcp.dimension` is still honored.
+      // dbt has no field for stays in meta: time `granularity` (non-day), and `meta.mcp.dimension`.
       // meta.mcp.dimension: false takes a column OUT of the group-by surface (it stays a real
       // column a pipeline can reference) — the opt-out for anything that is not an attribute.
       if (cm.dimension === false) continue;

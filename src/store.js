@@ -41,7 +41,6 @@
 //   memory.add({ id, note, targets, aliases, links, created_at }) -> id
 //   memory.get(id)                    -> { id, note, targets:[], aliases:[], links:[], created_at } | null
 //   memory.remove(id)                 -> bool (a row existed)
-//   memory.setTargets(id, targets)    -> bool (a row existed)
 //   memory.all({ limit })             -> rows[] (most recent first)
 //   memory.counts()                   -> { notes }
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
@@ -209,7 +208,6 @@ export class MemoryBackend {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
-      setTargets: (id, targets) => { const e = memory.get(id); if (!e) return false; e.targets = [...targets]; return true; },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
       // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
@@ -289,42 +287,18 @@ export class SqliteBackend {
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
-    // A column a later version added, brought to an older database: added only when it is missing, so
-    // a failure to add it (a locked or full database) is the error it is, not taken for "already there"
-    // (SQLite has no ADD COLUMN IF NOT EXISTS).
-    const ensureColumns = (table, defs) => {
-      const have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
-      for (const def of defs) if (!have.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${table} ADD COLUMN ${def}`);
-    };
-    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT)');
-    // `tool` came later: the tool that started a task is what says which query tool reads it back
+    // `tool`: the tool that started a task, which says which query tool reads it back;
     // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
-    ensureColumns('jobs', ['tool TEXT', 'drawn INTEGER']);
-    // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
-    // the users dimension — owns its own index space, so two facts may carry the same property
-    // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
-    // index is a rebuildable cache the background scan repopulates, so nothing is carried over.
-    // The test is the PRIMARY KEY, not the column list: a table that once received `source`
-    // through ADD COLUMN still has the old key (SQLite cannot widen a key in place), and every
-    // ON CONFLICT(source, …) upsert against it is rejected.
-    const keyedBySource = (table) => {
-      const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-      if (!cols.length) return null; // no table yet
-      const src = cols.find((c) => c.name === 'source');
-      return !!(src && src.pk > 0); // pk = 1-based position within the PRIMARY KEY, 0 = not part of it
-    };
-    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) {
-      if (keyedBySource(t) === false) db.exec(`DROP TABLE ${t}`);
-    }
+    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT, drawn INTEGER)');
+    // Every index table is keyed by (SOURCE, property): each catalog source — an events fact, the users
+    // dimension — owns its own index space, so two facts may carry the same property name.
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
-    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
-    // columns added later:
     //  null_count       — nulls per property.
     //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
     //                     so subsequent syncs SKIP it (indexed once, then left alone).
     //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
     //                     only rows newer than this and ADDS the new counts to what is stored.
-    ensureColumns('prop_stats', ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']);
+    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, high_cardinality INTEGER, data_watermark INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
     // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
     db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (source TEXT, property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, event_name))');
@@ -344,8 +318,6 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
     db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
-    // columns added later
-    ensureColumns('memory', ['question TEXT', 'embedding TEXT', 'embedding_model TEXT']);
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
@@ -353,10 +325,9 @@ export class SqliteBackend {
     // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
     db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
-    db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
+    // with what reproduces an error: the context's state, the code of the model that failed, the runtime
+    db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT, context TEXT, files TEXT, runtime TEXT)');
     db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
-    // what reproduces an error came later: the context's state, the code of the model that failed, the runtime
-    ensureColumns('errors', ['context TEXT', 'files TEXT', 'runtime TEXT']);
     const s = this;
     // every row a table holds for one (source, property), replaced by `rows` — each row the values of
     // `columns`, after the source and the property (the table names are this file's own)
@@ -411,7 +382,7 @@ export class SqliteBackend {
       init() {
         // a job left 'running' across a restart can never complete -> terminal error.
         s._run("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'");
-        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, ...(r.tool ? { tool: r.tool } : {}), ...(r.drawn ? { drawn: true } : {}) }));
+        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, tool: r.tool, ...(r.drawn ? { drawn: true } : {}) }));
       },
       upsert(j) {
         s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at, tool, drawn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at, tool=excluded.tool, drawn=excluded.drawn', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null, j.tool ?? null, j.drawn ? 1 : null);
@@ -532,7 +503,6 @@ export class SqliteBackend {
       add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
-      setTargets(id, targets) { return s._run('UPDATE memory SET targets = ? WHERE id = ?', JSON.stringify(targets || []), id).changes > 0; },
       all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 

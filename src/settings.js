@@ -9,7 +9,6 @@
 //          profile — read by profiles.yml through env_var(), never by the server
 //   example  the line .env.example sets (a value compose passes on); without it the line shows the
 //            default, commented out
-//   listed   false: read, but not a line of .env.example (an older spelling of another)
 
 import { envFlag, envNumber, envInt, envString } from './config.js';
 
@@ -39,7 +38,6 @@ export const SETTING_GROUPS = [
     S('SKIP_PROJECT_VALIDATION', 'flag', '1: skip the start-up check that the project has the models / macros the server needs.', { default: false, shown: '' }),
     S('MCP_GROUND_CATALOG', 'flag', 'false: do not check the catalog against the real tables at start.', { default: true }),
     S('MCP_REQUIRE_TIME_RANGE', 'flag', '1: refuse queries without a time window; 0: allow them. Default: the catalog decides\n(meta.mcp.require_time_range).', { shown: '' }),
-    S('MCP_SCD_VALIDITY_PARAMS', 'flag', 'false: do not write SCD validity windows into semantic models (an older MetricFlow that rejects them).', { default: true }),
   ]],
   ['dbt and MetricFlow environments', [
     S('DBT_ENVS_DIR', 'string', 'Where the environments live. Default ./.venvs; the image sets /opt/dbt-envs.', { shown: '/opt/dbt-envs' }),
@@ -87,8 +85,7 @@ export const SETTING_GROUPS = [
     S('MEMORY_EMBEDDINGS', 'string', 'openai: search memory by meaning. Unset: fuzzy search only.', { shown: 'openai' }),
     S('OPENAI_API_KEY', 'string', 'Required with MEMORY_EMBEDDINGS=openai.', { shown: '' }),
     S('OPENAI_EMBEDDING_MODEL', 'string', 'The embedding model.', { default: 'text-embedding-3-large' }),
-    S('OPENAI_BASE_URL', 'string', 'Any OpenAI-compatible endpoint (OPENAI_API_BASE is read too). Default: OpenAI\'s API.', { default: 'https://api.openai.com/v1' }),
-    S('OPENAI_API_BASE', 'string', 'The older spelling of OPENAI_BASE_URL.', { listed: false }),
+    S('OPENAI_BASE_URL', 'string', 'Any OpenAI-compatible endpoint. Default: OpenAI\'s API.', { default: 'https://api.openai.com/v1' }),
   ]],
   ['dbt profile (read by profiles.yml via env_var)', [
     S('DUCKDB_PATH', 'profile', 'The DuckDB database file: path: "{{ env_var(\'DUCKDB_PATH\') }}" (on the warehouse volume).', { example: '/warehouse/analytics.duckdb' }),
@@ -142,7 +139,6 @@ export function renderEnvExample() {
   for (const [title, rows] of SETTING_GROUPS) {
     out.push('', `# ───────────────────────── ${title} ─────────────────────────`);
     for (const r of rows) {
-      if (r.listed === false) continue;
       if (r.doc) for (const line of r.doc.split('\n')) out.push(`# ${line}`);
       out.push(r.example !== undefined ? `${r.name}=${r.example}` : `# ${r.name}=${shownOf(r)}`);
     }

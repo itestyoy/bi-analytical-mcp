@@ -338,7 +338,7 @@ test('23. a bare name carried by two sources is refused, naming both', opts, asy
 test('24. a declared amount the table lacks is pruned; the real one still sums to 17.50', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', meta: { mcp: { measure: { unit: 'usd' } } } });
+    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
   });
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.acquisition.includes('amount:bonus_spend'), JSON.stringify(pruned));
@@ -351,7 +351,7 @@ test('24. a declared amount the table lacks is pruned; the real one still sums t
 test('25. a measure over the pruned amount is refused at validation, not in the warehouse', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', meta: { mcp: { measure: { unit: 'usd' } } } });
+    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
   });
   await groundCatalogToPhysical(cat, backend, BASE);
   await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: { name: 'b' } }] }),
@@ -375,7 +375,7 @@ test('26. a governed measure whose column is missing is pruned; the surviving on
 test('27. a time axis on a missing column is dropped and the model still joins: control 6 / variant_b 6', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_experiment_assignments.columns.push({ name: 'ghost_time', data_type: 'timestamp', meta: { mcp: { is_time: true } } });
+    M.fct_experiment_assignments.columns.push({ name: 'ghost_time', data_type: 'timestamp', config: { meta: { mcp: { is_time: true } } } });
   });
   assert.equal(cat.getModel('experiments').time?.column, 'ghost_time', 'declared before grounding');
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
@@ -461,11 +461,6 @@ test("33. an events source whose role is not called 'events' loads and counts 18
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['aren_n'] }, renamedEngine);
   assert.equal(num(r.rows[0].aren_n), 184);
-});
-
-test('34. meta.mcp.anchor is refused at load: there is no default source', opts, async (t) => {
-  if (skip(t)) return;
-  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events).anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
 });
 
 test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
@@ -659,14 +654,6 @@ test('55. values come from the index with their frequencies: win 20 / lose 5', o
   const v = await engine.semantic_index({ source: 'events', property: 'result_of_event_data' });
   assert.deepEqual(Object.fromEntries(v.sample_values.map((x) => [x.value, x.freq])), { win: 20, lose: 5 });
   assert.deepEqual([...v.events].sort(), ['level_completed']);
-});
-
-test('56. a catalog that still declares events: or values: is refused with the replacement', opts, async (t) => {
-  if (skip(t)) return;
-  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events.columns.find((c) => c.name === 'result_of_event_data')).events = ['level_completed']; }),
-    /meta\.mcp\.events is no longer a schema key.*meta\.mcp\.property: true/s);
-  assert.throws(() => variant((M) => { setMcp(M.dim_users.columns.find((c) => c.name === 'platform'), { values: ['ios', 'android'] }); }),
-    /meta\.mcp\.values is no longer a schema key/);
 });
 
 test('57. the anr event carries anr_duration, breadcrumbs and custom_keys — not the stack', opts, async (t) => {

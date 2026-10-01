@@ -158,7 +158,7 @@ test('a checkpoint is retired when the value index moved on, or its model is gon
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: agg('events_seen') });
-  const built = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  await e.build_pipeline_model({ action: 'materialize', draft_id });
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1);
   // A completed index scan means the source data may have moved — the prefix is no longer trusted.
   draftOf(e, draft_id).checkpoints[0].index_run_id = 'a-previous-scan';

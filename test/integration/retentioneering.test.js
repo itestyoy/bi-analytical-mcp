@@ -269,13 +269,6 @@ const runFull = async (input) => {
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   return { task_id: q.task_id, analyses: r.analyses };
 };
-/** The analyses of a call as a read summarizes them (a segment's levels with their sizes). */
-const runRead = async (input) => {
-  const q = await engine.query_retentioneering_model({ context_id: built.context_id, ...input });
-  const r = await engine.query_retentioneering_model({ task_id: q.task_id });
-  assert.equal(r.status, 'done', JSON.stringify(r.error));
-  return { task_id: q.task_id, analyses: r.analyses };
-};
 const table = (result, name) => {
   const t = result.tables.find((x) => x.name === name);
   assert.ok(t, `a table '${name}' (has ${result.tables.map((x) => x.name).join(', ')})`);
@@ -611,20 +604,11 @@ test('a materialize that ends while a step is being edited never leaves a table 
   assert.ok(names.includes('tutorial') && !names.includes('shop_opened'));
 });
 
-test('a result stored before its rows were numbered per table is read whole; a draw that does not happen leaves no mark', opts, async (t) => {
+test('a draw that does not happen leaves no mark', opts, async (t) => {
   if (skip(t)) return;
   const q = await engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'length' }] }, { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' }] });
   await engine.query_retentioneering_model({ task_id: q.task_id });
-  // as a result of an earlier version: its origin a bare eventstream name, no longer held in memory
   const ctx = engine.ctxs.get(built.context_id);
-  const table = engine.jobs.get(q.task_id).table;
-  ctx.state.retentioneering.results[table] = 'paths';
-  engine._taskResults.delete(q.task_id);
-  const read = await engine.query_retentioneering_model({ task_id: q.task_id });
-  const [tb] = read.analyses.path_metrics.tables;
-  assert.equal(tb.total_rows, built.users, 'every row counted');
-  // read whole: the summary shows its first 20 rows, not the 7 a read keeps of a result it can cut
-  assert.equal(tb.rows.length, Math.min(built.users, 20));
   // an analysis without a card is refused, and the refusal leaves nothing behind: no mark, nothing held
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/);
   assert.ok(!ctx.state.retentioneering.drawn?.[q.task_id]?.includes('conversion_rate'));

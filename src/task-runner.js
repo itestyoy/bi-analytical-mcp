@@ -125,13 +125,12 @@ export class TaskRunner {
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
   started(id, extra = {}) {
     const side = this.sideOf(this.jobs.get(id)?.tool);
-    return { task_id: id, ...extra, ...(side ? { read_with: this.readers[side] } : {}), next: `${this.readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+    return { task_id: id, ...extra, read_with: this.readers[side], next: `${this.readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
   /** The call that reads a task back: its side's query tool, with the task_id. */
   readWith(id) {
-    const side = this.sideOf(this.jobs.get(id)?.tool);
-    return side ? `${this.readers[side]}({ request: { task_id: '${id}' } })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
+    return `${this.readers[this.sideOf(this.jobs.get(id)?.tool)]}({ request: { task_id: '${id}' } })`;
   }
 
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
@@ -158,7 +157,7 @@ export class TaskRunner {
   forSide(id, side) {
     const job = this.known(id);
     const own = this.sideOf(job.tool);
-    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_id: '${job.id}' } })`, { stage: 'validate', field: 'task_id' });
+    if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_id: '${job.id}' } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 

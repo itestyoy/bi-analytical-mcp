@@ -6,57 +6,64 @@ version: 2
 models:
   - name: fct_events
     description: "Events fact (one row per event)."
-    meta:
-      mcp:
-        role: events
-        primary_entity: event
-        known_events: [iap_purchase_completed, first_launch]
+    config:
+      meta:
+        mcp:
+          role: events
+          primary_entity: event
+          known_events: [iap_purchase_completed, first_launch]
     columns:
       - name: internal_player_id
         data_type: string
         description: "Player id; joins events to dim_users by the user entity."
-        meta:
-          mcp:
-            entity: { name: user, type: foreign }
+        config:
+          meta:
+            mcp:
+              entity: { name: user, type: foreign }
       - name: device_time
         data_type: timestamp
         description: "Event timestamp (the metric time axis)."
-        meta:
-          mcp:
-            is_time: true
+        config:
+          meta:
+            mcp:
+              is_time: true
       - name: event_name
         data_type: string
         description: "Event type."
-        meta:
-          mcp:
-            is_event_name: true
+        config:
+          meta:
+            mcp:
+              is_event_name: true
       - name: event_data
         data_type: jsonb
         description: "Raw event payload."
-        meta:
-          mcp:
-            is_event_data: true
+        config:
+          meta:
+            mcp:
+              is_event_data: true
       - name: price_in_usd_of_event_data
         data_type: numeric
         description: "IAP price in USD. Events: iap_purchase_completed."
-        meta: { mcp: { property: true } }
+        config: { meta: { mcp: { property: true } } }
       - name: product_id_of_event_data
         data_type: string
         description: "IAP product id. Events: iap_purchase_completed."
-        meta: { mcp: { property: true } }
+        config: { meta: { mcp: { property: true } } }
 
   - name: dim_users
     description: "Slowly-changing user dimension (one row per player×validity-window)."
-    meta:
-      mcp:
-        role: users
+    config:
+      meta:
+        mcp:
+          role: users
     columns:
       - name: internal_player_id
         data_type: string
         description: "Player id (natural key across versions)."
-        meta:
-          mcp:
-            entity: { name: user, type: primary }
+        config:
+          meta:
+            mcp:
+              entity: { name: user, type: primary }
       - name: country
         data_type: string
         description: "Player country AT THE TIME the version was valid."
@@ -66,8 +73,8 @@ models:
       - name: install_time_valid_from
         data_type: date
         description: "Validity window start (inclusive)."
-        meta: { mcp: { dimension: { validity: start } } }
+        config: { meta: { mcp: { dimension: { validity: start } } } }
       - name: install_time_valid_until
         data_type: date
         description: "Validity window end (inclusive)."
-        meta: { mcp: { dimension: { validity: end } } }
+        config: { meta: { mcp: { dimension: { validity: end } } } }

@@ -352,8 +352,7 @@ export const semanticIndexMethods = {
       else recommendations.push('No values indexed yet (the background value index may not have run).');
       if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
       recommendations.push(...nullRecs);
-      // A metric query names the attribute STRUCTURALLY — { model, attribute } — and the old
-      // '<entity>__<attr>' path string is refused by the schema, so it must not be recommended.
+      // A metric query names the attribute STRUCTURALLY — { model, attribute }.
       // `via` is needed exactly where the query resolver asks for it: a source carrying SEVERAL
       // relationships to this model. Which source the caller will query from is not known here,
       // so each such source is named with its choices — the same candidates the resolver lists.

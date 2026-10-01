@@ -18,7 +18,6 @@ test('every advertised tool declares its behaviour', () => {
   for (const t of tools) {
     assert.equal(typeof t.annotations.readOnlyHint, 'boolean', t.name);
     assert.equal(t.annotations.openWorldHint, false, `${t.name}: the warehouse is a closed domain`);
-    assert.equal(t.annotations.title, t.title);
     if (!t.annotations.readOnlyHint) assert.equal(typeof t.annotations.destructiveHint, 'boolean', t.name);
   }
   const by = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));

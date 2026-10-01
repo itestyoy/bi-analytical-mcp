@@ -11,7 +11,7 @@ import { renderWhereClauses } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
-import { uniqueRefs, clone, declaredAttribute } from './helpers.js';
+import { uniqueRefs, clone } from './helpers.js';
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -35,10 +35,9 @@ export const semanticQueryMethods = {
    */
   _groupableSplit(ctx) {
     const all = [...this.catalog.reachableAttributes()];
-    const tasks = ctx.state.tasks || [];
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
-        const attribute = declaredAttribute(d, tasks);
+        const attribute = d._attribute;
         if (!all.some((r) => r.model === model && r.attribute === attribute && !r.via)) all.push({ model, attribute });
       }
     }
@@ -55,43 +54,14 @@ export const semanticQueryMethods = {
     return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once their model is loaded (use_base_models): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   },
 
-  /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
-  _suggestRef(ctx, path) {
-    const c = this.catalog;
-    const p = String(path);
-    if (p === 'metric_time') return "{ time: 'metric_time', grain: 'day' }";
-    // A PATH is a caller-typed legacy spelling, so reading it apart here is reading INPUT, not
-    // recovering something we discarded. Every segment but the last is a relationship hop: follow
-    // them to the model that actually carries the attribute, instead of assuming one hop.
-    if (p.includes('__')) {
-      const segs = p.split('__');
-      const attr = segs[segs.length - 1];
-      const hops = segs.slice(0, -1);
-      const model = c.joinTargetFor(hops[hops.length - 1]);
-      if (!model) return `{ model: '<the model that owns ${hops[hops.length - 1]}>', attribute: '${attr}' }`;
-      if (hops.length > 1) return `{ model: '${model}', attribute: '${attr}' } (reached through ${hops.join(' → ')})`;
-      const identity = c.primaryEntityName(model);
-      return `{ model: '${model}', attribute: '${attr}'${hops[0] !== identity ? `, via: '${hops[0]}'` : ''} }`;
-    }
-    for (const [model, add] of Object.entries(ctx.state.additions || {})) {
-      const d = (add.dimensions || []).find((x) => x.name === p);
-      if (d) return `{ model: '${model}', attribute: '${declaredAttribute(d, ctx.state.tasks || [])}' }`;
-    }
-    return `{ model: '<model>', attribute: '${p}' }`;
-  },
-
   /**
    * An attribute may be addressed WITHOUT knowing MetricFlow's `<entity>__<attribute>` spelling:
    * { model, attribute, via? } names the model that carries the attribute and the attribute
    * itself, and this resolves the path — the relationship the task's source declares towards
    * that model, or the model's own identity when the attribute is the source's own. `via` picks
-   * the relationship when the source carries several to the same model (key variants). A string
-   * is returned unchanged, so both spellings flow through the same validation.
+   * the relationship when the source carries several to the same model (key variants).
    */
   _normalizeRef(ctx, ref, where = 'group_by') {
-    if (typeof ref === 'string') {
-      throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
-    }
     if (ref && typeof ref === 'object' && 'entity' in ref && !('attribute' in ref)) {
       throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index({ request: {} }) lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
@@ -108,9 +78,8 @@ export const semanticQueryMethods = {
     const target = c.getModel(model);
     // 1. a dimension the TASK declared on this model (a payload property or a model column named
     //    in create/update) → its task-namespaced name
-    const tasks = ctx.state.tasks || [];
     for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
-      if (declaredAttribute(d, tasks) === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;
+      if (d._attribute === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;
     }
     if (!(target.dimensions || {})[attribute]) {
       const known = Object.keys(target.dimensions || {});
@@ -281,7 +250,6 @@ export const semanticQueryMethods = {
    */
   _projectQueryWork(ctx, input) {
     const layer = this.project.layer;
-    const own = ctx.state.semantic_model;
     const known = new Map(this._projectMetricsOf(ctx).map((m) => [m.name, m]));
     const list = () => [...known.keys()].join(', ') || '(none)';
     if (!input.metrics?.length) throw new ToolError(`metrics is required. The context '${ctx.id}' has: ${list()}`, { stage: 'validate', field: 'metrics' });
@@ -343,7 +311,6 @@ export const semanticQueryMethods = {
         return tokenByItem.get(itemKey(item)) || tokenOf(item);
       },
       label: (key) => JSON.stringify(key),
-      refusePath: (key) => { throw new ToolError(`order_by: a dimension is named as in group_by ({ semantic_model: [...], dimension }, { entity }) or by its result column, not by a path string: '${key}'`, { stage: 'validate', field: 'order_by' }); },
     });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a
@@ -384,7 +351,7 @@ export const semanticQueryMethods = {
   /** order_by → MetricFlow's order tokens: a requested metric, a result column name (the caller's —
    *  never the internal token), `metric_time` for the grained time column, or a group_by reference
    *  resolved by `resolveKey`. → { orderBy, orderableKeys } */
-  _metricOrderBy(input, { groupBy, rename, resolveKey, label, refusePath }) {
+  _metricOrderBy(input, { groupBy, rename, resolveKey, label }) {
     const orderable = new Set([...input.metrics, ...groupBy]);
     const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
     const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
@@ -393,7 +360,6 @@ export const semanticQueryMethods = {
       let key = o.key;
       if (typeof key === 'object' && key) key = resolveKey(key);
       else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
-      else if (typeof key === 'string' && key.includes('__')) refusePath(key);
       else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key); // a result column name
       if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? label(o.key) : o.key}' is not a requested metric or group_by column. Orderable: ${orderableKeys.join(', ')}`, { stage: 'validate', field: 'order_by' });
       return `${o.direction === 'desc' ? '-' : ''}${key}`;
@@ -487,7 +453,6 @@ export const semanticQueryMethods = {
         // context's name, as group_by refuses it (the schema takes both shapes in every context)
         if (p.field?.kind === 'entity' || (p.field?.kind === 'dimension' && ('dimension' in p.field || 'semantic_model' in p.field))) this._normalizeRef(ctx, p.field, 'where');
         if (p.field?.kind === 'dimension') {
-          if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
           const label = `${p.field.model}.${p.field.attribute}`;
           const refModel = p.field.model; const refAttr = p.field.attribute;
           // The value-index key comes from the model the caller NAMED, while it is still here: a
@@ -510,7 +475,6 @@ export const semanticQueryMethods = {
       groupBy, rename,
       resolveKey: (key) => this._normalizeRef(ctx, key, 'order_by'), // { model, attribute } → the group-by token
       label: (key) => `${key.model}.${key.attribute}`,
-      refusePath: (key) => { throw new ToolError(`order_by: an attribute is addressed as { model, attribute }, not by a path string. '${key}' → ${this._suggestRef(ctx, key)}.`, { stage: 'validate', field: 'order_by' }); },
     });
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });

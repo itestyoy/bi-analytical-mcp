@@ -176,7 +176,7 @@ export async function query(engine, feature, input) {
   const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   // which eventstream, and which of its tables, a result was computed from — carried, so a later read
   // (and its card) speaks of those rows, whatever the eventstream became after
-  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model, analyses: analyses.map((a) => a.id), rows_per_table: true };
+  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model, analyses: analyses.map((a) => a.id) };
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
   const expiry = engine.host.expiryConfig('python');
   if (Object.keys(expiry).length) engine.ctxs.writeFile(ctx.id, `${modelName}.yml`, yaml.dump({ version: 2, models: [{ name: modelName, config: expiry }] }, { lineWidth: 200, noRefs: true }));
@@ -217,15 +217,7 @@ export async function readResult(engine, feature, dir, model, { context_id, even
 
 /** Where a query task's result came from: its eventstream and the table of it the analyses read. */
 export function resultOrigin(state, table) {
-  const r = state?.results?.[table];
-  return typeof r === 'string' ? { eventstream: r, table: null } : r || { eventstream: null, table: null };
-}
-
-/** How many rows of each table a read of this stored result may keep: a result written before its rows
- *  were numbered within their table (no rows_per_table) is read whole — cutting it by position would
- *  cut across its tables. */
-export function rowsFor(origin, rows) {
-  return origin.rows_per_table ? rows : Infinity;
+  return state?.results?.[table] || { eventstream: null, table: null };
 }
 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
@@ -295,9 +287,8 @@ export async function taskOutput(engine, feature, job, { rows = feature.keptRows
   const dir = engine.ctxs.dir(job.contextId);
   if (job.tool === QUERY) {
     const origin = resultOrigin(ctx.state.retentioneering, job.table);
-    const n = rowsFor(origin, rows);
-    const out = await readResult(engine, feature, dir, job.table, { context_id: job.contextId, eventstream: origin.eventstream, order: origin.analyses || [], rows: n, analysis });
-    if (out.ok && !analysis && n === feature.keptRows) engine.tasks.keep(job.id, { tool: job.tool, input: null, out });
+    const out = await readResult(engine, feature, dir, job.table, { context_id: job.contextId, eventstream: origin.eventstream, order: origin.analyses || [], rows, analysis });
+    if (out.ok && !analysis && rows === feature.keptRows) engine.tasks.keep(job.id, { tool: job.tool, input: null, out });
     return out;
   }
   const t = ctx.state.retentioneering?.tables?.[job.table];

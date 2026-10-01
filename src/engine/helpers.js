@@ -13,11 +13,7 @@ export function mixin(Class, ...parts) {
   }
 }
 
-/**
- * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
- * back into their public { kind, source, name } form, expose the note/aliases/links, and stamp
- * the time.
- */
+/** Presentation shape for a stored memory note: its note, targets, aliases and links, and its time. */
 export function memoryView(e) {
   const targets = [...(e.targets || [])];
   return {
@@ -38,18 +34,6 @@ export const uniqueRefs = (refs) => [...new Map(refs.map((r) => [JSON.stringify(
 
 export function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
-}
-
-/**
- * The attribute a compiled dimension was DECLARED as. `_attribute` records it at compile time; a
- * context persisted before that falls back to the longest task name the identifier starts with —
- * longest, because one task name may be a prefix of another ('ret' and 'ret_v2') and the shorter
- * one would leave part of the task name inside the attribute.
- */
-export function declaredAttribute(dim, tasks = []) {
-  if (dim._attribute) return dim._attribute;
-  const t = [...tasks].filter((tk) => dim.name.startsWith(`${tk}_`)).sort((a, b) => b.length - a.length)[0];
-  return t ? dim.name.slice(t.length + 1) : dim.name;
 }
 
 /**

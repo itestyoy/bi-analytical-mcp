@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { openStore } from '../../src/store.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
 
@@ -55,27 +54,6 @@ test('an unknown column name is refused by the property view, not read off undef
     /not a property or attribute of 'users'|`property` must be one of/);
 });
 
-// ── memory: a rewritten legacy target must be stored like every other target ────────────────
-// `record` stores targets as objects; the one-time rewrite of source-less legacy keys used to
-// store STRINGS ('term:foo') into the same list, so one note could hold two shapes and the
-// `term:` prefix leaked into the searchable text.
-test('a rewritten legacy memory target is stored in the same shape as a recorded one', async () => {
-  const store = openStore({});
-  const mk = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }), store }));
-  const e0 = mk();
-  store.memory.add({ id: 'legacy', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data'], aliases: [], links: [], created_at: Date.now() });
-  const e = mk(); // a fresh Engine over the same store runs the rewrite
-  const rec = await e.memory({ action: 'record', note: 'a recorded one', targets: [{ term: 'ad_type_of_event_data' }] });
-
-  const shapeOf = (id) => store.memory.get(id).targets.map((t) => (t && typeof t === 'object' ? Object.keys(t).sort().join('+') : `string:${t}`));
-  assert.deepEqual(shapeOf('legacy'), shapeOf(rec.id), 'the rewritten target has the same shape as a recorded one');
-  // and the prefix never becomes part of what is searched
-  const found = await e.memory({ action: 'search', query: 'ad_type_of_event_data' });
-  assert.ok(found.notes.some((n) => n.id === 'legacy'), 'still findable by the word itself');
-  assert.ok(!JSON.stringify(store.memory.get('legacy').targets).includes('term:'), 'no "term:" prefix inside the stored target');
-  e0.close(); e.close();
-});
-
 // ── meta.mcp.dimension: false was ignored on a non-fact's time axis ─────────────────────────
 // The opt-out is read further down the column loop, but the time axis returns before reaching it,
 // so a spend table's `spend_date` stayed a groupable attribute however it was declared.
@@ -83,23 +61,24 @@ test('meta.mcp.dimension: false takes the time axis out of the group-by surface 
   const base = (optOut) => `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
   - name: fct_spend
-    meta: { mcp: { role: acquisition } }
+    config: { meta: { mcp: { role: acquisition } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: spend_date, data_type: date, meta: { mcp: { is_time: true${optOut ? ', dimension: false' : ''} } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: spend_date, data_type: date, config: { meta: { mcp: { is_time: true${optOut ? ', dimension: false' : ''} } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `;
   const load = (yaml) => {
     const f = join(mkdtempSync(join(tmpdir(), 'rev-')), 'catalog.yml');
@@ -162,27 +141,29 @@ test('a funnel step can filter a property read from the event_data blob', async 
   const yaml = `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp:
-        role: events
-        primary_entity: event
-        known_events: [tutorial, level_completed]
+    config:
+      meta:
+        mcp:
+          role: events
+          primary_entity: event
+          known_events: [tutorial, level_completed]
     columns:
-      - { name: event_id, data_type: string, meta: { mcp: { entity: { name: event, type: primary } } } }
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: event_id, data_type: string, config: { meta: { mcp: { entity: { name: event, type: primary } } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
       - name: event_data
         data_type: jsonb
-        meta:
-          mcp:
-            is_event_data: true
-            properties:
-              step_id: { type: string }
+        config:
+          meta:
+            mcp:
+              is_event_data: true
+              properties:
+                step_id: { type: string }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
   const dir = mkdtempSync(join(tmpdir(), 'blob-'));
@@ -412,20 +393,22 @@ const spendCatalog = (axisMeta) => {
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: fct_spend
-    meta:
-      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
-      - { name: spend_date, data_type: date, meta: { mcp: { ${axisMeta} } } }
-      - { name: channel, data_type: string, meta: { mcp: { dimension: true } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row, type: primary } } } } }
+      - { name: spend_date, data_type: date, config: { meta: { mcp: { ${axisMeta} } } } }
+      - { name: channel, data_type: string, config: { meta: { mcp: { dimension: true } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `);
   return loadCatalog(file, {});
 };
@@ -449,23 +432,26 @@ test('two models declaring the same role are refused, naming both', () => {
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: fct_spend_a
-    meta:
-      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row, type: primary } } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
   - name: fct_spend_b
-    meta:
-      mcp: { role: measures, primary_entity: { name: row2, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row2, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row2, type: primary } } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row2, type: primary } } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `);
   assert.throws(() => loadCatalog(file, {}), /fct_spend_a.*fct_spend_b.*role.*measures/s);
 });
@@ -508,19 +494,21 @@ test('a name that is both a payload property and a groupable column is refused',
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
     columns:
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
-      - { name: bundle_id, data_type: string, meta: { mcp: { dimension: { bundle: true } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
+      - { name: bundle_id, data_type: string, config: { meta: { mcp: { dimension: { bundle: true } } } } }
       - name: event_data
         data_type: jsonb
-        meta:
-          mcp:
-            is_event_data: true
-            properties:
-              bundle_id: { type: string }
+        config:
+          meta:
+            mcp:
+              is_event_data: true
+              properties:
+                bundle_id: { type: string }
 `);
   assert.throws(() => loadCatalog(file, {}), /bundle_id.*BOTH as an event_data property and as a groupable column/s);
 });

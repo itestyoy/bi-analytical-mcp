@@ -8,7 +8,6 @@ import { getDialect } from './dialects/index.js';
 import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
 import { measureRefs } from './compile.js';
-import { setting } from './settings.js';
 
 const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
@@ -33,11 +32,6 @@ function entityExpr(catalog, ent) {
   return parts.length === 1 ? d.keyPartExpr(parts[0]) : d.compositeKeyExpr(parts);
 }
 
-/** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns
- *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
-function isScdModel(m) {
-  return !!m.scd && setting('MCP_SCD_VALIDITY_PARAMS');
-}
 
 /** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED
  *  aggregation, so every task computes them the same way. */
@@ -87,15 +81,11 @@ export function renderBaseModel(catalog, key) {
   }
 
   // dimension/fact model with a natural primary key. When the model is SLOWLY-CHANGING (SCD-2:
-  // several validity-windowed rows per key) AND MetricFlow's SCD support is enabled, the join
+  // several validity-windowed rows per key; the catalog marked its validity columns), the join
   // entity is declared `natural` (not `primary`, since the key is not unique) and the two
   // validity-bound time dimensions carry validity_params — MetricFlow then does a POINT-IN-TIME
-  // join (fact agg_time within the window) instead of a fan-out equality.
-  // DEFAULT ON when the catalog marks validity columns (verified against dbt-semantic-interfaces
-  // 0.9.0 via dbt parse: validity_params nested under type_params parses cleanly). An ESCAPE HATCH
-  // MCP_SCD_VALIDITY_PARAMS=false disables it for anyone on an OLDER DSI that rejects the field —
-  // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
-  const scd = isScdModel(m);
+  // join (fact agg_time within the window) instead of a fan-out equality. SCD models are join-only.
+  const scd = !!m.scd;
   const pe = m.primary_entity;
   if (!pe) {
     throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
@@ -176,7 +166,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const droppedMeasures = new Set(); // measures removed because their model is SCD (join-only)
   for (const key of modelsToRender) {
     const sm = renderBaseModel(catalog, key);
-    const scd = isScdModel(catalog.getModel(key));
+    const scd = !!catalog.getModel(key).scd;
     const add = state.additions?.[key];
     if (add) {
       // A task may re-declare an attribute the base model already carries (it is offered in the

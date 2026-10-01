@@ -44,7 +44,7 @@ export function createEmbedder({ env = process.env, logger = (m) => console.erro
   const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) { logger?.('MEMORY_EMBEDDINGS=openai but OPENAI_API_KEY is unset — falling back to fuzzy memory search'); return null; }
   const model = env.OPENAI_EMBEDDING_MODEL || DEFAULT_MODEL;
-  const baseUrl = (env.OPENAI_BASE_URL || env.OPENAI_API_BASE || DEFAULT_BASE).replace(/\/$/, '');
+  const baseUrl = (env.OPENAI_BASE_URL || DEFAULT_BASE).replace(/\/$/, '');
   logger?.(`semantic memory search enabled (provider=openai, model=${model})`);
   return {
     kind: 'openai',

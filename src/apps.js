@@ -5,8 +5,7 @@
 // `registerAppResource` in @modelcontextprotocol/ext-apps/server — our tools are registered on the
 // low-level Server because their input schemas are catalog-built JSON Schema, so the same two
 // pieces are applied here from that package's own constants):
-//   * the tool carries `_meta.ui.resourceUri` AND the flat `_meta["ui/resourceUri"]` key older
-//     hosts read — `registerAppTool` writes both, and so does `viewMeta` below;
+//   * the tool carries `_meta.ui.resourceUri` (`viewMeta` below);
 //   * the view is a `ui://` resource of type `text/html;profile=mcp-app`: ONE self-contained HTML
 //     file, built from src/apps/result-view/ by vite + vite-plugin-singlefile exactly like the
 //     official examples (`npm run build:app`); the built file is checked in and a test holds it
@@ -35,7 +34,7 @@
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
-import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
+import { RESOURCE_MIME_TYPE, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
 
 // WHAT DEPENDS ON THE CLIENT DECLARING THIS EXTENSION (with this view's MIME type, in the request
 // served — src/client-extensions.js): what speaks to its MODEL — the card instructions and the
@@ -64,14 +63,13 @@ export const TOOL_VISIBILITY = Object.freeze(['model']);
 
 /**
  * The `_meta` a tool carries, from its definition (src/tools/define.js): its visibility, and — for a
- * tool that draws (`view`: 'result' for the result view, or a feature's own view) — the view, in both
- * spellings registerAppTool writes. Nothing else carries a view — not a query, not a build, not a query
+ * tool that draws (`view`: 'result' for the result view, or a feature's own view) — the view. Nothing else carries a view — not a query, not a build, not a query
  * tool's read of a task — so no read, no poll and no intermediate step ever draws.
  */
 export function viewMeta(def) {
   const uri = def.view === 'result' ? RESULT_VIEW_URI : def.view?.uri || null;
   const visibility = def.appCallable ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY];
-  return uri ? { ui: { resourceUri: uri, visibility }, [RESOURCE_URI_META_KEY]: uri } : { ui: { visibility } };
+  return uri ? { ui: { resourceUri: uri, visibility } } : { ui: { visibility } };
 }
 
 /** The view's network policy: nothing. Maps to CSP connect-src / resource / frame-src 'none'. */

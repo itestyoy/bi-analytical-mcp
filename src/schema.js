@@ -20,16 +20,17 @@ import { transportSchema } from './schema/transport.js';
 import { form, pick } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
-import { abTestSchema, srmCheckSchema, sampleSizeSchema, experimentSchema } from './schema/experiment.js';
+import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
 export { MAX_WAIT_SECONDS, MAX_BATCH, transportSchema };
 
 /**
  * THE INPUT CONTRACTS OF THE ENGINE'S OWN METHODS — not tools. A tool hands its input to one of these
- * methods (experiment → ab_test / srm_check / sample_size, delete_context → drop_context, a pipeline
- * build → register_native_model …), and the method holds it to the exact contract below. They are
- * validated, never listed or called by a client: every tool is listed and called by its one name.
+ * methods, and the method holds it to the exact contract named `<tool>.<mode>` below — experiment's
+ * analyze / check_split / plan, delete_context's three targets, context's describe, a pipeline built
+ * in one call. They are validated, never listed or called by a client: every tool is listed and called
+ * by its one name.
  */
-export const METHOD_CONTRACTS = new Set(['update_semantic_model', 'register_native_model', 'list_query_jobs', 'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model', 'ab_test', 'srm_check', 'sample_size']);
+export const METHOD_CONTRACTS = new Set(['build_pipeline_model.pipeline', 'delete_context.context', 'delete_context.pipeline_model', 'delete_context.semantic_model', 'context.describe', 'experiment.analyze', 'experiment.check_split', 'experiment.plan']);
 
 export function buildSchemas(catalog, { project = null, projectContexts = [] } = {}) {
   // a context_id that may be a PRESET one — the dbt project's own semantic models, each a context
@@ -79,7 +80,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     ],
   };
 
-  // register_native_model: build a derived dbt model from a declarative PIPELINE
+  // a pipeline built in one call (build_pipeline_model.pipeline): a derived dbt model from a declarative PIPELINE
   // (a pipe-syntax transformation, optionally ending in a match_recognize funnel)
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
@@ -106,7 +107,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // build_pipeline_model: compose a pipeline INCREMENTALLY, one stage at a time. A
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
-  // materialized until materialize). The all-at-once register_native_model still works.
+  // materialized until materialize).
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   const pipelineFields = {
     draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). For fork it may also be a context whose pipeline was already materialized.' },
@@ -206,32 +207,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     ),
   };
 
-  const update = {
-    type: 'object',
-    additionalProperties: false,
-    required: ['context_id', 'semantic_model'],
-    description: 'Incrementally add or remove measures/dimensions/metrics on a semantic model within a context, then re-parse.',
-    properties: {
-      context_id: { type: 'string', pattern: CTX, description: D.context_id },
-      semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s semantic model to modify.' },
-      add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'Dimensions to add.' },
-      remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'Names of dimensions to remove.' },
-      add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'Measures to add.' },
-      remove_measures: { type: 'array', items: { type: 'string' }, description: 'Names of measures to remove (fails if metrics depend on them unless cascade is used elsewhere).' },
-      add_metrics: { type: 'array', items: metricSchema(), description: 'Metrics to add.' },
-      remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Names of metrics to remove.' },
-      task: { type: 'string', description: 'Task name the additions belong to (defaults to the context\'s first task).' },
-      dry_run: { type: 'boolean', description: 'If true, validate the change WITHOUT building anything.' },
-      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false; it is always written to the context files).' },
-    },
-  };
-
   const ctxRef = { type: 'object', additionalProperties: false, required: ['context_id'], description: 'Reference an existing context by id.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id } } };
   const del = { type: 'object', additionalProperties: false, required: ['context_id', 'semantic_model'], description: 'Remove a semantic model\'s task additions from a context.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id }, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s additions to remove.' }, cascade: { type: 'boolean', description: 'If true, also remove metrics that depend on the removed measures.' } } };
-  const empty = { type: 'object', additionalProperties: false, properties: {} };
 
-  // ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
-  // drop_context / delete_native_model / delete_semantic_model. Strict per-action fields.
+  // context reads (list, describe), delete_context removes (the context, its pipeline model, or a
+  // semantic model's additions). Strict per-action fields.
   // THE CONTEXTS, READ — list them, or describe one. Nothing here changes anything, so the tool is
   // read-only as a whole; removing what a context holds is delete_context, a tool of its own, because
   // a client asks before a destructive call and should not have to ask before a listing.
@@ -257,10 +237,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
 
   const tools = {
     build_semantic_model: create,
-    // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
-    register_native_model: withStageDefs(registerModel, catalog),
     build_pipeline_model: withStageDefs(buildModel, catalog),
-    delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     delete_context: deleteContext,
     query_semantic_model: query,
@@ -292,15 +269,6 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         transform: projection,
       },
     },
-    list_query_jobs: empty,
-    update_semantic_model: update,
-    delete_semantic_model: del,
-    drop_context: {
-      ...ctxRef,
-      description: 'Tear down an entire isolated context (delete its files + artifacts).',
-      properties: { ...ctxRef.properties, force: { type: 'boolean', description: 'Drop even though another draft reads a table this context built.' } },
-    },
-    describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
     preview_semantic_model: {
       type: 'object', additionalProperties: false, required: ['context_id'],
@@ -313,7 +281,6 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         time_range: { ...METRIC_TIME_RANGE, description: 'Only with validate: the metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it. Without it, validate compiles only and reads nothing.' },
       },
     },
-    list_contexts: empty,
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
@@ -344,9 +311,22 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     },
     experiment: experimentSchema(),
     memory: memorySchema(catalog),
-    ab_test: abTestSchema(),
-    srm_check: srmCheckSchema(),
-    sample_size: sampleSizeSchema(),
+  };
+  // the input contracts of the engine methods the tools hand to (METHOD_CONTRACTS): validated, never offered
+  const contracts = {
+    // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
+    'build_pipeline_model.pipeline': withStageDefs(registerModel, catalog),
+    'delete_context.context': {
+      ...ctxRef,
+      description: 'Tear down an entire isolated context (delete its files + artifacts).',
+      properties: { ...ctxRef.properties, force: { type: 'boolean', description: 'Drop even though another draft reads a table this context built.' } },
+    },
+    'delete_context.pipeline_model': { ...ctxRef, description: 'Delete the pipeline model of a context (remove its view + semantic model) and re-parse.' },
+    'delete_context.semantic_model': del,
+    'context.describe': { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
+    'experiment.analyze': analyzeContract(),
+    'experiment.check_split': checkSplitContract(),
+    'experiment.plan': planContract(),
   };
   // Every tool schema is written with its vocabulary SPELLED OUT where it is accepted — that is
   // what makes a refusal able to say which mode the caller was closest to. Repeating a 5 KB list
@@ -354,7 +334,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // choice, so the repetition is folded out HERE, after the schemas are written and before they
   // leave: identical subtrees become one `$defs` entry the sites point at. Authoring is unchanged,
   // validation is unchanged (ajv resolves the ref), and the client is handed each list once.
-  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, transportSchema(schema)]));
+  return Object.fromEntries(Object.entries({ ...tools, ...contracts }).map(([name, schema]) => [name, transportSchema(schema)]));
 }
 
 /** Attach the stages' `$defs` at a tool schema's root (where `#/$defs/…` references resolve). */

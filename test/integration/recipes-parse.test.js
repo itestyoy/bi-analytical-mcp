@@ -61,7 +61,7 @@ for (const r of recipes.list) {
       const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
       pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
       const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY_BIN }));
-      const out = await pyEngine.register_native_model({ ...r.register_payload, dry_run: true });
+      const out = await pyEngine._buildPipeline({ ...r.register_payload, dry_run: true });
       assert.equal(out.dry_run, true, `${r.id}: ${JSON.stringify(out.error || {})}`);
       assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
       const declared = r.register_payload.pipeline.stages.flatMap((st) => st.output?.columns || []);
@@ -84,7 +84,7 @@ for (const r of recipes.list) {
     // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
     // declares an experiment mapping (analyze, or check_split) — feed its per-group rows into the test.
     if (r.register_payload) {
-      const out = await engine.register_native_model(r.register_payload);
+      const out = await engine._buildPipeline(r.register_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
       // A recipe that feeds a two-group test needs its groups; one that collapses the table to a
       // single row of statistics (the table-wide aggregate) is correct at exactly one row.
@@ -100,19 +100,19 @@ for (const r of recipes.list) {
           return arm;
         });
         const [control, ...variants] = arms;
-        const res = engine.ab_test({ metric: map.metric, control, variants });
-        assert.equal(res.ok, true, `ab_test failed for ${r.id}: ${JSON.stringify(res)}`);
+        const res = engine._analyzeExperiment({ metric: map.metric, control, variants });
+        assert.equal(res.ok, true, `experiment analyze failed for ${r.id}: ${JSON.stringify(res)}`);
         assert.equal(res.results.length, variants.length);
         for (const v of res.results) assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1, `bad p_value for ${r.id}`);
       }
       if (r.experiment?.action === 'check_split') {
         const map = r.experiment;
         const groups = out.rows.map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
-        const res = engine.srm_check({ groups, ...(map.expected_ratio ? { expected_ratio: map.expected_ratio } : {}) });
-        assert.equal(res.ok, true, `srm_check failed for ${r.id}: ${JSON.stringify(res)}`);
+        const res = engine._checkSplit({ groups, ...(map.expected_ratio ? { expected_ratio: map.expected_ratio } : {}) });
+        assert.equal(res.ok, true, `experiment check_split failed for ${r.id}: ${JSON.stringify(res)}`);
         assert.ok(Number.isFinite(res.p_value) && res.p_value >= 0 && res.p_value <= 1, `bad p_value for ${r.id}`);
       }
-      await engine.delete_native_model({ context_id: out.context_id });
+      await engine._deletePipelineModel({ context_id: out.context_id });
       return;
     }
 

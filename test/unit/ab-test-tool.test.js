@@ -18,8 +18,8 @@ test('experiments role is a joinable model with its dimensions + time columns', 
   assert.ok(catalog.facts.includes('events')); // unchanged: events is still an events source
 });
 
-test('ab_test proportion: control vs two variants, per-variant verdicts', () => {
-  const r = engine.ab_test({
+test('experiment analyze, proportion: control vs two variants, per-variant verdicts', () => {
+  const r = engine._analyzeExperiment({
     metric: 'proportion',
     control: { label: 'control', n: 1000, conversions: 200 },
     variants: [
@@ -37,8 +37,8 @@ test('ab_test proportion: control vs two variants, per-variant verdicts', () => 
   assert.equal(c.significant, false);
 });
 
-test('ab_test mean: Welch t-test path', () => {
-  const r = engine.ab_test({
+test('experiment analyze, mean: Welch t-test path', () => {
+  const r = engine._analyzeExperiment({
     metric: 'mean',
     control: { n: 500, mean: 10, stddev: 2 },
     variants: [{ label: 'B', n: 500, mean: 12, stddev: 2 }],
@@ -47,8 +47,8 @@ test('ab_test mean: Welch t-test path', () => {
   assert.ok('t' in r.results[0] && 'df' in r.results[0]);
 });
 
-test('ab_test ratio: delta-method path over per-user sums', () => {
-  const r = engine.ab_test({
+test('experiment analyze, ratio: delta-method path over per-user sums', () => {
+  const r = engine._analyzeExperiment({
     metric: 'ratio',
     control: { label: 'control', n: 5, sumNum: 15, sumDen: 5, sumNum2: 55, sumDen2: 5, sumNumDen: 15 },
     variants: [{ label: 'B', n: 5, sumNum: 20, sumDen: 5, sumNum2: 90, sumDen2: 5, sumNumDen: 20 }],
@@ -57,8 +57,8 @@ test('ab_test ratio: delta-method path over per-user sums', () => {
   assert.ok(Math.abs(r.results[0].control_ratio - 3) < 1e-9 && Math.abs(r.results[0].variant_ratio - 4) < 1e-9);
 });
 
-test('ab_test correction: adjusted p-values across the variant family', () => {
-  const r = engine.ab_test({
+test('experiment analyze, correction: adjusted p-values across the variant family', () => {
+  const r = engine._analyzeExperiment({
     metric: 'proportion',
     correction: 'holm',
     control: { n: 1000, conversions: 200 },
@@ -69,46 +69,46 @@ test('ab_test correction: adjusted p-values across the variant family', () => {
 });
 
 // ── structural schema guards: each metric config rejects fields it does not use ──
-test('ab_test schema: missing conversions for proportion is rejected', () => {
-  assert.throws(() => engine.ab_test({ metric: 'proportion', control: { n: 100 }, variants: [{ n: 100 }] }), /invalid input/);
+test('experiment analyze contract: missing conversions for proportion is rejected', () => {
+  assert.throws(() => engine._analyzeExperiment({ metric: 'proportion', control: { n: 100 }, variants: [{ n: 100 }] }), /invalid input/);
 });
 
-test('ab_test schema: a proportion arm cannot carry a mean field', () => {
-  assert.throws(() => engine.ab_test({ metric: 'proportion', control: { n: 100, conversions: 10, mean: 1 }, variants: [{ n: 100, conversions: 12 }] }), /invalid input/);
+test('experiment analyze contract: a proportion arm cannot carry a mean field', () => {
+  assert.throws(() => engine._analyzeExperiment({ metric: 'proportion', control: { n: 100, conversions: 10, mean: 1 }, variants: [{ n: 100, conversions: 12 }] }), /invalid input/);
 });
 
-test('ab_test schema: mean requires both mean and stddev', () => {
-  assert.throws(() => engine.ab_test({ metric: 'mean', control: { n: 100, mean: 1 }, variants: [{ n: 100, mean: 2 }] }), /invalid input/);
+test('experiment analyze contract: mean requires both mean and stddev', () => {
+  assert.throws(() => engine._analyzeExperiment({ metric: 'mean', control: { n: 100, mean: 1 }, variants: [{ n: 100, mean: 2 }] }), /invalid input/);
 });
 
-test('ab_test schema: ratio requires all five per-user sums and a positive denominator', () => {
-  assert.throws(() => engine.ab_test({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
-  assert.throws(() => engine.ab_test({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 0, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
+test('experiment analyze contract: ratio requires all five per-user sums and a positive denominator', () => {
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 0, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
 });
 
-test('ab_test schema: a cuped arm cannot carry conversions; unknown metric is rejected', () => {
-  assert.throws(() => engine.ab_test({ metric: 'cuped', control: { n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1, conversions: 3 }, variants: [{ n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1 }] }), /invalid input/);
-  assert.throws(() => engine.ab_test({ metric: 'bogus', control: { n: 5, conversions: 1 }, variants: [{ n: 5, conversions: 1 }] }), /invalid input/);
+test('experiment analyze contract: a cuped arm cannot carry conversions; unknown metric is rejected', () => {
+  assert.throws(() => engine._analyzeExperiment({ metric: 'cuped', control: { n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1, conversions: 3 }, variants: [{ n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1 }] }), /invalid input/);
+  assert.throws(() => engine._analyzeExperiment({ metric: 'bogus', control: { n: 5, conversions: 1 }, variants: [{ n: 5, conversions: 1 }] }), /invalid input/);
 });
 
-test('sample_size schema: needs exactly one of mde/n and the metric-matched dispersion field', () => {
-  assert.equal(engine.sample_size({ metric: 'proportion', baseline: 0.2, mde: 0.05 }).ok, true);
-  assert.equal(engine.sample_size({ metric: 'mean', stddev: 5, n: 400 }).ok, true);
-  assert.throws(() => engine.sample_size({ metric: 'proportion', baseline: 0.2, mde: 0.05, n: 400 }), /invalid input/); // both
-  assert.throws(() => engine.sample_size({ metric: 'proportion', baseline: 0.2 }), /invalid input/); // neither
-  assert.throws(() => engine.sample_size({ metric: 'proportion', stddev: 5, mde: 0.05 }), /invalid input/); // wrong dispersion field
-  assert.throws(() => engine.sample_size({ metric: 'mean', mde: 1 }), /invalid input/); // missing stddev
+test('experiment plan contract: needs exactly one of mde/n and the metric-matched dispersion field', () => {
+  assert.equal(engine._planExperiment({ metric: 'proportion', baseline: 0.2, mde: 0.05 }).ok, true);
+  assert.equal(engine._planExperiment({ metric: 'mean', stddev: 5, n: 400 }).ok, true);
+  assert.throws(() => engine._planExperiment({ metric: 'proportion', baseline: 0.2, mde: 0.05, n: 400 }), /invalid input/); // both
+  assert.throws(() => engine._planExperiment({ metric: 'proportion', baseline: 0.2 }), /invalid input/); // neither
+  assert.throws(() => engine._planExperiment({ metric: 'proportion', stddev: 5, mde: 0.05 }), /invalid input/); // wrong dispersion field
+  assert.throws(() => engine._planExperiment({ metric: 'mean', mde: 1 }), /invalid input/); // missing stddev
 });
 
-test('srm_check: detects a broken split, passes a balanced one', () => {
-  assert.equal(engine.srm_check({ groups: [{ label: 'a', n: 500 }, { label: 'b', n: 500 }] }).srm_detected, false);
-  assert.equal(engine.srm_check({ groups: [{ label: 'a', n: 600 }, { label: 'b', n: 400 }] }).srm_detected, true);
+test('experiment check_split: detects a broken split, passes a balanced one', () => {
+  assert.equal(engine._checkSplit({ groups: [{ label: 'a', n: 500 }, { label: 'b', n: 500 }] }).srm_detected, false);
+  assert.equal(engine._checkSplit({ groups: [{ label: 'a', n: 600 }, { label: 'b', n: 400 }] }).srm_detected, true);
 });
 
 // Sequential (mSPRT) always-valid p: monotone in evidence, conservative vs fixed-horizon,
 // and exactly 1 when there is no effect signal.
-test('ab_test sequential: always-valid p is conservative and ordered by evidence', () => {
-  const strong = engine.ab_test({
+test('experiment analyze, sequential: always-valid p is conservative and ordered by evidence', () => {
+  const strong = engine._analyzeExperiment({
     metric: 'proportion', sequential: true,
     control: { n: 10000, conversions: 2000 },
     variants: [{ label: 'B', n: 10000, conversions: 2400 }], // big, well-powered lift
@@ -118,21 +118,21 @@ test('ab_test sequential: always-valid p is conservative and ordered by evidence
   assert.ok(b.p_value_sequential >= b.p_value, 'always-valid p is never smaller than the fixed-horizon p');
   assert.equal(b.significant_sequential, true, 'a strong effect is detected even sequentially');
 
-  const flat = engine.ab_test({
+  const flat = engine._analyzeExperiment({
     metric: 'proportion', sequential: true,
     control: { n: 1000, conversions: 200 },
     variants: [{ label: 'B', n: 1000, conversions: 200 }], // identical groups
   });
   assert.equal(flat.results[0].p_value_sequential, 1, 'no signal → p stays at 1');
   // a weaker (but real) lift yields a LARGER sequential p than the strong one.
-  const weak = engine.ab_test({
+  const weak = engine._analyzeExperiment({
     metric: 'proportion', sequential: true,
     control: { n: 1000, conversions: 200 },
     variants: [{ label: 'B', n: 1000, conversions: 220 }],
   });
   assert.ok(weak.results[0].p_value_sequential > b.p_value_sequential);
   // mean path also carries the sequential fields.
-  const m = engine.ab_test({
+  const m = engine._analyzeExperiment({
     metric: 'mean', sequential: true, expected_effect: 0.5,
     control: { n: 500, mean: 10, stddev: 3 },
     variants: [{ label: 'B', n: 500, mean: 10.6, stddev: 3 }],
@@ -142,15 +142,15 @@ test('ab_test sequential: always-valid p is conservative and ordered by evidence
 
 // Cross-metric multiplicity: other metrics' p-values join the Holm family and can
 // flip a borderline variant to non-significant.
-test('ab_test family_p_values: cross-metric correction tightens the verdict', () => {
-  const base = engine.ab_test({
+test('experiment analyze, family_p_values: cross-metric correction tightens the verdict', () => {
+  const base = engine._analyzeExperiment({
     metric: 'proportion',
     control: { n: 1000, conversions: 200 },
     variants: [{ label: 'B', n: 1000, conversions: 245 }], // borderline-significant alone
   });
   const alone = base.results[0];
   assert.equal(alone.significant_adjusted, true, 'significant when tested alone');
-  const withFamily = engine.ab_test({
+  const withFamily = engine._analyzeExperiment({
     metric: 'proportion',
     family_p_values: [0.2, 0.4, 0.6, 0.8], // four other metrics in the same readout
     control: { n: 1000, conversions: 200 },
@@ -177,11 +177,11 @@ test('analyze with expected_ratio carries its own split check; without it, none 
 
 test('each variant carries the smallest effect its sample could detect (power 0.8, the test\'s α, the smaller group)', async () => {
   const { sampleSizeProportion, normalQuantile } = await import('../../src/stats.js');
-  const p = engine.ab_test({ metric: 'proportion', control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 12000, conversions: 1250 }] }).results[0];
+  const p = engine._analyzeExperiment({ metric: 'proportion', control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 12000, conversions: 1250 }] }).results[0];
   // the detectable lift is the one the plan would need this n for (to the user, the plan rounds up)
   assert.ok(Math.abs(sampleSizeProportion({ baseline: 0.1, mde: p.detectable_lift }) - 10000) <= 1);
   assert.ok(Math.abs(p.detectable_relative_lift - p.detectable_lift / 0.1) < 1e-12);
-  const m = engine.ab_test({ metric: 'mean', confidence: 0.9, control: { n: 500, mean: 10, stddev: 2 }, variants: [{ label: 'b', n: 800, mean: 10.1, stddev: 2.5 }] }).results[0];
+  const m = engine._analyzeExperiment({ metric: 'mean', confidence: 0.9, control: { n: 500, mean: 10, stddev: 2 }, variants: [{ label: 'b', n: 800, mean: 10.1, stddev: 2.5 }] }).results[0];
   const expected = (normalQuantile(0.95) + normalQuantile(0.8)) * 2 * Math.sqrt(2 / 500);
   assert.ok(Math.abs(m.detectable_lift - expected) < 1e-12, `${m.detectable_lift} vs ${expected}`);
   assert.ok(Math.abs(m.detectable_relative_lift - expected / 10) < 1e-12);

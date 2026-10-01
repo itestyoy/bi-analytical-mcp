@@ -441,7 +441,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 }
 
 // Registered like every other stage, so it is valid in build_pipeline_model (add_step) and
-// register_native_model alike; the engine splits the pipeline at it. `terminal` = nothing may
+// _buildPipeline alike; the engine splits the pipeline at it. `terminal` = nothing may
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {

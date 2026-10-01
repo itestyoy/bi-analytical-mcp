@@ -62,9 +62,9 @@ test('the description belongs to the draft, not to every action on it', async ()
   );
 });
 
-test('register_native_model records its description in the context', async () => {
+test('_buildPipeline records its description in the context', async () => {
   const e = engine();
-  const out = await e.register_native_model({
+  const out = await e._buildPipeline({
     name: 'oneshot', description: 'payer revenue, one-off table for the weekly readout',
     pipeline: { source: 'events', stages: [AGG] },
   });
@@ -86,12 +86,12 @@ test('a governed task keeps its description per task name', async () => {
   assert.deepEqual(described.task_notes, { rev_task: 'revenue + payers for the monetization readout' });
 
   // a SECOND task in the same context keeps its own note, and neither overwrites the other
-  await e.update_semantic_model({
+  await e.build_semantic_model({ action: 'update',
     context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
     semantic_models: [{ from: 'events', event_scope: { event_name: ['new_session'] }, measures: [{ name: 'sessions', agg: 'count', field: '*' }] }],
     metrics: [{ name: 'sessions', type: 'simple', measure: { name: 'sessions' } }],
   }).catch(async (e2) => {
-    // update_semantic_model may require the task to exist; creating a second task is the same path
+    // build_semantic_model action update may require the task to exist; creating a second task is the same path
     assert.match(String(e2.message), /./);
     await e.build_semantic_model({
       context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',

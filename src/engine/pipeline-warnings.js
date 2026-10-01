@@ -29,7 +29,7 @@ export class PipelineAdvisor {
    * The stage-level warnings for a WHOLE pipeline — the same judgements the incremental builder
    * makes per step, applied to a pipeline submitted all at once. Both entry points must warn about
    * the same stages: a recipe or a hand-written payload that goes straight through
-   * register_native_model is exactly where a silently-wrong join does the most damage, because
+   * _buildPipeline is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
   stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {

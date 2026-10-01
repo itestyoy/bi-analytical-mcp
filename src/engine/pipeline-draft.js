@@ -11,7 +11,7 @@ export const pipelineDraftMethods = {
    * Compose a native pipeline INCREMENTALLY (single tool, `action`-driven). Each
    * add_step validates the stage and returns the columns now available for the next
    * stage — pure schema propagation via renderPipeline, NO warehouse hit until materialize.
-   * The all-at-once register_native_model path is unchanged. Lifecycle:
+   * The all-at-once _buildPipeline path is unchanged. Lifecycle:
    * start → add_step* → (preview) → materialize | discard.
    */
   async build_pipeline_model(input) {

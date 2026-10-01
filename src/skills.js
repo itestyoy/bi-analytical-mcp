@@ -87,10 +87,10 @@ export function buildSkills(engine) {
     skills.push({ uri: `${base}/SKILL.md`, frontmatter, resources });
   };
 
-  // Each recipe as the TOOL returns it (engine.get_recipe fits a pipeline payload to this catalog —
+  // Each recipe as the TOOL returns it (engine._recipe fits a pipeline payload to this catalog —
   // a point-in-time window on a slowly-changing join), never the raw file entry: the skill must say
   // exactly what semantic_index({ request: { recipe } }) says.
-  const visible = recipes ? recipes.ids().filter((id) => !recipes.get(id).unavailable_here).map((id) => engine.get_recipe({ id })) : [];
+  const visible = recipes ? recipes.ids().filter((id) => !recipes.get(id).unavailable_here).map((id) => engine._recipe({ id })) : [];
   const recipeFile = (r) => [`recipes/${r.id}.md`, recipeMarkdown(r)];
 
   // ── the analyst procedure ──

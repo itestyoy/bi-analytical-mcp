@@ -1267,7 +1267,7 @@ test('48. duplicate names and unknown columns are refused with the fix', opts, a
 //     they mean different things: the version that crashed vs the version at install.
 test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
   if (skip(t)) return;
-  const preview = (attrs) => engine.register_native_model({
+  const preview = (attrs) => engine._buildPipeline({
     name: 'contract_preview', dry_run: true,
     pipeline: { source: 'crashlytics', stages: [{ stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', ...(attrs ? { attrs } : {}) }] },
   });

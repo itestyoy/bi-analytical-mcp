@@ -76,7 +76,7 @@ const num = (v) => (v == null || v === '' ? null : Number(v));
 
 test('python stage: dbt builds the prep table, runs the Python model, and its ROWS are the pipeline result', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY] } });
+  const r = await engine._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY] } });
   assert.equal(r.ok ?? r.build?.ok, true, JSON.stringify(r.error || r));
   assert.equal(r.build.executed, true, 'dbt actually ran both models');
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [[`${r.model}_s1`, 'sql', 'fct_analytics_events'], [r.model, 'python', `${r.model}_s1`]]);
@@ -119,7 +119,7 @@ test('python stage: the incremental builder materializes the same split and retu
 test('python stage: a runtime error in the Python model is reported from dbt, nothing is materialized as the result', opts, async (t) => {
   if (skip(t)) return;
   const bad = { ...PY, steps: [PY.steps[0], { call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
-  const r = await engine.register_native_model({ name: 'seg3', pipeline: { source: 'events', stages: [AGG, bad] } });
+  const r = await engine._buildPipeline({ name: 'seg3', pipeline: { source: 'events', stages: [AGG, bad] } });
   assert.equal(r.ok, false);
   assert.equal(r.error.stage, 'run');
   assert.match(r.error.message, /no_such_column/);
@@ -139,7 +139,7 @@ test('python stage: steps run on the relation dbt.ref() returns — no pandas an
     steps: [{ call: 'payers' }, { call: 'doubled' }],
     output: { columns: ['player_id_of_internal', 'revenue_x2'] },
   };
-  const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
+  const r = await engine._buildPipeline({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
   assert.equal(r.python[0].runtime, 'duckdb');
   assert.deepEqual(Object.keys(r.rows[0]).sort(), ['player_id_of_internal', 'revenue', 'revenue_x2'], 'the last step\'s projection IS the result — nothing re-projected');
@@ -154,7 +154,7 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   if (skip(t)) return;
   const first = { stage: 'python', functions: [{ name: 'purchases', params: ['df'], body: ["return df.filter(\"event_name = 'iap_purchase_completed'\")"] }], steps: [{ call: 'purchases' }] };
   const z = { ...PY, output: { columns: ['player_id_of_internal', 'n', 'revenue', 'revenue_z', 'tier'] } };
-  const r = await engine.register_native_model({ name: 'chain', pipeline: { source: 'events', stages: [
+  const r = await engine._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [
     first,                                                                             // s1: python over the SOURCE (purchases only → p4 disappears here)
     AGG,                                                                               // s2: SQL over the python model
     z,                                                                                 // s3: python (pandas by choice) over s2
@@ -192,7 +192,7 @@ test('python stage: a deeply nested body runs, and each level indents where it w
     steps: [{ call: 'to_pandas' }, { call: 'depth' }],
     output: { columns: ['player_id_of_internal', 'revenue', 'depth'] },
   };
-  const r = await engine.register_native_model({ name: 'deep', pipeline: { source: 'events', stages: [AGG, deep] } });
+  const r = await engine._buildPipeline({ name: 'deep', pipeline: { source: 'events', stages: [AGG, deep] } });
   assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
   // p3's 65 is the largest revenue in the seed, so the OUTERMOST branch (12) is the one that runs;
   // every row gets it, because the function decides once for the frame.
@@ -228,7 +228,7 @@ test('python stage: both sides of a nested if/else are reachable, decided per ro
     steps: [{ call: 'to_pandas' }, { call: 'label', args: { cut: 20 } }],
     output: { columns: ['player_id_of_internal', 'revenue', 'band'] },
   };
-  const r = await engine.register_native_model({ name: 'band', pipeline: { source: 'events', stages: [AGG, branch] } });
+  const r = await engine._buildPipeline({ name: 'band', pipeline: { source: 'events', stages: [AGG, branch] } });
   assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
   const bands = Object.fromEntries(r.rows.map((x) => [x.player_id_of_internal, x.band]));
   // revenue: p1 30, p2 5, p3 65, p4 NULL → the > 20 branch for p1/p3, the else for p2 and (NaN) p4

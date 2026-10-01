@@ -23,12 +23,12 @@ const engine = (over = {}) => settle(new Engine({
   ...over,
 }));
 
-// ── delete_native_model left a pipeline's other files behind ────────────────────────────────
+// ── _deletePipelineModel left a pipeline's other files behind ────────────────────────────────
 // A pipeline is a CHAIN of generated files: `<model>.sql`, and for a python stage `<model>.py` +
 // `<model>.yml`, plus `<model>_sN.*` per step. Deleting only `<model>.sql` reported removed:true
 // while dbt kept compiling the rest — and with the context's state cleared, nothing could name
 // them again. Lifecycle check: what the context owns on disk afterwards.
-test('delete_native_model removes EVERY file of the pipeline, not just the .sql', async () => {
+test('_deletePipelineModel removes EVERY file of the pipeline, not just the .sql', async () => {
   const e = engine();
   const ctx = e.ctxs.create();
   const dir = e.ctxs.generatedDir(ctx.id);
@@ -38,7 +38,7 @@ test('delete_native_model removes EVERY file of the pipeline, not just the .sql'
   for (const f of ['pipe_demo.sql', 'pipe_demo.py', 'pipe_demo.yml', 'pipe_demo_s1.sql', 'pipe_demo_s2.py', 'pipe_other.sql']) {
     writeFileSync(join(dir, f), '-- x\n');
   }
-  const out = await e.delete_native_model({ context_id: ctx.id });
+  const out = await e._deletePipelineModel({ context_id: ctx.id });
   assert.equal(out.removed, true);
   const left = readdirSync(dir).filter((f) => f.startsWith('pipe_'));
   assert.deepEqual(left, ['pipe_other.sql'], 'only the other model’s file survives');
@@ -144,7 +144,7 @@ test('a pipeline build never holds its call: even a lone python model returns a 
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
-  const started = await e.raw.register_native_model({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
+  const started = await e.raw._buildPipeline({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
   assert.ok(isStartedTask(started), `the call answers with its task only: ${JSON.stringify(started).slice(0, 300)}`);
   assert.equal(finished, 0, 'and returns before the build is done');
   const out = await taskResult(e, started.task_id);
@@ -198,7 +198,7 @@ models:
     ],
     metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
   };
-  const out = await e.register_native_model({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
+  const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
 });
 
@@ -225,17 +225,17 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
 });
 
 // ── a pipeline submitted all at once got none of the stage warnings ─────────────────────────
-// The incremental builder warns about an SCD join with no window; register_native_model ran the
+// The incremental builder warns about an SCD join with no window; _buildPipeline ran the
 // very same stages silently. Both paths now make the same judgements.
-test('register_native_model warns about an incomplete SCD join, like the step builder does', async () => {
+test('_buildPipeline warns about an incomplete SCD join, like the step builder does', async () => {
   const e = engine();
-  const out = await e.register_native_model({
+  const out = await e._buildPipeline({
     name: 'scd_fanout', dry_run: true,
     pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'] }] },
   });
   assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
   // with the window stated, there is nothing to warn about
-  const ok = await e.register_native_model({
+  const ok = await e._buildPipeline({
     name: 'scd_pit', dry_run: true,
     pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
   });
@@ -261,10 +261,10 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
     /cannot remove dimension 'nope'.*It has: country/s,
   );
-  const out = await e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it

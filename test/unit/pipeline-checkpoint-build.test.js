@@ -104,7 +104,7 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
-  assert.ok(e.list_query_jobs().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
+  assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
   const peek = await e.query_pipeline_model({ task_id: bg.task_id, wait_seconds: 0 });
   assert.equal(peek.status, 'running');
 
@@ -188,7 +188,7 @@ test('a build whose builder is gone does not wedge the draft: the restart retire
   await taskResult(e, bg.task_id);
 });
 
-test('a view prefix is called out (reading it re-runs its SQL), and describe_context shows the open draft', async (t) => {
+test('a view prefix is called out (reading it re-runs its SQL), and context describe shows the open draft', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
@@ -199,7 +199,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   assert.ok(r.warnings.some((w) => /VIEW/.test(w)), 'a view is not a computed prefix — said once, here');
   assert.equal(r.checkpoint.carries_source, 'events', 'a filtered slice is still the source\'s events');
 
-  const d = await e.describe_context({ context_id: draft_id });
+  const d = await e._describeContext({ context_id: draft_id });
   assert.deepEqual(d.draft.checkpoints.map((c) => [c.at, c.model, c.carries_source]), [[1, r.model, 'events']]);
   assert.equal(d.draft.steps.length, 1);
   // preview says what materialize would actually build now (nothing — everything is the table).

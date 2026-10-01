@@ -62,7 +62,7 @@ test('a mistake is refused IN the call — no task is started for it', async () 
   const e = engine(orderedRunner());
   const created = await e.build_semantic_model(TASK);
   await assert.rejects(() => e.query_semantic_model({ context_id: created.context_id, metrics: ['no_such_metric'] }), /unknown metric/);
-  assert.equal(e.list_query_jobs().tasks.length, 1, 'only the declaration\'s task exists');
+  assert.equal(e._listTasks().tasks.length, 1, 'only the declaration\'s task exists');
 });
 
 test('a query tool\'s read pages what the task holds, reads only its own side, and an unknown task is result_gone', async () => {
@@ -108,7 +108,7 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   const step = await e.build_pipeline_model({ action: 'add_step', draft_id: draft.draft_id, stage: { stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 1 }] } });
   assert.equal(step.column_count, 1);
   // the table's owner cannot be dropped under the draft that reads it
-  assert.throws(() => e.drop_context({ context_id: created.context_id }), /reads|READS|consumer|force/i);
+  assert.throws(() => e._dropContext({ context_id: created.context_id }), /reads|READS|consumer|force/i);
 });
 
 test('display_model_result draws a model\'s rows once — and nothing else; an experiment is no task', async () => {
@@ -299,12 +299,12 @@ test('a batch answers with its task_ids only; its members run side by side, and 
 test('one mistake refuses the whole batch, naming the query — and nothing in it is started', async () => {
   const e = engine(orderedRunner());
   const created = await e.build_semantic_model(TASK);
-  const before = e.list_query_jobs().tasks.length;
+  const before = e._listTasks().tasks.length;
   await assert.rejects(
     () => e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['no_such_metric'] }] }),
     (err) => err.field.startsWith('queries[1]') && /queries\[1\]: unknown metric/.test(err.message),
   );
-  assert.equal(e.list_query_jobs().tasks.length, before, 'no task was started for the batch');
+  assert.equal(e._listTasks().tasks.length, before, 'no task was started for the batch');
 });
 
 test('a batch takes at most five queries, and each mode takes only its own fields', async () => {

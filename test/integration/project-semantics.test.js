@@ -233,7 +233,7 @@ test('what the project does not define is refused in the call, naming what it do
   // …by any tool that would write into it
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, semantic_model: 'events', remove_metrics: ['project_cost'] })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', draft_id: ACQ })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw.register_native_model({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] }] } })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] }] } })), /own semantic layer/);
   // and it still serves its layer after them
   assert.ok(rowsOf(await q(ACQ, { metrics: ['project_cost'] }))[0].project_cost != null);
 });

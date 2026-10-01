@@ -217,7 +217,7 @@ export const pipelineMaterializeMethods = {
   /**
    * Register (or rebuild) a general transformation PIPELINE as a dbt model.
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
-   * It runs INSIDE a task (register_native_model, or a draft's materialize): the build is waited
+   * It runs INSIDE a task (_buildPipeline, or a draft's materialize): the build is waited
    * for here, and the caller reads the response with query_pipeline_model({ request: { task_id } }). A later pipeline re-slices
    * the table without recomputing it: build_pipeline_model({ request: { action: 'start', from_task } }).
    */

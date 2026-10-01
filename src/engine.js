@@ -384,21 +384,21 @@ export class Engine {
    */
   async context(input = {}) {
     this._validate('context', input);
-    return input.action === 'list' ? this.list_contexts() : this.describe_context({ context_id: input.context_id });
+    return input.action === 'list' ? this._listContexts() : this._describeContext({ context_id: input.context_id });
   }
 
   /** Remove a context, its pipeline model, or one model's task additions. */
   async delete_context(input = {}) {
     this._validate('delete_context', input);
     switch (input.what || 'context') {
-      case 'pipeline_model': return this.delete_native_model({ context_id: input.context_id });
-      case 'semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
-      default: return this.drop_context({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
+      case 'pipeline_model': return this._deletePipelineModel({ context_id: input.context_id });
+      case 'semantic_model': return this._deleteSemanticModel({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
+      default: return this._dropContext({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
     }
   }
 
-  drop_context(input) {
-    this._validate('drop_context', input);
+  _dropContext(input) {
+    this._validate('delete_context.context', input);
     if (this.ctxs.has(input.context_id) && this.ctxs.get(input.context_id).state?.pinned) throw new ToolError(`context '${input.context_id}' serves a semantic model of the dbt project's own layer for as long as the server runs — it is read from the project at start, not built here, so there is nothing to drop`, { stage: 'validate', field: 'context_id' });
     // A context whose materialized prefix another draft READS cannot just vanish: the fork's
     // `{{ ref() }}` would resolve to a relation that no longer exists. Name the consumers and let
@@ -430,13 +430,13 @@ export class Engine {
     return this.ctxs.checkpointConsumers(id).filter(({ consumer, model }) => reads(this.ctxs.get(consumer).state.draft, model));
   }
 
-  list_contexts() {
+  _listContexts() {
     return { contexts: this.ctxs.list() };
   }
 
   /**
-   * The A/B-experiment tool (action-driven): plan → sample_size (power/MDE), check_split → srm_check
-   * (SRM guardrail), analyze → ab_test (significance) — methods, not tools. Validates the action
+   * The A/B-experiment tool (action-driven): plan → _planExperiment (power/MDE), check_split →
+   * _checkSplit (SRM guardrail), analyze → _analyzeExperiment (significance). Validates the action
    * shape, then delegates to the method, which holds the input to its exact per-metric contract. The lifecycle order
    * (plan → check_split → analyze) is the recommended sequence.
    */
@@ -445,28 +445,28 @@ export class Engine {
     // `card` asks the MCP server for the result's card (src/mcp-surface.js): not a statistic
     const { action, card: _card, ...rest } = input;
     switch (action) {
-      case 'plan': return this.sample_size(rest);
-      case 'check_split': return this.srm_check(rest);
-      case 'analyze': return this.ab_test(rest);
+      case 'plan': return this._planExperiment(rest);
+      case 'check_split': return this._checkSplit(rest);
+      case 'analyze': return this._analyzeExperiment(rest);
       default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
     }
   }
 
   /** A/B significance over pre-aggregated per-group stats (src/experiment.js). */
-  ab_test(input) {
-    this._validate('ab_test', input);
+  _analyzeExperiment(input) {
+    this._validate('experiment.analyze', input);
     return abTest(input);
   }
 
   /** The sample-ratio-mismatch guardrail (src/experiment.js). */
-  srm_check(input) {
-    this._validate('srm_check', input);
+  _checkSplit(input) {
+    this._validate('experiment.check_split', input);
     return srmCheck(input);
   }
 
   /** Power / sample-size planning (src/experiment.js). */
-  sample_size(input) {
-    this._validate('sample_size', input);
+  _planExperiment(input) {
+    this._validate('experiment.plan', input);
     return sampleSize(input);
   }
 
@@ -511,8 +511,8 @@ export class Engine {
     return this.errors.explore(input);
   }
 
-  async describe_context(input) {
-    this._validate('describe_context', input);
+  async _describeContext(input) {
+    this._validate('context.describe', input);
     const ctx = this._ctx(input.context_id);
     if (ctx.state.engine === 'project' && this.project) return { engine: 'project', ...this._projectOverview(ctx.id) };
     // A pipeline-registered model is a normal dbt model whose rows are the result.
@@ -579,7 +579,7 @@ export class Engine {
     };
   }
 
-  list_query_jobs() {
+  _listTasks() {
     return { tasks: this.jobs.list() };
   }
 

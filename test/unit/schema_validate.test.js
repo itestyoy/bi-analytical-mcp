@@ -80,8 +80,8 @@ test('query: requires context_id and metrics', () => {
 });
 
 test('update: semantic_model must be a known model key', () => {
-  assert.equal(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'ghost' }).ok, false);
-  assert.ok(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
+  assert.equal(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_model: 'ghost' }).ok, false);
+  assert.ok(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
 });
 
 // TWO MODES, ONE TOOL. Declaring a task and editing the task already in a context used to be two

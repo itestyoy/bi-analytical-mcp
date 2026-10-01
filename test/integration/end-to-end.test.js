@@ -9,13 +9,13 @@
 //                    activation funnel; rows read back via query_pipeline_model; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
-//                    country → update_semantic_model adds a payers metric → re-query;
+//                    country → build_semantic_model action update adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
 //   5. A/B         — build_pipeline_model fed the conversion recipe's stages one-at-a-
-//                    time → materialize → per-variant aggregates → ab_test + srm_check +
-//                    sample_size, asserting the exact numbers ab-test.test.js asserts.
+//                    time → materialize → per-variant aggregates → experiment analyze + check_split +
+//                    plan, asserting the exact numbers ab-test.test.js asserts.
 //   6. RECIPES     — semantic_index overview list + semantic_index({ recipe: id }).
-//   7. TEARDOWN    — context({delete_semantic_model|delete_model|drop}), then
+//   7. TEARDOWN    — delete_context({ what: semantic_model | pipeline_model | context }), then
 //                    context({list}) shows the dropped context gone.
 //
 // DATA-ONLY: every substantive assertion is on a returned VALUE/COUNT (grounded in
@@ -238,15 +238,15 @@ test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_
   assert.equal(num(t3.rows[0].n), 3);
 });
 
-test('3c. commit equals the all-at-once register_native_model path (fidelity 12/8/5/3)', opts, async (t) => {
+test('3c. commit equals the all-at-once _buildPipeline path (fidelity 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: 'e2e_funnel_aao', pipeline: { source: 'events', stages: [matchActivation()] } });
+  const out = await engine._buildPipeline({ name: 'e2e_funnel_aao', pipeline: { source: 'events', stages: [matchActivation()] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   assert.equal(reached(out.rows, 'launch'), 12);
   assert.equal(reached(out.rows, 'tut1'), 8);
   assert.equal(reached(out.rows, 'tut2'), 5);
   assert.equal(reached(out.rows, 'tut3'), 3);
-  await engine.delete_native_model({ context_id: out.context_id });
+  await engine._deletePipelineModel({ context_id: out.context_id });
 });
 
 // ───────────────────────── 4. SEMANTIC MODEL ─────────────────────────
@@ -273,9 +273,9 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
-test('4b. update_semantic_model adds a payers metric; re-query = 7 distinct payers', opts, async (t) => {
+test('4b. build_semantic_model action update adds a payers metric; re-query = 7 distinct payers', opts, async (t) => {
   if (skip(t)) return;
-  const upd = await engine.update_semantic_model({
+  const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx, semantic_model: 'events',
     add_measures: [{ name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['iap_purchase_completed'] }],
     add_metrics: [{ name: 'payers', type: 'simple', measure: { name: 'payers' } }],
@@ -316,7 +316,7 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
 test('5a. build_pipeline_model fed the conversion recipe stages → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
   if (skip(t)) return;
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
-  // stages one at a time, then commit. (register_native_model with the same payload
+  // stages one at a time, then commit. (_buildPipeline with the same payload
   // is the documented fallback; here we prove the add_step path also works.)
   const r = recipes.list.find((x) => x.id === 'ab_test_conversion');
   const stages = r.register_payload.pipeline.stages;
@@ -404,7 +404,7 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
 // ───────────────────────── 7. TEARDOWN ─────────────────────────
 test('7. context: delete models + drop contexts; list shows them gone', opts, async (t) => {
   if (skip(t)) return;
-  // delete the semantic task's model additions (context delete_semantic_model action)
+  // delete the semantic task's model additions (delete_context with what: 'semantic_model')
   const dsm = await engine.delete_context({ what: 'semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
   assert.equal(dsm.removed, true);
   // delete the A/B pipeline model definition (context delete_model action)

@@ -10,7 +10,7 @@
 // just at runtime, and every field is typed where the form names it.
 import { form } from '../schema-kit.js';
 
-export function abTestSchema() {
+export function analyzeContract() {
   return { type: 'object', description: AB_DESCRIPTION, anyOf: abTestForms() };
 }
 
@@ -98,7 +98,7 @@ function abTestForms(extra = {}) {
 }
 
 // ── Sample Ratio Mismatch guardrail ───────────────────────────────────────────
-export function srmCheckSchema() {
+export function checkSplitContract() {
   return {
     type: 'object', additionalProperties: false, required: ['groups'],
     description: 'Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the observed per-group sample sizes match the intended split. A detected mismatch (p < 0.001) means randomization or logging is broken and the experiment is invalid — run this before trusting any lift. Compute per-group n with a pipeline first.',
@@ -124,7 +124,7 @@ export function srmCheckSchema() {
 // EXACTLY ONE of {mde, n} is given (mde → solve n; n → solve MDE), so each pair is a form of its own
 // that takes the one and not the other. Neither "both" nor "neither" nor a mismatched dispersion field
 // can be passed.
-export function sampleSizeSchema() {
+export function planContract() {
   return {
     type: 'object',
     description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size PER GROUP, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
@@ -166,7 +166,7 @@ export function experimentSchema() {
   // a card exists for the test alone: card: true elsewhere is refused by name (false is harmless)
   const noCard = { const: false, description: 'The split check and the plan have no card: answer them in words.' };
   const action = (value, description) => ({ required: true, schema: { const: value, description } });
-  const srm = srmCheckSchema();
+  const srm = checkSplitContract();
   return {
     type: 'object',
     description: 'The A/B experiment lifecycle in one tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) before running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it before trusting any lift); analyze = the significance test on pre-aggregated per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',

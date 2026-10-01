@@ -12,7 +12,7 @@ import { memoryView } from '../engine/helpers.js';
 
 export const semanticIndexMethods = {
   // Not a tool of its own — reached through semantic_index({ request: { recipe } }) and the skills.
-  get_recipe(input) {
+  _recipe(input) {
     if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
     // A recipe ships as ONE payload for every catalog, but whether a join needs a point-in-time
@@ -107,10 +107,10 @@ export const semanticIndexMethods = {
       });
     }
 
-    // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──
+    // ── { recipe }: one ready-made recipe by id (folded in from the old _recipe tool) ──
     if (input.recipe) {
       if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
-      return this.get_recipe({ id: input.recipe });
+      return this._recipe({ id: input.recipe });
     }
 
     // ── the catalog's views, one method each; none of them is the default ──

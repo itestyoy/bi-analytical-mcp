@@ -132,7 +132,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
 });
 
 // Recipes are building blocks reached THROUGH semantic_index, not a standalone tool.
-test('recipes have no standalone tool; get_recipe payload is framed as a building block', async () => {
+test('recipes have no standalone tool; _recipe payload is framed as a building block', async () => {
   const names = buildToolDefs(engine()).map((d) => d.name);
   assert.ok(!names.includes('get_recipe') && !names.includes('list_recipes'), 'no standalone recipe tools');
   const r = await engine().semantic_index({ recipe: 'conversion_metric_window' });
@@ -274,7 +274,7 @@ test('a task dimension is reported under its declared attribute even when one ta
     ],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
-  const out = await e.update_semantic_model({
+  const out = await e.build_semantic_model({ action: 'update',
     context_id: first.context_id,
     semantic_model: 'users',
     task: 'ret_v2',

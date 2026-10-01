@@ -107,7 +107,7 @@ export const semanticQueryMethods = {
     this._checkModelLoaded(ctx, ref);
     const target = c.getModel(model);
     // 1. a dimension the TASK declared on this model (a payload property or a model column named
-    //    in create/update_semantic_model) → its task-namespaced name
+    //    in create/update) → its task-namespaced name
     const tasks = ctx.state.tasks || [];
     for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
       if (declaredAttribute(d, tasks) === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;

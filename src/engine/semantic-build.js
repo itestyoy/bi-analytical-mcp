@@ -44,8 +44,8 @@ export const semanticBuildMethods = {
    * ARE the result. Funnels are just pipelines: match_recognize is a stage, and
    * downstream join/aggregate slice it by user attributes — no separate engine.
    */
-  async register_native_model(input) {
-    this._validate('register_native_model', input);
+  async _buildPipeline(input) {
+    this._validate('build_pipeline_model.pipeline', input);
     // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_id } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
@@ -54,8 +54,8 @@ export const semanticBuildMethods = {
   },
 
   /** Delete a registered native model: remove its files + state and re-parse. */
-  async delete_native_model(input) {
-    this._validate('delete_native_model', input);
+  async _deletePipelineModel(input) {
+    this._validate('delete_context.pipeline_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
@@ -144,15 +144,7 @@ export const semanticBuildMethods = {
     };
   },
 
-  /**
-   * The INCREMENTAL path on an existing task — build_semantic_model({ request: { action: 'update', … } })
-   * hands its input here, held to its own contract (METHOD_CONTRACTS, src/schema.js).
-   */
-  async update_semantic_model(input) {
-    this._validate('update_semantic_model', input);
-    return this._updateSemanticModel(input);
-  },
-
+  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }). */
   async _updateSemanticModel(input) {
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
@@ -212,8 +204,8 @@ export const semanticBuildMethods = {
     return this._taskStarted(taskId, { context_id: ctx.id });
   },
 
-  async delete_semantic_model(input) {
-    this._validate('delete_semantic_model', input);
+  async _deleteSemanticModel(input) {
+    this._validate('delete_context.semantic_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     const add = ctx.state.additions[modelKey];

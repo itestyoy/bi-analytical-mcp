@@ -224,7 +224,7 @@ test('a described pipeline builds and returns exactly the rows of the same pipel
     { stage: 'order_by', keys: [{ key: 'player_id_of_internal', direction: 'asc' }] },
   ];
   const build = async (name, description) => {
-    const out = await engine.register_native_model({ name, ...(description ? { description } : {}), pipeline: { source: 'events', stages } });
+    const out = await engine._buildPipeline({ name, ...(description ? { description } : {}), pipeline: { source: 'events', stages } });
     assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
     return out;
   };
@@ -238,6 +238,6 @@ test('a described pipeline builds and returns exactly the rows of the same pipel
   // …and the label is what the context now says this model is for
   const described = await engine.context({ action: 'describe', context_id: labelled.context_id });
   assert.equal(described.models?.[0]?.description, 'revenue per payer — the weekly monetization readout');
-  await engine.delete_native_model({ context_id: plain.context_id });
-  await engine.delete_native_model({ context_id: labelled.context_id });
+  await engine._deletePipelineModel({ context_id: plain.context_id });
+  await engine._deletePipelineModel({ context_id: labelled.context_id });
 });

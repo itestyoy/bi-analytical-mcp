@@ -56,7 +56,7 @@ const RULES = [
     re: /[=!]==\s*['"`](user|session|country|player_id|appsflyer_id|event_name|install)['"`]/g,
     why: 'a catalog name hardcoded in src/ — derive it from a role or a declaration',
     // A ROLE comparison (`.role === 'users'`) is structural: roles are the catalog's own fixed
-    // vocabulary (CLAUDE.md), while relationship and column names belong to the schema's author.
+    // vocabulary (AGENTS.md), while relationship and column names belong to the schema's author.
     skip: /\brole\s*===/,
     allow: {},
   },

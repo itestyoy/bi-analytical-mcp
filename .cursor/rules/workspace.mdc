@@ -1,0 +1,11 @@
+---
+description: Follow the repo root AGENTS.md for workspace rules
+alwaysApply: true
+---
+
+# Workspace rules
+
+Always follow **[AGENTS.md](../../AGENTS.md)** in the repository root.
+
+Before significant work, reread `AGENTS.md` and any relevant notes under `docs/knowledge/`.
+

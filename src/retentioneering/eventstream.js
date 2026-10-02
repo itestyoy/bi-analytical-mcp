@@ -1,5 +1,5 @@
 // THE EVENTSTREAM — the one table a path analysis reads, prepared in SQL where the data lives
-// (CLAUDE.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
+// (AGENTS.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
 //
 // The scoping and the attributes go through the pipeline's own stages (src/pipeline.js — a `where`
 // on the time window and the events, a `join` by the relationship the catalog declares, a `where`

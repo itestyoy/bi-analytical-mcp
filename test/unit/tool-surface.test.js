@@ -157,6 +157,18 @@ test('add_step warns when an event-specific property is used without its event s
   await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
   const a2 = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
   assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
+  const warnFor = async (cond) => {
+    const d = await e.build_pipeline_model({ action: 'start', name: 'scoped2', source: 'events' });
+    await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [cond] } });
+    const r = await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
+    return (r.recommendations || []).find((x) => x.includes('populated only on event'));
+  };
+  // a scope WITHIN the field's events is the right choice: every row it keeps carries the field
+  assert.equal(await warnFor({ column: 'event_name', op: 'eq', value: 'ad_started' }), undefined);
+  // a scope that also keeps an event without the field: those rows read NULL, and it names that event
+  assert.match(await warnFor({ column: 'event_name', op: 'in', value: ['ad_started', 'first_launch'] }), /also keeps first_launch/);
+  // a condition that does not name the events kept is no scope
+  assert.match(await warnFor({ column: 'event_name', op: 'neq', value: 'first_launch' }), /add an earlier where on event_name/);
 });
 
 // HLL is promoted as the preferred distinct-count method (mergeable, high-accuracy).

@@ -135,3 +135,13 @@ test('context list pages the contexts, most recently used first, and search narr
   await assert.rejects(() => e.context({ action: 'list', limit: 0 }), /limit/);
   e.close();
 });
+
+test('status lists the latest tasks first, of every side', async () => {
+  const e = engine();
+  const ids = [];
+  for (let i = 0; i < 12; i += 1) { ids.push(e.jobs.create({ tool: i % 2 ? 'query_pipeline_model' : 'query_retentioneering_model' })); await new Promise((r) => { setTimeout(r, 2); }); }
+  const st = await e.semantic_index({ status: true });
+  assert.equal(st.tasks.total, 12);
+  assert.deepEqual(st.tasks.recent.map((t) => t.task_id), ids.slice(-10).reverse(), 'the newest ten, newest first');
+  e.close();
+});

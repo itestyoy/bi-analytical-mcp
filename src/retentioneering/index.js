@@ -27,6 +27,7 @@ import { buildSchema, querySchema, displaySchema, retentioneeringFacts, pathSour
 import { renderEventstream } from './eventstream.js';
 import { LibraryChecker } from './checker.js';
 import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI } from './view-model.js';
+import { summarize } from './results.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 import { SIDE, BUILD, QUERY, DISPLAY } from './names.js';
 import { contextFor, pathContext, basePaths } from './contexts.js';
@@ -124,6 +125,10 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview, a distribution\'s histogram or a diff\'s heatmaps.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
+      // what the MODEL reads of a drawn card: the analysis as a read summarizes it — the card holds every
+      // record (the structured copy), and every path's cluster label or a density's thousand points
+      // would not fit the conversation
+      forModel: (drawn) => (drawn?.result ? { ...drawn, result: summarize(drawn.result), note: 'The card holds every record; this is the summary a read gives (query_retentioneering_model with detail: "full" for all of it).' } : drawn),
     },
     guide: { name: GUIDE_NAME, build: () => retentioneeringGuide(), triggers: ROUTING_TRIGGERS },
     skill: () => retentioneeringSkill(),

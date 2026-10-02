@@ -1375,7 +1375,8 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
 test('53. every attribute the catalog advertises for an owned relationship answers', opts, async (t) => {
   if (skip(t)) return;
   const refs = trueCatalog.reachableAttributes().filter((r) => r.model === 'crashlytics' && r.via === 'ad_funnel');
-  const own = Object.keys(trueCatalog.getModel('crashlytics').dimensions || {});
+  // the owner's attributes: its dimensions and, an events source, its event name — the one set the schema and the engine read
+  const own = trueCatalog.modelDimensionColumns('crashlytics');
   assert.ok(own.length >= 2, `the owning fact must declare attributes to reach: ${own}`);
   assert.deepEqual(refs.map((r) => r.attribute).sort(), [...own].sort(), 'exactly the owner\'s attributes are advertised through the relationship');
 

@@ -361,3 +361,37 @@ test('context() lists and describes a path-analysis context by its eventstreams 
   assert.equal(d.brief, undefined, 'the listing line is not repeated in describe');
   e.close();
 });
+
+// What the model reads of a distribution and of a long result: the numbers in the metric's own units,
+// the curve and every path's label left to the card. Pure functions over a result; no warehouse.
+test('a log-binned distribution is read in the metric\'s own units, without its density curve; long lists are cut', async () => {
+  const { summarize } = await import('../../src/retentioneering/results.js');
+  const curve = [Array.from({ length: 1000 }, (_, i) => i / 100), Array.from({ length: 1000 }, () => 0.1)];
+  const s = summarize({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 1, 2], counts: [3, 4], counts_normalized: [0.43, 0.57], kde: curve, mean: 1, median: 2 }, distance: 0.5, log_scale: true } });
+  assert.deepEqual(s.values.distribution_1, { bins: [1, 10, 100], counts: [3, 4], counts_normalized: [0.43, 0.57], median: 100, geometric_mean: 10 });
+  assert.equal(s.values.scale, 'log10');
+  assert.equal(s.values.distance_log10, 0.5);
+  assert.ok(s.scale_note);
+  // not log-binned: as the library gave it, the curve still left out
+  const plain = summarize({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 5, 10], counts: [1, 2], kde: curve, mean: 4, median: 3 }, log_scale: false } });
+  assert.deepEqual(plain.values.distribution_1, { bins: [0, 5, 10], counts: [1, 2], mean: 4, median: 3 });
+  // any other long list among the values: its first items and how many there were
+  const g = summarize({ kind: 'describe', values: { labels: Array.from({ length: 1684 }, (_, i) => i % 3) } });
+  assert.equal(g.values.labels.total, 1684);
+  assert.equal(g.values.labels.first.length, 20);
+});
+
+test('a read of several path-analysis tasks says how long it waited for them', async () => {
+  const e = on();
+  const { contextFor } = await import('../../src/retentioneering/contexts.js');
+  const { QUERY } = await import('../../src/retentioneering/names.js');
+  const ctx = contextFor(e, {});
+  const id = e.tasks.start(ctx, QUERY, () => new Promise((resolve) => { setTimeout(() => resolve({ ok: true, kind: 'analyses', analyses: {} }), 400); }));
+  const r = await e.query_retentioneering_model({ task_ids: [id], wait_seconds: 0 });
+  assert.equal(r.results[0].status, 'running');
+  assert.equal(r.results[0].waited_seconds, 0, 'asked not to wait');
+  const id2 = e.tasks.start(ctx, QUERY, () => new Promise((resolve) => { setTimeout(() => resolve({ ok: false, error: { message: 'x' } }), 5000); }));
+  const r2 = await e.query_retentioneering_model({ task_ids: [id2], wait_seconds: 1 });
+  assert.ok(r2.waited_seconds >= 0.9 && r2.results[0].waited_seconds >= 0.9, JSON.stringify(r2));
+  e.close();
+});

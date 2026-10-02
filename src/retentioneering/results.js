@@ -5,7 +5,7 @@
 // analysis that has one, draws it); the default read is a summary that fits a conversation (the biggest transitions,
 // the leading events per step, each group's profile, the first rows of each table).
 
-import { byText } from './view-model.js';
+import { byText, distributionInUnits } from './view-model.js';
 const TOP_EDGES = 25;
 const TOP_PER_STEP = 3;
 const TOP_PROFILE = 6;
@@ -178,6 +178,15 @@ export function summarize(result) {
       ...libraryTables,
     };
   }
+  if (kind === 'metric_distribution' && result.values) {
+    // each group's bins and counts with its figures, in the metric's own units — the density curve (a
+    // thousand points a group) is the card's to draw, not a number to read
+    const values = distributionInUnits(result.values);
+    const lean = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, v && typeof v === 'object' && !Array.isArray(v) && Array.isArray(v.bins)
+      ? Object.fromEntries(Object.entries(v).filter(([f]) => f !== 'kde').map(([f, x]) => [f, Array.isArray(x) ? x.map((n) => round(n)) : round(x)]))
+      : v]));
+    return { kind, ...(result.diff ? { diff: true } : {}), ...summarizeGeneric({ ...result, values: lean }), values: lean, ...(values.scale ? { scale_note: 'the library binned log10 of the values (a skewed metric); bins and median are put back into the metric\'s units, the mean of the logs is the geometric mean, and the distance is on the log10 values' } : {}) };
+  }
   return { kind, ...(result.diff ? { diff: true, ...(result.diff_groups ? { groups: result.diff_groups } : {}) } : {}), ...libraryTables };
 }
 
@@ -186,15 +195,24 @@ export function truncatedTables(result) {
   return !!result?.tables?.some((t) => t.truncated);
 }
 
-/** Tables as their first rows (with how many there are), values as they are. */
+/** A value with every list longer than TOP_ROWS cut to its first items, and how many it had. */
+function cutLists(v, depth = 0) {
+  if (Array.isArray(v)) return v.length > TOP_ROWS ? { first: v.slice(0, TOP_ROWS).map((x) => cutLists(x, depth + 1)), total: v.length } : v.map((x) => cutLists(x, depth + 1));
+  if (v && typeof v === 'object' && depth < 6) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cutLists(x, depth + 1)]));
+  return v;
+}
+
+/** Tables as their first rows (with how many there are), values with their long lists cut. */
 function summarizeGeneric(result) {
   const tables = result.tables?.map((t) => ({
     name: t.name, columns: t.columns, rows: t.rows.slice(0, TOP_ROWS).map((r) => r.map((v) => round(v))), total_rows: t.total_rows ?? t.rows.length,
   }));
   const cut = tables?.some((t) => t.total_rows > TOP_ROWS);
+  // a long list among the values (a curve, every path's label) is cut like a table's rows
+  const values = result.values && Object.fromEntries(Object.entries(result.values).map(([k, v]) => [k, cutLists(v)]));
   return {
     ...(tables ? { tables } : {}),
-    ...(result.values ? { values: result.values } : {}),
+    ...(values ? { values } : {}),
     ...(cut ? { rows_note: `tables show their first ${TOP_ROWS} rows; read with detail: "full" for every row` } : {}),
   };
 }

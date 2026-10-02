@@ -10,6 +10,32 @@ export const RETENTIONEERING_VIEW_URI = 'ui://betti/retentioneering-view.html';
 export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
+ * A distribution in the metric's OWN units. On a skewed continuous metric the library bins log10 of
+ * the values (its `log_scale`), and its bin edges, mean and median are log10 numbers then — read as
+ * they are, a duration of 300 s looked like 2.5. Here the edges and the median are put back (10^x: the
+ * log is monotonic, so the median is the median), the mean of the logs is the GEOMETRIC mean, and the
+ * scale is said. Without log_scale the values are as the library gave them.
+ */
+export function distributionInUnits(values) {
+  if (values?.log_scale !== true) return values;
+  const back = (x) => (typeof x === 'number' && Number.isFinite(x) ? 10 ** x : x);
+  const out = { ...values, scale: 'log10' };
+  for (const [name, v] of Object.entries(values)) {
+    if (!v || typeof v !== 'object' || Array.isArray(v) || !Array.isArray(v.bins)) continue;
+    const { mean, kde, ...rest } = v;
+    out[name] = {
+      ...rest, bins: v.bins.map(back), median: back(v.median),
+      ...(mean !== undefined ? { geometric_mean: back(mean) } : {}),
+      // the density is over log10 of the values: its x axis is put back too
+      ...(Array.isArray(kde) && kde.length === 2 ? { kde: [kde[0].map(back), kde[1]] } : kde !== undefined ? { kde } : {}),
+    };
+  }
+  // the distance between the groups is measured on the log10 values the library compared
+  if (typeof values.distance === 'number') { delete out.distance; out.distance_log10 = values.distance; }
+  return out;
+}
+
+/**
  * THE KINDS THAT HAVE A CARD — one table: a kind's title, whether its card is a chart of its own
  * (`charted`; a distribution is drawn as its histogram), how its card is built (`card`, from the
  * card's head, the result and what the drawing call carries), and for a diff that has a card, how
@@ -115,14 +141,17 @@ const kindOf = (v, kind) => (typeof kind === 'string' ? kind : typeof v === 'num
 /** metric_distribution: each group's bins as bars — two groups on the same bins in one chart — with
  *  the groups' own figures (mean, median) and the distance between them under it. */
 function distribution(head, r) {
-  const groups = Object.entries(r.values || {}).filter(([, v]) => isObj(v)).map(([name, v]) => {
+  // in the metric's own units, the scale said in each title (a log10 binning made 300 s read as 2.5)
+  const values = distributionInUnits(r.values || {});
+  const scaleNote = values.scale === 'log10' ? ' · log scale' : '';
+  const groups = Object.entries(values).filter(([, v]) => isObj(v)).map(([name, v]) => {
     const kinds = isObj(r.value_kinds?.[name]) ? r.value_kinds[name] : {};
     const items = Object.entries(v).map(([k, x]) => ({ label: humanize(k), value: x, kind: kindOf(x, kinds[k]) }));
     const h = histogramOf(items);
-    return h && { title: humanize(name), edges: h.edges, series: h.series, items: items.filter((it) => scalar(it.value) && !h.used.has(it)) };
+    return h && { title: `${humanize(name)}${scaleNote}`, edges: h.edges, series: h.series, items: items.filter((it) => scalar(it.value) && !h.used.has(it)) };
   }).filter(Boolean);
   if (!groups.length) return none('empty');
-  const loose = Object.entries(r.values || {}).filter(([, v]) => scalar(v)).map(([name, value]) => ({ label: humanize(name), value, kind: kindOf(value, r.value_kinds?.[name]) }));
+  const loose = Object.entries(values).filter(([k, v]) => scalar(v) && k !== 'log_scale' && k !== 'scale').map(([name, value]) => ({ label: humanize(name), value, kind: kindOf(value, r.value_kinds?.[name]) }));
   const shared = groups.length > 1 && groups.every((g) => JSON.stringify(g.edges) === JSON.stringify(groups[0].edges));
   const histograms = shared
     ? [{

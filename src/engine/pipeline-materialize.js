@@ -9,6 +9,7 @@ import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRu
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { samplingNote } from './helpers.js';
+import { physicalColumnType } from '../catalog/column-types.js';
 
 export const pipelineMaterializeMethods = {
   /**
@@ -341,6 +342,13 @@ export const pipelineMaterializeMethods = {
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ...dbtFailure('show', show) };
       build = { ok: true, executed: true };
+      // a column whose type the stages could not say (what a python stage returns) is typed as the
+      // built table has it — best effort: the answer stands without it
+      if ([...out.columns.values()].some((c) => !c?.type || c.type === 'unknown')) {
+        const phys = await this.probe.bestEffort(`built-columns:${ctx.id}:${modelName}`, () => this.runner.relationColumns(this.ctxs.dir(ctx.id), modelName));
+        const dtype = new Map((phys?.ok ? phys.columns : []).map((c) => [String(c.name).toLowerCase(), c.dtype ?? c.data_type]));
+        for (const [name, c] of out.columns) if ((!c?.type || c.type === 'unknown') && dtype.get(name.toLowerCase())) out.columns.set(name, { ...c, type: physicalColumnType(dtype.get(name.toLowerCase())) });
+      }
     }
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,

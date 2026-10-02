@@ -211,12 +211,19 @@ export class PipelineAdvisor {
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
+    // the events a where keeps: only a condition that NAMES them (eq / in) at the top of a where scopes
+    // the rows to them — a neq / not_in, or one inside an { or }, keeps others too
     const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
-    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
+    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol && (cond.op === 'eq' || cond.op === 'in')) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
+    // the risk is ROWS WITHOUT THE FIELD: no scope at all (every other event reads NULL), or a scope that
+    // keeps an event the field is not populated on. A scope within the field's events is the right one.
+    const missing = (evs) => (hasScope ? [...scoped].filter((e) => !evs.includes(e)) : null);
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && (!hasScope || missing(evs).length); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+    return [hasScope
+      ? `'${p}' is populated only on event(s) ${evs.join(', ')} — your event_name scope also keeps ${missing(evs).join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`
+      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
   }
 
   /**

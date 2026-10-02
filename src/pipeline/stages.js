@@ -311,7 +311,8 @@ export const STAGES = {
       const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile) }; });
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : 'numeric' });
+      // the earliest / latest of a column is of the column's type (a time stays a time); every other aggregate is a number
+      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : (m.agg === 'min' || m.agg === 'max') && m.column ? (cols.get(m.column)?.type || 'unknown') : 'numeric' });
       return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },

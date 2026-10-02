@@ -365,3 +365,24 @@ test('every tool description, and the core of the instructions for any offer, fi
     assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
   }
 });
+
+// WHAT A CALL SENDS IS READ FOR WHAT IT MEANS. The list shows one field, `request`; a model may still
+// send nothing for "an empty request", or the fields at the top as an earlier version's cached list
+// showed them — each is served as the request it means, checked by the same schema. Only `request`
+// beside other fields is ambiguous, and refused.
+test('a call with nothing in it is the empty request, and fields at the top are the request; request beside them is refused', async () => {
+  const { runTool } = await import('../../src/mcp-surface.js');
+  const e = engine();
+  const answer = async (args) => JSON.parse((await runTool(e, 'semantic_index', args)).result.content[0].text);
+  const overview = await answer({ request: {} });
+  assert.notEqual(overview.ok, false, JSON.stringify(overview.error));
+  for (const args of [{}, undefined]) assert.deepEqual(Object.keys(await answer(args)).sort(), Object.keys(overview).sort(), JSON.stringify(args));
+  // the fields at the top: the same view as under request, and the same refusal for a value the schema refuses
+  assert.deepEqual(await answer({ model: 'users' }), await answer({ request: { model: 'users' } }));
+  assert.equal((await runTool(e, 'semantic_index', { model: 'nope' })).result.isError, true);
+  // both at once cannot be told apart
+  const both = await runTool(e, 'semantic_index', { request: {}, model: 'users' });
+  assert.equal(both.result.isError, true);
+  assert.match(JSON.parse(both.result.content[0].text).error.message, /the field 'model' goes inside request, not beside it/);
+  assert.equal((await runTool(e, 'semantic_index', { request: 'users' })).result.isError, true);
+});

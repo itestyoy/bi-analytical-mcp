@@ -116,9 +116,9 @@ test('an error carries what reproduces it: the draft a refused step was added to
   assert.equal(task.args.action, 'materialize');
 });
 
-test('a call refused for leaving out the envelope is kept with the ids it carried at the top', async () => {
+test('a call refused for putting fields beside request is kept with the ids it carried at the top', async () => {
   const engine = makeEngine({ recipes: false });
-  const r = await runTool(engine, 'query_semantic_model', { task_id: 'abcdef123456' });
+  const r = await runTool(engine, 'query_semantic_model', { request: {}, task_ids: ['abcdef123456'] });
   assert.equal(r.result.isError, true);
   const page = payload(await runTool(engine, 'explore_errors', { request: { task_id: 'abcdef123456' } }));
   assert.equal(page.total, 1, 'found by the task it named');

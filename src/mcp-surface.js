@@ -126,19 +126,25 @@ export function isCallableTool(engine, name) {
 }
 
 /**
- * The input of a call: the value of its one field, `request`. A call written some other way — its
- * fields at the top, or nothing at all — is refused with the shape to use, the fields it gave moved
- * where they belong, so the next call is right.
+ * The input of a call: the value of its one field, `request`. What a client is SHOWN is that one
+ * field (wireSchema); what it SENDS is read for what it means, because a model does not always send
+ * the shape it was shown — a host may hold the tool list of an earlier version (whose fields sat at
+ * the top), a description's "an empty request" is easily sent as nothing at all, and some hosts drop
+ * an empty object. So a call with nothing in it is the empty request, and a call whose fields sit at
+ * the top is that request — either way validated against the same schema as `{ request }`. Only a
+ * call that is both — `request` beside other fields — is refused, since which one is meant cannot be
+ * told; as is a `request` that is not an object.
  */
 export function requestOf(name, args) {
   const given = isPlainObject(args) ? args : {};
   const keys = Object.keys(given);
-  if (keys.length === 1 && keys[0] === 'request' && isPlainObject(given.request)) return { request: given.request };
+  if (!keys.includes('request')) return { request: given };
+  if (keys.length === 1 && isPlainObject(given.request)) return { request: given.request };
   const others = keys.filter((k) => k !== 'request');
   const call = others.length
-    ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request`
+    ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request, not beside it`
     : `${name}({ request: { … } }) — request holds the fields the tool's schema lists ({ request: {} } when it needs none)`;
-  const bad = keys.includes('request') && !isPlainObject(given.request) ? ' (request must be an object)' : '';
+  const bad = !isPlainObject(given.request) ? ' (request must be an object)' : '';
   return { error: `${name} takes its input under one field, request: call ${call}${bad}` };
 }
 
@@ -183,8 +189,10 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   logLine(name, `▶ call ${summarizeArgs(args)}`);
   // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
   // (the arguments are kept as they came, so a failure is replayed by the same call)
-  // (a call refused for not using the envelope still carried its ids — at the top)
-  const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
+  // (the ids a call carried, under request or at the top — a call refused for putting fields beside
+  // request is still found by them)
+  const top = isPlainObject(args) ? args : {};
+  const inner = { ...top, ...(isPlainObject(top.request) ? top.request : {}) };
   const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
@@ -196,7 +204,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // call sees that input and nothing else
   const call = requestOf(name, args);
   if (call.error) {
-    logLine(name, '✗ not under request');
+    logLine(name, '✗ request beside other fields');
     failed(name, call.error, { stage: 'validate', field: 'request' });
     return { result: errorResult(call.error, 'validate', 'request'), raw: null };
   }

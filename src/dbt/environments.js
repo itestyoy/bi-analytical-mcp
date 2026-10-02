@@ -48,7 +48,7 @@ export function notOurs(name, envDir, role) {
  * table, since v2.0.0-preview.206 — dbt-labs/dbt#16423, #16425; the revert #16433 was closed
  * unmerged), so on a dataset this server fills with its contexts' tables every run, show and parse
  * waits minutes. dbt 1.x lists it in one INFORMATION_SCHEMA query. Back to `dbt-v2` once a v2 release
- * lists in bulk again. (The tests run on `dbt-v2` regardless: test/helpers/dbt-env.js.)
+ * lists in bulk again. The tests run on the same one (test/helpers/dbt-env.js).
  */
 export const DEFAULT_ENV = 'dbt-v1';
 export const DEFAULT_MF_ENV = 'metricflow';

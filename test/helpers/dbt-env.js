@@ -1,11 +1,11 @@
 // The dbt the integration tests run: an ENVIRONMENT (src/dbt/environments.js — a venv under
-// .venvs, or DBT_ENVS_DIR), `dbt-v2` unless DBT_ENV names another (the tests' own default, whatever
-// the server's is for now — src/dbt/environments.js DEFAULT_ENV) — built from its lock with
+// .venvs, or DBT_ENVS_DIR), the server's own default (src/dbt/environments.js DEFAULT_ENV — for now
+// `dbt-v1`) unless DBT_ENV names another — built from its lock with
 // `npm run dbt:env -- create <name>`, the same as the image. A file that needs a particular dbt (the python stage: dbt 1.x)
 // asks for its environment by name with dbtEnv().
 
 import { existsSync } from 'node:fs';
-import { resolveEnvironment } from '../../src/dbt/environments.js';
+import { resolveEnvironment, DEFAULT_ENV } from '../../src/dbt/environments.js';
 import { createDbt } from '../../src/dbt/index.js';
 
 /**
@@ -20,8 +20,8 @@ export function dbtEnv(name) {
   }
 }
 
-/** The environment the tests run on: DBT_ENV, else `dbt-v2`. */
-export const TEST_ENV = process.env.DBT_ENV || 'dbt-v2';
+/** The environment the tests run on: DBT_ENV, else the one the server runs (DEFAULT_ENV). */
+export const TEST_ENV = process.env.DBT_ENV || DEFAULT_ENV;
 const ENV = dbtEnv(TEST_ENV);
 export const DBT_BIN = ENV?.dbtBin || '';
 export const MF_BIN = ENV?.mfBin || '';

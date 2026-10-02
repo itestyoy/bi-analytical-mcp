@@ -99,7 +99,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
     name: 'context',
     output: OUTPUTS.context,
     title: 'Read Contexts',
-    description: 'Read the isolated contexts that build_semantic_model and build_pipeline_model create: action:"list" gives every context with its description; action:"describe" gives one context\'s tasks, models, metrics and group-by paths. It changes nothing; to remove a context or a model in it, use delete_context.',
+    description: 'Read the isolated contexts that build_semantic_model and build_pipeline_model create: action:"list" gives a page of contexts, the most recently used first, each with its description (offset pages through them, search narrows them — the server keeps every conversation\'s); action:"describe" gives one context\'s tasks, models, metrics and group-by paths. It changes nothing; to remove a context or a model in it, use delete_context.',
     // list / describe read the contexts; removing is delete_context
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.context(input),

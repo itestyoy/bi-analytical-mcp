@@ -339,3 +339,25 @@ test('a query result stored before its rows were numbered within their tables is
   assert.equal(resultOrigin(state, 'q_new').gone, undefined);
   for (const t of ['q_old', 'q_str', 'q_none']) assert.match(resultOrigin(state, t).gone, /stored by an earlier version .* run the same query again/);
 });
+
+// A path-analysis context is seen in context() for what it holds — its eventstreams, their steps and
+// how far they are materialized — in the listing as in describe; the core asks the feature, by name of
+// nothing (src/features.js describeContext). Context lifecycle; no warehouse.
+test('context() lists and describes a path-analysis context by its eventstreams and their steps', async () => {
+  const e = on();
+  const { contextFor } = await import('../../src/retentioneering/contexts.js');
+  const ctx = contextFor(e, {});
+  ctx.state.retentioneering.description = 'onboarding paths';
+  ctx.state.retentioneering.eventstreams.es = {
+    model: 'm', source: 'events', spec: {}, columns: [], segments: [], steps: [{ step: { type: 'add_start_end_events' }, library: 'add_start_end_events', checked: true, shape: null }], checkpoint: null,
+    base: { model: 'm', task_id: null, summary: { events: ['a'], users: 3 }, shape: null }, summary: null,
+  };
+  const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === ctx.id);
+  assert.equal(listed.description, 'onboarding paths');
+  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps: 1, materialized_through: 0 }]);
+  const d = await e.context({ action: 'describe', context_id: ctx.id });
+  assert.equal(d.engine, 'retentioneering');
+  assert.deepEqual(d.eventstreams.map((x) => [x.name, x.source, x.steps.map((s) => s.library), x.base.users]), [['es', 'events', ['add_start_end_events'], 3]]);
+  assert.equal(d.brief, undefined, 'the listing line is not repeated in describe');
+  e.close();
+});

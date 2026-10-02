@@ -231,6 +231,7 @@ export class ContextManager {
       semantic_models: Object.keys(c.state.additions || {}),
       metrics: (c.state.metrics || []).map((m) => m.name),
       age_ms: now - c.createdAt,
+      idle_ms: now - (c.lastUsedAt || c.createdAt),
     }));
   }
 

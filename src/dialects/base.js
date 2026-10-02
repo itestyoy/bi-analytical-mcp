@@ -210,6 +210,12 @@ export class Dialect {
    * which is what puts a whole table in one worker's memory.
    */
   get approximateStats() { return []; }
+  /**
+   * A time column as the semantic layer reads it. MetricFlow keeps time in ONE type per warehouse — its
+   * time spine and every truncation are of it — and a time dimension of another type is compared with
+   * them as it is, which a strict warehouse refuses. Here the column is its own type.
+   */
+  semanticTimeExpr(column, _dataType) { return column; }
   /** Approximate distinct count (HLL++ where available). */
   approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
   // ── the value index's scans ─────────────────────────────────────────────────

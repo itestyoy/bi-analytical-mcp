@@ -95,6 +95,7 @@ export function dbtSchemaToCatalog(doc) {
     const flatProps = {}; // fact-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in pipelines
+    const dataTypes = {}; // column → its declared warehouse data_type
     for (const col of model.columns || []) {
       const cm = mcpOf(col) || {};
       // A VALIDITY MARK only means something on a groupable time dimension — that is the only
@@ -115,6 +116,7 @@ export function dbtSchemaToCatalog(doc) {
       // Expose every REAL column to pipelines — except the raw is_event_data
       // payload marker, which may not exist as a physical column once flattened.
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
+      if (col.data_type) dataTypes[col.name] = String(col.data_type); // the warehouse type as declared — the semantic layer reads a time column by it
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
         // A column-level entity is the single-column case of the same declaration.
@@ -253,6 +255,7 @@ export function dbtSchemaToCatalog(doc) {
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     m.columns = allColumns;
+    m.data_types = dataTypes;
     // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or one relationship
     // carried by several ALTERNATIVE columns (`variants`). It lives on the MODEL because it
     // belongs to no single column. The same entity NAME on two models is the join between them, and the key is

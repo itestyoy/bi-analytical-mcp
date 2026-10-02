@@ -43,8 +43,14 @@ export const OUTPUTS = {
   }),
 
   // list: { contexts }; describe: one context in depth — one object, no union: what each mode answers is optional
-  context: shape('The contexts (list: `contexts`), or one in depth (describe: `context_id` and what it holds).', [], {
+  context: shape('A page of the contexts (list: `contexts`, `total`, `next_offset`), or one in depth (describe: `context_id` and what it holds).', [], {
     contexts: list(obj),
+    total: num,
+    offset: num,
+    next_offset: num,
+    description: str,
+    eventstreams: list(obj),
+    continue_with: str,
     context_id: str,
     engine: str,
     tasks: list(),

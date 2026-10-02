@@ -582,12 +582,12 @@ export class Catalog {
         const target = this.primaryByEntity[ent];
         if (!target) continue;
         const identity = primaryEntityName(this.models[target]);
-        for (const dim of Object.keys(this.models[target].dimensions || {})) push(target, dim, ent === identity ? undefined : ent);
+        for (const dim of this.modelDimensionColumns(target)) push(target, dim, ent === identity ? undefined : ent);
       }
     }
     for (const key of this.modelKeys()) {
       if (!primaryEntityName(this.models[key])) continue;
-      for (const dim of Object.keys(this.models[key].dimensions || {})) push(key, dim, undefined);
+      for (const dim of this.modelDimensionColumns(key)) push(key, dim, undefined);
     }
     return out;
   }

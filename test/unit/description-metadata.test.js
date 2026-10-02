@@ -113,3 +113,25 @@ test('no description means no empty field in the response', async () => {
   assert.ok(!('description' in listed));
   assert.ok(!('task_notes' in listed));
 });
+
+// The listing is a PAGE, most recently used first: a server keeps every conversation's contexts, and the
+// whole list did not fit a model's window. Context lifecycle; no warehouse.
+test('context list pages the contexts, most recently used first, and search narrows them', async () => {
+  const e = engine();
+  const ids = [];
+  for (let i = 0; i < 5; i += 1) ids.push((await e.build_pipeline_model({ action: 'start', name: `pg${i}`, source: 'events', description: i === 2 ? 'the payer funnel' : `draft ${i}` })).draft_id);
+  e.ctxs.touch(ids[1]); // used last
+  const first = await e.context({ action: 'list', limit: 2 });
+  assert.equal(first.total, 5);
+  assert.equal(first.contexts.length, 2);
+  assert.equal(first.contexts[0].context_id, ids[1], 'the one used last comes first');
+  assert.equal(first.next_offset, 2);
+  const rest = await e.context({ action: 'list', offset: first.next_offset, limit: 10 });
+  assert.equal(rest.contexts.length, 3);
+  assert.equal(rest.next_offset, undefined, 'the last page says there is no next one');
+  assert.deepEqual(new Set([...first.contexts, ...rest.contexts].map((c) => c.context_id)), new Set(ids));
+  const found = await e.context({ action: 'list', search: 'PAYER funnel' });
+  assert.deepEqual(found.contexts.map((c) => c.context_id), [ids[2]]);
+  await assert.rejects(() => e.context({ action: 'list', limit: 0 }), /limit/);
+  e.close();
+});

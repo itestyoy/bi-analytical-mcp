@@ -129,6 +129,8 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
     skill: () => retentioneeringSkill(),
     instructions: INSTRUCTIONS_LINE,
     close: () => feature.checker.close(),
+    // what a path-analysis context holds, for context({ action: list | describe }): null for any other
+    describeContext: (engine, ctx) => describePathContext(ctx),
     overview: () => ({
       library: `retentioneering ${retentioneeringFacts().version}`,
       analyses: analysisKinds(),
@@ -137,6 +139,31 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
     }),
   };
   return feature;
+}
+
+/**
+ * A path-analysis context as context() shows it: its description and each eventstream — its source
+ * (or the task it was started from), what it was forked from, its steps as preview gives them, how
+ * far they are materialized and the shape at the end — and how to go on with it. `brief` is the
+ * listing's line: the eventstreams by name, with their step counts.
+ */
+function describePathContext(ctx) {
+  const state = ctx.state?.retentioneering;
+  if (!state) return null;
+  const eventstreams = Object.entries(state.eventstreams || {}).map(([name, es]) => {
+    const p = preview(ctx, name, es);
+    return {
+      name, source: es.source, ...(es.from_task ? { from_task: es.from_task } : {}), ...(es.forked_from ? { forked_from: es.forked_from } : {}),
+      ...(es.description ? { description: es.description } : {}), base: p.base, steps: p.steps, materialized_through: p.materialized_through, ...(p.table ? { table: p.table } : {}), shape: p.shape,
+    };
+  });
+  return {
+    engine: SIDE,
+    ...(state.description ? { description: state.description } : {}),
+    eventstreams,
+    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, source: e.source, steps: e.steps.length, materialized_through: e.materialized_through })) },
+    continue_with: `${BUILD}({ request: { action: 'preview' | 'add_step' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it.`,
+  };
 }
 
 // ── build ─────────────────────────────────────────────────────────────────────────────────────

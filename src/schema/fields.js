@@ -344,6 +344,8 @@ export function predicateDefs(catalog, project = null) {
 // knows nor can raise. Asking for more than this returns after the cap, with `clamped: true`.
 // Declared here because both the schema text and the engine's clamp must say the same number.
 export const MAX_WAIT_SECONDS = 30;
+/** How many contexts one context({ action: list }) page holds, unless it asks for another number. */
+export const CONTEXT_PAGE = 20;
 
 /** A copy of a schema without its descriptions: the same checks, told once where it is described. */
 export function terse(schema) {

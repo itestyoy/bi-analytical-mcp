@@ -27,6 +27,8 @@
 //   skill(engine) → { path, frontmatter, body, references: [[relPath, text]] }
 //   instructions: one line for the core instructions
 //   overview(engine) → what semantic_index's overview says about it
+//   describeContext(engine, ctx) → what a context of this feature holds, for context({ action: describe }),
+//              with `brief` for its line in the listing — null for a context that is not the feature's
 
 import { retentioneeringDefinition } from './retentioneering/index.js';
 import { defineTool } from './tools/define.js';

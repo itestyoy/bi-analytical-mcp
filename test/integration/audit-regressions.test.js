@@ -596,6 +596,25 @@ test('49b. freshness read over the recent partitions is the latest device_time o
   assert.equal(dayOf(await probeAt('2026-06-01T00:00:00Z').dataFreshness('events')), truth);
 });
 
+test('49c. an id past 2^53 comes back from a pipeline with every digit the warehouse holds', opts, async (t) => {
+  if (skip(t)) return;
+  const truth = (await wh.query('select cast(3000624785682605657 as bigint)::varchar as id')).rows[0].id;
+  const rows = await pipeRows('events', [
+    { stage: 'compute', name: 'big_id', expr: { fn: 'raw', sql: 'CAST(3000624785682605657 AS BIGINT)', type: 'numeric' } },
+    { stage: 'aggregate', group_by: ['big_id'], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(String(rows[0].big_id), truth);
+});
+
+test('49d. a metric is grouped by the event name the schema offers as an attribute — the counts per crash event the warehouse holds', opts, async (t) => {
+  if (skip(t)) return;
+  const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((r) => [r.event_name, Number(r.n)]));
+  const r = await q(evCrashCtx, { metrics: ['aboth_reports'], group_by: [{ model: 'crashlytics', attribute: 'event_name' }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const col = Object.keys(r.rows[0]).find((k) => k !== 'aboth_reports');
+  assert.deepEqual(Object.fromEntries(r.rows.map((row) => [row[col], Number(row.aboth_reports)])), truth);
+});
+
 // ═══════════ O. PER-APP COVERAGE PER SOURCE ═══════════
 
 test('50. apps are listed per source: two on events (131 / 53), none on the crash source', opts, async (t) => {

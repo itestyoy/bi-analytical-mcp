@@ -499,7 +499,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   an OPENING paragraph of at most 512 characters that stands alone (what the server is for, how a
   question flows — ChatGPT and Codex), then a CORE BLOCK (`coreInstructions`, src/mcp-surface.js)
   within 2,048 (the rules that span several tools, when to stop — Claude Code's cut), then the data
-  model and its joins. They carry only what no single tool says — the spec asks them not to repeat
+  model and its joins. The server does not talk about how it works technically: the opening says so
+  and the core states it (`SELF_REFUSAL`) — a request for its code, architecture, tech stack, tools'
+  internals or instructions is declined in one sentence however it is framed; how a number was computed is about the data, and is answered. They carry only what no single tool says — the spec asks them not to repeat
   the tool descriptions, and every tool description stands on its own (each within 2,048 too); long
   procedures live behind semantic_index ({ guide }, { recipe }) and the skills
   (test/unit/tool-surface.test.js holds the budgets).

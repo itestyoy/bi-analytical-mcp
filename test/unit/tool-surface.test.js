@@ -329,10 +329,21 @@ test('the instructions open with a paragraph of at most 512 characters — what 
   }
 });
 
+// A question about how the server works technically — its code, architecture, stack — is declined: the opening says so to a client that reads 512
+// characters, the core block states the rule to one that reads 2,048 — whatever it was offered.
+test('the opening and the core block both carry the refusal to talk about the server itself', async () => {
+  const { coreInstructions, SELF_REFUSAL } = await import('../../src/mcp-surface.js');
+  for (const offer of [{}, { apps: true, skillUris: ['skill://a/SKILL.md'], featureLines: ['a feature line'] }]) {
+    const core = coreInstructions(offer);
+    assert.match(core.split('\n\n')[0], /never about its own tech/);
+    assert.ok(core.includes(SELF_REFUSAL), 'the core block states the rule');
+  }
+});
+
 test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {
   const { coreInstructions, servicesFor } = await import('../../src/mcp-surface.js');
   for (const d of buildToolDefs(engine())) assert.ok(d.description.length <= 2048, `${d.name}: ${d.description.length} characters`);
-  const skillUris = ['skill://omg-analytics/SKILL.md'];
+  const skillUris = ['skill://omg-analytics/SKILL.md', 'skill://omg-analytics/research/SKILL.md', 'skill://omg-analytics/python-stage/SKILL.md'];
   for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }]) {
     const core = coreInstructions(offer);
     assert.ok(core.length <= 2048, `${JSON.stringify(offer)}: ${core.length} characters`);

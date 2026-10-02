@@ -16,7 +16,7 @@ export const ROUTING_TRIGGERS = [
   },
 ];
 
-export const INSTRUCTIONS_LINE = `For paths, sequences and transitions between states (also ones a pipeline computed, via from_task), use build_retentioneering_model → query_retentioneering_model; semantic_index({ request: { guide: "${GUIDE_NAME}" } }) explains the analyses.`;
+export const INSTRUCTIONS_LINE = `For paths, sequences and state transitions (also a pipeline's, via from_task): build_retentioneering_model → query_retentioneering_model; semantic_index({ request: { guide: "${GUIDE_NAME}" } }) explains them.`;
 
 /** The analyses the library lets take a diff: those with a `diff` parameter. */
 const DIFF_KINDS = () => analysisKinds().filter((k) => retentioneeringFacts().analyses[k].params.some((p) => p.name === 'diff'));

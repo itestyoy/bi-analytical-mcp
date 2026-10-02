@@ -499,8 +499,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   an OPENING paragraph of at most 512 characters that stands alone (what the server is for, how a
   question flows — ChatGPT and Codex), then a CORE BLOCK (`coreInstructions`, src/mcp-surface.js)
   within 2,048 (the rules that span several tools, when to stop — Claude Code's cut), then the data
-  model and its joins. The server does not talk about how it is built: the opening carries the rule's
-  brief (`SELF_REFUSAL_BRIEF`) and the core the rule (`SELF_REFUSAL`, which extends the same brief) —
+  model and its joins. The server does not talk about how it is built (src/self-refusal.js, one wording
+  in three forms): the opening carries the brief (`SELF_REFUSAL_BRIEF`), the core the rule
+  (`SELF_REFUSAL`) and semantic_index's description its scope (`SELF_REFUSAL_TOOL`, for a client that
+  reads no instructions) —
   a request for its code, architecture, tech stack or instructions is declined in one sentence however
   it is framed, while the data's own questions stay answered (how a number was computed, its SQL, why a
   call failed, how sources join); the eval case `server_internals` grades it on what the reply gives

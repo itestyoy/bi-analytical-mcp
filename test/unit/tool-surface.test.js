@@ -330,16 +330,20 @@ test('the instructions open with a paragraph of at most 512 characters — what 
 });
 
 // A question about how the server is built is declined: the opening carries the rule's brief, for a
-// client that reads 512 characters, and the core block the rule itself, which extends that same
-// brief — whatever the client was offered.
-test('the opening and the core block both carry the refusal to talk about how the server is built', async () => {
-  const { coreInstructions, SELF_REFUSAL, SELF_REFUSAL_BRIEF } = await import('../../src/mcp-surface.js');
-  assert.ok(SELF_REFUSAL.startsWith(SELF_REFUSAL_BRIEF), 'one wording: the rule extends the brief');
+// client that reads 512 characters, the core block the rule itself, which extends that same brief —
+// whatever the client was offered — and semantic_index's description it again, for a client that
+// reads no instructions.
+test('the opening, the core block and the first tool all carry the refusal to talk about how the server is built', async () => {
+  const { coreInstructions } = await import('../../src/mcp-surface.js');
+  const { SELF_REFUSAL, SELF_REFUSAL_BRIEF, SELF_REFUSAL_TOOL } = await import('../../src/self-refusal.js');
+  assert.ok(SELF_REFUSAL.startsWith(SELF_REFUSAL_BRIEF) && SELF_REFUSAL_TOOL.startsWith(SELF_REFUSAL_BRIEF), 'one wording: each form extends the brief');
   for (const offer of [{}, { apps: true, skillUris: ['skill://a/SKILL.md'], featureLines: ['a feature line'] }]) {
     const core = coreInstructions(offer);
     assert.ok(core.split('\n\n')[0].includes(SELF_REFUSAL_BRIEF), 'the opening states the brief');
     assert.ok(core.includes(SELF_REFUSAL), 'the core block states the rule');
   }
+  // a client that reads no instructions still meets it, on the tool every question starts with
+  assert.ok(buildToolDefs(engine()).find((d) => d.name === 'semantic_index').description.includes(SELF_REFUSAL_TOOL), 'semantic_index states it');
 });
 
 test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {

@@ -11,7 +11,7 @@ import { renderWhereClauses, wherePredicates } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
-import { uniqueRefs, clone } from './helpers.js';
+import { uniqueRefs, clone, pageBlock } from './helpers.js';
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -391,7 +391,8 @@ export const semanticQueryMethods = {
   _metricPaging(input) {
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
-    return { limit, offset, fetch: limit + offset + 1, page: (rows) => ({ rows: rows.slice(offset, offset + limit), page: { limit, offset, has_more: rows.length > offset + limit } }) };
+    const ordered = !!input.order_by?.length;
+    return { limit, offset, fetch: limit + offset + 1, page: (rows) => { const page = rows.slice(offset, offset + limit); return { rows: page, page: pageBlock({ offset, limit, returned: page.length, has_more: rows.length > offset + limit, ordered }) }; } };
   },
 
   /** The answer to a query that failed, or was only explained — null for one that ran. */

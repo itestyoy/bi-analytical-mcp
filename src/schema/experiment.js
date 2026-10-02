@@ -27,6 +27,8 @@ function abTestForms(extra = {}) {
     conversions: { type: 'integer', minimum: 0, description: 'proportion: number of successes in the group.' },
     mean: { type: 'number', description: 'mean: mean of the metric over the group.' },
     stddev: { type: 'number', minimum: 0, description: 'mean: standard deviation over the group.' },
+    sum: { type: 'number', description: 'mean: Σ of the metric over the group (with sum_squares — what one aggregate stage gives: count, sum, sum of squares).' },
+    sum_squares: { type: 'number', minimum: 0, description: 'mean: Σ of the metric² over the group.' },
     sumNum: { type: 'number', description: 'ratio: Σ of the per-user numerator.' },
     sumDen: { type: 'number', exclusiveMinimum: 0, description: 'ratio: Σ of the per-user denominator (must be > 0).' },
     sumNum2: { type: 'number', minimum: 0, description: 'ratio: Σ of numerator².' },
@@ -61,8 +63,9 @@ function abTestForms(extra = {}) {
   const good = { enum: ['up', 'down'], default: 'up', description: 'Which direction of the metric is GOOD: up (conversion, revenue, retention) or down (crash rate, churn, load time, cost). Decides whether a significant change is an improvement or a regression; no statistic changes.' };
 
   // One metric's form.
+  // a group may be given in several closed forms (each with distinct required fields): `fields` a list of [fields, description]
   const branch = (metric, branchDesc, fields, armDesc, extraProps = {}) => {
-    const a = arm(fields, armDesc);
+    const a = Array.isArray(fields) ? { anyOf: fields.map(([f, d]) => arm(f, d)) } : arm(fields, armDesc);
     return form({
       title: `metric: ${metric}`,
       description: branchDesc,
@@ -84,9 +87,9 @@ function abTestForms(extra = {}) {
       { conversions: F.conversions },
       'A group for a proportion test: n and the number of conversions.',
       { sequential, expected_effect: expectedEffect }),
-    branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev.',
-      { mean: F.mean, stddev: F.stddev },
-      'A group for a mean test: n, mean and stddev.',
+    branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev — or the sum and sum of squares a pipeline\'s aggregate gives, from which they are computed (the sample stddev).',
+      [[{ mean: F.mean, stddev: F.stddev }, 'A group for a mean test: n, mean and stddev.'], [{ sum: F.sum, sum_squares: F.sum_squares }, 'A group for a mean test from its sums: n (at least 2), sum and sum_squares of the per-user values.']],
+      null,
       { sequential, expected_effect: expectedEffect }),
     branch('ratio', 'Ratio-metric test via the delta method: each group carries the per-user numerator/denominator sums plus their squares and cross-product.',
       { sumNum: F.sumNum, sumDen: F.sumDen, sumNum2: F.sumNum2, sumDen2: F.sumDen2, sumNumDen: F.sumNumDen },

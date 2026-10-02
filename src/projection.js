@@ -8,8 +8,9 @@ import { comparison, conditionsSql, eachCondition } from './conditions.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 /** The aggregations a projection (a read's transform, a drill-down) takes — the one list its schema offers. */
-export const AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct']);
-const SQL_FN = { average: 'avg' };
+export const AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance']);
+// the sample statistics, as a pipeline's aggregate stage computes them (both warehouses spell them so)
+const SQL_FN = { average: 'avg', stddev: 'stddev_samp', variance: 'var_samp' };
 /** The column an aggregation produces: its own name, else <agg>_<column> (the function alone for a row count). */
 export const aggName = (a) => a.name || (a.column ? `${a.agg}_${a.column}` : a.agg);
 

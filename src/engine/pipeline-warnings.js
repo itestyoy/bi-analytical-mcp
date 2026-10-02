@@ -9,6 +9,7 @@ import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
 import { FNS, exprCalls } from '../pipeline/compute.js';
+import { eachCondition } from '../conditions.js';
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -280,10 +281,31 @@ export class PipelineAdvisor {
     return warns.slice(0, 3);
   }
 
+  /**
+   * A where that bounds a TIME column from above by a bare date (`lte` / the high end of `between`):
+   * on a timestamp the date means that day's 00:00:00, so the whole last day is left out — the
+   * classic off-by-a-day. Said, never refused: on a DATE column the bound is exactly right.
+   */
+  dateBoundWarnings(stage, available = []) {
+    if (stage?.stage !== 'where') return [];
+    const timeCols = new Set(available.filter((c) => c.type === 'time').map((c) => c.name));
+    const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const hits = [];
+    eachCondition(stage.conditions, (c) => {
+      const col = c.column ?? c.left?.column;
+      if (!timeCols.has(col)) return;
+      const value = c.value ?? c.right?.value;
+      const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
+      if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
+    });
+    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
+  }
+
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
   stepRecommendations(stage, available) {
     const own = stageDef(stage.stage)?.recommend;
     return [
+      ...this.dateBoundWarnings(stage, available),
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
       'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
     ];

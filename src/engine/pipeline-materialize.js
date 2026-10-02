@@ -8,8 +8,13 @@ import { formatDbtError, dbtFailure } from '../dbt/index.js';
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from '../python-model.js';
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
 import { sqlConfigHeader } from '../sql-header.js';
-import { samplingNote } from './helpers.js';
+import { samplingNote, pageBlock } from './helpers.js';
 import { physicalColumnType } from '../catalog/column-types.js';
+
+/** How many rows of a built table its build hands back (the table holds them all; a read pages it). */
+const SHOWN_ROWS = 200;
+/** Whether a pipeline's rows come out sorted: its last stage that is not a limit is an order_by. */
+const endsSorted = (stages) => [...(stages || [])].reverse().find((st) => st.stage !== 'limit')?.stage === 'order_by';
 
 export const pipelineMaterializeMethods = {
   /**
@@ -330,7 +335,7 @@ export const pipelineMaterializeMethods = {
     // `ok` as every step of a build says it (parse, run, show); `executed` says whether the model was
     // actually built and run, or only written to disk (no runner)
     let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
-    let rows = []; let columns = [...out.columns.keys()];
+    let rows = []; let columns = [...out.columns.keys()]; let more = false;
     if (this.runner) {
       // Select the chain's OWN models by name (space = dbt's union operator), in ref order — never
       // `+model`, whose ancestor operator would also select the catalog's base tables and REBUILD
@@ -338,8 +343,9 @@ export const pipelineMaterializeMethods = {
       // model's cold start of minutes holds nobody.
       const r = await this.runner.run(this.ctxs.dir(ctx.id), models.length > 1 ? models.map((m) => m.model).join(' ') : modelName);
       if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : this._sqlRunMessage(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
-      const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
-      if (show.ok) { rows = show.rows; columns = show.columns || columns; }
+      // the first SHOWN_ROWS rows (one more, to know whether there are more): the table holds them all
+      const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, SHOWN_ROWS + 1);
+      if (show.ok) { more = show.rows.length > SHOWN_ROWS; rows = show.rows.slice(0, SHOWN_ROWS); columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ...dbtFailure('show', show) };
       build = { ok: true, executed: true };
       // a column whose type the stages could not say (what a python stage returns) is typed as the
@@ -354,6 +360,8 @@ export const pipelineMaterializeMethods = {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
+      // the rows shown are the table's first ones: in order when the pipeline ends sorted
+      page: pageBlock({ offset: 0, limit: SHOWN_ROWS, returned: rows.length, has_more: more, ordered: endsSorted(input.pipeline?.stages) }),
       ...(models.length > 1 ? { models: chainInfo } : {}),
       ...(hasPython ? { python: pyInfo } : {}),
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh

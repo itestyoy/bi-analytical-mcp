@@ -17,7 +17,7 @@
 // a finished task READS AS (a stored table paged, a card hint) is the engine's; which tool reads which
 // side's tasks back is given (`sideOf`, `readers`). The engine and a feature reach it as `engine.tasks`.
 
-import { detached, withSignal, isolatedTarget, currentSignal } from './request-context.js';
+import { detached, withSignal, withProgress, isolatedTarget, currentSignal } from './request-context.js';
 import { ToolError, RESULT_GONE } from './validate.js';
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { isPlainObject } from './engine/helpers.js';
@@ -44,6 +44,7 @@ export class TaskRunner {
     this.runs = new Map(); // task id → its settled promise
     this.controls = new Map(); // task id → its AbortController
     this.results = new Map(); // task id → { at, tool, input, out } — its finished response, for a while
+    this.progress = new Map(); // task id → { queued, started, step } — what a running task is doing now
   }
 
   /** A wait a caller asked for, within [0, MAX_WAIT_SECONDS]. */
@@ -82,6 +83,10 @@ export class TaskRunner {
     // work starts is stopped by it, and one started after it is refused at once (src/dbt/process.js).
     const control = new AbortController();
     this.controls.set(id, control);
+    // what a read of the task while it runs says it is doing: queued behind earlier work, then
+    // running — and the process it is on (src/dbt/process.js reports to it)
+    const progress = { queued: Date.now(), started: null, step: null };
+    this.progress.set(id, progress);
     const keep = (out) => {
       if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
       this.keep(id, { tool, input, out });
@@ -93,18 +98,20 @@ export class TaskRunner {
     const settled = detached(async () => {
       await null; // the caller records what it needs about the task before any of the work runs
       if (before) await before;
+      progress.started = Date.now();
       // A query cancelled while it waited never starts. A cancelled BUILD still runs its work —
       // with its signal already aborted, so no dbt process starts and the work goes down its own
       // failure path (clearing its in-flight marker and its checkpoint).
       if (control.signal.aborted && this.sideOf(tool) && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
       // Members of a batch run at the same time on one context: each dbt process gets its own target/.
-      return withSignal(control.signal, () => (batch ? isolatedTarget(() => work(id)) : work(id)));
+      return withSignal(control.signal, () => withProgress(progress, () => (batch ? isolatedTarget(() => work(id)) : work(id))));
     }).then(keep, (e) => keep({
       ok: false,
       error: { stage: e?.stage || 'task', message: e?.message || String(e), ...(e?.field ? { field: e.field } : {}), ...(e?.code ? { code: e.code } : {}) },
     })).catch((e) => { this.jobs.fail(id, e?.message || String(e)); this.onFailure(id, tool, ctx, input, { stage: 'task', message: e?.message || String(e), detail: e?.stack }); }).finally(() => {
       this.runs.delete(id);
       this.controls.delete(id);
+      this.progress.delete(id);
       if (!ctx) return;
       this.ctxs.release(ctx.id);
       if (this.queue.get(ctx.id) === settled) this.queue.delete(ctx.id);
@@ -228,6 +235,17 @@ export class TaskRunner {
     return Math.round((Date.now() - started) / 100) / 10;
   }
 
+  /** How far a running task is: seconds since it was started, whether it is still queued behind
+   *  earlier work on its context, and the process it is on (a read of it says so, not a bare running). */
+  progressOf(id, job) {
+    const p = this.progress.get(id);
+    const secs = (from) => Math.round((Date.now() - from) / 1000);
+    const out = { elapsed_seconds: secs(p?.queued ?? job.startedAt) };
+    if (!p) return out;
+    if (!p.started) return { ...out, phase: 'queued', phase_note: 'waiting for the earlier work on this context to finish' };
+    return { ...out, phase: 'running', ...(p.step ? { step: p.step.command, step_state: p.step.state, step_seconds: secs(p.step.since) } : {}) };
+  }
+
   /**
    * The head of a task's answer — its id, tool, context and table — and, for one not finished,
    * the whole answer: still running (call again), started by a process that is gone, or cancelled.
@@ -238,7 +256,7 @@ export class TaskRunner {
     const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}) };
     if (job.status === 'running') {
       if (!this.jobs.isLive(id)) return { head, pending: { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } } };
-      return { head, pending: { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call ${this.readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` } };
+      return { head, pending: { ok: true, ...head, status: 'running', waited_seconds: waited, ...this.progressOf(id, job), next: `still running — call ${this.readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` } };
     }
     if (job.status === 'cancelled') return { head, pending: { ok: false, ...head, status: 'cancelled', error: { stage: 'cancelled', code: 'cancelled', message: job.error || 'cancelled' } } };
     return { head, pending: null };

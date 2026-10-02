@@ -5,6 +5,16 @@
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { ToolError } from './validate.js';
 
+/** A mean-test group as { n, mean, stddev }: given so, as it is; given { n, sum, sum_squares }, computed (n − 1 in the variance). */
+function meanFromSums(g) {
+  if (!g || g.mean !== undefined || g.sum === undefined) return g;
+  if (!(g.n >= 2)) throw new ToolError(`experiment analyze, metric=mean: group '${g.label || '?'}' needs n ≥ 2 to have a stddev from its sums`, { stage: 'validate', field: 'n' });
+  const mean = g.sum / g.n;
+  const variance = Math.max(0, (g.sum_squares - (g.sum * g.sum) / g.n) / (g.n - 1));
+  const { sum: _s, sum_squares: _q, ...rest } = g;
+  return { ...rest, mean, stddev: Math.sqrt(variance) };
+}
+
 /**
  * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
  * that joins the experiments source, windows events to the assignment period,
@@ -15,7 +25,11 @@ import { ToolError } from './validate.js';
  * and p-values are corrected across the variant family. Pure stats, no warehouse.
  */
 export function abTest(input) {
-  const { metric, control } = input;
+  const { metric } = input;
+  // a mean test's group given by its sums (what one aggregate stage gives: n, Σx, Σx²) is that group's
+  // mean and SAMPLE stddev — the form the Welch test reads
+  if (metric === 'mean') input = { ...input, control: meanFromSums(input.control), variants: (input.variants || []).map(meanFromSums) };
+  const { control } = input;
   const confidence = input.confidence ?? 0.95;
   const alternative = input.alternative || 'two_sided';
   const correction = input.correction || 'holm';

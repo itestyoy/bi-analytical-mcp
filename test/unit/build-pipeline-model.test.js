@@ -252,7 +252,12 @@ test('build_pipeline_model: add_steps applies several stages at once with a per-
   assert.equal(r.step_effects.length, 3, 'one effect entry per applied stage, in order');
   assert.deepEqual(r.step_effects.map((x) => x.stage), ['where', 'match_recognize', 'aggregate']);
   assert.ok(r.step_effects.every((x) => typeof x.column_count === 'number' && Array.isArray(x.columns_added)), 'each effect reports the column delta');
-  assert.equal(r.steps.length, 3);
+  // the steps just added are echoed (with the count); the whole list only when asked for
+  assert.deepEqual([r.steps_added.length, r.steps_count, r.steps], [3, 3, undefined]);
+  const more = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 5 }], include_steps: true });
+  assert.deepEqual([more.steps.length, more.steps_added], [4, undefined]);
+  const one = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 3 }] });
+  assert.deepEqual([one.steps_added.map((x) => x.index), one.steps_count], [[5], 5]);
   assert.ok(r.recommendations.some((x) => /logical chunk/i.test(x)), 'nudges to split into logical chunks');
 });
 

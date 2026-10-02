@@ -1,4 +1,5 @@
-// WHAT THE CURRENT TOOL CALL CARRIES DOWN TO THE PROCESSES IT STARTS — today, its cancellation.
+// WHAT THE CURRENT TOOL CALL CARRIES DOWN TO THE PROCESSES IT STARTS — its cancellation, and for a
+// task the record its processes report their progress to.
 //
 // A tool call can be abandoned: the client cancels it, the caller disconnects, a task is cancelled.
 // The work it started is a dbt process on the warehouse, several layers below the handler, and
@@ -24,6 +25,19 @@ export function withSignal(signal, fn) {
 /** The cancellation signal of the call this code runs for, or undefined outside one. */
 export function currentSignal() {
   return storage.getStore()?.signal;
+}
+
+/**
+ * Run `fn` with `progress` (a task's own record of what it is doing) as the place every process it
+ * starts reports to (src/dbt/process.js) — so a read of a running task can say which step it is on.
+ */
+export function withProgress(progress, fn) {
+  return storage.run({ ...(storage.getStore() || {}), progress }, fn);
+}
+
+/** The progress record of the task this code runs for, or undefined outside one. */
+export function currentProgress() {
+  return storage.getStore()?.progress;
 }
 
 /** Run `fn` outside any call's cancellation — for work that serves more than one caller. */

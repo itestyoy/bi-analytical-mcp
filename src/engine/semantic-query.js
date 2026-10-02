@@ -12,6 +12,7 @@ import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../g
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, clone, pageBlock } from './helpers.js';
+import { reachedMetrics } from '../metric-graph.js';
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -134,7 +135,11 @@ export const semanticQueryMethods = {
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...(project ? { batch: { before: null } } : {}) }), { context_id: ctx.id });
+    // A query only compiled (explain / dry_run) runs nothing on the warehouse: it waits for the
+    // declaration it compiles, not behind the queries before it.
+    const compileOnly = !!(input.explain || input.dry_run);
+    const slot = project ? { batch: { before: null } } : compileOnly ? { batch: this.tasks.afterBuilds(ctx) } : {};
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...slot }), { context_id: ctx.id });
   },
 
   /** The tokens any metric query causes besides what it names: metric_time at every grain, and
@@ -387,6 +392,29 @@ export const semanticQueryMethods = {
     return { bounds: resolveTimeRange(input.time_range) || {}, windowWarnings: timeRangeWarnings(input.time_range) };
   },
 
+  /**
+   * What a CONVERSION metric's query is told, when it reads one: MetricFlow filters only its base
+   * side (dbt-labs/metricflow#1199) — the query's where and the partition window this server adds
+   * alike — so the conversion events are read from the whole source; and its window is counted on the
+   * time dimension at that dimension's granularity, so '1 day' at a day grain is the same calendar day.
+   */
+  _conversionNotes(ctx, metrics, { where = false, window = false } = {}) {
+    const conv = reachedMetrics(metrics, ctx.state.metrics || []).filter((m) => m.type === 'conversion');
+    if (!conv.length) return [];
+    const [source] = this._measureSources(ctx);
+    const grain = (source && this.catalog.getModel(source).time?.granularity) || 'day';
+    const notes = [];
+    const bare = conv.filter((m) => !(m.type_params?.conversion_type_params?.constant_properties || []).length);
+    if (where || window) notes.push(`Conversion metric${conv.length > 1 ? 's' : ''} ${conv.map((m) => m.name).join(', ')}: MetricFlow applies ${where && window ? 'the where and the time window' : where ? 'the where' : 'the time window'} to the BASE events only (dbt-labs/metricflow#1199) — the conversion events are read from the whole source${window ? ', every partition' : ''}${where ? ', whatever the filtered columns hold' : ''}, which is slow on a large table${where && bare.length ? ', and a conversion of the same entity under another value of a filtered column (another app, another environment) counts' : ''}. To hold a property equal on both sides, declare it in the metric's constant_properties (e.g. the app and environment columns); for a scan bounded in time, count the conversion with a pipeline funnel (match_recognize).`);
+    for (const m of conv) {
+      const w = m.type_params?.conversion_type_params?.window;
+      const unit = /^\d+ (\w+?)s?$/.exec(String(w || ''))?.[1];
+      const order = ['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+      if (unit && order.indexOf(unit) <= order.indexOf(grain)) notes.push(`${m.name}: its window '${w}' is compared on the time dimension at its ${grain} granularity — a base and a conversion event are compared by their ${grain}, so '${w}' means the same ${grain} (not ${w} after the base event). For a window measured from the event itself, a pipeline funnel (match_recognize) gives the seconds between the steps, which a where holds to the window.`);
+    }
+    return notes;
+  },
+
   /** Paging: the page asked for, and one row over it fetched so has_more means something. */
   _metricPaging(input) {
     const limit = input.limit ?? 1000;
@@ -486,7 +514,9 @@ export const semanticQueryMethods = {
     const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k)).map((k) => `source ${k}`);
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
     const paging = this._metricPaging(input);
-    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
+    const partitionWhere = this._semanticPartitionWhere(ctx, bounds, input.metrics);
+    const conversionNotes = this._conversionNotes(ctx, input.metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...partitionWhere], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
@@ -501,7 +531,7 @@ export const semanticQueryMethods = {
       // an explain or a failure is text that may quote any item MetricFlow resolved: spelled with its list
       const listed = !res.ok || explain ? await this._listedGroupBys(ctx, input.metrics) : null;
       const fully = listed ? this._callerSpelling(new Map([...this._localTimeTokens(this._previewLayer(ctx).layer), ...this._listedTokens(listed.groupBys), ...spelled])) : speak;
-      const early = this._metricEarlyAnswer(res, { explain, input, speak: fully, extra: { orderable_keys: orderableKeys, ...(filterWarnings.length ? { warnings: filterWarnings } : {}) } });
+      const early = this._metricEarlyAnswer(res, { explain, input, speak: fully, extra: { orderable_keys: orderableKeys, ...(filterWarnings.length || conversionNotes.length ? { warnings: [...filterWarnings, ...conversionNotes] } : {}) } });
       if (early) return early;
       const { rows: pageRows, page } = paging.page(res.rows);
       // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
@@ -552,7 +582,7 @@ export const semanticQueryMethods = {
           data_freshness: fresh,
           ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
         },
-        warnings: [...windowWarnings, ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
+        warnings: [...windowWarnings, ...filterWarnings, ...conversionNotes, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
         recommendations: recs,
       };
       return out;

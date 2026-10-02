@@ -54,3 +54,24 @@ test('a where that bounds a time column from above by a bare date is told so; a 
   assert.equal(warned([{ column: 'event_at', op: 'gte', value: '2026-01-01' }, { column: 'event_at', op: 'lt', value: '2026-02-01' }]), 0);
   assert.equal(warned([{ column: 'event_name', op: 'lte', value: '2026-01-31' }]), 0, 'not a time column');
 });
+
+test('a query only compiled waits for the build of its context, not for the queries queued before it', async () => {
+  const jobs = new JobManager();
+  const runner = new TaskRunner({ jobs, ctxs, sideOf: (tool) => (tool.endsWith('semantic_model') ? 'semantic' : null), readers: { semantic: 'query_semantic_model' } });
+  const order = [];
+  let finishBuild; let finishQuery;
+  const build = new Promise((r) => { finishBuild = r; });
+  const slow = new Promise((r) => { finishQuery = r; });
+  runner.start(ctx, 'build_semantic_model', () => build.then(() => { order.push('build'); return { ok: true }; }));
+  runner.start(ctx, 'query_semantic_model', () => slow.then(() => { order.push('query'); return { ok: true }; }));
+  const compiled = runner.start(ctx, 'query_semantic_model', async () => { order.push('compiled'); return { ok: true }; }, { batch: runner.afterBuilds(ctx) });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(order, [], 'nothing runs before the build');
+  finishBuild();
+  await runner.runs.get(compiled);
+  assert.deepEqual(order, ['build', 'compiled'], 'the compiled query does not wait for the running one');
+  finishQuery();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(order, ['build', 'compiled', 'query']);
+  jobs.close();
+});

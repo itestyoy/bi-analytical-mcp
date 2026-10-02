@@ -10,7 +10,8 @@
 // is supposed to go on), with a lease on its context, and tasks on ONE context run one after another
 // — a query issued right after its task was declared starts once the declaration is parsed, and two
 // builds never write the same files at once. A batch's members run side by side, after what was
-// queued before them and before what is queued after.
+// queued before them and before what is queued after; a query only compiled waits for the last build
+// alone (`afterBuilds`).
 //
 // This module owns the lifecycle — the per-context queue, each task's run, its cancellation and the
 // response it finished with — and the words every task answer shares (its id, where to read it). What
@@ -45,6 +46,16 @@ export class TaskRunner {
     this.controls = new Map(); // task id → its AbortController
     this.results = new Map(); // task id → { at, tool, input, out } — its finished response, for a while
     this.progress = new Map(); // task id → { queued, started, step } — what a running task is doing now
+    this.builds = new Map(); // context id → the promise of the last BUILD on it (what a compile-only read waits for)
+  }
+
+  /**
+   * A batch slot for work that only READS a context's declaration (a query compiled, never run): it
+   * waits for the last build on the context — the declaration it compiles — and not for the queries
+   * queued before it, whose minutes on the warehouse it has nothing to do with.
+   */
+  afterBuilds(ctx) {
+    return { before: (ctx && this.builds.get(ctx.id)) || null };
   }
 
   /** A wait a caller asked for, within [0, MAX_WAIT_SECONDS]. */
@@ -115,8 +126,10 @@ export class TaskRunner {
       if (!ctx) return;
       this.ctxs.release(ctx.id);
       if (this.queue.get(ctx.id) === settled) this.queue.delete(ctx.id);
+      if (this.builds.get(ctx.id) === settled) this.builds.delete(ctx.id);
     });
     if (ctx && !batch) this.queue.set(ctx.id, settled);
+    if (ctx && !tool.startsWith('query_')) this.builds.set(ctx.id, settled);
     this.runs.set(id, settled);
     return id;
   }

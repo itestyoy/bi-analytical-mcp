@@ -1,8 +1,7 @@
 // MCP APPS — a tool result rendered as an interactive view in the host's conversation.
 //
-// Two halves. The protocol half (lifecycle): the viewed tools carry the view in both spellings the
-// official ext-apps `registerAppTool` writes (`_meta.ui.resourceUri` and the flat `ui/resourceUri`
-// older hosts read), for every client in either protocol revision; the resource is one
+// Two halves. The protocol half (lifecycle): the viewed tools carry the view (`_meta.ui.resourceUri`),
+// for every client in either protocol revision; the resource is one
 // `text/html;profile=mcp-app` document; the result carries `structuredContent` next to its text;
 // and the checked-in build of the view is the build of its sources. The data half: the view model
 // (src/apps/result-view-model.js, the function the page runs) turns a result into the numbers the
@@ -16,26 +15,36 @@ import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
+import { displayProblems } from '../../src/display-check.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
+import { defineTool, toolRegistry } from '../../src/tools/define.js';
+import { fieldNames } from '../helpers/schema-nav.js';
+
+/** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
+function sharedSources() {
+  const dir = new URL('../../src/apps/shared/', import.meta.url).pathname;
+  return readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f));
+}
+
 
 let s;
 before(async () => { s = await startServer(); });
 after(async () => { await s.stop(); });
 
 const VIEWED = ['display_model_result', 'experiment'];
-const APPS_ONLY = ['display_model_result', 'drill_result'];
 
-test('the two drawing tools carry the view, in both spellings — for a client that declares MCP Apps in its request', async () => {
+test('the two drawing tools carry the view — for a client that declares MCP Apps in its request', async () => {
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
   const tools = (await c.listTools()).tools;
   for (const t of tools) {
     const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
     assert.equal(t._meta?.ui?.resourceUri, want, t.name);
-    assert.equal(t._meta?.['ui/resourceUri'], want, `${t.name} (flat key)`);
   }
-  assert.ok(tools.find((t) => t.name === 'display_model_result').inputSchema.properties.display, 'display is declared on display_model_result');
-  for (const name of ['query_semantic_model', 'query_pipeline_model', 'experiment']) assert.equal(tools.find((t) => t.name === name).inputSchema.properties.display, undefined, `${name} takes no model card declaration`);
-  assert.ok(tools.find((t) => t.name === 'experiment').inputSchema.properties.card, 'experiment asks for its own card with card: true');
+  // a tool's input is its `request` (src/schema/transport.js wireSchema)
+  const takes = (name, f) => { const s = tools.find((t) => t.name === name).inputSchema; return fieldNames(s, s.properties.request).includes(f); };
+  assert.ok(takes('display_model_result', 'display'), 'display is declared on display_model_result');
+  for (const name of ['query_semantic_model', 'query_pipeline_model', 'experiment']) assert.equal(takes(name, 'display'), false, `${name} takes no model card declaration`);
+  assert.ok(takes('experiment', 'card'), 'experiment asks for its own card with card: true');
   assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
 });
 
@@ -54,10 +63,10 @@ test('a client that does not declare MCP Apps sees the same tools and page, but 
     assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${label}: and read`);
     // …but nothing tells its model about cards, and nothing draws
     assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
-    const r = await c.callTool({ name: 'display_model_result', arguments: { task_id: 'ffffffffffff' } });
+    const r = await c.callTool({ name: 'display_model_result', arguments: { request: { task_id: 'ffffffffffff' } } });
     assert.equal(r.isError, true, label);
     assert.match(JSON.parse(r.content[0].text).error.message, /MCP Apps/, label);
-    const card = await c.callTool({ name: 'experiment', arguments: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } });
+    const card = await c.callTool({ name: 'experiment', arguments: { request: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } } });
     assert.equal(card.isError, true, `${label}: card is refused`);
     assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
   }
@@ -65,10 +74,11 @@ test('a client that does not declare MCP Apps sees the same tools and page, but 
 
 test('the hint to show a result as a card reaches only a client that renders cards', async () => {
   // a stand-in tool answering the way a query tool's read ({ task_id }) does for a finished result with rows
-  const engine = { schemas: { result_like: {} }, result_like: () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'display_model_result', arguments: { task_id: 'aabbccddeeff' } } }) };
-  const withCards = await runTool(engine, 'result_like', {}, { renders: true });
-  const without = await runTool(engine, 'result_like', {}, { renders: false });
-  assert.deepEqual(withCards.raw.show_to_user.arguments, { task_id: 'aabbccddeeff' });
+  const answer = () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'display_model_result', arguments: { request: { task_id: 'aabbccddeeff' } } } });
+  const engine = { schemas: { result_like: {} }, tools: toolRegistry([defineTool({ name: 'result_like', title: 'Result Like', description: 'a stand-in', annotations: { readOnlyHint: true }, run: answer })]) };
+  const withCards = await runTool(engine, 'result_like', { request: {} }, { renders: true });
+  const without = await runTool(engine, 'result_like', { request: {} }, { renders: false });
+  assert.deepEqual(withCards.raw.show_to_user.arguments, { request: { task_id: 'aabbccddeeff' } });
   assert.equal('show_to_user' in without.raw, false);
   assert.deepEqual(without.raw.rows, [{ n: 1 }], 'the answer itself is the same');
 });
@@ -85,7 +95,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   // the view's own code: no App method that reaches the model or other server methods, no network API
   const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
   const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
-  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname, new URL('../../src/apps/shared/ui.js', import.meta.url).pathname];
+  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname, ...sharedSources()];
   const toolCalls = [];
   const reads = [];
   for (const file of sources) {
@@ -97,7 +107,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   }
   // exactly one tools/call site: drill_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
-  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'drill_result', arguments: args }");
+  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'drill_result', arguments: { request: args } }");
   // …reached for the card's OWN task only: its stored table's next view when a drill-down steps
   // down (a pivot row, a chart mark — each read built by the view model)
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
@@ -108,7 +118,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
 
 test('a task that is gone reaches the model as result_gone over MCP, and a card of it would say "no longer available"', async () => {
   for (const era of ['legacy', 'modern']) {
-    const r = await (await s.client({ era })).callTool({ name: 'query_semantic_model', arguments: { task_id: 'ffffffffffff' } });
+    const r = await (await s.client({ era })).callTool({ name: 'query_semantic_model', arguments: { request: { task_ids: ['ffffffffffff'] } } });
     assert.equal(r.isError, true, era);
     const payload = JSON.parse(r.content[0].text);
     assert.equal(payload.error.code, 'result_gone', era);
@@ -146,11 +156,11 @@ test('the view resource is one mcp-app HTML document, listed and readable for a 
 test('an experiment is its own process: card: true draws its A/B test card, equal to the text; without it, text alone — and no task, nothing for display_model_result', async () => {
   const args = { action: 'analyze', metric: 'proportion', control: { n: 5000, conversions: 500 }, variants: [{ label: 'b', n: 5020, conversions: 580 }] };
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
-  const asked = await c.callTool({ name: 'experiment', arguments: { ...args, card: true } });
+  const asked = await c.callTool({ name: 'experiment', arguments: { request: { ...args, card: true } } });
   assert.deepEqual(asked.structuredContent, JSON.parse(asked.content[0].text));
   assert.equal(asked.structuredContent.results[0].variant, 'b', 'the card carries the test\'s own numbers');
   assert.equal(buildViewModel('experiment', asked.structuredContent, args).kind, 'experiment');
-  const plain = await c.callTool({ name: 'experiment', arguments: args });
+  const plain = await c.callTool({ name: 'experiment', arguments: { request: args } });
   assert.equal(plain.structuredContent, undefined, 'no card asked for: no structured output');
   const answer = JSON.parse(plain.content[0].text);
   assert.equal(answer.results[0].p_value, asked.structuredContent.results[0].p_value, 'the same answer, as text');
@@ -358,12 +368,12 @@ test('view model: a sankey sums a link seen twice, drops empty flows and sizes e
 
 test('display guard: a sankey that loops back, or KPI tiles over many rows with no axis, are refused', () => {
   const links = [{ a: 'menu', b: 'level' }, { a: 'level', b: 'shop' }, { a: 'shop', b: 'menu' }].map((r) => ({ ...r, v: 1 }));
-  const loop = s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
+  const loop = displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
   assert.equal(loop.length, 1);
-  assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
-  assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
-  assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
-  assert.equal(s.engine._displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
+  assert.equal(displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
+  assert.equal(displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
+  assert.equal(displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+  assert.equal(displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
 });
 
 test('pivot: one level is the rows under a path, grouped by the next level; its rows keep the key as it came', () => {
@@ -371,7 +381,7 @@ test('pivot: one level is the rows under a path, grouped by the next level; its 
   const t = pivotTransform(display, ['US', null]);
   assert.deepEqual(t.where, [{ column: 'country', op: 'eq', value: 'US' }, { column: 'platform', op: 'is_null' }]);
   assert.deepEqual(t.group_by, ['channel']);
-  assert.deepEqual(t.aggregations, [{ fn: 'sum', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
+  assert.deepEqual(t.aggregations, [{ agg: 'sum', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
   const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
   assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
 });
@@ -406,7 +416,7 @@ test('drill: a view is the stored rows under the path, grouped by what it draws;
   const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, agg: 'max' } };
   // the chart as declared: folded over the drill levels
   assert.deepEqual(drillView(bar).transform.group_by, ['country']);
-  assert.deepEqual(drillView(bar).transform.aggregations, [{ fn: 'max', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
+  assert.deepEqual(drillView(bar).transform.aggregations, [{ agg: 'max', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
   // a bar of US opened by Platform: filtered to US, one bar per platform, Channel left to step into
   const step = drillView(bar, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'breakdown' });
   assert.deepEqual(step.transform.where, [{ column: 'country', op: 'eq', value: 'US' }]);
@@ -486,7 +496,7 @@ test('a funnel with outcomes, one per ad format: shares of the parent, the main 
   assert.equal(inter.biggest_drop, 3, 'loaded → started is the continuation that lost the most (a failed load is an outcome, not a drop)');
   assert.equal(inter.overall, 52 / 918, 'the main line: attempts → loaded → started → shown');
   // a parent that is not a step before it is refused
-  assert.equal(s.engine._displayProblems({ kind: 'funnel', steps: [{ column: 'a' }, { column: 'b', parent: 'c' }, { column: 'c' }] }, ['a', 'b', 'c'], [{ a: 3, b: 2, c: 1 }]).length, 1);
-  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], [...rows, { format: 'banner', step: 'shown', parent: 'nope', n: 1 }]).length, 1);
-  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], rows).length, 0);
+  assert.equal(displayProblems({ kind: 'funnel', steps: [{ column: 'a' }, { column: 'b', parent: 'c' }, { column: 'c' }] }, ['a', 'b', 'c'], [{ a: 3, b: 2, c: 1 }]).length, 1);
+  assert.equal(displayProblems(display, ['format', 'step', 'parent', 'n'], [...rows, { format: 'banner', step: 'shown', parent: 'nope', n: 1 }]).length, 1);
+  assert.equal(displayProblems(display, ['format', 'step', 'parent', 'n'], rows).length, 0);
 });

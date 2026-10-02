@@ -8,17 +8,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -43,7 +42,7 @@ before(async () => {
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Monetization model: only two data sources (events fact + user attributes).
@@ -70,7 +69,7 @@ before(async () => {
   ctx = out.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
@@ -111,8 +110,8 @@ test('revenue by users.country (1-hop join) = US 35 / GB 25 / BR 25', opts, asyn
 // SEED_DATA: revenue by acquisition_type -> paid=55, organic=30.
 test('revenue filtered by users.acquisition_type: paid 55 / organic 30', opts, async (t) => {
   if (skip(t)) return;
-  const paid = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' }] } });
-  const org = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'organic' }] } });
+  const paid = await q({ metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' }] });
+  const org = await q({ metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'organic' }] });
   assert.equal(paid.ok, true, JSON.stringify(paid.error));
   assert.equal(org.ok, true, JSON.stringify(org.error));
   assert.equal(sumCol(paid.rows, 'mon_revenue'), 55);

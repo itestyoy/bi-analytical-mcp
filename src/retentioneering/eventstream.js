@@ -1,5 +1,5 @@
 // THE EVENTSTREAM — the one table a path analysis reads, prepared in SQL where the data lives
-// (CLAUDE.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
+// (AGENTS.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
 //
 // The scoping and the attributes go through the pipeline's own stages (src/pipeline.js — a `where`
 // on the time window and the events, a `join` by the relationship the catalog declares, a `where`
@@ -20,6 +20,7 @@
 import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
 import { userKeyColumn } from './schema.js';
+import { mapConditions, eachCondition } from '../conditions.js';
 
 /** The fixed columns of every eventstream (segment columns come after them). */
 export const ES_COLUMNS = { user: 'user_id', event: 'event', time: 'event_time', session: 'session_id' };
@@ -59,15 +60,20 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
   // the source's own columns and event properties are read before any join: a filter on them scopes
   // the rows the joins then carry, and a property is surfaced by the pipeline's own `derive` stage
   const segNames = new Set((spec.segments || []).map((seg) => seg.name));
+  // a condition on the source (a column, a property surfaced by a derive) is applied before the joins;
+  // one on a segment — and a group holding one — once the segments are there
   const early = [];
-  (spec.where || []).forEach((c, i) => {
+  const late = [];
+  let derived = 0;
+  const onSegment = (list) => { let seg = false; eachCondition(list, (c) => { if (c.property === undefined && segNames.has(c.column)) seg = true; }); return seg; };
+  const resolved = (list) => mapConditions(list, (c) => {
     const cond = (column) => ({ column, op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) });
-    if (c.property !== undefined) {
-      const col = `es_w${i}`;
-      stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
-      early.push(cond(col));
-    } else if (!segNames.has(c.column)) early.push(cond(c.column));
+    if (c.property === undefined) return cond(c.column);
+    const col = `es_w${derived++}`;
+    stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
+    return cond(col);
   });
+  for (const item of spec.where || []) (onSegment([item]) ? late : early).push(...resolved([item]));
   if (early.length) stages.push({ stage: 'where', conditions: early });
   // events made from an event's parameters (events.split): each rule renames the rows of one event —
   // by the value of a property/column, or by the first case whose conditions hold — in one CASE
@@ -90,21 +96,21 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     const cases = [];
     splits.forEach((rule, i) => {
       if (rule.cases) {
-        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...cs.where.map(cond)], then: { value: cs.name } });
+        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...mapConditions(cs.where, cond)], then: { value: cs.name } });
         if (rule.else) cases.push({ when: [isEvent(rule.event)], then: { value: rule.else } });
         return;
       }
       const by = colOf(rule.by);
       const text = `es_v${i}`;
-      stages.push({ stage: 'compute', name: text, op: 'cast', column: by, type: 'string' });
+      stages.push({ stage: 'compute', name: text, expr: { fn: 'cast', args: [{ column: by }], type: 'string' } });
       for (const [value, name] of Object.entries(rule.names || {})) cases.push({ when: [isEvent(rule.event), { column: text, op: 'eq', value }], then: { value: name } });
       // any other value: <event>_<value>; an event without the parameter keeps its name
       const named = `es_n${i}`;
-      stages.push({ stage: 'compute', name: named, op: 'concat', parts: [{ value: `${rule.event}_` }, { column: text }] });
+      stages.push({ stage: 'compute', name: named, expr: { fn: 'concat', args: [{ value: `${rule.event}_` }, { column: text }] } });
       cases.push({ when: [isEvent(rule.event), { column: text, op: 'is_not_null' }], then: { column: named } });
     });
     splitCol = 'es_event';
-    stages.push({ stage: 'compute', name: splitCol, op: 'case', cases, else: { column: eventCol }, type: 'string' });
+    stages.push({ stage: 'compute', name: splitCol, expr: { fn: 'case', cases, else: { column: eventCol }, type: 'string' } });
   }
   // a path by something other than the user: its key parts, each present, as one text column —
   // parts joined by '|' (a composite key), so one path is one value of all of them together
@@ -120,18 +126,18 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     stages.push({ stage: 'where', conditions: partCols.map((column) => ({ column, op: 'is_not_null' })) });
     const texts = partCols.map((column, i) => {
       const text = `es_kt${i}`;
-      stages.push({ stage: 'compute', name: text, op: 'cast', column, type: 'string' });
+      stages.push({ stage: 'compute', name: text, expr: { fn: 'cast', args: [{ column }], type: 'string' } });
       return text;
     });
     if (texts.length === 1) pathCol = texts[0];
     else {
       pathCol = 'es_path';
-      stages.push({ stage: 'compute', name: pathCol, op: 'concat', parts: texts.flatMap((column, i) => (i ? [{ value: '|' }, { column }] : [{ column }])) });
+      stages.push({ stage: 'compute', name: pathCol, expr: { fn: 'concat', args: texts.flatMap((column, i) => (i ? [{ value: '|' }, { column }] : [{ column }])) } });
     }
   }
   const segments = [];
   for (const seg of spec.segments || []) {
-    const name = seg.name || seg.as || seg.attribute;
+    const name = seg.name || seg.attribute;
     if (seg.column !== undefined) { segments.push({ name, expr: seg.column }); continue; }
     if (seg.property !== undefined) {
       const col = `es_s_${name}`;
@@ -142,7 +148,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     // joined under a name of the eventstream's own (the segment's may be a keyword: group, order), named
     // as the segment in the final select
     const col = `es_j${segments.length}`;
-    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, as: col }] };
+    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, name: col }] };
     // a slowly-changing model is joined point in time — at the event's own time (as a pipeline must state it)
     const m = catalog.getModel(seg.model);
     if (m?.scd) {
@@ -154,10 +160,9 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     segments.push({ name, expr: col });
   }
   // a condition on a segment is applied once the segments are there
-  const late = (spec.where || []).filter((c) => c.property === undefined && segNames.has(c.column));
   if (late.length) {
     const exprOf = new Map(segments.map((sg) => [sg.name, sg.expr]));
-    stages.push({ stage: 'where', conditions: late.map((c) => ({ column: exprOf.get(c.column), op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) })) });
+    stages.push({ stage: 'where', conditions: mapConditions(late, (c) => ({ ...c, column: exprOf.get(c.column) ?? c.column })) });
   }
   return { stages, segments, eventColumn: splitCol, pathColumn: pathCol };
 }

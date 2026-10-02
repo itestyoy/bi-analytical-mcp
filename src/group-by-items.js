@@ -1,5 +1,5 @@
 // WHAT A METRIC CAN BE GROUPED BY, AS METRICFLOW SAYS — not as this server works it out. MetricFlow
-// lists, per metric, every group-by item it accepts (src/backends/mf-engine.js groupBys): a dimension
+// lists, per metric, every group-by item it accepts (the dbt client's groupBys, src/dbt/v1.js): a dimension
 // with the semantic model that carries it and the ENTITY PATH to it (`entity_links`, one entity for a
 // dimension of the metric's own model, more through joins), an entity, and metric_time with its grain.
 // MetricFlow itself builds every join; what it needs is WHICH item, and its name for one always carries

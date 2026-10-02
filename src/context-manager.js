@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { mergeModelEntry } from './semantic-latest.js';
 import { sqlConfigHeader } from './sql-header.js';
+import { getDialect } from './dialects/index.js';
+import { readModelPaths } from './catalog/project.js';
 
 // A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
 // cumulative and conversion metrics. We guarantee the model file is always
@@ -20,11 +22,7 @@ import { sqlConfigHeader } from './sql-header.js';
 // is the base project's responsibility; the server only guarantees the file.
 function timeSpineSql(dialect, start, end) {
   const header = sqlConfigHeader('time_spine', { model: 'metricflow_time_spine', dialect, start, end, granularity: 'day' });
-  if (dialect === 'bigquery') {
-    return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
-  }
-  // duckdb (default): range() is a table of timestamps, one per day
-  return `{{ config(materialized='table') }}\n${header}select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)\n`;
+  return `{{ config(materialized='table') }}\n${header}${getDialect(dialect || 'duckdb').timeSpineSelect(start, end)}\n`;
 }
 
 const TIME_SPINE_YML = `models:
@@ -110,7 +108,6 @@ export function mergeCompiled(state, compiled) {
   state.metrics ||= [];
   state.usedModels ||= [];
   state.tasks ||= [];
-  for (const k of Object.keys(state.additions)) if (!state.usedModels.includes(k)) state.usedModels.push(k);
 
   for (const [modelKey, add] of Object.entries(compiled.additions || {})) {
     const cur = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
@@ -126,8 +123,7 @@ export function mergeCompiled(state, compiled) {
   }
   for (const k of compiled.usedModels || []) if (!state.usedModels.includes(k)) state.usedModels.push(k);
   if (compiled.task && !state.tasks.includes(compiled.task)) state.tasks.push(compiled.task);
-  // The caller's own words about the task, kept BESIDE `tasks` (which stays a list of names —
-  // stripping a measure's namespace reads it, see declaredAttribute).
+  // The caller's own words about the task, kept BESIDE `tasks` (which stays a list of names).
   if (compiled.task && compiled.description) (state.task_notes ||= {})[compiled.task] = compiled.description;
   return state;
 }
@@ -144,24 +140,11 @@ export class ContextManager {
     // generated models/YAML under a scanned path — otherwise dbt never sees them and the compiled
     // semantic_manifest has zero semantic models + zero time spines ("none were found"). A project
     // with a custom model-paths (e.g. ["marts"]) does NOT include the default "models".
-    this.modelPaths = this._readModelPaths();
+    this.modelPaths = this.baseProjectDir ? readModelPaths(this.baseProjectDir) : ['models'];
     this.contexts = new Map(); // id -> { id, createdAt, lastUsedAt, state }
     this.leases = new Map(); // id -> count of in-flight ops
     mkdirSync(this.workspaceRoot, { recursive: true });
     this._load();
-  }
-
-  /** Read model-paths from the base dbt_project.yml (dbt default is ["models"]). */
-  _readModelPaths() {
-    try {
-      const f = this.baseProjectDir && join(this.baseProjectDir, 'dbt_project.yml');
-      if (f && existsSync(f)) {
-        const doc = yaml.load(readFileSync(f, 'utf8')) || {};
-        const mp = doc['model-paths'] || doc.model_paths || doc.source_paths; // source-paths: pre-1.0 alias
-        if (Array.isArray(mp) && mp.length) return mp.map(String);
-      }
-    } catch { /* fall through to default */ }
-    return ['models'];
   }
 
   _load() {
@@ -171,14 +154,10 @@ export class ContextManager {
       for (const c of data.contexts || []) {
         // reconcile: keep only contexts whose workspace still exists on disk
         if (!existsSync(this.dir(c.id))) continue;
-        // usedModels drives the require_time_range guard and rendering; a registry written before
-        // it existed lists the models only under additions — rebuild it so the guard sees them.
         const st = (c.state ||= {});
         // A build cannot survive the process that ran it: an in-flight marker read back from the
         // registry is stale, and keeping it would wedge the draft as "already building".
         if (st.draft?.building) delete st.draft.building;
-        st.usedModels ||= [];
-        for (const k of Object.keys(st.additions || {})) if (!st.usedModels.includes(k)) st.usedModels.push(k);
         this.contexts.set(c.id, c);
       }
     } catch {
@@ -246,8 +225,8 @@ export class ContextManager {
       // says what is in a context, never why it exists — which is the thing you need when several
       // drafts are open and one of them is the one to continue.
       ...(Object.keys(c.state.task_notes || {}).length ? { task_notes: c.state.task_notes } : {}),
-      ...(c.state.native?.description || c.state.draft?.description
-        ? { description: c.state.native?.description || c.state.draft?.description }
+      ...(c.state.pipeline_model?.description || c.state.draft?.description
+        ? { description: c.state.pipeline_model?.description || c.state.draft?.description }
         : {}),
       semantic_models: Object.keys(c.state.additions || {}),
       metrics: (c.state.metrics || []).map((m) => m.name),
@@ -255,7 +234,6 @@ export class ContextManager {
     }));
   }
 
-  /** Create a fresh context: allocate id + a FULL independent copy of the base project. */
   /** A fresh context id, chosen before the context exists (see create). */
   newId() {
     return newContextId();
@@ -323,7 +301,7 @@ export class ContextManager {
     return true;
   }
 
-  /** Back-compat: a time spine is present only when actually CONFIGURED (not just a name match). */
+  /** Whether the context has a time spine CONFIGURED (not just a model file of that name). */
   hasTimeSpine(id) { return this._timeSpinePresence(id).hasConfig; }
 
   /** True when WE generated the time-spine MODEL in this overlay (so its table is NOT yet built
@@ -571,7 +549,7 @@ export class ContextManager {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
       if (c.state?.pinned) continue; // …nor one served for as long as the server runs (the project's own semantic layer)
       // …nor one whose materialized prefix another (live) context reads: dropping it would take
-      // that table with it, which is exactly what context({ action: 'drop' }) refuses to do
+      // that table with it, which is exactly what delete_context refuses to do
       // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only
       // held while its table is actually being read.
       if (this.checkpointConsumers(c.id).length) continue;

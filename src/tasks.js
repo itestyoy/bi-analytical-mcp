@@ -1,7 +1,7 @@
 // TASKS — a tool call that outlives its request, tracked by an id the client polls.
 //
 // This server has the idea at the tool level too: a query or a build returns a task_id at once, and
-// the query tool of its side reads it back with { task_id }, waiting up to MAX_WAIT_SECONDS per call.
+// the query tool of its side reads it back with { task_ids }, waiting up to MAX_WAIT_SECONDS per call.
 // A PROTOCOL task is what a call that waits becomes when it outlasts services.taskAfterMs: the HOST
 // polls instead of holding the request, and the call is run TO ITS END (src/mcp-surface.js
 // runToCompletion waits on the engine task, then answers), so its result is exactly the
@@ -27,10 +27,9 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 export const isTerminal = (status) => TERMINAL.has(status);
 
 export class TaskRegistry {
-  constructor({ ttlMs = 3600000, pollIntervalMs = 2000, maxTasks = 2000 } = {}) {
+  constructor({ ttlMs = 3600000, pollIntervalMs = 2000 } = {}) {
     this.ttlMs = ttlMs;
     this.pollIntervalMs = pollIntervalMs;
-    this.maxTasks = maxTasks;
     this.tasks = new Map();
     this._sweep = setInterval(() => this.sweep(), Math.min(ttlMs, 60000));
     this._sweep.unref?.();
@@ -43,7 +42,6 @@ export class TaskRegistry {
    */
   create({ ttlMs, run, ctl: given }) {
     this.sweep();
-    if (this.tasks.size >= this.maxTasks) throw Object.assign(new Error(`too many tasks in flight (${this.maxTasks}) — wait for some to finish`), { code: -32603 });
     const now = new Date().toISOString();
     // `ctl` — the controller of work that was ALREADY running before it became a task (a call
     // that outgrew its inline window keeps its own cancellation)
@@ -59,7 +57,6 @@ export class TaskRegistry {
       ctl,
       result: undefined,
       error: undefined,
-      waiters: new Set(),
     };
     this.tasks.set(t.taskId, t);
     Promise.resolve()
@@ -78,12 +75,6 @@ export class TaskRegistry {
     t.lastUpdatedAt = new Date().toISOString();
     if (result !== undefined) t.result = result;
     if (error !== undefined) t.error = error;
-    this._wake(t);
-  }
-
-  _wake(t) {
-    for (const w of t.waiters) w();
-    t.waiters.clear();
   }
 
   /** The task, or null when unknown or expired. */
@@ -103,21 +94,8 @@ export class TaskRegistry {
       t.status = 'cancelled';
       t.statusMessage = reason;
       t.lastUpdatedAt = new Date().toISOString();
-      this._wake(t);
     }
     return t;
-  }
-
-  /** Resolves when the task changes or `ms` passes — what a blocking tasks/result waits on. */
-  waitForChange(t, ms, signal) {
-    if (isTerminal(t.status)) return Promise.resolve();
-    return new Promise((resolve) => {
-      // every way out removes every hook, so a long wait loop leaves no listener behind
-      const done = () => { clearTimeout(timer); t.waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(); };
-      const timer = setTimeout(done, ms);
-      t.waiters.add(done);
-      signal?.addEventListener?.('abort', done, { once: true });
-    });
   }
 
   _expired(t) {

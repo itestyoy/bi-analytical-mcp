@@ -8,12 +8,13 @@
 //     file that ONE process may hold open ("Could not set lock on file … Conflicting lock is held"):
 //     two dbt processes on it at once — a batch of queries, a card's drill-down during a build, the
 //     value index — fail. Such a warehouse gets one FIFO turn per database, shared by every client
-//     on it (a context's queries, the indexer, the MetricFlow sidecar), and a process waits for it.
+//     on it (a context's queries, the indexer, the MetricFlow group-by script), and a process waits for it.
 
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { currentSignal } from '../request-context.js';
+import { setting } from '../settings.js';
 
 /**
  * One process at a time per key, in the order asked; a waiter whose call is cancelled leaves the
@@ -68,7 +69,7 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
 
 /**
  * Run `bin args` with `input` written to its stdin (then closed), and collect what it printed — for a
- * process that takes its request on stdin (the MetricFlow sidecar, asked once). Waits for `turn` like
+ * process that takes its request on stdin (python/mf_group_bys.py, asked once). Waits for `turn` like
  * runProcess, stops with the call's cancellation, and never throws: { ok, code, cancelled?, stdout,
  * stderr, error? }.
  */
@@ -104,7 +105,7 @@ export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, tur
  * warehouse's turn and how long it RAN — to see where the time of a run (a test suite) goes.
  */
 export function timing(bin, args, asked, began, r) {
-  const file = process.env.DBT_TIMING_LOG;
+  const file = setting('DBT_TIMING_LOG');
   if (!file) return;
   const end = Date.now();
   const cmd = args[0] === 'run-operation' ? `run-operation ${args[1]}` : args[0];

@@ -114,7 +114,9 @@ def _plain(value):
     return value
 
 
-class _Out:
+class Output:
+    """The records a run returns: one row per (analysis, part, record), numbered in order within each."""
+
     def __init__(self):
         self.rows = []
         self.seq = {}
@@ -348,7 +350,16 @@ def _metric_meta(stream, configs):
 
 
 def cluster_analysis(stream, spec, a, out):
-    data = stream.cluster_analysis_data(**a["params"])
+    params = a["params"]
+    batches = _metric_batches(stream, params["overview_metrics"]) if params.get("overview_metrics") else [None]
+    data = stream.cluster_analysis_data(**({**params, "overview_metrics": batches[0]} if batches[0] is not None else params))
+    # the overview's other batches (a metric at a second agg): the clustering is seeded, so each call
+    # finds the same clusters, and only the overview's rows are taken from it
+    for batch in batches[1:]:
+        more = stream.cluster_analysis_data(**{**params, "overview_metrics": batch}).get("overview_df")
+        if more is not None and data.get("overview_df") is not None:
+            both = pd.concat([data["overview_df"], more])
+            data["overview_df"] = both[~both.index.duplicated(keep="first")]
     if data.get("overview_df") is not None:
         _overview(data["overview_df"], a, out, "cluster_analysis", "cluster", _metric_meta(stream, a["params"].get("overview_metrics")))
     if data.get("best_params") is not None:
@@ -365,9 +376,43 @@ def cluster_analysis(stream, spec, a, out):
             _emit(out, a, k, v)
 
 
+def _metric_batches(stream, configs):
+    """The metric configs in batches the library computes in ONE call: it builds one column per metric
+    (and event) BEFORE it rolls them up, so two configs of the same metric — the same one at another
+    agg (a median and a mean of event_count), or the same one twice — make two columns of one name and
+    the call fails ("Data must be 1-dimensional", or "'DataFrame' object has no attribute 'name'" on
+    another pandas). Each batch holds a column once; an identical config is kept once. The library's
+    own parse names the columns."""
+    from retentioneering.metrics.metric_builder import MetricConfig
+
+    events = sorted(str(e) for e in stream.get_event_counts().keys())
+    parsed = MetricConfig(configs, available_events=events).parsed_configs
+    batches, seen = [], set()
+    for cfg, p in zip(configs, parsed):
+        key = json.dumps(cfg, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        cols = set(p.get("metric_names") or [])
+        home = next((b for b in batches if not (b["cols"] & cols)), None)
+        if home is None:
+            home = {"cols": set(), "configs": []}
+            batches.append(home)
+        home["cols"] |= cols
+        home["configs"].append(cfg)
+    return [b["configs"] for b in batches]
+
+
 def segment_overview(stream, spec, a, out):
-    frame = stream.segment_overview_data(**a["params"])
-    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, a["params"].get("metrics")))
+    params = a["params"]
+    if not params.get("metrics"):
+        frames = [stream.segment_overview_data(**params)]
+    else:
+        frames = [stream.segment_overview_data(**{**params, "metrics": batch}) for batch in _metric_batches(stream, params["metrics"])]
+    # the rows of every batch, each once (the segment's size and share come back with each)
+    frame = pd.concat(frames)
+    frame = frame[~frame.index.duplicated(keep="first")]
+    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, params.get("metrics")))
 
 
 CHARTED = {
@@ -380,7 +425,7 @@ CHARTED = {
 }
 
 
-def _stream(frame, spec):
+def eventstream_of(frame, spec):
     """The library's Eventstream over `frame`, ordered and typed the way every analysis reads it.
 
     `spec["columns"]`: the path owner (`user`, the first path column), the event, its time, the other
@@ -438,7 +483,7 @@ def apply_steps(frame, spec):
     are paths, segments, custom) — so the table says what it is, whatever the steps made."""
     from retentioneering.ops import apply_ops
 
-    stream = apply_ops(_stream(frame, spec), spec["steps"])
+    stream = apply_ops(eventstream_of(frame, spec), spec["steps"])
     df = stream.to_dataframe()
     held = stream_columns(stream)
     schema = stream.schema
@@ -454,20 +499,51 @@ def apply_steps(frame, spec):
     return out
 
 
+def charted_of(a):
+    """The charted function an analysis runs through, or None for the library's own result — one
+    decision for the run and its pre-run check: a diff only where the spec says its card keeps the
+    analysis's own shape (`diff_charted`, set by the server's one table of diff cards)."""
+    if a["params"].get("diff") is not None and not a.get("diff_charted"):
+        return None
+    return CHARTED.get(a["kind"])
+
+
+def _diff_groups(diff):
+    """What the two groups of a diff are: two levels of a segment (the library's <REST> the others,
+    <MISSING> the paths with no level), or two lists of path ids."""
+    if isinstance(diff, (list, tuple)) and len(diff) == 3 and isinstance(diff[0], str):
+        return {"segment": diff[0], "first": str(diff[1]), "second": str(diff[2])}
+    return {"first": f"{len(diff[0])} paths", "second": f"{len(diff[1])} paths"}
+
+
+def _analyze(stream, spec, a, frame_out, out):
+    """One analysis's records into `out`."""
+    # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
+    if a["path_col"] in frame_out.columns:
+        out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
+    charted = charted_of(a)
+    diff = a["params"].get("diff")
+    if diff is not None:
+        # which groups, and in which form the diff is stored: the analysis's own shape, or the library's tables
+        out.add(a["id"], a["kind"], "diff", {"diff": True, "charted": charted is not None, "groups": json.dumps(_diff_groups(diff), default=str)})
+    if charted:
+        charted(stream, spec, a, out)
+    else:
+        _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))
+
+
 def run(frame, spec):
-    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
-    stream = _stream(frame, spec)
-    out = _Out()
+    """The analyses `spec` names, over the eventstream `frame` → the long result table. Each analysis
+    stands alone: one the library raises on is kept as its error, and the others keep their results."""
+    stream = eventstream_of(frame, spec)
+    frame_out = stream.to_dataframe()
+    out = Output()
     for a in spec["analyses"]:
-        # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
-        frame_out = stream.to_dataframe()
-        if a["path_col"] in frame_out.columns:
-            out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
-        charted = CHARTED.get(a["kind"])
-        if a["params"].get("diff") is not None:
-            out.add(a["id"], a["kind"], "diff", {"diff": True})
-        if charted and a["params"].get("diff") is None:
-            charted(stream, spec, a, out)
-        else:
-            _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))
+        own = Output()
+        try:
+            _analyze(stream, spec, a, frame_out, own)
+        except Exception as e:  # noqa: BLE001 — the library's own error, said for this analysis alone
+            own = Output()
+            own.add(a["id"], a["kind"], "error", {"type": type(e).__name__, "message": str(e)})
+        out.rows.extend(own.rows)
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)

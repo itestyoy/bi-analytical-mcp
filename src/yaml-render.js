@@ -7,6 +7,7 @@ import { primaryEntityName } from './catalog.js';
 import { getDialect } from './dialects/index.js';
 import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
+import { measureRefs } from './compile.js';
 
 const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
@@ -31,23 +32,6 @@ function entityExpr(catalog, ent) {
   return parts.length === 1 ? d.keyPartExpr(parts[0]) : d.compositeKeyExpr(parts);
 }
 
-/** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns
- *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
-function isScdModel(m) {
-  return !!m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
-}
-
-/** True when a metric's type_params reference any measure name in `names` (simple/ratio/derived). */
-function metricRefsMeasure(metric, names) {
-  const tp = metric.type_params || {};
-  const refs = [];
-  const push = (v) => { if (typeof v === 'string') refs.push(v); else if (v?.name) refs.push(v.name); };
-  push(tp.measure);
-  for (const m of tp.measures || []) push(m);
-  push(tp.numerator); push(tp.denominator);
-  for (const m of tp.input_measures || []) push(m);
-  return refs.some((r) => names.has(r));
-}
 
 /** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED
  *  aggregation, so every task computes them the same way. */
@@ -97,26 +81,22 @@ export function renderBaseModel(catalog, key) {
   }
 
   // dimension/fact model with a natural primary key. When the model is SLOWLY-CHANGING (SCD-2:
-  // several validity-windowed rows per key) AND MetricFlow's SCD support is enabled, the join
+  // several validity-windowed rows per key; the catalog marked its validity columns), the join
   // entity is declared `natural` (not `primary`, since the key is not unique) and the two
   // validity-bound time dimensions carry validity_params — MetricFlow then does a POINT-IN-TIME
-  // join (fact agg_time within the window) instead of a fan-out equality.
-  // DEFAULT ON when the catalog marks validity columns (verified against dbt-semantic-interfaces
-  // 0.9.0 via dbt parse: validity_params nested under type_params parses cleanly). An ESCAPE HATCH
-  // MCP_SCD_VALIDITY_PARAMS=false disables it for anyone on an OLDER DSI that rejects the field —
-  // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
-  const scd = isScdModel(m);
+  // join (fact agg_time within the window) instead of a fan-out equality. SCD models are join-only.
+  const scd = !!m.scd;
   const pe = m.primary_entity;
   if (!pe) {
     throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
   }
-  const peName = typeof pe === 'string' ? pe : pe.name;
+  const peName = pe.name;
 
   // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
   // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
-  const peExpr = typeof pe === 'string' ? undefined : entityExpr(catalog, pe);
+  const peExpr = pe.key ? entityExpr(catalog, pe) : undefined;
   sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
@@ -161,11 +141,6 @@ export function renderBaseModel(catalog, key) {
   return sm;
 }
 
-/**
- * Render the full context YAML.
- * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
- * @returns { yaml, semanticModels: string[], metricNames: string[] }
- */
 /** A compiled declaration as the MANIFEST takes it: our own `_`-prefixed annotations are for the
  *  tools that describe and resolve it, and dbt rejects a key it does not know. */
 function manifestOnly(decl) {
@@ -177,6 +152,10 @@ function manifestOnly(decl) {
  * (dbt 1.x) or 'latest' (dbt v2) — the same semantic layer, rendered once and then converted
  * (src/semantic-latest.js). A 'latest' render also returns `latest` ({ models, metrics }), which the
  * context writer merges into the project's own model entries.
+ *
+ * Render the full context YAML.
+ * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
+ * @returns { yaml, semanticModels: string[], metricNames: string[] }
  */
 export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);
@@ -187,7 +166,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const droppedMeasures = new Set(); // measures removed because their model is SCD (join-only)
   for (const key of modelsToRender) {
     const sm = renderBaseModel(catalog, key);
-    const scd = isScdModel(catalog.getModel(key));
+    const scd = !!catalog.getModel(key).scd;
     const add = state.additions?.[key];
     if (add) {
       // A task may re-declare an attribute the base model already carries (it is offered in the
@@ -210,8 +189,9 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   // Drop metrics that reference a measure we removed from an SCD model — otherwise dbt fails parse
   // with "a semantic model having a measure `X` does not exist but was referenced".
   const droppedMetrics = [];
+  // — directly or through the metrics it is built from (a ratio, a derived metric, a conversion)
   const metrics = (state.metrics || []).filter((mt) => {
-    if (droppedMeasures.size && metricRefsMeasure(mt, droppedMeasures)) { droppedMetrics.push(mt.name); return false; }
+    if (droppedMeasures.size && [...measureRefs(mt, state.metrics)].some((r) => droppedMeasures.has(r))) { droppedMetrics.push(mt.name); return false; }
     return true;
   });
 

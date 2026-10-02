@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
-import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
+import { ValueIndex } from '../../src/value-index.js';
+import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { settle } from '../helpers/settle.js';
 
 // Allowed observability/lifecycle test: a STUB runner returns canned rows by SQL SHAPE (no
@@ -229,7 +230,7 @@ test('BackgroundIndexer records a failed sync (errors logged, status error/parti
 
 // Triple-cell collection: when the combined coverage query returns (event × app) rows, the
 // indexer persists each cell so cellCoverage(prop, {bundle, event}) reflects the seeded fill
-// (powers the native-model "field empty for this app+event" warning). Stub runner, no warehouse.
+// (powers the pipeline-model "field empty for this app+event" warning). Stub runner, no warehouse.
 test('BackgroundIndexer stores per (bundle × event) triple cells', async () => {
   const catalog = loadCatalog(CATALOG, {});
   // ad_finished@words populated (nn=10), level_started@relax empty (nn=0); combined coverage
@@ -286,13 +287,12 @@ test('BackgroundIndexer combines top-values via approx_top_k on a capable dialec
   index.close();
 });
 
-// parseApproxTopK normalises both the BigQuery {value,count} and Snowflake [value,count] shapes.
-test('parseApproxTopK normalises dialect array shapes', async () => {
-  const { parseApproxTopK } = await import('../../src/dialect.js');
-  assert.deepEqual(parseApproxTopK([{ value: 'a', count: 5 }, { value: 'b', count: 2 }]), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
-  assert.deepEqual(parseApproxTopK([['a', 5], ['b', 2]]), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
-  assert.deepEqual(parseApproxTopK(JSON.stringify([{ value: 'a', count: 5 }])), [{ value: 'a', freq: 5 }]); // JSON-string encoded
-  assert.deepEqual(parseApproxTopK('not json'), []); // unparseable → empty (caller falls back)
+// the top-K cell BigQuery's approxTopK writes (TO_JSON_STRING of APPROX_TOP_COUNT) read back as [{ value, freq }]
+test('a top-K cell is read back as values with their counts', async () => {
+  const { getDialect } = await import('../../src/dialects/index.js');
+  const bq = getDialect('bigquery');
+  assert.deepEqual(bq.parseTopK(JSON.stringify([{ value: 'a', count: 5 }, { value: 'b', count: 2 }])), [{ value: 'a', freq: 5 }, { value: 'b', freq: 2 }]);
+  assert.deepEqual(bq.parseTopK('not json'), []); // unparseable → empty (caller falls back)
 });
 
 // Observability: when the COMBINED batch scan fails but per-property succeeds, the fallback
@@ -320,6 +320,27 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   // indexing still completed via the per-property fallback.
   assert.equal(s.last_run.status, 'ok');
   assert.equal(index.stats('events', catalog.scalarEventProps('events')[0]).totalCount, 3);
+  index.close();
+});
+
+// A top-K cell the dialect cannot read: each property is counted exactly, and the run says so once
+// per batch, naming the properties — not once per property.
+test('a combined top-k that reads nothing is counted exactly and noted once per batch', async () => {
+  const catalog = loadCatalog(CATALOG, { dialect: 'bigquery' });
+  const cells = (pick) => new Proxy({}, { get: (_t, k) => pick(String(k)) });
+  const runner = { show: async (_dir, sql) => {
+    if (/APPROX_TOP_COUNT/.test(sql)) return { ok: true, rows: [cells((k) => (/^v\d+$/.test(k) ? 'not a top-k cell' : undefined))] };
+    if (/ AS d0/.test(sql)) return { ok: true, rows: [cells((k) => (k === 'rows_total' ? 5 : /^[dt]\d+$/.test(k) ? 3 : undefined))] };
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    return { ok: true, rows: [] };
+  } };
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
+  await bi.refresh();
+  const notes = index.runNotes(index.syncStatus().last_run.id).filter((n) => /read no values/.test(n.note));
+  const props = catalog.scalarEventProps('events');
+  assert.ok(notes.length >= 1 && notes.length < props.length, `one note per batch, not per property: ${notes.length} for ${props.length}`);
+  assert.deepEqual(index.sampleValues('events', props[0]), [{ value: 'x', freq: 3 }]);
   index.close();
 });
 

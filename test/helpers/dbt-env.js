@@ -5,6 +5,7 @@
 
 import { existsSync } from 'node:fs';
 import { resolveEnvironment, DEFAULT_ENV } from '../../src/dbt/environments.js';
+import { createDbt } from '../../src/dbt/index.js';
 
 /**
  * The environment `name`, or null when it is not built (the file then skips). One that IS there but
@@ -23,3 +24,12 @@ export const DBT_BIN = ENV?.dbtBin || '';
 export const MF_BIN = ENV?.mfBin || '';
 export const PY_BIN = ENV?.pythonBin || '';
 export const HAS_DBT = !!(DBT_BIN && MF_BIN && existsSync(DBT_BIN) && existsSync(MF_BIN));
+
+/**
+ * The dbt client the SERVER runs (src/server.js makeEngine → createDbt), over this environment: a
+ * data test proves the numbers of the path production queries through — `mf query` and its CSV,
+ * `dbt show` and its JSON — not those of a client only the tests use.
+ */
+export function testDbt({ profilesDir, timeout = 600000 } = {}) {
+  return createDbt({ environment: ENV, profilesDir, timeout });
+}

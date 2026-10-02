@@ -1,4 +1,4 @@
-// The `python` PIPELINE STAGE — a dbt PYTHON model anywhere in a native pipeline.
+// The `python` PIPELINE STAGE — a dbt PYTHON model anywhere in a pipeline.
 //
 // One declaration, a CHAIN of dbt models under the hood: the SQL stages before a python stage land
 // as a table, the python stage becomes the one `.py` file dbt expects (`def model(dbt, session)`)
@@ -15,10 +15,8 @@
 // packages and the operator's runtime settings) and the final `return` (from `output.columns`).
 // Function bodies pass a static gate (python/ast_gate.py) before anything is written or run.
 
-import { spawn } from 'node:child_process';
+import { runWithInput } from './dbt/process.js';
 import { assetPath, missingAssetMessage } from './runtime-assets.js';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
 import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
@@ -46,7 +44,7 @@ export function frameProfile(rt, config = {}) {
   // Per platform: what the frame is, how pandas is spelled, the ML library that runs INSIDE the
   // engine (`ml`), and the do/don't list that keeps the work there (`guide`) — from the platforms'
   // own docs (BigQuery DataFrames: bigframes.ml = the scikit-learn API executed as BigQuery ML;
-  // Spark: pyspark.ml; Snowflake: snowflake.ml.modeling).
+  // Spark, which BigQuery's serverless / Dataproc submission runs: pyspark.ml).
   if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
     return {
       key: 'bigframes',
@@ -86,7 +84,7 @@ export function frameProfile(rt, config = {}) {
       packages: ['bigframes'],
     };
   }
-  if (runtime === 'bigquery' || runtime === 'databricks') {
+  if (runtime === 'bigquery') {
     return {
       key: 'pyspark',
       native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions)',
@@ -95,17 +93,6 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window); avoid Python UDFs and row iteration (they serialize every row through Python), and collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
       packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
       packages: ['pyspark'],
-    };
-  }
-  if (runtime === 'snowflake') {
-    return {
-      key: 'snowpark',
-      native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions',
-      pandas: 'df.to_pandas()',
-      ml: 'snowflake.ml.modeling — the scikit-learn API run inside Snowflake: modeling.cluster.KMeans, modeling.linear_model.*, modeling.preprocessing.StandardScaler / OneHotEncoder, modeling.pipeline.Pipeline',
-      guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window); avoid Python UDFs on rows and to_pandas() on a large frame.',
-      packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
-      packages: ['snowflake'],
     };
   }
   if (runtime === 'duckdb') {
@@ -361,19 +348,12 @@ export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20
   const gate = assetPath('astGate');
   if (!gate) return Promise.reject(new Error(missingAssetMessage('astGate')));
   if (!pythonBin) return Promise.reject(new Error('ast gate has no Python to run on: the engine was given neither pythonBin nor a dbt environment (whose MetricFlow Python runs it) — nothing is taken from PATH'));
-  return new Promise((resolve, reject) => {
-    const proc = spawn(pythonBin, [gate], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = ''; let err = '';
-    const timer = setTimeout(() => { proc.kill(); reject(new Error(`ast gate timed out after ${timeoutMs}ms`)); }, timeoutMs);
-    proc.stdout.on('data', (d) => { out += d; });
-    proc.stderr.on('data', (d) => { err += d; });
-    proc.on('error', (e) => { clearTimeout(timer); reject(new Error(`ast gate could not start (${pythonBin}): ${e.message}`)); });
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0 && !out) return reject(new Error(`ast gate failed (${pythonBin} exit ${code}): ${err.trim()}`));
-      try { resolve(JSON.parse(out)); } catch { reject(new Error(`ast gate returned no JSON: ${(out || err).slice(0, 300)}`)); }
-    });
-    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings] }));
+  return runWithInput(pythonBin, [gate], JSON.stringify({ functions, bindings: [...bindings] }), { timeout: timeoutMs }).then((r) => {
+    if (r.cancelled) throw new Error('ast gate was not run: the call was cancelled');
+    if (r.killed) throw new Error(`ast gate timed out after ${timeoutMs}ms`);
+    if (!r.ok && r.code == null) throw new Error(`ast gate could not start (${pythonBin}): ${r.error}`);
+    if (!r.ok && !r.stdout) throw new Error(`ast gate failed (${pythonBin} exit ${r.code}): ${(r.stderr || '').trim()}`);
+    try { return JSON.parse(r.stdout); } catch { throw new Error(`ast gate returned no JSON: ${(r.stdout || r.stderr).slice(0, 300)}`); }
   });
 }
 
@@ -421,7 +401,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   // included), interpolated below. Restating any of it here is how the two start to disagree.
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed anywhere in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read its table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as this warehouse returns it: ${profile.native}. Write the functions against that API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ recipe: "${profile.mlReference}" })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The last step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed anywhere in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read its table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as this warehouse returns it: ${profile.native}. Write the functions against that API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ request: { recipe: "${profile.mlReference}" } })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The last step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
     properties: {
       stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
@@ -461,7 +441,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 }
 
 // Registered like every other stage, so it is valid in build_pipeline_model (add_step) and
-// register_native_model alike; the engine splits the pipeline at it. `terminal` = nothing may
+// _buildPipeline alike; the engine splits the pipeline at it. `terminal` = nothing may
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {

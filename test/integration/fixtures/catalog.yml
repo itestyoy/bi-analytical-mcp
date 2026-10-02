@@ -118,7 +118,7 @@ models:
             mcp:
               is_event_data: true
               # COMPLEX properties live on the raw JSON (no flat column) — usable only
-              # via the register_native_model pipeline (array_length/contains/unnest/struct_field).
+              # via a pipeline (array_length/contains/unnest/struct_field).
               properties:
                 words_collected: { type: array, items: string, description: "Words collected on a completed level." }
                 rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted on level completion (item + quantity)." }
@@ -502,7 +502,7 @@ models:
               array: { items: string, encoding: json }
         # An ARRAY OF STRUCTS, flattened into one column holding JSON: the exception stack. Unnest
         # it with `field` for one field per row, or without `field` to bind the whole frame and
-        # pull several fields off it downstream (compute op=json_field). NULL on anr — a blocked
+        # pull several fields off it downstream (compute json_field). NULL on anr — a blocked
         # main thread has no exception stack — so those reports drop out of an unnest.
       - name: stack_frames_of_event_data
         data_type: string
@@ -516,7 +516,7 @@ models:
                 encoding: json
                 fields: { file: string, line: int, in_app: boolean }
         # A JSON OBJECT (not an array): Crashlytics custom keys, whatever the app attached to the
-        # report. Read one key with compute op=json_field / derive op=struct_field; the column is
+        # report. Read one key with compute json_field / derive op=struct_field; the column is
         # TEXT holding JSON, so it is parsed before the field is taken.
       - name: custom_keys_of_event_data
         data_type: string

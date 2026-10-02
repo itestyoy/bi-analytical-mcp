@@ -2,7 +2,20 @@
 // The AI never sends raw SQL; the server renders the typed predicate tree into
 // safe Dimension()/TimeDimension()/Entity() wrappers.
 
-import { sqlLiteral } from './dialect.js';
+import { comparison } from './conditions.js';
+
+/**
+ * A query's `where`, as the caller writes it — the one condition grammar (src/schema-kit.js
+ * conditionList: a list that all hold, { or } / { and } groups), each condition's `field` named the
+ * way group_by names it ({ model, attribute }, { time: 'metric_time', grain }, { semantic_model,
+ * dimension }, { entity }) — as the predicate tree the query resolves and renders: { op, conditions }
+ * groups, each field with its `kind`.
+ */
+export function wherePredicates(list) {
+  const kindOf = (f) => (f?.time ? { kind: 'metric_time', ...(f.grain ? { grain: f.grain } : {}) } : f?.entity ? { kind: 'entity', entity: f.entity } : { kind: 'dimension', ...f });
+  const one = (c) => (c.or ? { op: 'or', conditions: c.or.map(one) } : c.and ? { op: 'and', conditions: c.and.map(one) } : { ...c, field: kindOf(c.field) });
+  return { op: 'and', conditions: (list || []).map(one) };
+}
 
 /** Render a fieldRef into its Jinja wrapper (left-hand side of a predicate). */
 export function renderField(field) {
@@ -39,40 +52,7 @@ function assertName(n) {
 
 /** Render one predicate {field, op, value} into a SQL boolean fragment. */
 export function renderPredicate(pred) {
-  const lhs = renderField(pred.field);
-  const op = pred.op;
-  switch (op) {
-    case 'eq':
-      return `${lhs} = ${sqlLiteral(pred.value)}`;
-    case 'neq':
-      return `${lhs} != ${sqlLiteral(pred.value)}`;
-    case 'gt':
-      return `${lhs} > ${sqlLiteral(pred.value)}`;
-    case 'gte':
-      return `${lhs} >= ${sqlLiteral(pred.value)}`;
-    case 'lt':
-      return `${lhs} < ${sqlLiteral(pred.value)}`;
-    case 'lte':
-      return `${lhs} <= ${sqlLiteral(pred.value)}`;
-    case 'in':
-    case 'not_in': {
-      const arr = Array.isArray(pred.value) ? pred.value : [pred.value];
-      const list = arr.map(sqlLiteral).join(', ');
-      return `${lhs} ${op === 'in' ? 'in' : 'not in'} (${list})`;
-    }
-    case 'between': {
-      if (!Array.isArray(pred.value) || pred.value.length !== 2) {
-        throw new Error("'between' requires value: [low, high]");
-      }
-      return `${lhs} between ${sqlLiteral(pred.value[0])} and ${sqlLiteral(pred.value[1])}`;
-    }
-    case 'is_null':
-      return `${lhs} is null`;
-    case 'is_not_null':
-      return `${lhs} is not null`;
-    default:
-      throw new Error(`Unsupported operator: ${op}`);
-  }
+  return comparison(renderField(pred.field), pred.op, pred.value);
 }
 
 /** Render a predicateGroup (recursive and/or) into a single boolean expression. */

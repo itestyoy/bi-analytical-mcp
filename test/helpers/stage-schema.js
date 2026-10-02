@@ -7,25 +7,28 @@
 // that one line, so a test reads as "the python branch of the stage union" instead of as a walk
 // through the document.
 
-/** The stage union of a tool schema, wherever the tool puts it (`stage`, or `pipeline.stages`). */
+import { deref, field, forms, pinned } from './schema-nav.js';
+
+/** The stage union of a tool schema, wherever the tool puts it (`stage`, or `pipeline.stages`): one
+ *  entry per stage — a stage written as several forms (compute, one per op) is one entry, its union. */
 export function stageUnion(toolSchema, prop = 'stage') {
   const node = prop === 'stage'
-    ? toolSchema.properties?.stage
-    : toolSchema.properties?.pipeline?.properties?.stages?.items;
-  const target = node?.$ref ? resolve(toolSchema, node.$ref) : node;
-  return target?.oneOf || target?.anyOf || [];
+    ? field(toolSchema, toolSchema, 'stage')
+    : deref(toolSchema, field(toolSchema, field(toolSchema, toolSchema, 'pipeline'), 'stages')?.items);
+  return (deref(toolSchema, node)?.anyOf || []).map((b) => deref(toolSchema, b));
 }
 
-/** One branch of it, by the stage name its discriminator pins. */
+/** The stage a branch of the union is (the name every one of its forms pins `stage` to). */
+export function stageOf(toolSchema, branch) {
+  return pinned(toolSchema, forms(toolSchema, branch)[0], 'stage')[0];
+}
+
+/** One branch of it, by the stage name its forms pin. */
 export function stageBranch(toolSchema, name, prop = 'stage') {
-  return stageUnion(toolSchema, prop).find((b) => b.properties?.stage?.enum?.[0] === name || b.properties?.stage?.const === name);
+  return stageUnion(toolSchema, prop).find((b) => stageOf(toolSchema, b) === name);
 }
 
 /** The stage names a tool offers — what is available on this deployment. */
 export function stageNames(toolSchema, prop = 'stage') {
-  return stageUnion(toolSchema, prop).map((b) => b.properties?.stage?.enum?.[0] ?? b.properties?.stage?.const);
-}
-
-function resolve(doc, ref) {
-  return String(ref).replace(/^#\//, '').split('/').reduce((node, key) => node?.[decodeURIComponent(key)], doc);
+  return stageUnion(toolSchema, prop).map((b) => stageOf(toolSchema, b));
 }

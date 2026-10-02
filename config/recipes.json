@@ -13,7 +13,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "active_users",
         "semantic_models": [
           {
@@ -111,7 +111,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "rev_segment",
         "use_base_models": [
           "users"
@@ -241,7 +241,7 @@
         "simple",
         "conversion"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "tut_funnel",
         "semantic_models": [
           {
@@ -379,7 +379,7 @@
       "metric_types": [
         "conversion"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "retention",
         "semantic_models": [
           {
@@ -474,7 +474,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "cohort_grid",
         "use_base_models": [
           "users"
@@ -563,7 +563,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "behavior",
         "semantic_models": [
           {
@@ -644,7 +644,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "progression",
         "semantic_models": [
           {
@@ -764,7 +764,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "monetization",
         "use_base_models": [
           "users"
@@ -901,7 +901,7 @@
         "simple",
         "ratio"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "ads",
         "semantic_models": [
           {
@@ -1001,7 +1001,7 @@
           ]
         }
       ],
-      "notes": "The unit lives in the schema (e.g. cents): convert it in a derived metric so every consumer divides once, in one place. Grouping by a high-cardinality descriptor (an id) returns a long result — check the value distribution with semantic_index({ source, property }) first.",
+      "notes": "The unit lives in the schema (e.g. cents): convert it in a derived metric so every consumer divides once, in one place. Grouping by a high-cardinality descriptor (an id) returns a long result — check the value distribution with semantic_index({ request: { source, property } }) first.",
       "hack": "A typed payload column is a MEASURE when it is an amount and a DIMENSION when it is a descriptor; scope the model to the event that carries them, then sum the amount and group by its neighbours. The event scope is what makes the payload readable — the same column is NULL on every other event."
     },
     {
@@ -1022,7 +1022,7 @@
         "simple",
         "derived"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "economy",
         "semantic_models": [
           {
@@ -1074,10 +1074,10 @@
             "expr": "coins_in - coins_out",
             "metrics": [
               {
-                "name": "coins_in"
+                "metric": "coins_in"
               },
               {
-                "name": "coins_out"
+                "metric": "coins_out"
               }
             ]
           }
@@ -1129,7 +1129,7 @@
       "metric_types": [
         "simple"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "stickiness",
         "semantic_models": [
           {
@@ -1184,8 +1184,8 @@
       "hack": "Query the SAME count_distinct at two grains (day vs month) and divide the results: because count_distinct is re-counted per grain, the two numbers are genuinely different questions. One model, two queries — not two models."
     },
     {
-      "id": "ab_test_conversion",
-      "task_type": "ab_test",
+      "id": "experiment_conversion",
+      "task_type": "experiment",
       "title": "A/B test — conversion rate by variant (with significance)",
       "when_to_use": "Compare a conversion rate (e.g. purchase) between experiment variants and test whether the difference is significant.",
       "required_events": [
@@ -1199,7 +1199,7 @@
       "metric_types": [
         "proportion"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_checkout_conversion",
         "pipeline": {
           "source": "events",
@@ -1209,10 +1209,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1241,25 +1249,27 @@
             {
               "stage": "compute",
               "name": "is_conv",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "aggregate",
@@ -1271,7 +1281,7 @@
               "measures": [
                 {
                   "name": "converted",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "is_conv"
                 }
               ]
@@ -1285,11 +1295,11 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "conversions",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "converted"
                 }
               ]
@@ -1306,14 +1316,15 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "proportion",
         "group_field": "variant_group",
         "n_field": "n",
         "conversions_field": "conversions"
       },
-      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ action: 'analyze', metric: proportion }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ action: 'analyze', metric: mean }).",
-      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ action: 'analyze' }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
+      "notes": "The pipeline-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
+      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ request: { action: 'analyze' } }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
       "id": "cumulative_metric",
@@ -1330,7 +1341,7 @@
       "metric_types": [
         "cumulative"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "cumulative_rev",
         "semantic_models": [
           {
@@ -1410,7 +1421,7 @@
         "simple",
         "derived"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "blended",
         "semantic_models": [
           {
@@ -1456,10 +1467,10 @@
             "expr": "iap_revenue + ad_revenue_cents / 100",
             "metrics": [
               {
-                "name": "iap_revenue"
+                "metric": "iap_revenue"
               },
               {
-                "name": "ad_revenue_cents"
+                "metric": "ad_revenue_cents"
               }
             ]
           }
@@ -1488,8 +1499,8 @@
       "hack": "type: \"derived\" with an `expr` over metric NAMES computes in the layer, so every consumer gets the same formula: unit conversion (x/100), sums of streams, differences, shares. A composite is a formula over metrics, never a new measure over the fact."
     },
     {
-      "id": "ab_test_revenue",
-      "task_type": "ab_test",
+      "id": "experiment_revenue",
+      "task_type": "experiment",
       "title": "A/B test — revenue per user by variant (Welch t-test)",
       "when_to_use": "Compare a CONTINUOUS metric (revenue/ARPU/time per user) between experiment variants and test significance.",
       "required_events": [
@@ -1505,7 +1516,7 @@
       "metric_types": [
         "mean"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_revenue_per_user",
         "pipeline": {
           "source": "events",
@@ -1515,10 +1526,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1554,25 +1573,27 @@
             {
               "stage": "compute",
               "name": "price0",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "column": "price"
                     }
-                  ],
-                  "then": {
-                    "column": "price"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -1584,7 +1605,7 @@
               "measures": [
                 {
                   "name": "user_rev",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price0"
                 }
               ]
@@ -1598,16 +1619,16 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "rev_mean",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "user_rev"
                 },
                 {
                   "name": "rev_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "user_rev"
                 }
               ]
@@ -1624,19 +1645,20 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "mean",
         "group_field": "variant_group",
         "n_field": "n",
         "mean_field": "rev_mean",
         "stddev_field": "rev_sd"
       },
-      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call experiment({ action: 'analyze', metric: mean }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
-      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ action: 'analyze', metric: mean }) runs Welch t-test: control = control variant_group row, variants = the rest."
+      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call experiment({ request: { action: 'analyze', metric: mean } }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest."
     },
     {
-      "id": "ab_test_cuped",
-      "task_type": "ab_test",
+      "id": "experiment_cuped",
+      "task_type": "experiment",
       "title": "A/B test — CUPED variance reduction (pre-experiment covariate)",
       "when_to_use": "Compare a continuous metric between variants with MORE POWER by adjusting for each user's pre-experiment value of the same metric (CUPED).",
       "required_events": [
@@ -1652,7 +1674,7 @@
       "metric_types": [
         "cuped"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "ab_revenue_cuped",
         "pipeline": {
           "source": "events",
@@ -1662,10 +1684,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1678,88 +1708,94 @@
             {
               "stage": "compute",
               "name": "price0",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "iap_purchase_completed"
+                      }
+                    ],
+                    "then": {
+                      "column": "price"
                     }
-                  ],
-                  "then": {
-                    "column": "price"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
               "name": "y_val",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "left": {
-                        "column": "device_time"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "gte",
+                        "right": {
+                          "column": "assigned_at"
+                        }
                       },
-                      "op": "gte",
-                      "right": {
-                        "column": "assigned_at"
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "lte",
+                        "right": {
+                          "column": "ended_at"
+                        }
                       }
-                    },
-                    {
-                      "left": {
-                        "column": "device_time"
-                      },
-                      "op": "lte",
-                      "right": {
-                        "column": "ended_at"
-                      }
+                    ],
+                    "then": {
+                      "column": "price0"
                     }
-                  ],
-                  "then": {
-                    "column": "price0"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
               "name": "x_val",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "left": {
-                        "column": "device_time"
-                      },
-                      "op": "lt",
-                      "right": {
-                        "column": "assigned_at"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "left": {
+                          "column": "device_time"
+                        },
+                        "op": "lt",
+                        "right": {
+                          "column": "assigned_at"
+                        }
                       }
+                    ],
+                    "then": {
+                      "column": "price0"
                     }
-                  ],
-                  "then": {
-                    "column": "price0"
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "numeric"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -1771,12 +1807,12 @@
               "measures": [
                 {
                   "name": "uy",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "y_val"
                 },
                 {
                   "name": "ux",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "x_val"
                 }
               ]
@@ -1784,34 +1820,46 @@
             {
               "stage": "compute",
               "name": "uy2",
-              "op": "mul",
-              "left": {
-                "column": "uy"
-              },
-              "right": {
-                "column": "uy"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "uy"
+                  },
+                  {
+                    "column": "uy"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "ux2",
-              "op": "mul",
-              "left": {
-                "column": "ux"
-              },
-              "right": {
-                "column": "ux"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "ux"
+                  },
+                  {
+                    "column": "ux"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "uxy",
-              "op": "mul",
-              "left": {
-                "column": "ux"
-              },
-              "right": {
-                "column": "uy"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "ux"
+                  },
+                  {
+                    "column": "uy"
+                  }
+                ]
               }
             },
             {
@@ -1823,31 +1871,31 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "sum_y",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uy"
                 },
                 {
                   "name": "sum_y2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uy2"
                 },
                 {
                   "name": "sum_x",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "ux"
                 },
                 {
                   "name": "sum_x2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "ux2"
                 },
                 {
                   "name": "sum_xy",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "uxy"
                 }
               ]
@@ -1864,7 +1912,8 @@
           ]
         }
       },
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "cuped",
         "group_field": "variant_group",
         "n_field": "n",
@@ -1874,12 +1923,12 @@
         "sumX2_field": "sum_x2",
         "sumXY_field": "sum_xy"
       },
-      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ action: 'analyze', metric: cuped }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ request: { action: 'analyze', metric: cuped } }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
       "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
     },
     {
-      "id": "ab_test_ratio",
-      "task_type": "ab_test",
+      "id": "experiment_ratio",
+      "task_type": "experiment",
       "title": "A/B test — ratio metric via the delta method (e.g. level completion rate)",
       "when_to_use": "Compare a RATIO metric between variants where the unit of analysis is finer than the randomization unit — e.g. levels completed per level started, or clicks per impression, when users (not attempts) are randomized.",
       "required_events": [
@@ -1894,7 +1943,8 @@
       "metric_types": [
         "ratio"
       ],
-      "ab_test": {
+      "experiment": {
+        "action": "analyze",
         "metric": "ratio",
         "group_field": "variant_group",
         "n_field": "n",
@@ -1904,9 +1954,9 @@
         "sumDen2_field": "sum_den2",
         "sumNumDen_field": "sum_numden"
       },
-      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ action: 'analyze', metric: ratio }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
-      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ action: 'analyze', metric: ratio }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
-      "register_payload": {
+      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ request: { action: 'analyze', metric: ratio } }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ request: { action: 'analyze', metric: ratio } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "pipeline_payload": {
         "name": "ab_level_completion_ratio",
         "pipeline": {
           "source": "events",
@@ -1916,10 +1966,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -1948,48 +2006,52 @@
             {
               "stage": "compute",
               "name": "is_completed",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_completed"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "level_completed"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "compute",
               "name": "is_started",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_started"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "event_name",
+                        "op": "eq",
+                        "value": "level_started"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
+              }
             },
             {
               "stage": "aggregate",
@@ -2001,12 +2063,12 @@
               "measures": [
                 {
                   "name": "num",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "is_completed"
                 },
                 {
                   "name": "den",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "is_started"
                 }
               ]
@@ -2014,34 +2076,46 @@
             {
               "stage": "compute",
               "name": "num2",
-              "op": "mul",
-              "left": {
-                "column": "num"
-              },
-              "right": {
-                "column": "num"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "num"
+                  },
+                  {
+                    "column": "num"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "den2",
-              "op": "mul",
-              "left": {
-                "column": "den"
-              },
-              "right": {
-                "column": "den"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "den"
+                  },
+                  {
+                    "column": "den"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "numden",
-              "op": "mul",
-              "left": {
-                "column": "num"
-              },
-              "right": {
-                "column": "den"
+              "expr": {
+                "fn": "mul",
+                "args": [
+                  {
+                    "column": "num"
+                  },
+                  {
+                    "column": "den"
+                  }
+                ]
               }
             },
             {
@@ -2053,31 +2127,31 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "sum_num",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "num"
                 },
                 {
                   "name": "sum_den",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "den"
                 },
                 {
                   "name": "sum_num2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "num2"
                 },
                 {
                   "name": "sum_den2",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "den2"
                 },
                 {
                   "name": "sum_numden",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "numden"
                 }
               ]
@@ -2096,8 +2170,8 @@
       }
     },
     {
-      "id": "ab_test_srm",
-      "task_type": "ab_test",
+      "id": "experiment_srm",
+      "task_type": "experiment",
       "title": "A/B guardrail — Sample Ratio Mismatch (SRM) check",
       "when_to_use": "BEFORE trusting any lift: verify the observed per-variant split matches the intended one. A mismatch means randomization or logging is broken and the whole experiment is invalid.",
       "required_events": [
@@ -2111,13 +2185,14 @@
       "metric_types": [
         "srm"
       ],
-      "srm_check": {
+      "experiment": {
+        "action": "check_split",
         "group_field": "variant_group",
         "n_field": "n"
       },
-      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ action: 'check_split' }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
-      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ action: 'check_split' }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
-      "register_payload": {
+      "notes": "The pipeline-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ request: { action: 'check_split' } }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
+      "pipeline_payload": {
         "name": "ab_srm_counts",
         "pipeline": {
           "source": "events",
@@ -2127,10 +2202,18 @@
               "with": "experiments",
               "via": "user",
               "attrs": [
-                "experiment_name",
-                "variant_group",
-                "assigned_at",
-                "ended_at"
+                {
+                  "column": "experiment_name"
+                },
+                {
+                  "column": "variant_group"
+                },
+                {
+                  "column": "assigned_at"
+                },
+                {
+                  "column": "ended_at"
+                }
               ]
             },
             {
@@ -2166,7 +2249,7 @@
               "measures": [
                 {
                   "name": "events_seen",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -2179,7 +2262,7 @@
               "measures": [
                 {
                   "name": "n",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -2197,8 +2280,8 @@
       }
     },
     {
-      "id": "ab_test_power",
-      "task_type": "ab_test",
+      "id": "experiment_power",
+      "task_type": "experiment",
       "title": "A/B planning — sample size & minimum detectable effect (power)",
       "when_to_use": "BEFORE launching, to size the test (how many users per variant to detect a target effect), or given the traffic you have, to find the smallest effect you can detect (MDE). Also AFTER an inconclusive test, to tell 'no effect' apart from 'underpowered'.",
       "required_events": [],
@@ -2208,7 +2291,7 @@
       "metric_types": [
         "power"
       ],
-      "notes": "experiment({ action: 'plan' }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ action: 'analyze' }) with an up-front MDE so a non-significant result can be read correctly.",
+      "notes": "experiment({ request: { action: 'plan' } }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ request: { action: 'analyze' } }) with an up-front MDE so a non-significant result can be read correctly.",
       "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
       "tool_calls": [
         {
@@ -2254,10 +2337,10 @@
       "required_user_attrs": [],
       "metric_types": [],
       "approach": "Prepare the grain you are asking about (here: revenue per player), then ONE `aggregate` stage with NO group_by: it returns a single row with every statistic you need — the percentile, the mean, the deviation, the max — computed once. Read that row, and use the numbers in the next pass (see agg_scale_rows_by_literals).",
-      "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute `window` stage with no partition_by, or op=raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
+      "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute window function whose over has no partition_by, or fn: raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
       "notes": "Say which kind of number you are reporting: on BigQuery `percentile`/`median` here are APPROX_QUANTILES — a sketch, which is exactly why they need no ordering and no global memory; on Postgres they are exact (percentile_cont). The stage description states this per warehouse. An exact percentile over a huge table is the one form that needs a total order, so it is the most expensive thing you can ask for — take the approximate one unless the difference changes a decision, and label it.",
       "hack": "Two passes instead of one query: pass 1 collapses the table to ONE row of statistics (no group_by, no window, no ordering), pass 2 uses those numbers as literals on the rows. Anything you were tempted to write as OVER () belongs in pass 1; a window is only for a value within a group — per player, per day, per session — and then partition_by names that group.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "table_wide_stats",
         "pipeline": {
           "source": "events",
@@ -2287,7 +2370,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2297,22 +2380,22 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue_p99",
-                  "fn": "percentile",
-                  "q": 0.99,
+                  "agg": "percentile",
+                  "percentile": 0.99,
                   "column": "revenue"
                 },
                 {
                   "name": "revenue_avg",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 },
                 {
                   "name": "revenue_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "revenue"
                 }
               ]
@@ -2334,11 +2417,11 @@
       ],
       "required_user_attrs": [],
       "metric_types": [],
-      "approach": "Put the numbers from pass 1 in as LITERALS: `least` with parts [{ column }, { value: <p99> }] clamps at the threshold, then `sub` and `div` against { value: <mean> } / { value: <deviation> } give the z-score. Every row is then independent arithmetic — no window, no ordering, no global memory — and the result is the feature table a python stage (or a segmentation) reads.",
+      "approach": "Put the numbers from pass 1 in as LITERALS: `least` with args [{ column }, { value: <p99> }] clamps at the threshold, then `sub` and `div` against { value: <mean> } / { value: <deviation> } give the z-score. Every row is then independent arithmetic — no window, no ordering, no global memory — and the result is the feature table a python stage (or a segmentation) reads.",
       "instead_of": "Recomputing the same statistics per row with AVG/STDDEV/PERCENTILE_CONT OVER () — the global window that exhausts the query's memory. Also: a `sample` stage to make the window affordable, which changes the answer instead of the shape of the query.",
       "notes": "The literals belong to the window of data pass 1 measured — re-run pass 1 when the period or the filter changes, or the z-scores quietly describe a different population. Keep them in the model's description (build_pipeline_model's `description`) so the next reader knows where the numbers came from. div guards against a zero deviation by itself (a NULL, not a division error).",
       "hack": "A number about the whole table enters the row-level query as a constant. Pass 1 (one row of statistics) → pass 2 (arithmetic per row with those constants): the pair replaces every OVER () that had no PARTITION BY, and each pass stays a plain dbt model.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "scaled_player_features",
         "pipeline": {
           "source": "events",
@@ -2368,7 +2451,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2376,36 +2459,46 @@
             {
               "stage": "compute",
               "name": "revenue_capped",
-              "op": "least",
-              "parts": [
-                {
-                  "column": "revenue"
-                },
-                {
-                  "value": 100
-                }
-              ]
+              "expr": {
+                "fn": "least",
+                "args": [
+                  {
+                    "column": "revenue"
+                  },
+                  {
+                    "value": 100
+                  }
+                ]
+              }
             },
             {
               "stage": "compute",
               "name": "revenue_centered",
-              "op": "sub",
-              "left": {
-                "column": "revenue_capped"
-              },
-              "right": {
-                "value": 12.5
+              "expr": {
+                "fn": "sub",
+                "args": [
+                  {
+                    "column": "revenue_capped"
+                  },
+                  {
+                    "value": 12.5
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "revenue_z",
-              "op": "div",
-              "left": {
-                "column": "revenue_centered"
-              },
-              "right": {
-                "value": 8.25
+              "expr": {
+                "fn": "div",
+                "args": [
+                  {
+                    "column": "revenue_centered"
+                  },
+                  {
+                    "value": 8.25
+                  }
+                ]
               }
             }
           ]
@@ -2425,7 +2518,7 @@
         "install_date"
       ],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "dn_retention_curve",
         "pipeline": {
           "source": "events",
@@ -2445,20 +2538,26 @@
               "with": "users",
               "via": "user",
               "attrs": [
-                "install_date"
+                {
+                  "column": "install_date"
+                }
               ]
             },
             {
               "stage": "compute",
               "name": "day_n",
-              "op": "date_diff",
-              "from": {
-                "column": "install_date"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "day"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "install_date"
+                  },
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "unit": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -2468,7 +2567,7 @@
               "measures": [
                 {
                   "name": "returners",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -2497,7 +2596,7 @@
       "required_properties": [],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "gap_sessions",
         "pipeline": {
           "source": "events",
@@ -2505,80 +2604,100 @@
             {
               "stage": "compute",
               "name": "prev_ts",
-              "op": "window",
-              "fn": "lag",
-              "column": "device_time",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
+              "expr": {
+                "fn": "lag",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "over": {
+                  "partition_by": [
+                    "player_id_of_internal"
+                  ],
+                  "order_by": [
+                    {
+                      "key": "device_time",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "compute",
               "name": "gap_s",
-              "op": "date_diff",
-              "from": {
-                "column": "prev_ts"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "second"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "prev_ts"
+                  },
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "unit": "second"
+              }
             },
             {
               "stage": "compute",
               "name": "is_session_start",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "is_null"
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "gap_s",
+                        "op": "is_null"
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
+                  },
+                  {
+                    "when": [
+                      {
+                        "column": "gap_s",
+                        "op": "gt",
+                        "value": 1800
+                      }
+                    ],
+                    "then": {
+                      "value": 1
+                    }
                   }
+                ],
+                "else": {
+                  "value": 0
                 },
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "gt",
-                      "value": 1800
-                    }
-                  ],
-                  "then": {
-                    "value": 1
-                  }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
+                "type": "int"
+              }
             },
             {
               "stage": "compute",
               "name": "session_idx",
-              "op": "window",
-              "fn": "sum",
-              "column": "is_session_start",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
+              "expr": {
+                "fn": "sum",
+                "args": [
+                  {
+                    "column": "is_session_start"
+                  }
+                ],
+                "over": {
+                  "partition_by": [
+                    "player_id_of_internal"
+                  ],
+                  "order_by": [
+                    {
+                      "key": "device_time",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "aggregate",
@@ -2589,16 +2708,16 @@
               "measures": [
                 {
                   "name": "events_in_session",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "session_start",
-                  "fn": "min",
+                  "agg": "min",
                   "column": "device_time"
                 },
                 {
                   "name": "session_end",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "device_time"
                 }
               ]
@@ -2606,14 +2725,18 @@
             {
               "stage": "compute",
               "name": "session_seconds",
-              "op": "date_diff",
-              "from": {
-                "column": "session_start"
-              },
-              "to": {
-                "column": "session_end"
-              },
-              "unit": "second"
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "session_start"
+                  },
+                  {
+                    "column": "session_end"
+                  }
+                ],
+                "unit": "second"
+              }
             },
             {
               "stage": "order_by",
@@ -2647,7 +2770,7 @@
       ],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "revenue_pop",
         "pipeline": {
           "source": "events",
@@ -2672,9 +2795,15 @@
             {
               "stage": "compute",
               "name": "period",
-              "op": "date_trunc",
-              "column": "device_time",
-              "granularity": "day"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -2684,7 +2813,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2692,36 +2821,51 @@
             {
               "stage": "compute",
               "name": "prev_revenue",
-              "op": "window",
-              "fn": "lag",
-              "column": "revenue",
-              "order_by": [
-                {
-                  "key": "period",
-                  "direction": "asc"
+              "expr": {
+                "fn": "lag",
+                "args": [
+                  {
+                    "column": "revenue"
+                  }
+                ],
+                "over": {
+                  "order_by": [
+                    {
+                      "key": "period",
+                      "direction": "asc"
+                    }
+                  ]
                 }
-              ]
+              }
             },
             {
               "stage": "compute",
               "name": "delta",
-              "op": "sub",
-              "left": {
-                "column": "revenue"
-              },
-              "right": {
-                "column": "prev_revenue"
+              "expr": {
+                "fn": "sub",
+                "args": [
+                  {
+                    "column": "revenue"
+                  },
+                  {
+                    "column": "prev_revenue"
+                  }
+                ]
               }
             },
             {
               "stage": "compute",
               "name": "pct_change",
-              "op": "div",
-              "left": {
-                "column": "delta"
-              },
-              "right": {
-                "column": "prev_revenue"
+              "expr": {
+                "fn": "div",
+                "args": [
+                  {
+                    "column": "delta"
+                  },
+                  {
+                    "column": "prev_revenue"
+                  }
+                ]
               }
             },
             {
@@ -2748,7 +2892,7 @@
       "required_properties": [],
       "required_user_attrs": [],
       "metric_types": [],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "event_volume_audit",
         "pipeline": {
           "source": "events",
@@ -2761,11 +2905,11 @@
               "measures": [
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "users",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -2783,11 +2927,11 @@
         }
       },
       "notes": "Distinguish an EXPECTED NULL (the property does not belong to that event) from a gap (it does and is missing) — the property view reports them separately. A volume change with stable coverage is behaviour; stable volume with collapsing coverage is instrumentation.",
-      "hack": "Count rows and distinct actors per event, then read the properties' NULL coverage (semantic_index({ source, property })) before trusting any movement. Triage order: volume → coverage → metric; most \"metric drops\" are a tracking change, and this ordering is what tells the two apart."
+      "hack": "Count rows and distinct actors per event, then read the properties' NULL coverage (semantic_index({ request: { source, property } })) before trusting any movement. Triage order: volume → coverage → metric; most \"metric drops\" are a tracking change, and this ordering is what tells the two apart."
     },
     {
       "id": "two_sample_significance",
-      "task_type": "ab_test",
+      "task_type": "experiment",
       "title": "Two-sample significance for ANY two groups (no experiment needed)",
       "when_to_use": "You have TWO groups from the SAME pipeline and want to know if a difference is statistically real — NOT a randomized experiment. E.g. mean time-to-first vs time-to-last occurrence, conversion of cohort A vs B, a metric before vs after a date, organic vs paid. There is NO experiments-assignment table involved.",
       "required_events": [],
@@ -2798,12 +2942,13 @@
         "mean",
         "proportion"
       ],
-      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to ab_test — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ metric: 'mean' }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ metric: 'proportion' }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
-      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE ab_test call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
+      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then experiment({ request: { action: 'analyze', metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then experiment({ request: { action: 'analyze', metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final experiment step on example per-group aggregates.",
+      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE experiment({ request: { action: \"analyze\" } }) call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
       "tool_calls": [
         {
-          "tool": "ab_test",
+          "tool": "experiment",
           "args": {
+            "action": "analyze",
             "metric": "mean",
             "control": {
               "label": "group_a",
@@ -2822,8 +2967,9 @@
           }
         },
         {
-          "tool": "ab_test",
+          "tool": "experiment",
           "args": {
+            "action": "analyze",
             "metric": "proportion",
             "control": {
               "label": "group_a",
@@ -2850,8 +2996,8 @@
       "instead_of": "`df[\"v\"] = df[\"k\"].map(mapping)` — map aligns two objects by index, and the frame from dbt.ref() has none: NullIndexError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "lookup_merge",
         "pipeline": {
           "source": "events",
@@ -2871,11 +3017,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -2942,8 +3088,8 @@
       "instead_of": "`df[\"m\"] = df.groupby(\"k\")[\"x\"].mean()` — the groupby result is another object with its own index; assigning it needs alignment the frame cannot do.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "group_back_to_rows",
         "pipeline": {
           "source": "events",
@@ -2958,9 +3104,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -2971,7 +3123,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3033,8 +3185,8 @@
       "instead_of": "`df[\"k\"].unique()` with no argument — its default keep_order=True demands a row ordering and raises OrderRequiredError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "distinct_pairs",
         "pipeline": {
           "source": "events",
@@ -3106,8 +3258,8 @@
       "instead_of": "`df.head(10)` / `df.tail(10)` / `df.iloc[:10]` on an unsorted frame, and `df.nlargest(10, \"x\")` — every one of them raises OrderRequiredError here (nlargest only escapes it with keep=\"all\", because ties then need no tie-break).",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "top_payers",
         "pipeline": {
           "source": "events",
@@ -3127,11 +3279,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3185,8 +3337,8 @@
       "instead_of": "Calling rolling/shift/cumsum on the frame as it arrives — the window is then over an arbitrary order, and the numbers are silently meaningless.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "series_ops",
         "pipeline": {
           "source": "events",
@@ -3204,9 +3356,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -3216,7 +3374,7 @@
               "measures": [
                 {
                   "name": "dau",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "player_id_of_internal"
                 }
               ]
@@ -3279,8 +3437,8 @@
       "instead_of": "Computing the statistic in another frame and joining it in (it is a different root, so it needs a merge), and `std(ddof=…)` — this Series.std takes NO parameters at all, so passing ddof is a TypeError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "frame_statistics",
         "pipeline": {
           "source": "events",
@@ -3300,11 +3458,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3363,8 +3521,8 @@
       "instead_of": "`df[\"x\"].quantile([0.5, 0.9])` — a SERIES indexed by q, which this runtime has no index to align; and a hard-coded threshold nobody can defend.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "distribution_cut",
         "pipeline": {
           "source": "events",
@@ -3394,7 +3552,7 @@
               "measures": [
                 {
                   "name": "attempts",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -3454,8 +3612,8 @@
       "instead_of": "`df[other[\"flag\"]]` / `df[df[\"k\"].isin(other_series)]` — a Series from ANOTHER frame has no index to align with this one.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "filter_by_other",
         "pipeline": {
           "source": "events",
@@ -3475,11 +3633,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3538,8 +3696,8 @@
       "instead_of": "`df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]` — predict re-reads its result as a NEW query, so its frame has a different root than df and the assignment raises NullIndexError. Also sklearn/scipy: they need to_pandas() first and then run single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "ml_predict_column",
         "pipeline": {
           "source": "events",
@@ -3559,11 +3717,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3632,11 +3790,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -3656,8 +3814,8 @@
       "instead_of": "`KMeans(n_clusters=4, standardize_features=True)` → TypeError: __init__() got an unexpected keyword argument. bigframes.ml wears the scikit-learn API but wraps BigQuery ML: a constructor takes the options its BQML model type has, so an sklearn-only argument (standardize_features, n_init, random_state, algorithm) does not exist here. A third Pipeline step raises NotImplementedError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
+      "pipeline_payload": {
         "name": "ml_estimator_params",
         "pipeline": {
           "source": "events",
@@ -3677,11 +3835,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3757,11 +3915,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -3769,7 +3927,7 @@
           ]
         }
       },
-      "notes": "Why the resemblance misleads: each estimator maps its parameters to BQML CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's and nothing else is accepted — and the parameters after the first are keyword-only, so a positional call fails the same way. The signatures are extracted from the installed library (config/bigframes-facts.json) and published as a fetchable reference — semantic_index({ recipe: \"bf_ml_signatures\" }) — so they are this version's, not a memory of the docs. Standardizing in a SQL stage before the python stage is equally valid and cheaper — compute the mean and the deviation as a ONE-ROW aggregate and apply them as literals (see agg_table_stat_no_global_window); then the estimator needs no transformer at all.",
+      "notes": "Why the resemblance misleads: each estimator maps its parameters to BQML CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's and nothing else is accepted — and the parameters after the first are keyword-only, so a positional call fails the same way. The signatures are extracted from the installed library (config/bigframes-facts.json) and published as a fetchable reference — semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) — so they are this version's, not a memory of the docs. Standardizing in a SQL stage before the python stage is equally valid and cheaper — compute the mean and the deviation as a ONE-ROW aggregate and apply them as literals (see agg_table_stat_no_global_window); then the estimator needs no transformer at all.",
       "hack": "Read the signature, pass only what is in it, and express anything it lacks as a step of its own (a transformer) or as SQL before the stage. The same holds for every estimator: only the class and its option names change."
     },
     {
@@ -3781,8 +3939,8 @@
       "instead_of": "Declaring the input columns as the output — the following SQL stages then reference columns that do not exist.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "ml_output_shape",
         "pipeline": {
           "source": "events",
@@ -3807,9 +3965,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -3819,7 +3983,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3888,8 +4052,8 @@
       "instead_of": "`model.fit(df)` with the label still inside the features (it then predicts itself), a Series as y, or assigning `df[\"pred\"] = model.predict(...)` — predict re-reads its result, so the assignment raises NullIndexError. Also sklearn's LogisticRegression/RandomForest: they need to_pandas() and run single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the estimator's own parameters, and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the estimator's own parameters, and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
+      "pipeline_payload": {
         "name": "ml_supervised",
         "pipeline": {
           "source": "events",
@@ -3909,11 +4073,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -3921,24 +4085,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -3999,11 +4165,11 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "avg_revenue",
-                  "fn": "avg",
+                  "agg": "average",
                   "column": "revenue"
                 }
               ]
@@ -4023,8 +4189,8 @@
       "instead_of": "Scoring on the training rows (an accuracy that means nothing), splitting with a pandas train_test_split after to_pandas(), or reporting a prediction with no error figure at all.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ guide: \"python\" }) for the frame rules.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
+      "pipeline_payload": {
         "name": "ml_model_score",
         "pipeline": {
           "source": "events",
@@ -4044,11 +4210,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4056,24 +4222,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -4153,8 +4321,8 @@
       "instead_of": "Expecting the input columns back (the SQL stages after it would then reference columns that do not exist), or assigning a component into df (a cross-frame assignment → NullIndexError). Also sklearn's PCA: it needs to_pandas() and runs single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for PCA's parameters (n_components, svd_solver), and semantic_index({ guide: \"python\" }) for the frame rules.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for PCA's parameters (n_components, svd_solver), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
+      "pipeline_payload": {
         "name": "ml_pca_components",
         "pipeline": {
           "source": "events",
@@ -4174,16 +4342,16 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 },
                 {
                   "name": "max_price",
-                  "fn": "max",
+                  "agg": "max",
                   "column": "price"
                 }
               ]
@@ -4240,16 +4408,16 @@
               "measures": [
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "pc1_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "principal_component_1"
                 },
                 {
                   "name": "pc2_sd",
-                  "fn": "stddev",
+                  "agg": "stddev",
                   "column": "principal_component_2"
                 }
               ]
@@ -4269,8 +4437,8 @@
       "instead_of": "Hand-rolled dummies with np.where / a lookup frame per value (a cross-frame alignment → NullIndexError, and a column per value you have to keep in step), a THIRD Pipeline step (NotImplementedError — it takes exactly two), or LabelEncoder on a nominal column, which invents an order between its values.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ guide: \"python\" }) for the frame rules.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
+      "pipeline_payload": {
         "name": "ml_categorical_features",
         "pipeline": {
           "source": "events",
@@ -4287,7 +4455,9 @@
               "with": "users",
               "via": "user",
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {
@@ -4299,11 +4469,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4311,24 +4481,26 @@
             {
               "stage": "compute",
               "name": "is_payer",
-              "op": "case",
-              "type": "int",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+              "expr": {
+                "fn": "case",
+                "cases": [
+                  {
+                    "when": [
+                      {
+                        "column": "revenue",
+                        "op": "gt",
+                        "value": 0
+                      }
+                    ],
+                    "then": {
+                      "value": 1
                     }
-                  ],
-                  "then": {
-                    "value": 1
                   }
-                }
-              ],
-              "else": {
-                "value": 0
+                ],
+                "else": {
+                  "value": 0
+                },
+                "type": "int"
               }
             },
             {
@@ -4417,7 +4589,7 @@
               "measures": [
                 {
                   "name": "players",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             }
@@ -4436,8 +4608,8 @@
       "instead_of": "Deriving several results from the same expensive expression without caching (deferred execution re-runs it per dependent result), and mixing objects taken BEFORE the cache with the cached frame — cache() swaps the object's node for a read of the temporary table, so a mask or column taken earlier belongs to the old expression and combining them raises NullIndexError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "cache_intermediate",
         "pipeline": {
           "source": "events",
@@ -4452,9 +4624,15 @@
             {
               "stage": "compute",
               "name": "day",
-              "op": "date_trunc",
-              "granularity": "day",
-              "column": "device_time"
+              "expr": {
+                "fn": "date_trunc",
+                "args": [
+                  {
+                    "column": "device_time"
+                  }
+                ],
+                "grain": "day"
+              }
             },
             {
               "stage": "aggregate",
@@ -4465,7 +4643,7 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4522,8 +4700,8 @@
       "instead_of": "`to_pandas()` to get a Python equivalent — that leaves BigQuery and brings the whole result into the notebook.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "bbq_functions",
         "pipeline": {
           "source": "events",
@@ -4543,11 +4721,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4610,8 +4788,8 @@
       "instead_of": "`pdf = df.to_pandas()` on the incoming frame — it downloads the whole table into the notebook runtime and everything after it is single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-      "register_payload": {
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "pipeline_payload": {
         "name": "pandas_last_resort",
         "pipeline": {
           "source": "events",
@@ -4631,11 +4809,11 @@
               "measures": [
                 {
                   "name": "events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 }
               ]
@@ -4705,7 +4883,7 @@
       "required_roles": [
         "acquisition"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "ua_spend",
         "use_base_models": [
           "users"
@@ -4858,7 +5036,7 @@
       "required_roles": [
         "acquisition"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "gov",
         "use_base_models": [
           "users"
@@ -4941,7 +5119,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "create_payload": {
+      "semantic_payload": {
         "name": "mix",
         "semantic_models": [
           {
@@ -5038,7 +5216,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "crash_ad_funnel",
         "pipeline": {
           "source": "crashlytics",
@@ -5049,7 +5227,9 @@
               "via": "ad_funnel_rewarded",
               "kind": "inner",
               "attrs": [
-                "event_id"
+                {
+                  "column": "event_id"
+                }
               ]
             },
             {
@@ -5060,11 +5240,11 @@
               "measures": [
                 {
                   "name": "matched_events",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "reports",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "crash_id"
                 }
               ]
@@ -5095,7 +5275,7 @@
       "task_type": "joins",
       "title": "Joining a slowly-changing model: state the window",
       "when_to_use": "Joining attributes that CHANGE (an install record, a plan, a price list) — anything with a validity window.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "spend_by_country_pit",
         "pipeline": {
           "source": "acquisition",
@@ -5111,7 +5291,9 @@
                 "to": "install_time_valid_until"
               },
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {
@@ -5122,12 +5304,12 @@
               "measures": [
                 {
                   "name": "spend",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "cost"
                 },
                 {
                   "name": "rows",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },
@@ -5160,7 +5342,7 @@
       "task_type": "pipeline",
       "title": "An ORDERED sequence per entity (row-pattern match)",
       "when_to_use": "When the order matters: did A happen before B, how far along an ordered path each entity got, time between steps.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "activation_sequence",
         "pipeline": {
           "source": "events",
@@ -5237,7 +5419,7 @@
       "required_roles": [
         "crashlytics"
       ],
-      "register_payload": {
+      "pipeline_payload": {
         "name": "breadcrumb_frequency",
         "pipeline": {
           "source": "crashlytics",
@@ -5245,7 +5427,7 @@
             {
               "stage": "unnest",
               "source": "breadcrumbs_of_event_data",
-              "as": "crumb",
+              "name": "crumb",
               "type": "string"
             },
             {
@@ -5256,11 +5438,11 @@
               "measures": [
                 {
                   "name": "occurrences",
-                  "fn": "count"
+                  "agg": "count"
                 },
                 {
                   "name": "reports",
-                  "fn": "count_distinct",
+                  "agg": "count_distinct",
                   "column": "crash_id"
                 }
               ]
@@ -5295,7 +5477,7 @@
       "task_type": "pipeline",
       "title": "Reshape the result: columns into rows (and back)",
       "when_to_use": "When the shape is wrong for what reads it: several measure columns that should be (name, value) rows, or categories that should be columns.",
-      "register_payload": {
+      "pipeline_payload": {
         "name": "revenue_long",
         "pipeline": {
           "source": "events",
@@ -5327,7 +5509,9 @@
                 "to": "install_time_valid_until"
               },
               "attrs": [
-                "country"
+                {
+                  "column": "country"
+                }
               ]
             },
             {
@@ -5338,12 +5522,12 @@
               "measures": [
                 {
                   "name": "revenue",
-                  "fn": "sum",
+                  "agg": "sum",
                   "column": "price"
                 },
                 {
                   "name": "purchases",
-                  "fn": "count"
+                  "agg": "count"
                 }
               ]
             },

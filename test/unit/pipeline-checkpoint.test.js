@@ -21,7 +21,7 @@ function engine() {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, fn: 'count' }] });
+const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, agg: 'count' }] });
 const keepEvents = (value) => ({ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value }] });
 const funnel = {
   stage: 'match_recognize',
@@ -60,13 +60,13 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: agg('events_seen') });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] } });
   const c1 = await e.build_pipeline_model({ action: 'materialize', draft_id }); // at: 2
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'compute', name: 'twice', op: 'mul', left: { column: 'events_seen' }, right: { value: 2 } } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'mul', args: [{ column: 'events_seen' }, { value: 2 }] } } });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'order_by', keys: [{ key: 'twice', direction: 'desc' }] } });
   const c2 = await e.build_pipeline_model({ action: 'materialize', draft_id }); // at: 4
   assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2, 4]);
 
   // Editing step 3 retires ONLY the checkpoint that baked it (at: 4); the one at 2 lives.
-  const edit = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 3, stage: { stage: 'compute', name: 'twice', op: 'mul', left: { column: 'events_seen' }, right: { value: 3 } } });
+  const edit = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 3, stage: { stage: 'compute', name: 'twice', expr: { fn: 'mul', args: [{ column: 'events_seen' }, { value: 3 }] } } });
   assert.deepEqual(edit.checkpoints_dropped.map((d) => d.at), [4]);
   assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2]);
   assert.deepEqual(edit.from_checkpoint.model, c1.model);
@@ -147,10 +147,10 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   assert.equal(step.steps_recomputed, 1);
 
   // Dropping the owner would take that table with it → refused, naming the consumer.
-  await assert.rejects(() => e.context({ action: 'drop', context_id: draft_id }), new RegExp(`${fork.draft_id}.*${c1.model}`));
+  await assert.rejects(() => e.delete_context({ context_id: draft_id }), new RegExp(`${fork.draft_id}.*${c1.model}`));
   assert.ok(e.ctxs.has(draft_id), 'nothing was dropped');
   // Forced: the fork's inherited checkpoint is retired, so it recomputes from the source.
-  assert.deepEqual(await e.context({ action: 'drop', context_id: draft_id, force: true }), { removed: true });
+  assert.deepEqual(await e.delete_context({ context_id: draft_id, force: true }), { removed: true });
   assert.deepEqual(draftOf(e, fork.draft_id).checkpoints, []);
 });
 
@@ -158,7 +158,7 @@ test('a checkpoint is retired when the value index moved on, or its model is gon
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_step', draft_id, stage: agg('events_seen') });
-  const built = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  await e.build_pipeline_model({ action: 'materialize', draft_id });
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1);
   // A completed index scan means the source data may have moved — the prefix is no longer trusted.
   draftOf(e, draft_id).checkpoints[0].index_run_id = 'a-previous-scan';
@@ -246,7 +246,7 @@ test('a new draft in the same context never reuses a model name', async () => {
 });
 
 // The idle-context GC used to drop a checkpoint owner without consulting the consumers —
-// bypassing the refusal that context({ action: 'drop' }) makes for exactly that reason.
+// bypassing the refusal that delete_context makes for exactly that reason.
 test('the idle GC does not reclaim a context whose prefix a fork reads', async () => {
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });

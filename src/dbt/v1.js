@@ -10,7 +10,7 @@ import { inIsolatedTarget } from '../request-context.js';
 import { runProcess, runWithInput } from './process.js';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
-import { parseShowJson, parseCsv, extractSql, extractPlan } from './output.js';
+import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
 
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
@@ -24,6 +24,10 @@ export class DbtV1 {
 
   /** The semantic-layer YAML this dbt reads: 1.x (below 1.12) knows only the legacy spec. */
   get semanticSpec() { return 'legacy'; }
+
+  /** The config a SQL model needs when its SQL is written in a syntax dbt's own parser does not read
+   *  (BigQuery's pipe syntax) — dbt 1.x parses no SQL, so none. */
+  unparsedSqlConfig() { return {}; }
 
   /** Whether this dbt runs Python models on `adapter` — 1.x leaves that to the adapter (catalog.js decides). */
   pythonModelsOn(_adapter) { return true; }
@@ -64,12 +68,12 @@ export class DbtV1 {
 
   async parse(projectDir) {
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
-    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
+    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, ...SEMANTIC_MANIFEST)) };
   }
 
   /** The semantic manifest the last parse of `projectDir` wrote (what MetricFlow reads), or null. */
   semanticManifest(projectDir) {
-    const file = join(projectDir, 'target', 'semantic_manifest.json');
+    const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (!existsSync(file)) return null;
     try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
   }
@@ -96,17 +100,17 @@ export class DbtV1 {
   /**
    * What each of `metrics` can be grouped by, as MetricFlow itself lists it over `projectDir`'s parsed
    * semantic manifest (its `list_group_bys`: each dimension with its semantic model and entity path,
-   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through the sidecar
-   * script (python/mf_sidecar.py), in the MetricFlow environment. The `mf` CLI prints only names.
+   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through
+   * python/mf_group_bys.py, in the MetricFlow environment. The `mf` CLI prints only names.
    * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
    */
   async groupBys(projectDir, metrics) {
     const python = this.pythonBin || this.environment?.pythonBin;
     if (!python) return { ok: false, error: 'no MetricFlow Python to ask: the dbt environment names no MetricFlow environment (MF_ENV)' };
-    const sidecar = assetPath('mfSidecar');
-    if (!sidecar) return { ok: false, error: missingAssetMessage('mfSidecar') };
+    const script = assetPath('mfGroupBys');
+    if (!script) return { ok: false, error: missingAssetMessage('mfGroupBys') };
     const request = { id: 'group_bys', op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics };
-    const r = await runWithInput(python, [sidecar], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
+    const r = await runWithInput(python, [script], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
     const line = (r.stdout || '').split('\n').find((l) => l.trim().startsWith('{'));
     let out = null;
     try { out = line ? JSON.parse(line) : null; } catch { /* said below */ }
@@ -135,7 +139,7 @@ export class DbtV1 {
     // Preserve the process-level facts (killed/signal/error = timeout, spawn failure): the caller
     // has to tell "dbt could not run" from "dbt ran and this relation is not there".
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, killed: r.killed, signal: r.signal };
-    const m = (r.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').match(/MCP_COLS:(\[[^\n]*\])/);
+    const m = stripAnsi(r.stdout).match(/MCP_COLS:(\[[^\n]*\])/);
     if (!m) return { ok: false, stdout: r.stdout };
     try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }
   }
@@ -190,6 +194,12 @@ export class DbtV1 {
       let columns = [];
       let rows = [];
       if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));
+      // a CSV carries no types: a metric's column is a number, as the warehouse computed it (a
+      // dimension's values stay as written — "1.0.0" or "007" is not a number)
+      const metricCols = new Set(opts.metrics || []);
+      for (const row of rows) {
+        for (const c of metricCols) if (typeof row[c] === 'string' && row[c].trim() !== '' && Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+      }
       return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
     } finally {
       rmSync(tmpDir, { recursive: true, force: true }); // don't leak per-query temp dirs

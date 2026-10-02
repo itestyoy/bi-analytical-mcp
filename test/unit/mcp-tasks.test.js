@@ -15,6 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, TASK_CAPS } from '../helpers/mcp-http.js';
 import { runToCompletion } from '../../src/mcp-surface.js';
+import { TaskRunner } from '../../src/task-runner.js';
 
 const payload = (result) => JSON.parse(result.content[0].text);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -31,10 +32,10 @@ async function pollUntil(s, taskId, done) {
 test('a quick call answers inline even with tasks declared; a long one becomes a task and completes with its result', async () => {
   const s = await startServer();
   try {
-    const quick = await s.modern('tools/call', { name: 'time', arguments: { seconds: 0 } }, { caps: TASK_CAPS });
+    const quick = await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 0 } } }, { caps: TASK_CAPS });
     assert.equal(quick.body.result.resultType, 'complete');
 
-    const t = (await s.modern('tools/call', { name: 'time', arguments: { seconds: 1 } }, { caps: TASK_CAPS })).body.result;
+    const t = (await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 1 } } }, { caps: TASK_CAPS })).body.result;
     assert.equal(t.resultType, 'task');
     assert.equal(t.status, 'working');
     assert.match(t.taskId, /^[0-9a-f-]{36}$/, 'an unguessable id');
@@ -53,11 +54,11 @@ test('a quick call answers inline even with tasks declared; a long one becomes a
 test('no task without the extension: the call answers inline, tasks/* are -32021, a legacy client is never given one', async () => {
   const s = await startServer();
   try {
-    const r = await s.modern('tools/call', { name: 'time', arguments: { seconds: 1 } });
+    const r = await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 1 } } });
     assert.equal(r.body.result.resultType, 'complete');
     assert.equal(payload(r.body.result).waited_seconds, 1);
     const legacy = await s.client({ era: 'legacy', capabilities: { extensions: TASK_CAPS.extensions } });
-    assert.equal(payload(await legacy.callTool({ name: 'time', arguments: { seconds: 1 } })).waited_seconds, 1, 'the extension is not defined before 2026-07-28');
+    assert.equal(payload(await legacy.callTool({ name: 'time', arguments: { request: { seconds: 1 } } })).waited_seconds, 1, 'the extension is not defined before 2026-07-28');
 
     const g = await s.modern('tasks/get', { taskId: 'whatever' });
     assert.equal(g.status, 400);
@@ -65,6 +66,7 @@ test('no task without the extension: the call answers inline, tasks/* are -32021
     assert.deepEqual(g.body.error.data.requiredCapabilities, { extensions: { 'io.modelcontextprotocol/tasks': {} } });
     const unknown = await s.modern('tasks/get', { taskId: '00000000-0000-4000-8000-000000000000' }, { caps: TASK_CAPS });
     assert.equal(unknown.body.error.code, -32602);
+    assert.equal(unknown.status, 200, 'a task the server does not know is the handler\'s answer: in-band, not an HTTP failure');
     const misrouted = await s.modern('tasks/get', { taskId: 'abc' }, { caps: TASK_CAPS, headers: { 'mcp-name': 'other' } });
     assert.equal(misrouted.body.error.code, -32020, 'Mcp-Name must be the taskId (SEP-2663 routing header)');
   } finally { await s.stop(); }
@@ -76,7 +78,7 @@ test('tasks/cancel is an ack, the task ends cancelled, and the work itself stops
   let outcome;
   s.engine.time = async (input) => { outcome = await real(input); return outcome; };
   try {
-    const t = (await s.modern('tools/call', { name: 'time', arguments: { seconds: 20 } }, { caps: TASK_CAPS })).body.result;
+    const t = (await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 20 } } }, { caps: TASK_CAPS })).body.result;
     const upd = await s.modern('tasks/update', { taskId: t.taskId, inputResponses: {} }, { caps: TASK_CAPS });
     assert.equal(upd.status, 200);
     const ack = await s.modern('tasks/cancel', { taskId: t.taskId }, { caps: TASK_CAPS });
@@ -100,13 +102,15 @@ function stubEngine({ after = 3, rows = [], fail = null, throws = null } = {}) {
     state,
     schemas: { query_pipeline_model: {}, display_model_result: {}, query_semantic_model: {} },
     jobs: { get: (id) => (id === 't1' ? { id, status: done() ? (fail ? 'error' : 'ready') : 'running' } : undefined), isLive: () => true },
-    async _awaitTasks() {
-      if (throws) throw throws;
-      state.waits += 1;
+    tasks: {
+      async await() {
+        if (throws) throw throws;
+        state.waits += 1;
+      },
     },
-    async query_pipeline_model({ task_id }) {
-      if (!task_id) return { task_id: 't1', context_id: 'c1', next: 'query_pipeline_model' };
-      return done() ? result() : { ok: true, task_id: 't1', status: 'running' };
+    async query_pipeline_model({ task_ids }) {
+      if (!task_ids) return { task_id: 't1', context_id: 'c1', next: 'query_pipeline_model' };
+      return TaskRunner.readAnswer([done() ? result() : { ok: true, task_id: 't1', status: 'running' }], 'query_pipeline_model');
     },
     async display_model_result({ display }) {
       const r = result();
@@ -120,9 +124,9 @@ function stubEngine({ after = 3, rows = [], fail = null, throws = null } = {}) {
 test('a protocol task follows a query tool\'s read while the engine task runs, and returns its rows — never a card', async () => {
   const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }];
   const engine = stubEngine({ rows });
-  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
+  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { request: { task_ids: ['t1'] } });
   assert.equal(raw.status, 'done');
-  assert.deepEqual(payload(result).rows, rows);
+  assert.deepEqual(payload(result).results[0].rows, rows);
   assert.equal(result.structuredContent, undefined, 'reading a result draws nothing');
   assert.ok(engine.state.waits >= 3, 'it waited until the task was done');
 });
@@ -130,27 +134,27 @@ test('a protocol task follows a query tool\'s read while the engine task runs, a
 test('display_model_result under a protocol task waits for the task, then draws its ONE card', async () => {
   const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }];
   const engine = stubEngine({ rows });
-  const { result } = await runToCompletion(engine, 'display_model_result', { task_id: 't1', display: { kind: 'line', x: 'day', y: ['dau'] } });
+  const { result } = await runToCompletion(engine, 'display_model_result', { request: { task_id: 't1', display: { kind: 'line', x: 'day', y: ['dau'] } } });
   assert.deepEqual(result.structuredContent.rows, rows, 'the card is drawn from the finished rows');
 });
 
 test('a call that STARTS work is never held by a protocol task: it answers with its task_id', async () => {
   const engine = stubEngine({ after: 1000 });
-  const { raw } = await runToCompletion(engine, 'query_semantic_model', {});
+  const { raw } = await runToCompletion(engine, 'query_semantic_model', { request: {} });
   assert.equal(raw.task_id, 't1');
   assert.equal(engine.state.waits, 0, 'nothing waited on the task');
 });
 
 test('a followed task that FAILS is a tool error, not a completed success', async () => {
   const engine = stubEngine({ after: 1, fail: { stage: 'materialize', message: 'dbt run failed' } });
-  const { result } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
+  const { result } = await runToCompletion(engine, 'query_pipeline_model', { request: { task_ids: ['t1'] } });
   assert.equal(result.isError, true);
   assert.equal(payload(result).error.message, 'dbt run failed');
 });
 
 test('a wait that THROWS while following a task is a tool error the caller reads', async () => {
   const engine = stubEngine({ throws: Object.assign(new Error('relation "qr_x" does not exist'), { stage: 'query' }) });
-  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
+  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { request: { task_ids: ['t1'] } });
   assert.equal(raw, null);
   assert.equal(result.isError, true);
   assert.equal(payload(result).error.stage, 'query');
@@ -165,7 +169,7 @@ test('following a long task leaves no abort listener behind on the protocol task
   const remove = ctl.signal.removeEventListener.bind(ctl.signal);
   ctl.signal.addEventListener = (type, fn, o) => { if (type === 'abort') live += 1; add(type, fn, o); };
   ctl.signal.removeEventListener = (type, fn, o) => { if (type === 'abort') live -= 1; remove(type, fn, o); };
-  await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' }, { signal: ctl.signal });
+  await runToCompletion(engine, 'query_pipeline_model', { request: { task_ids: ['t1'] } }, { signal: ctl.signal });
   assert.ok(engine.state.waits >= 40);
   assert.ok(live <= 1, `listeners still attached after 40 waits: ${live}`);
 });

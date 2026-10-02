@@ -31,22 +31,21 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
 import yaml from 'js-yaml';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
+import { ValueIndex } from '../../src/value-index.js';
+import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { openStore } from '../../src/store.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -101,7 +100,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
   // The value index is REAL: a full pass over the warehouse, awaited, so the guard and the
@@ -148,7 +147,7 @@ before(async () => {
   ({ engine: renamedEngine } = variant((M) => { mcp(M.fct_analytics_events).role = 'analytics'; }));
 }, opts);
 
-after(async () => { backend?.close(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
 
 // ═══════════ A. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES ═══════════
 
@@ -172,7 +171,7 @@ test('2. the response echoes the path the structured reference resolved to', opt
 
 test('3. a where clause addressed by model + attribute: GB has 57 events', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].aeu_evts), 57);
 });
@@ -188,7 +187,7 @@ test("4. the source's OWN attribute under its identity: bundle_id splits 131 / 5
 test('5. an attribute the model does not have is refused, listing the ones it has', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'shoe_size' }] }),
-    /'shoe_size' is not an attribute of 'users'.*country/s);
+    /`group_by.0.attribute` must be one of: .*country/s);
 });
 
 test('6. a model the task did not load is refused with the use_base_models fix', opts, async (t) => {
@@ -215,7 +214,7 @@ test('8. via names the relationship explicitly and gives the same numbers', opts
 test('9. a via that is not a relationship to that model is refused, listing the real ones', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'session' }] }, ownerEngine),
-    /'session' is not a relationship from this task's source\(s\) to 'crashlytics'.*ad_funnel/s);
+    /`group_by.0.via` must be one of: .*ad_funnel/s);
 });
 
 test('10. a structured attribute and a time grain together: one month, 184 events', opts, async (t) => {
@@ -230,42 +229,42 @@ test('10. a structured attribute and a time grain together: one month, 184 event
 
 test('11. a wrong-cased country on users.country is rejected with the real casing', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'gb' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'gb' }] }),
     /different casing.*'GB'/s);
 });
 
 test('12. …and the correctly cased value returns 57', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
   assert.equal(num(r.rows[0].aeu_evts), 57);
 });
 
 test('13. an IN list is checked value by value: GB + US = 124', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'US'] }] } });
+  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'US'] }] });
   assert.equal(num(r.rows[0].aeu_evts), 124);
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'us'] }] } }), /different casing/);
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'us'] }] }), /different casing/);
 });
 
 test('14. a value absent from a fully indexed small set is rejected outright', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'XX' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'XX' }] }),
     /does not occur in this column/);
 });
 
 test('15. the guard applies to the structured reference too', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'De' }] } }),
+  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'De' }] }),
     /different casing.*'DE'/s);
-  const ok = await q(evUsersCtx, { metrics: ['aeu_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'DE' }] } });
+  const ok = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'DE' }] });
   assert.equal(num(ok.rows[0].aeu_evts), 31);
 });
 
 test("16. the source's own attribute is guarded against its own indexed values", opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'COM.OMG.COLORFIT' }] } }),
+  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'COM.OMG.COLORFIT' }] }),
     /different casing.*'com\.omg\.colorfit'/s);
-  const ok = await q(evCtx, { metrics: ['aev_evts'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'com.omg.colorfit' }] } });
+  const ok = await q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'com.omg.colorfit' }] });
   assert.equal(num(ok.rows[0].aev_evts), 53);
 });
 
@@ -295,8 +294,8 @@ test('19. a relationship nobody owns is pipeline only — and the pipeline join 
   const v = await engine.semantic_index({ model: 'crashlytics' });
   assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'pipeline only');
   const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'ev_name' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev_name' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.deepEqual(mapCol(rows, 'event_name', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
 });
@@ -330,7 +329,7 @@ test('22. a finding on a qualified crash property surfaces on that property', op
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}.*\{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════
@@ -338,7 +337,7 @@ test('23. a bare name carried by two sources is refused, naming both', opts, asy
 test('24. a declared amount the table lacks is pruned; the real one still sums to 17.50', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', meta: { mcp: { measure: { unit: 'usd' } } } });
+    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
   });
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.acquisition.includes('amount:bonus_spend'), JSON.stringify(pruned));
@@ -351,7 +350,7 @@ test('24. a declared amount the table lacks is pruned; the real one still sums t
 test('25. a measure over the pruned amount is refused at validation, not in the warehouse', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', meta: { mcp: { measure: { unit: 'usd' } } } });
+    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
   });
   await groundCatalogToPhysical(cat, backend, BASE);
   await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: { name: 'b' } }] }),
@@ -375,15 +374,15 @@ test('26. a governed measure whose column is missing is pruned; the surviving on
 test('27. a time axis on a missing column is dropped and the model still joins: control 6 / variant_b 6', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_experiment_assignments.columns.push({ name: 'ghost_time', data_type: 'timestamp', meta: { mcp: { is_time: true } } });
+    M.fct_experiment_assignments.columns.push({ name: 'ghost_time', data_type: 'timestamp', config: { meta: { mcp: { is_time: true } } } });
   });
   assert.equal(cat.getModel('experiments').time?.column, 'ghost_time', 'declared before grounding');
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.experiments.includes('(time axis)'), JSON.stringify(pruned));
   assert.equal(cat.getModel('experiments').time, undefined);
   const rows = await pipeRows('events', [
-    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group'] },
-    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', fn: 'count_distinct', column: 'player_id_of_internal' }] },
+    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
+    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', agg: 'count_distinct', column: 'player_id_of_internal' }] },
   ], eng);
   assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 });
 });
@@ -417,26 +416,6 @@ test('30. the model view lists clicks both as an attribute and as an amount', op
 
 // ═══════════ G. RESET IS A CLEAN SLATE ═══════════
 
-test('31. over a database keyed the old way the indexer rebuilds from the warehouse: US 4 / GB 4 / DE 3 / BR 2', opts, async (t) => {
-  if (skip(t)) return;
-  const path = join(mkdtempSync(join(tmpdir(), 'aud-v1-')), 'vi.sqlite');
-  const db = new DatabaseSync(path);
-  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
-  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-  db.exec("INSERT INTO prop_stats VALUES ('users.country', 1, 99, 0, 1, 0, NULL)");
-  db.exec("INSERT INTO prop_values VALUES ('users.country', 'ATLANTIS', 99)");
-  db.close();
-  const store = openStore({ dbPath: path });
-  const index = new ValueIndex({ store });
-  assert.equal(index.stats('users', 'country'), null, 'the old rows are dropped, never mis-filed');
-  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
-  await bi.refresh();
-  const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
-  assert.deepEqual(vals, { US: 4, GB: 4, DE: 3, BR: 2 });
-  assert.equal(vals.ATLANTIS, undefined);
-  index.close();
-});
-
 test('32. reset() over a fresh store leaves an empty index that the scan then fills', opts, async (t) => {
   if (skip(t)) return;
   const path = join(mkdtempSync(join(tmpdir(), 'aud-reset-')), 'vi.sqlite');
@@ -463,11 +442,6 @@ test("33. an events source whose role is not called 'events' loads and counts 18
   assert.equal(num(r.rows[0].aren_n), 184);
 });
 
-test('34. meta.mcp.anchor is refused at load: there is no default source', opts, async (t) => {
-  if (skip(t)) return;
-  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events).anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
-});
-
 test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
   if (skip(t)) return;
   assert.throws(() => catalog.eventNames(), /a source is required/);
@@ -479,12 +453,12 @@ test('35. an event accessor without a source is refused; named, it answers', opt
 test('36. the session key is not a groupable path of the events source', opts, async (t) => {
   if (skip(t)) return;
   assert.ok(!catalog.modelDimensionColumns('events').includes('session_number'));
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'session_number' }] }), /'session_number' is not an attribute of 'events'/);
+  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'session_number' }] }), /`group_by.0.attribute` must be one of/);
 });
 
 test('37. …a pipeline reads the key like any column: sessions 1..4 hold 150 / 26 / 4 / 4 events', opts, async (t) => {
   if (skip(t)) return;
-  const rows = await pipeRows('events', [{ stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', fn: 'count' }] }]);
+  const rows = await pipeRows('events', [{ stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', agg: 'count' }] }]);
   assert.deepEqual(mapCol(rows, 'session_number', 'n'), { 1: 150, 2: 26, 3: 4, 4: 4 });
 });
 
@@ -523,7 +497,7 @@ test('41. pipeline: the same property extracted → the same 10 / 8 / 6', opts, 
   const rows = await pipeRows('events', [
     { stage: 'derive', name: 'ad_type', op: 'extract', source: 'ad_type_of_event_data' },
     { stage: 'where', conditions: [{ column: 'ad_type', op: 'is_not_null' }] },
-    { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.deepEqual(mapCol(rows, 'ad_type', 'n'), { rewarded: 10, interstitial: 8, banner: 6 });
 });
@@ -543,7 +517,7 @@ test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 
   const rows = await pipeRows('events', [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'aggregate', measures: [{ name: 'rev', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].rev), 85); assert.equal(num(rows[0].n), 8);
 });
@@ -579,8 +553,8 @@ test('46. the guide names the real variant relationships, and the first one join
   assert.ok(trig && /ad_funnel_rewarded/.test(trig.do) && /ad_funnel_interstitial/.test(trig.do) && /ad_funnel_banner/.test(trig.do), JSON.stringify(trig));
   assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'nothing domain-specific');
   const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', as: 'ev' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].n), 14);
 });
@@ -659,14 +633,6 @@ test('55. values come from the index with their frequencies: win 20 / lose 5', o
   const v = await engine.semantic_index({ source: 'events', property: 'result_of_event_data' });
   assert.deepEqual(Object.fromEntries(v.sample_values.map((x) => [x.value, x.freq])), { win: 20, lose: 5 });
   assert.deepEqual([...v.events].sort(), ['level_completed']);
-});
-
-test('56. a catalog that still declares events: or values: is refused with the replacement', opts, async (t) => {
-  if (skip(t)) return;
-  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events.columns.find((c) => c.name === 'result_of_event_data')).events = ['level_completed']; }),
-    /meta\.mcp\.events is no longer a schema key.*meta\.mcp\.property: true/s);
-  assert.throws(() => variant((M) => { setMcp(M.dim_users.columns.find((c) => c.name === 'platform'), { values: ['ios', 'android'] }); }),
-    /meta\.mcp\.values is no longer a schema key/);
 });
 
 test('57. the anr event carries anr_duration, breadcrumbs and custom_keys — not the stack', opts, async (t) => {

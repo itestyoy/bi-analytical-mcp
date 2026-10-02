@@ -9,16 +9,43 @@ export const RETENTIONEERING_VIEW_URI = 'ui://betti/retentioneering-view.html';
  *  comparison orders mixed case and punctuation differently from one deployment to the next). */
 export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+/**
+ * THE KINDS THAT HAVE A CARD — one table: a kind's title, whether its card is a chart of its own
+ * (`charted`; a distribution is drawn as its histogram), how its card is built (`card`, from the
+ * card's head, the result and what the drawing call carries), and for a diff that has a card, how
+ * that one is built (`diff`) — the library's matrices as heatmaps, or, where `diffCharted`, in the
+ * analysis's own shape (a funnel's: both groups on the same steps, and their difference). A kind not
+ * in it has no card and is answered in words.
+ */
+const KINDS = {
+  transition_graph: { title: 'Transition graph', charted: true, card: (head, r, at) => graph(head, r, at.weight, at.synthetic), diff: diffMatrices },
+  step_matrix: { title: 'Step matrix', charted: true, card: (head, r, at) => stepMatrix(head, r, at.synthetic), diff: diffMatrices },
+  step_sankey: { title: 'Step sankey', charted: true, card: stepSankey, diff: diffMatrices },
+  funnel: { title: 'Funnel', charted: true, card: funnel, diff: funnelDiff, diffCharted: true },
+  cluster_analysis: { title: 'Path clusters', charted: true, card: overview },
+  segment_overview: { title: 'Segment overview', charted: true, card: overview },
+  metric_distribution: { card: distribution },
+};
+const kindsWhere = (test) => Object.keys(KINDS).filter((k) => test(KINDS[k]));
 /** The analyses the card draws as a chart of their own. */
-export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
-/** WHICH ANALYSES HAVE A CARD — the one list: the charted ones and a distribution (its histogram). */
-export const CARD_KINDS = [...CHARTED_KINDS, 'metric_distribution'];
-/** A diff has a card where its parts are matrices (drawn as heatmaps); a funnel's diff has none. */
-export const DIFF_CARD_KINDS = ['transition_graph', 'step_matrix', 'step_sankey'];
+export const CHARTED_KINDS = kindsWhere((k) => k.charted);
+/** Which analyses have a card: the charted ones and a distribution (its histogram). */
+export const CARD_KINDS = Object.keys(KINDS);
+/** Which diffs have a card. */
+export const DIFF_CARD_KINDS = kindsWhere((k) => k.diff);
+/** The kinds whose diff keeps the analysis's own shape: the query spec tells the analysis step so
+ *  (`diff_charted`), which then runs it — and its pre-run check — through the charted function. */
+export const CHARTED_DIFF_KINDS = kindsWhere((k) => k.diffCharted);
 
-/** Whether an analysis of this kind (a diff of it, or not) has a card — decided by kind alone. */
+/** How a stored result holds its diff: 'charted' (the analysis's own shape), 'tables' (the library's
+ *  tables), or false for no diff. */
+export const diffForm = (r) => (r?.diff ? (r.diff_charted ? 'charted' : 'tables') : false);
+
+/** Whether an analysis of this kind has a card — decided by kind, and for a diff by the form the
+ *  card of that kind reads (a diff stored in another form has none). */
 export function hasCard(kind, diff = false) {
-  return (diff ? DIFF_CARD_KINDS : CARD_KINDS).includes(kind);
+  if (!diff) return CARD_KINDS.includes(kind);
+  return DIFF_CARD_KINDS.includes(kind) && (diff === 'charted') === CHARTED_DIFF_KINDS.includes(kind);
 }
 
 /** How each transition weight reads: a count, a share of 0..1, a plain number, or a duration in seconds. */
@@ -30,14 +57,12 @@ export const WEIGHT_LABELS = {
   count: 'Transitions', unique_paths: 'Paths', share_of_total: 'Share of all transitions', avg_per_path: 'Per path',
   proba_in: 'Share of the target\'s arrivals', proba_out: 'Share of the source\'s departures', time_median: 'Median time', time_q95: 'Time, 95th percentile',
 };
-const TITLES = {
-  transition_graph: 'Transition graph', step_matrix: 'Step matrix', step_sankey: 'Step sankey',
-  funnel: 'Funnel', cluster_analysis: 'Path clusters', segment_overview: 'Segment overview',
-};
 /** A title for any analysis: its own, else its kind in words. */
-const titleOf = (kind) => TITLES[kind] || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
-const SYNTHETIC = new Set(['path_start', 'path_end']);
-/** How the library's synthetic events read on a card: where a path begins, and where it has ended. */
+const titleOf = (kind) => (Object.hasOwn(KINDS, kind) && KINDS[kind].title) || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
+/** How the library's synthetic events read on a card: where a path begins, and where it has ended.
+ *  Which events ARE synthetic is the library's word: the server draws a card with the facts sheet's
+ *  `synthetic_events` (this page does not carry the sheet); a card drawn before it did falls back to
+ *  the events these labels name, which test/unit/retentioneering-feature.test.js holds to the sheet. */
 const START_END = { path_start: 'Path start', path_end: 'Path end' };
 const STEP_START_END = { path_start: 'Path start', path_end: 'Ended' };
 /** retentioneering's own default for the graph: each event keeps its strongest few exits (plus every
@@ -51,19 +76,16 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
-  const head = { kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
+  if (r.error) return none('error');
+  // analysis_kind stays the analysis's own kind where the card's kind is a shape of its (a diff, a distribution)
+  const synthetic = new Set(Array.isArray(drawn.synthetic_events) ? drawn.synthetic_events : Object.keys(START_END));
+  const head = { kind: r.kind, analysis_kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
-  if (!hasCard(r.kind, !!r.diff)) return none('no_card');
-  if (r.diff) return diffMatrices(head, r);
-  switch (r.kind) {
-    case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
-    case 'step_matrix': return stepMatrix(head, r);
-    case 'step_sankey': return stepSankey(head, r);
-    case 'funnel': return funnel(head, r);
-    case 'metric_distribution': return distribution(head, r);
-    default: return overview(head, r);
-  }
+  if (!hasCard(r.kind, diffForm(r))) return none('no_card');
+  const kind = KINDS[r.kind];
+  if (r.diff) return kind.diff(head, r);
+  return kind.card(head, r, { weight: args.edge_weight || drawn.edge_weight, synthetic });
 }
 
 /** A library name as a reader reads it: "paths_with_start" → "Paths with start", "path_stats.user_id"
@@ -129,13 +151,13 @@ function diffMatrices(head, r) {
   return { ...head, kind: 'diff', title: `${head.title} — difference between two groups`, tables };
 }
 
-function graph(head, r, weight) {
+function graph(head, r, weight, synthetic) {
   const edges = (r.edges || []).filter((e) => e.count > 0);
   if (!edges.length) return none('empty');
   const weights = Object.keys(WEIGHT_UNITS).filter((w) => edges.some((e) => e[w] != null));
   return {
     ...head,
-    nodes: (r.nodes || []).map((n) => ({ event: n.event, label: START_END[n.event] || n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: SYNTHETIC.has(n.event) })),
+    nodes: (r.nodes || []).map((n) => ({ event: n.event, label: START_END[n.event] || n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: synthetic.has(n.event) })),
     edges,
     weights,
     weight: weights.includes(weight) ? weight : weights.includes('proba_out') ? 'proba_out' : weights[0],
@@ -158,11 +180,11 @@ function eventOrder(cells, steps) {
     .map(([e]) => e);
 }
 
-function stepMatrix(head, r) {
+function stepMatrix(head, r, synthetic) {
   const blocks = (r.blocks || []).filter((b) => b.cells?.length).map((b) => {
     const events = eventOrder(b.cells, b.steps);
     const at = new Map(b.cells.map((c) => [`${c.event}\u0000${c.step}`, c.share]));
-    return { steps: b.steps, rows: events.map((e) => ({ event: e, label: STEP_START_END[e] || e, synthetic: SYNTHETIC.has(e), values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
+    return { steps: b.steps, rows: events.map((e) => ({ event: e, label: STEP_START_END[e] || e, synthetic: synthetic.has(e), values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
   });
   return blocks.length ? { ...head, blocks } : none('empty');
 }
@@ -183,6 +205,27 @@ function funnel(head, r) {
   let biggest = null;
   steps.forEach((s, i) => { if (i > 0 && (biggest === null || s.of_previous < steps[biggest].of_previous)) biggest = i; });
   return { ...head, steps, biggest_drop: biggest };
+}
+
+/** A funnel's diff: each step with both groups (paths, share of all, share of the previous step) and
+ *  their difference as the library computed it (first minus second); the step where the share that
+ *  continues differs most is marked. */
+function funnelDiff(head, r) {
+  const side = (s, p) => ({ value: s[`${p}_unique_paths`], of_first: s[`${p}_conversion_rate`], of_previous: s[`${p}_step_conversion_rate`] });
+  const steps = (r.steps || []).filter((s) => s.funnel1_unique_paths != null && s.funnel2_unique_paths != null).map((s) => ({
+    label: s.step, first: side(s, 'funnel1'), second: side(s, 'funnel2'),
+    delta: { value: s.delta_unique_paths, of_first: s.delta_conversion_rate, of_previous: s.delta_step_conversion_rate },
+  }));
+  if (!steps.length) return none('empty');
+  let widest = null;
+  steps.forEach((s, i) => { if (i > 0 && Number.isFinite(s.delta.of_previous) && (widest === null || Math.abs(s.delta.of_previous) > Math.abs(steps[widest].delta.of_previous))) widest = i; });
+  const g = r.diff_groups || {};
+  const named = (v) => (v === '<REST>' ? 'the other levels' : v === '<MISSING>' ? 'no level' : v);
+  return {
+    ...head, kind: 'funnel_diff', title: `${head.title} — two groups`,
+    groups: { segment: g.segment ?? null, first: named(g.first ?? 'Group 1'), second: named(g.second ?? 'Group 2') },
+    steps, widest_gap: widest,
+  };
 }
 
 function overview(head, r) {

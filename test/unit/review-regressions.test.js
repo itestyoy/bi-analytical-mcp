@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { openStore } from '../../src/store.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
 
@@ -23,12 +22,12 @@ const engine = (over = {}) => settle(new Engine({
   ...over,
 }));
 
-// ── delete_native_model left a pipeline's other files behind ────────────────────────────────
+// ── _deletePipelineModel left a pipeline's other files behind ────────────────────────────────
 // A pipeline is a CHAIN of generated files: `<model>.sql`, and for a python stage `<model>.py` +
 // `<model>.yml`, plus `<model>_sN.*` per step. Deleting only `<model>.sql` reported removed:true
 // while dbt kept compiling the rest — and with the context's state cleared, nothing could name
 // them again. Lifecycle check: what the context owns on disk afterwards.
-test('delete_native_model removes EVERY file of the pipeline, not just the .sql', async () => {
+test('_deletePipelineModel removes EVERY file of the pipeline, not just the .sql', async () => {
   const e = engine();
   const ctx = e.ctxs.create();
   const dir = e.ctxs.generatedDir(ctx.id);
@@ -38,7 +37,7 @@ test('delete_native_model removes EVERY file of the pipeline, not just the .sql'
   for (const f of ['pipe_demo.sql', 'pipe_demo.py', 'pipe_demo.yml', 'pipe_demo_s1.sql', 'pipe_demo_s2.py', 'pipe_other.sql']) {
     writeFileSync(join(dir, f), '-- x\n');
   }
-  const out = await e.delete_native_model({ context_id: ctx.id });
+  const out = await e._deletePipelineModel({ context_id: ctx.id });
   assert.equal(out.removed, true);
   const left = readdirSync(dir).filter((f) => f.startsWith('pipe_'));
   assert.deepEqual(left, ['pipe_other.sql'], 'only the other model’s file survives');
@@ -55,27 +54,6 @@ test('an unknown column name is refused by the property view, not read off undef
     /not a property or attribute of 'users'|`property` must be one of/);
 });
 
-// ── memory: a rewritten legacy target must be stored like every other target ────────────────
-// `record` stores targets as objects; the one-time rewrite of source-less legacy keys used to
-// store STRINGS ('term:foo') into the same list, so one note could hold two shapes and the
-// `term:` prefix leaked into the searchable text.
-test('a rewritten legacy memory target is stored in the same shape as a recorded one', async () => {
-  const store = openStore({});
-  const mk = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }), store }));
-  const e0 = mk();
-  store.memory.add({ id: 'legacy', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data'], aliases: [], links: [], created_at: Date.now() });
-  const e = mk(); // a fresh Engine over the same store runs the rewrite
-  const rec = await e.memory({ action: 'record', note: 'a recorded one', targets: [{ term: 'ad_type_of_event_data' }] });
-
-  const shapeOf = (id) => store.memory.get(id).targets.map((t) => (t && typeof t === 'object' ? Object.keys(t).sort().join('+') : `string:${t}`));
-  assert.deepEqual(shapeOf('legacy'), shapeOf(rec.id), 'the rewritten target has the same shape as a recorded one');
-  // and the prefix never becomes part of what is searched
-  const found = await e.memory({ action: 'search', query: 'ad_type_of_event_data' });
-  assert.ok(found.notes.some((n) => n.id === 'legacy'), 'still findable by the word itself');
-  assert.ok(!JSON.stringify(store.memory.get('legacy').targets).includes('term:'), 'no "term:" prefix inside the stored target');
-  e0.close(); e.close();
-});
-
 // ── meta.mcp.dimension: false was ignored on a non-fact's time axis ─────────────────────────
 // The opt-out is read further down the column loop, but the time axis returns before reaching it,
 // so a spend table's `spend_date` stayed a groupable attribute however it was declared.
@@ -83,23 +61,24 @@ test('meta.mcp.dimension: false takes the time axis out of the group-by surface 
   const base = (optOut) => `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
   - name: fct_spend
-    meta: { mcp: { role: acquisition } }
+    config: { meta: { mcp: { role: acquisition } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: spend_date, data_type: date, meta: { mcp: { is_time: true${optOut ? ', dimension: false' : ''} } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: spend_date, data_type: date, config: { meta: { mcp: { is_time: true${optOut ? ', dimension: false' : ''} } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `;
   const load = (yaml) => {
     const f = join(mkdtempSync(join(tmpdir(), 'rev-')), 'catalog.yml');
@@ -144,7 +123,7 @@ test('a pipeline build never holds its call: even a lone python model returns a 
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
-  const started = await e.raw.register_native_model({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
+  const started = await e.raw._buildPipeline({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
   assert.ok(isStartedTask(started), `the call answers with its task only: ${JSON.stringify(started).slice(0, 300)}`);
   assert.equal(finished, 0, 'and returns before the build is done');
   const out = await taskResult(e, started.task_id);
@@ -162,27 +141,29 @@ test('a funnel step can filter a property read from the event_data blob', async 
   const yaml = `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp:
-        role: events
-        primary_entity: event
-        known_events: [tutorial, level_completed]
+    config:
+      meta:
+        mcp:
+          role: events
+          primary_entity: event
+          known_events: [tutorial, level_completed]
     columns:
-      - { name: event_id, data_type: string, meta: { mcp: { entity: { name: event, type: primary } } } }
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: event_id, data_type: string, config: { meta: { mcp: { entity: { name: event, type: primary } } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
       - name: event_data
         data_type: jsonb
-        meta:
-          mcp:
-            is_event_data: true
-            properties:
-              step_id: { type: string }
+        config:
+          meta:
+            mcp:
+              is_event_data: true
+              properties:
+                step_id: { type: string }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
   const dir = mkdtempSync(join(tmpdir(), 'blob-'));
@@ -198,7 +179,7 @@ models:
     ],
     metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
   };
-  const out = await e.register_native_model({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
+  const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
 });
 
@@ -215,7 +196,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   }));
   const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
-  const joinStage = out.register_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
+  const joinStage = out.pipeline_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
   const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
@@ -225,19 +206,19 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
 });
 
 // ── a pipeline submitted all at once got none of the stage warnings ─────────────────────────
-// The incremental builder warns about an SCD join with no window; register_native_model ran the
+// The incremental builder warns about an SCD join with no window; _buildPipeline ran the
 // very same stages silently. Both paths now make the same judgements.
-test('register_native_model warns about an incomplete SCD join, like the step builder does', async () => {
+test('_buildPipeline warns about an incomplete SCD join, like the step builder does', async () => {
   const e = engine();
-  const out = await e.register_native_model({
+  const out = await e._buildPipeline({
     name: 'scd_fanout', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'] }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] },
   });
   assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
   // with the window stated, there is nothing to warn about
-  const ok = await e.register_native_model({
+  const ok = await e._buildPipeline({
     name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
   });
   assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
 });
@@ -261,10 +242,10 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
     /cannot remove dimension 'nope'.*It has: country/s,
   );
-  const out = await e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it
@@ -412,20 +393,22 @@ const spendCatalog = (axisMeta) => {
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: fct_spend
-    meta:
-      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
-      - { name: spend_date, data_type: date, meta: { mcp: { ${axisMeta} } } }
-      - { name: channel, data_type: string, meta: { mcp: { dimension: true } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row, type: primary } } } } }
+      - { name: spend_date, data_type: date, config: { meta: { mcp: { ${axisMeta} } } } }
+      - { name: channel, data_type: string, config: { meta: { mcp: { dimension: true } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `);
   return loadCatalog(file, {});
 };
@@ -449,23 +432,26 @@ test('two models declaring the same role are refused, naming both', () => {
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [login] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [login] }
     columns:
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
   - name: fct_spend_a
-    meta:
-      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row, type: primary } } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
   - name: fct_spend_b
-    meta:
-      mcp: { role: measures, primary_entity: { name: row2, type: primary } }
+    config:
+      meta:
+        mcp: { role: measures, primary_entity: { name: row2, type: primary } }
     columns:
-      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row2, type: primary } } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+      - { name: row_id, data_type: string, config: { meta: { mcp: { entity: { name: row2, type: primary } } } } }
+      - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `);
   assert.throws(() => loadCatalog(file, {}), /fct_spend_a.*fct_spend_b.*role.*measures/s);
 });
@@ -508,19 +494,21 @@ test('a name that is both a payload property and a groupable column is refused',
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
-    meta:
-      mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
+    config:
+      meta:
+        mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
     columns:
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
-      - { name: bundle_id, data_type: string, meta: { mcp: { dimension: { bundle: true } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
+      - { name: bundle_id, data_type: string, config: { meta: { mcp: { dimension: { bundle: true } } } } }
       - name: event_data
         data_type: jsonb
-        meta:
-          mcp:
-            is_event_data: true
-            properties:
-              bundle_id: { type: string }
+        config:
+          meta:
+            mcp:
+              is_event_data: true
+              properties:
+                bundle_id: { type: string }
 `);
   assert.throws(() => loadCatalog(file, {}), /bundle_id.*BOTH as an event_data property and as a groupable column/s);
 });
@@ -533,13 +521,13 @@ test('unnest is refused when the payload column it explodes is gone', async () =
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
+  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } });
   assert.equal(ok.step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] } });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
+    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } }),
     /unknown column 'event_data' at this stage/,
   );
 });

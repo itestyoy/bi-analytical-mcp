@@ -80,12 +80,16 @@ Stage = {
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 
-**Implemented** (`src/pipeline.js` + `src/dialects/{base,duckdb,bigquery}.js`):
-`where`, `derive`, `unnest`, `join`, `aggregate`, `pivot`, `unpivot`, `order_by`,
-`limit`, `project` — lowered to a DuckDB CTE chain (data-tested via `dbt show`:
-aggregate / pivot / unpivot) and to BigQuery pipe syntax. Remaining:
-`match_recognize` as a registry stage (today a dedicated renderer consuming the
-prepared relation).
+**Implemented**: the registry is `src/pipeline/stages.js` (the compute stage's ops are one
+table in `src/pipeline/compute.js`, the pieces every stage is written with in
+`src/pipeline/sql.js`), rendering is `src/pipeline.js`, and each warehouse lowers the op list
+in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `derive`, `compute`, `unnest`, `join`,
+`aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
+`match_recognize` (`src/match-recognize.js`) and `python` (`src/python-model.js`), which
+register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax. A stage
+declares what the machinery needs to know about it (`available` on this warehouse,
+`keepsSourceRows`, the next-step hints it `recommend`s), so nothing outside the registry
+names a stage.
 
 New stages the request adds — `aggregate` (group_by), `join`, and
 `match_recognize` (promoted from a bespoke renderer to a registry stage) — slot
@@ -135,9 +139,8 @@ targets either dialect:
 
 Exactly **two dialects** are supported — `duckdb` and `bigquery` — each a class
 in its own file (`src/dialects/duckdb.js`, `src/dialects/bigquery.js`)
-implementing the abstract `Dialect` (`src/dialects/base.js`). `src/dialect.js` is
-a thin functional facade that delegates to them (so existing callers are
-unchanged). The same op IR lowers two ways:
+implementing the abstract `Dialect` (`src/dialects/base.js`); callers take one
+with `getDialect(name)` (`src/dialects/index.js`). The same op IR lowers two ways:
 
 - **BigQuery → native pipe syntax.** Each stage emits its `|>` operator; the
   result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> PIVOT …`).
@@ -166,13 +169,13 @@ with the YAML config header. Two consumption modes, unchanged:
    stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
 
 `build_semantic_model` stays the declarative way to define measures/metrics over
-the **scalar** two-source models. **`register_native_model` is the pipeline
+the **scalar** two-source models. **A pipeline built in one call (`_buildPipeline`) is the pipeline
 creator**: it accepts either a `sequence` (an ordered MATCH_RECOGNIZE funnel with a
 MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
 general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
 aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in
 `match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
-result (the build is a task: `query_pipeline_model({ task_id })` returns and pages its rows,
+result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
 `query_pipeline_model({ context_id, transform })` filters and regroups the built model, and a
 pipeline started from it with `from_task` re-slices them).
 
@@ -214,7 +217,7 @@ refusal that names the consumers, unless forced.
 ## 7. Migration path (from today's code)
 
 Already in place: the stage registry pattern (`src/prepare.js`), chained-CTE
-lowering, dialect array/struct helpers (`src/dialect.js`), catalog complex-type
+lowering, dialect array/struct helpers (`src/dialects/`), catalog complex-type
 declarations + scalar guards, SQL config headers (`src/sql-header.js`), and
 MATCH_RECOGNIZE as a generator with a CTE equivalent (DuckDB).
 
@@ -223,7 +226,7 @@ Steps to reach the target:
    the top-level pipeline; give each stage a `plan()` (schema/grain contract)
    alongside `emit()`.
 2. **Promote `match_recognize` to a stage** (`emit` = current renderers; `plan`
-   = its per-match output columns). The bespoke `register_native_model` path
+   = its per-match output columns). The bespoke one-call pipeline path (`_buildPipeline`)
    becomes "pipeline ending in a `match_recognize` stage".
 3. **Add `aggregate` (group_by) and `join` stages** to the registry.
 4. **Add the BigQuery pipe-syntax emitter** next to the CTE lowering; pick per
@@ -244,7 +247,7 @@ Declarative pipeline:
     { "stage": "match_recognize", "partition_by": "user", "mode": "ordered",
       "steps": [ { "name": "launch", "event_name": ["first_launch"] },
                  { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "property": "level_id", "op": "eq", "value": 1 } ] } ],
-      "metrics": [ { "name": "avg_words", "type": "agg_at_step", "agg": "avg", "property": "n_words", "step": "lvl1" } ] },
+      "metrics": [ { "name": "avg_words", "type": "agg_at_step", "agg": "average", "property": "n_words", "step": "lvl1" } ] },
     { "stage": "aggregate", "group_by": ["furthest_step_name", "user__platform"], "measures": [ { "name": "users", "agg": "count" } ] }
   ]
 }

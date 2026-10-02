@@ -5,9 +5,9 @@
 > Semantic Layer / MetricFlow** test suite. Every formulation is cross-checked
 > for feasibility against:
 > - `docs/dbt-semantic-layer-spec.md` (metric types, join rules, time spine, filters)
-> - `config/catalog.json` (the only events, properties, and attributes that exist)
+> - `config/catalog.yml` (the only events, properties, and attributes that exist)
 >
-> Scope of the underlying model (from `catalog.json`):
+> Scope of the underlying model (from `catalog.yml`):
 > - **`events`** (`fct_analytics_events`, fact) — entities `user` (foreign,
 >   `user_id`), `session` (foreign, `session_id`); time `event_timestamp` (day);
 >   `event_name` ∈ {`session_start`, `session_end`, `level_start`,

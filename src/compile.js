@@ -2,8 +2,10 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 
-import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
+import { isNumericType } from './dialects/base.js';
+import { getDialect } from './dialects/index.js';
 import { NUMERIC_AGGS } from './catalog.js';
+import { comparison, conditionsSql } from './conditions.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -28,50 +30,31 @@ export function namesToScope(catalog, modelKey, names) {
   if (!catalog.isFact(modelKey) || !names?.length) return null;
   const col = catalog.getModel(modelKey).event_name.column;
   const vals = names.map((n) => factName(catalog, modelKey, n, 'event_name'));
-  if (vals.length === 1) return `${col} = ${sqlLiteral(vals[0])}`;
-  return `${col} in (${vals.map(sqlLiteral).join(', ')})`;
-}
-
-/** Build the SQL scope predicate from a semantic_models event_scope or null. */
-export function scopeExpr(catalog, modelKey, eventScope) {
-  return namesToScope(catalog, modelKey, eventScope?.event_name);
+  return vals.length === 1 ? comparison(col, 'eq', vals[0]) : comparison(col, 'in', vals);
 }
 
 /** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
-function propExpr(catalog, modelKey, name, _spec) {
+function propExpr(catalog, modelKey, name) {
   return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
 function propCond(catalog, modelKey, cond) {
   const found = factProp(catalog, modelKey, cond.property, 'where.property');
-  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'where.property');
-  const lhs = propExpr(catalog, modelKey, found.name, found.spec);
-  switch (cond.op) {
-    case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
-    case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
-    case 'gt': return `${lhs} > ${sqlLiteral(cond.value)}`;
-    case 'gte': return `${lhs} >= ${sqlLiteral(cond.value)}`;
-    case 'lt': return `${lhs} < ${sqlLiteral(cond.value)}`;
-    case 'lte': return `${lhs} <= ${sqlLiteral(cond.value)}`;
-    case 'in':
-    case 'not_in': {
-      const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
-      return `${lhs} ${cond.op === 'in' ? 'in' : 'not in'} (${arr.map(sqlLiteral).join(', ')})`;
-    }
-    default: fail(`unsupported where op: ${cond.op}`, 'where.op');
-  }
+  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'where.property');
+  const lhs = propExpr(catalog, modelKey, found.name);
+  try { return comparison(lhs, cond.op, cond.value); } catch (e) { return fail(e.message, 'where.op'); }
 }
 
 /** Combine event_name scope + property conditions into one boolean (or null). */
 function measureScope(catalog, modelKey, decl, smScope) {
   const evScope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
-  const propParts = (decl.where || []).map((c) => propCond(catalog, modelKey, c));
+  const propParts = conditionsSql(decl.where, (c) => propCond(catalog, modelKey, c));
   return [evScope, ...propParts].filter(Boolean).join(' AND ') || null;
 }
 
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
-function applyScope(valueExpr, scope, { numeric }) {
+function applyScope(valueExpr, scope) {
   if (!scope) return valueExpr;
   if (valueExpr === '1') return `CASE WHEN ${scope} THEN 1 ELSE 0 END`;
   return `CASE WHEN ${scope} THEN ${valueExpr} END`;
@@ -107,7 +90,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     if (NUMERIC_AGGS.has(decl.agg) && !isNumericType(spec.type) && !decl.cast) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
-    valueExpr = propExpr(catalog, modelKey, propName, spec);
+    valueExpr = propExpr(catalog, modelKey, propName);
   } else if (catalog.aggregatableField(modelKey, field)) {
     // An AMOUNT the schema marks aggregatable on this source. The schema says only WHAT may be
     // aggregated (a column, or an expression over columns); the function is this caller's choice.
@@ -123,13 +106,13 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // the tool cannot offer a field this then rejects.
     const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
-      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ model: '${modelKey}' }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
+      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }
     valueExpr = field;
   }
-  if (decl.cast) valueExpr = castExpr(catalog.dialect, valueExpr, decl.cast);
+  if (decl.cast) valueExpr = getDialect(catalog.dialect).castExpr(valueExpr, decl.cast);
 
-  const m = { name, agg, expr: applyScope(valueExpr, scope, { numeric: true }) };
+  const m = { name, agg, expr: applyScope(valueExpr, scope) };
   if (decl.agg === 'percentile') {
     if (typeof decl.percentile !== 'number') fail(`measure '${decl.name}': percentile required`, 'measures.percentile');
     m.agg = 'percentile';
@@ -138,10 +121,9 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   return m;
 }
 
-/** Resolve a dimension declaration to a dbt dimension object. */
 /**
- * One declared dimension → its manifest form. `_task` / `_attribute` record what the caller
- * DECLARED (the task it belongs to, the attribute name it was given) next to the namespaced name
+ * One declared dimension → its manifest form. `_attribute` records what the caller DECLARED (the
+ * attribute name it was given) next to the namespaced name
  * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
  * stripped before the manifest is written (see yaml-render). Recovering them from the generated
  * identifier instead would mis-split the moment one task name is a prefix of another.
@@ -150,16 +132,51 @@ function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
     if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'dimensions.property');
+    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec), _task: task, _attribute: found.name };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _attribute: found.name };
   }
   if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _task: task, _attribute: decl.column };
+    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _attribute: decl.column };
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }
   fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
+}
+
+/** The measures a compiled metric reads itself: a simple or cumulative metric's measure, a conversion's
+ *  base and conversion measures. */
+function ownMeasures(metric) {
+  const tp = metric?.type_params || {};
+  const ctp = tp.conversion_type_params || {};
+  const name = (v) => (typeof v === 'string' ? v : v?.name);
+  return [tp.measure, ctp.base_measure, ctp.conversion_measure].map(name).filter(Boolean);
+}
+
+/** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */
+function inputMetrics(metric) {
+  const tp = metric?.type_params || {};
+  const name = (v) => (typeof v === 'string' ? v : v?.name);
+  return [tp.numerator, tp.denominator, ...(tp.metrics || [])].map(name).filter(Boolean);
+}
+
+/**
+ * EVERY measure a compiled metric reads — its own and, through the metrics it is built from, theirs
+ * (`metrics`: the context's compiled metrics). The one walk of that graph: which metrics a removed
+ * measure takes with it, and which a model that cannot carry measures drops before dbt parses them.
+ */
+export function measureRefs(metric, metrics = []) {
+  const byName = new Map(metrics.map((m) => [m.name, m]));
+  const found = new Set();
+  const seen = new Set();
+  const walk = (m) => {
+    if (!m || seen.has(m.name)) return;
+    seen.add(m.name);
+    for (const x of ownMeasures(m)) found.add(x);
+    for (const n of inputMetrics(m)) walk(byName.get(n));
+  };
+  walk(metric);
+  return found;
 }
 
 /**
@@ -188,7 +205,7 @@ export function compileDeclaration(catalog, decl) {
     if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
     usedModels.add(modelKey);
     // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
-    const scope = scopeExpr(catalog, modelKey, sm.event_scope);
+    const scope = namesToScope(catalog, modelKey, sm.event_scope?.event_name);
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);
@@ -253,7 +270,7 @@ export function compileDeclaration(catalog, decl) {
       if (!/^[A-Za-z0-9_+\-*/().,\s]+$/.test(expr)) {
         fail(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`, 'metrics.expr');
       }
-      const aliases = new Set((md.metrics || []).map((x) => x.alias || x.name));
+      const aliases = new Set((md.metrics || []).map((x) => x.name || x.metric));
       const SAFE_FNS = new Set(['nullif', 'coalesce', 'abs', 'round', 'least', 'greatest', 'floor', 'ceil', 'ceiling', 'power', 'sqrt', 'ln', 'log', 'exp', 'mod']);
       for (const tok of expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []) {
         if (!aliases.has(tok) && !SAFE_FNS.has(tok)) {
@@ -262,7 +279,7 @@ export function compileDeclaration(catalog, decl) {
       }
       // input metrics are namespaced; alias each to the raw name so the user's
       // `expr` (written with raw metric names) resolves correctly in MetricFlow.
-      const inputs = md.metrics.map((x) => ({ name: NS(task, x.name), alias: x.alias || x.name }));
+      const inputs = md.metrics.map((x) => ({ name: NS(task, x.metric), alias: x.name || x.metric }));
       addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
     } else if (md.type === 'conversion') {
       const ctp = {

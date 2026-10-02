@@ -8,17 +8,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -45,7 +44,7 @@ before(async () => {
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-crash-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Metrics built FROM the crashlytics source. A semantic model is built from ONE source, so
@@ -89,7 +88,7 @@ before(async () => {
   bothCtx = both.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
@@ -248,13 +247,13 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   const a = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
-    stage: { stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' },
+    stage: { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
   });
   assert.equal(a.step_index, 1);
   const g = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
-    stage: { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', fn: 'count' }] },
+    stage: { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }] },
   });
   assert.equal(g.step_index, 2);
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
@@ -266,6 +265,79 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   assert.equal(by.ui_freeze, 3);
   assert.equal(by.gc_pause, 3);
   assert.equal(by.iap_start, 1);
+});
+
+// A BOOL column compared with a constant written as text ("true", as a caller often writes it): the
+// constant is written as the column's own type — a warehouse compares a BOOL only with a BOOL
+// (BigQuery refuses BOOL = STRING) — and a constant that is no boolean is refused when the step is added.
+test('a boolean column takes true / false however it is written, and its rows are the warehouse\'s own', opts, async (t) => {
+  if (skip(t)) return;
+  const [want] = (await wh.query('select count(*) filter (where is_fatal_of_event_data) as yes, count(*) filter (where not is_fatal_of_event_data) as no from fct_crashlytics_events')).rows;
+  assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
+  const count = async (conditions) => {
+    const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
+    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+    const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+    assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+    return num(c.rows[0].n);
+  };
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'eq', value: 'true' }]), num(want.yes));
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'eq', value: 'FALSE' }]), num(want.no));
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'in', value: ['true', false] }]), num(want.yes) + num(want.no));
+  assert.equal(await count([{ left: { value: 'true' }, op: 'eq', right: { column: 'is_fatal_of_event_data' } }]), num(want.yes));
+  // a constant that is no boolean is refused in the call, naming the column
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] } })), /'is_fatal_of_event_data' is a boolean column/);
+});
+
+// A funnel step's condition follows the same rule: a flag spelled "true" is compared as TRUE.
+test('a funnel step on a boolean column takes "true" as the flag, and matches the players the rows say', opts, async (t) => {
+  if (skip(t)) return;
+  const names = (await wh.query('select distinct event_name as e from fct_crashlytics_events order by 1')).rows.map((r) => r.e);
+  const perPlayer = (await wh.query('select player_id_of_internal as u, count(*) as n from fct_crashlytics_events where is_fatal_of_event_data group by 1')).rows;
+  const fatal = { event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'true' }] };
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
+  await engine.build_pipeline_model({
+    action: 'add_step', draft_id: s.draft_id,
+    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] },
+  });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
+  assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, perPlayer.filter((r) => num(r.n) >= 2).length, 'and a second one');
+  // a constant that is no flag is refused as the step is added, naming the property
+  const bad = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({
+    action: 'add_step', draft_id: bad.draft_id,
+    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] }, { name: 'again', event_name: names }] },
+  })), /'is_fatal_of_event_data' is a boolean column/);
+});
+
+// A column a caller names may be a SQL keyword: every stage writes it quoted, so it is a column.
+test('columns named like keywords (group, order) flow through the stages as columns, counted from the rows', opts, async (t) => {
+  if (skip(t)) return;
+  const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
+  ] });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(c.rows.reduce((n, r) => n + num(r.order), 0), num(want.n));
+  assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
+});
+
+// A raw expression runs as written, over the columns the steps before it made: one naming a column
+// that is not there is refused when it is added, not by the warehouse minutes later.
+test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', expr: { fn: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
+  // one over real columns — with functions, keywords, strings and an alias of its own — is taken
+  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end" } } });
+  assert.equal(ok.step_index, 1);
 });
 
 // A GOVERNED measure — one the SCHEMA declares with a fixed aggregation (meta.mcp.measures with

@@ -1,5 +1,5 @@
 // THE dbt CLIENT — one set of methods over dbt, whatever its version. The engine, the value index
-// and the MetricFlow sidecar talk to dbt ONLY through this contract; what a given dbt version needs
+// and the MetricFlow group-by script talk to dbt ONLY through this contract; what a given dbt version needs
 // (its CLI, its output format, how metrics are queried) lives in its own implementation next to it.
 //
 //   parse(projectDir)                     → { ok, stdout, stderr, manifest }   (semantic manifest written?)
@@ -15,6 +15,7 @@
 //   semanticModelSources(projectDir)      → { <semantic model>: <dbt model it reads> }
 //   groupBys(projectDir, metrics)         → { ok, group_bys: { <metric>: [item] } }  (MetricFlow's list)
 //   pythonModelsOn(adapter)               → can this dbt run Python models there
+//   unparsedSqlConfig()                   → the config a model whose SQL dbt's parser cannot read needs
 //
 // Every method takes the project it works on (a context's overlay project) and never throws for a
 // dbt failure: `ok: false` with what dbt printed. The cancellation of the call or task in progress
@@ -29,7 +30,7 @@ import { resolveEnvironment } from './environments.js';
 
 export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV, DEFAULT_MF_ENV } from './environments.js';
 
-export { formatDbtError, parseShowJson, parseCsv } from './output.js';
+export { formatDbtError, dbtFailure, parseShowJson, parseCsv } from './output.js';
 export { dbtVersion } from './version.js';
 import { dbtVersion } from './version.js';
 

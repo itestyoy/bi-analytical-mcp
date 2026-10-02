@@ -1,4 +1,5 @@
-// One embedded database shared by all subsystems (the job registry + the value index),
+// One embedded database shared by all subsystems (the job registry, the value index and its runs,
+// the analyst memory, the error log, the server's own facts),
 // behind a REPOSITORY abstraction. The managers call domain methods (store.jobs.*,
 // store.values.*, store.runs.*) and contain NO SQL — every query lives inside a backend.
 // Swapping databases = implement these repositories for a new backend and register it;
@@ -23,12 +24,20 @@
 //   values.bundlePropertyCoverage(source?, bundle) -> [{source, property, row_count, non_null, null_count}] (per source)
 //   values.search(query, limit)           -> [{source, property, value, freq}] (substring, freq desc)
 //   values.candidates(cap)                -> [{source, property, value, freq}] (top-freq pool for JS fuzzy rank)
+//   values.allCells(source, property)  -> [{bundle, event_name, row_count, non_null, null_count}]
 //   values.counts()                   -> { properties, values }
-//   values.valueCount(prop)           -> int (values STORED for prop; vs distinct_count → capped?)
+//   values.valueCount(source, property) -> int (values STORED; vs distinct_count → capped?)
+//   values.properties()               -> [{source, property}] (every indexed pair)
+//   values.removeProperty(source, property)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
 //   runs.all()                        -> rows[] (desc by id)
+//   runs.get(id)                      -> row | null
+//   runs.recordProperty(runId, { source, property, ms, valuesWritten, distinctCount, totalCount, status, error })
+//   runs.properties(runId, { limit }) -> rows[] (slowest first)
+//   runs.propertyHistory(source, property, { limit }) -> rows[] (newest run first)
+//   runs.addNote(runId, note);  runs.notes(runId) -> [{ note, at }]
 //   memory.add({ id, note, targets, aliases, links, created_at }) -> id
 //   memory.get(id)                    -> { id, note, targets:[], aliases:[], links:[], created_at } | null
 //   memory.remove(id)                 -> bool (a row existed)
@@ -37,15 +46,17 @@
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
 //   memory.vectorIds(model)           -> Set<id> (notes already embedded for this model)
 //   memory.vectorSearch(qvec, { limit, model }) -> [{ id, score }] (cosine; KNN via sqlite-vec)
-//   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail }) -> id
+//   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail, context, files, runtime }) -> id
 //   errors.list({ since, until, source, severity, tool, stage, context_id, task_id, text, limit, offset }) -> { total, rows[] } (newest first)
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
 //   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
+//   reset()                           (wipe every table but memory and the error log — MCP_DB_RESET)
 //   close()
 
 import { createRequire } from 'node:module';
 import { cosineSimilarity } from './embeddings.js';
+import { setting } from './settings.js';
 
 const require = createRequire(import.meta.url);
 
@@ -197,7 +208,6 @@ export class MemoryBackend {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
-      setTargets: (id, targets) => { const e = memory.get(id); if (!e) return false; e.targets = [...targets]; return true; },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
       // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
@@ -270,74 +280,95 @@ export class MemoryBackend {
 }
 
 // ───────────────────────── SQLite backend (node:sqlite) ─────────────────────────
+// The store's tables, each declared ONCE: its columns, its key, whether it is a CACHE the server
+// rebuilds on its own (the value index and its runs, which the background scan repopulates), and
+// whether it is KEPT by MCP_DB_RESET (curated memory and the error log are not re-derivable).
+const TABLES = [
+  // `tool`: the tool that started a task, which says which query tool reads it back;
+  // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
+  { name: 'jobs', key: ['id'], columns: ['id TEXT', 'context_id TEXT', 'table_name TEXT', 'status TEXT', 'error TEXT', 'started_at INTEGER', 'ready_at INTEGER', 'tool TEXT', 'drawn INTEGER'] },
+  // Every index table is keyed by (SOURCE, property): each catalog source — an events fact, the users
+  // dimension — owns its own index space, so two facts may carry the same property name.
+  { name: 'prop_values', cache: true, key: ['source', 'property', 'value'], columns: ['source TEXT', 'property TEXT', 'value TEXT', 'freq INTEGER'] },
+  //  null_count       — nulls per property.
+  //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
+  //                     so subsequent syncs SKIP it (indexed once, then left alone).
+  //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
+  //                     only rows newer than this and ADDS the new counts to what is stored.
+  { name: 'prop_stats', cache: true, key: ['source', 'property'], columns: ['source TEXT', 'property TEXT', 'distinct_count INTEGER', 'total_count INTEGER', 'null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER', 'indexed_at INTEGER'] },
+  // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
+  // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
+  { name: 'prop_coverage', cache: true, key: ['source', 'property', 'event_name'], columns: ['source TEXT', 'property TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
+  // is empty for one app but populated for another is visible (the { bundle } index view).
+  { name: 'prop_bundle_coverage', cache: true, key: ['source', 'property', 'bundle'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
+  // combo — so a pipeline-model step scoped to a concrete bundle_id AND event_name can warn the
+  // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
+  { name: 'prop_bundle_event_coverage', cache: true, key: ['source', 'property', 'bundle', 'event_name'], columns: ['source TEXT', 'property TEXT', 'bundle TEXT', 'event_name TEXT', 'row_count INTEGER', 'non_null INTEGER'] },
+  { name: 'index_runs', cache: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'started_at INTEGER', 'finished_at INTEGER', 'status TEXT', 'properties_indexed INTEGER', 'values_written INTEGER', 'errors INTEGER', 'error TEXT'] },
+  // Per-property timing within a run — detailed stats drilled into via semantic_index.
+  // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
+  { name: 'index_run_props', cache: true, key: ['run_id', 'source', 'property'], columns: ['run_id INTEGER', 'source TEXT', 'property TEXT', 'ms INTEGER', 'values_written INTEGER', 'distinct_count INTEGER', 'total_count INTEGER', 'status TEXT', 'error TEXT'] },
+  // Run-level events surfaced in semantic_index({ request: { status } })/({ run }), e.g. "a batch fell
+  // back to per-property because the combined scan failed: <reason>".
+  { name: 'index_run_notes', cache: true, key: [], columns: ['run_id INTEGER', 'note TEXT', 'at INTEGER'] },
+  // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
+  { name: 'memory', kept: true, key: ['id'], columns: ['id TEXT', 'note TEXT', 'question TEXT', 'targets TEXT', 'aliases TEXT', 'links TEXT', 'created_at INTEGER', 'embedding TEXT', 'embedding_model TEXT'] },
+  // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
+  { name: 'memory_vec_meta', kept: true, key: ['only_row'], columns: ['only_row INTEGER PRIMARY KEY CHECK (only_row = 1)', 'dims INTEGER', 'model TEXT'] },
+  { name: 'server_meta', kept: true, key: ['key'], columns: ['key TEXT', 'value TEXT'] },
+  // with what reproduces an error: the context's state, the code of the model that failed, the runtime
+  { name: 'errors', kept: true, key: ['id'], columns: ['id INTEGER PRIMARY KEY AUTOINCREMENT', 'at INTEGER', 'source TEXT', 'severity TEXT', 'tool TEXT', 'stage TEXT', 'field TEXT', 'code TEXT', 'context_id TEXT', 'task_id TEXT', 'message TEXT', 'args TEXT', 'detail TEXT', 'context TEXT', 'files TEXT', 'runtime TEXT'] },
+];
+
+/**
+ * A database is brought to the declared tables, whichever version of the server wrote it: a missing
+ * table is created and a missing column added (SQLite has no ADD COLUMN IF NOT EXISTS, so only what
+ * the table lacks — a failure to add it is the error it is). A table keyed otherwise cannot be
+ * widened in place (every ON CONFLICT on the declared key would be rejected): a cache is dropped and
+ * recreated — its rows are rebuilt — as is a table MCP_DB_RESET wipes when the store is opened with
+ * `reset`; a table it keeps is refused, naming both keys.
+ */
+function bringToSchema(db, { name, key, columns, cache = false, kept = false }, { reset = false } = {}) {
+  const have = db.prepare(`PRAGMA table_info(${name})`).all();
+  if (have.length) {
+    const keyed = have.filter((c) => c.pk > 0).sort((x, y) => x.pk - y.pk).map((c) => c.name); // pk: 1-based position in the key
+    if (keyed.join() !== key.join()) {
+      if (!cache && (kept || !reset)) throw new Error(`store: table ${name} is keyed by (${keyed.join(', ')}), this server keys it by (${key.join(', ')}) — it cannot be changed in place${kept ? '' : '; MCP_DB_RESET=1 clears it'}`);
+      db.exec(`DROP TABLE ${name}`);
+    } else {
+      const names = new Set(have.map((c) => c.name));
+      for (const def of columns) if (!names.has(def.split(' ')[0])) db.exec(`ALTER TABLE ${name} ADD COLUMN ${def}`);
+    }
+  }
+  const inline = columns.some((d) => /PRIMARY KEY/.test(d));
+  db.exec(`CREATE TABLE IF NOT EXISTS ${name} (${columns.join(', ')}${key.length && !inline ? `, PRIMARY KEY(${key.join(', ')})` : ''})`);
+}
+
 // All SQL is encapsulated here. Prepared statements are cached per SQL string.
 export class SqliteBackend {
-  constructor(db) {
+  constructor(db, { reset = false } = {}) {
     this.kind = 'sqlite';
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
-    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT)');
-    // `tool` came later: the tool that started a task is what says which query tool reads it back
-    try { db.exec('ALTER TABLE jobs ADD COLUMN tool TEXT'); } catch { /* already present */ }
-    // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
-    try { db.exec('ALTER TABLE jobs ADD COLUMN drawn INTEGER'); } catch { /* already present */ }
-    // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
-    // the users dimension — owns its own index space, so two facts may carry the same property
-    // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
-    // index is a rebuildable cache the background scan repopulates, so nothing is carried over.
-    // The test is the PRIMARY KEY, not the column list: a table that once received `source`
-    // through ADD COLUMN still has the old key (SQLite cannot widen a key in place), and every
-    // ON CONFLICT(source, …) upsert against it is rejected.
-    const keyedBySource = (table) => {
-      const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-      if (!cols.length) return null; // no table yet
-      const src = cols.find((c) => c.name === 'source');
-      return !!(src && src.pk > 0); // pk = 1-based position within the PRIMARY KEY, 0 = not part of it
-    };
-    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) {
-      if (keyedBySource(t) === false) db.exec(`DROP TABLE ${t}`);
-    }
-    db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
-    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
-    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
-    //  null_count       — nulls per property.
-    //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
-    //                     so subsequent syncs SKIP it (indexed once, then left alone).
-    //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
-    //                     only rows newer than this and ADDS the new counts to what is stored.
-    for (const col of ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']) { try { db.exec(`ALTER TABLE prop_stats ADD COLUMN ${col}`); } catch { /* already present */ } }
-    // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
-    // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
-    db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (source TEXT, property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, event_name))');
-    // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
-    // is empty for one app but populated for another is visible (the { bundle } index view).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (source TEXT, property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle))');
-    // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
-    // combo — so a native-model step scoped to a concrete bundle_id AND event_name can warn the
-    // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
-    db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
-    // Per-property timing within a run — detailed stats drilled into via semantic_index.
-    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
-    db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
-    // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
-    // back to per-property because the combined scan failed: <reason>".
-    db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
-    // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
-    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
-    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
-    for (const col of ['question TEXT', 'embedding TEXT', 'embedding_model TEXT']) { try { db.exec(`ALTER TABLE memory ADD COLUMN ${col}`); } catch { /* already present */ } }
+    for (const table of TABLES) bringToSchema(db, table, { reset });
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
     try { require('sqlite-vec').load(db); this._vec = true; } catch { /* extension unavailable */ }
-    // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
-    db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
-    db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
-    db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
     db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
     const s = this;
+    // every row a table holds for one (source, property), replaced by `rows` — each row the values of
+    // `columns`, after the source and the property (the table names are this file's own)
+    const replaceRows = (table, source, property, columns, rows) => {
+      s._run(`DELETE FROM ${table} WHERE source = ? AND property = ?`, source, property);
+      const insert = `INSERT INTO ${table} (source, property, ${columns.join(', ')}) VALUES (${['?', '?', ...columns.map(() => '?')].join(', ')})`;
+      for (const row of rows) s._run(insert, source, property, ...row);
+    };
+    // a coverage row as the value index reads it: the rows, the ones that carry the property, the NULLs
+    const fill = (r) => ({ row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) });
 
     this.meta = {
       get(key) { return s._all('SELECT value FROM server_meta WHERE key = ?', key)[0]?.value ?? null; },
@@ -357,8 +388,8 @@ export class SqliteBackend {
     };
     this.errors = {
       add(e) {
-        return Number(s._run('INSERT INTO errors (at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          e.at, e.source ?? null, e.severity ?? null, e.tool ?? null, e.stage ?? null, e.field ?? null, e.code ?? null, e.context_id ?? null, e.task_id ?? null, e.message ?? null, e.args ?? null, e.detail ?? null).lastInsertRowid);
+        return Number(s._run('INSERT INTO errors (at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail, context, files, runtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          e.at, e.source ?? null, e.severity ?? null, e.tool ?? null, e.stage ?? null, e.field ?? null, e.code ?? null, e.context_id ?? null, e.task_id ?? null, e.message ?? null, e.args ?? null, e.detail ?? null, e.context ?? null, e.files ?? null, e.runtime ?? null).lastInsertRowid);
       },
       list({ limit = 20, offset = 0, ...f } = {}) {
         const { sql, params } = errorWhere(f);
@@ -382,7 +413,7 @@ export class SqliteBackend {
       init() {
         // a job left 'running' across a restart can never complete -> terminal error.
         s._run("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'");
-        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, ...(r.tool ? { tool: r.tool } : {}), ...(r.drawn ? { drawn: true } : {}) }));
+        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, tool: r.tool, ...(r.drawn ? { drawn: true } : {}) }));
       },
       upsert(j) {
         s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at, tool, drawn) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at, tool=excluded.tool, drawn=excluded.drawn', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null, j.tool ?? null, j.drawn ? 1 : null);
@@ -392,14 +423,11 @@ export class SqliteBackend {
     this.values = {
       replaceProperty(source, property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) {
         s._tx(() => {
-          s._run('DELETE FROM prop_values WHERE source = ? AND property = ?', source, property);
-          for (const v of values) s._run('INSERT INTO prop_values (source, property, value, freq) VALUES (?, ?, ?, ?)', source, property, String(v.value), Number(v.freq) || 0);
-          s._run('DELETE FROM prop_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of coverage) s._run('INSERT INTO prop_coverage (source, property, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (source, property, bundle, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_event_coverage WHERE source = ? AND property = ?', source, property);
-          for (const e of cellCoverage) s._run('INSERT INTO prop_bundle_event_coverage (source, property, bundle, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?, ?)', source, property, String(e.bundle), String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          const counts = (e) => [Number(e.rowCount) || 0, Number(e.nonNull) || 0];
+          replaceRows('prop_values', source, property, ['value', 'freq'], values.map((v) => [String(v.value), Number(v.freq) || 0]));
+          replaceRows('prop_coverage', source, property, ['event_name', 'row_count', 'non_null'], coverage.map((e) => [String(e.event), ...counts(e)]));
+          replaceRows('prop_bundle_coverage', source, property, ['bundle', 'row_count', 'non_null'], bundleCoverage.map((e) => [String(e.bundle), ...counts(e)]));
+          replaceRows('prop_bundle_event_coverage', source, property, ['bundle', 'event_name', 'row_count', 'non_null'], cellCoverage.map((e) => [String(e.bundle), String(e.event), ...counts(e)]));
           s._run('INSERT INTO prop_stats (source, property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at, high_cardinality=excluded.high_cardinality, data_watermark=excluded.data_watermark', source, property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now(), highCardinality ? 1 : 0, dataWatermark ?? null);
         });
       },
@@ -425,12 +453,12 @@ export class SqliteBackend {
       },
       coverage(source, property) {
         return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, event_name ASC', source, property)
-          .map((r) => ({ event_name: r.event_name, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+          .map((r) => ({ event_name: r.event_name, ...fill(r) }));
       },
       // ── per-bundle (app) coverage: which apps populate a property vs leave it empty ──
       bundleCoverage(source, property) {
         return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, bundle ASC', source, property)
-          .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+          .map((r) => ({ bundle: r.bundle, ...fill(r) }));
       },
       // An app is a (source, bundle) pair — never aggregated across sources (see the memory backend).
       bundles(source) {
@@ -443,12 +471,12 @@ export class SqliteBackend {
         const rows = source
           ? s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? AND source = ? ORDER BY source ASC, non_null DESC, property ASC', bundle, source)
           : s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY source ASC, non_null DESC, property ASC', bundle);
-        return rows.map((r) => ({ source: r.source, property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+        return rows.map((r) => ({ source: r.source, property: r.property, ...fill(r) }));
       },
       // ── triple (property × bundle × event) cell lookup: the field's fill at one combo ──
       cellCoverage(source, property, { bundle, event } = {}) {
         const r = s._get('SELECT row_count, non_null FROM prop_bundle_event_coverage WHERE source = ? AND property = ? AND bundle = ? AND event_name = ?', source, property, String(bundle), String(event));
-        return r ? { bundle, event_name: event, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) } : null;
+        return r ? { bundle, event_name: event, ...fill(r) } : null;
       },
       search(query, limit) {
         const q = String(query).toLowerCase();
@@ -506,7 +534,6 @@ export class SqliteBackend {
       add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
-      setTargets(id, targets) { return s._run('UPDATE memory SET targets = ? WHERE id = ?', JSON.stringify(targets || []), id).changes > 0; },
       all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 
@@ -574,7 +601,7 @@ export class SqliteBackend {
    */
   reset() {
     this._tx(() => {
-      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
+      for (const t of TABLES) if (!t.kept) this._run(`DELETE FROM ${t.name}`);
     });
   }
 
@@ -596,31 +623,30 @@ export function registerStoreBackend(name, factory) { BACKENDS.set(name, factory
 /** Names of the registered backends (for diagnostics / discovery). */
 export function storeBackends() { return [...BACKENDS.keys()]; }
 
-// Built-in backend: node:sqlite (zero external deps, synchronous). Returns null when
-// sqlite or a path is unavailable, so openStore falls back to the in-memory backend.
-registerStoreBackend('sqlite', ({ dbPath }) => {
+// Built-in backend: node:sqlite (zero external deps, synchronous). Returns null when no path is set
+// or this Node has no node:sqlite — then openStore uses the in-memory backend. A database that cannot
+// be opened or brought to the declared tables is the error it is, never a silent in-memory store.
+registerStoreBackend('sqlite', ({ dbPath, reset = false }) => {
   if (!dbPath) return null;
-  try {
-    const { DatabaseSync } = require('node:sqlite');
-    // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
-    // when the extension is absent (the backend falls back to in-SQL cosine).
-    return new SqliteBackend(new DatabaseSync(dbPath, { allowExtension: true }));
-  } catch {
-    return null;
-  }
+  let DatabaseSync;
+  try { ({ DatabaseSync } = require('node:sqlite')); } catch { return null; }
+  // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
+  // when the extension is absent (the backend falls back to in-SQL cosine)
+  const db = new DatabaseSync(dbPath, { allowExtension: true });
+  try { return new SqliteBackend(db, { reset }); } catch (e) { db.close(); throw e; }
 });
 
 /**
  * Open the shared store. The backend is selectable (default 'sqlite', override via
  * MCP_DB_BACKEND or the `backend` arg) — the single switch point for changing databases.
- * ALWAYS returns a backend: falls back to the in-memory backend when no persistent one is
- * available, so callers never branch on null.
+ * ALWAYS returns a backend: the in-memory one when the selected backend declines (no path, no
+ * node:sqlite), so callers never branch on null; a database that fails to open throws.
  */
 export function openStore({ dbPath, backend, reset = false } = {}) {
-  const name = backend || process.env.MCP_DB_BACKEND || 'sqlite';
+  const name = backend || setting('MCP_DB_BACKEND');
   const factory = BACKENDS.get(name);
   if (!factory) throw new Error(`unknown store backend '${name}'. Registered: ${storeBackends().join(', ')}`);
-  const store = factory({ dbPath }) || new MemoryBackend();
+  const store = factory({ dbPath, reset }) || new MemoryBackend();
   if (reset) store.reset?.(); // wipe all state BEFORE any manager reads it (MCP_DB_RESET)
   return store;
 }

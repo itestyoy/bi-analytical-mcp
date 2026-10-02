@@ -31,7 +31,7 @@ const engine = () => {
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   return settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY }));
 };
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
 const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] };
 const PY_STAGE = { stage: 'python', imports: [{ package: 'numpy' }], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
 const decl = (over = {}) => ({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] }, ...over });
@@ -57,7 +57,7 @@ test('importAllowlist: the base set + the operator\'s MCP_PYTHON_PACKAGES (impor
 test('python stage: one declaration lands as prep TABLE + Python model under the pipeline name', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const r = await e.register_native_model(decl({ materialized: 'view' })); // view requested: overridden, and said so
+  const r = await e._buildPipeline(decl({ materialized: 'view' })); // view requested: overridden, and said so
   assert.equal(r.build.ok, true);
   assert.match(r.model, /^pipe_seg_[a-z0-9]+$/);
   assert.equal(r.materialized, 'table');
@@ -71,7 +71,7 @@ test('python stage: one declaration lands as prep TABLE + Python model under the
   const files = pipeFiles(e, r.context_id);
   assert.deepEqual(files, [`${r.model}.py`, `${r.model}.yml`, `${r.model}_s1.sql`]);
   // the context records the split
-  const n = e.ctxs.get(r.context_id).state.native;
+  const n = e.ctxs.get(r.context_id).state.pipeline_model;
   assert.equal(n.model, r.model);
   assert.deepEqual(n.chain.map((m) => m.model), [`${r.model}_s1`, r.model]);
   assert.equal(r.build.executed, false, 'no runner → written, not run');
@@ -82,11 +82,11 @@ test('python stage: one declaration lands as prep TABLE + Python model under the
 test('python stage: a rebuild WITHOUT the stage removes the Python files (dbt allows one model per name)', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const r1 = await e.register_native_model(decl());
-  const r2 = await e.register_native_model({ name: 'seg', context_id: r1.context_id, pipeline: { source: 'events', stages: [AGG] } });
+  const r1 = await e._buildPipeline(decl());
+  const r2 = await e._buildPipeline({ name: 'seg', context_id: r1.context_id, pipeline: { source: 'events', stages: [AGG] } });
   assert.equal(r2.model, r1.model);
   assert.deepEqual(pipeFiles(e, r1.context_id), [`${r1.model}.sql`]);
-  assert.equal(e.ctxs.get(r1.context_id).state.native.python, undefined);
+  assert.equal(e.ctxs.get(r1.context_id).state.pipeline_model.python, undefined);
 });
 
 // A python stage may sit ANYWHERE, any number of times: every one is a dbt model of its own, and
@@ -96,7 +96,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   const e = engine();
   const PY_OUT = { ...PY_STAGE, output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
   const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: ['return df'] }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
-  const r = await e.register_native_model({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', n: 10 }] } });
+  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', n: 10 }] } });
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [
     [`${r.model}_s1`, 'python', 'fct_analytics_events'],   // python FIRST → dbt.ref of the source itself
     [`${r.model}_s2`, 'sql', `${r.model}_s1`],              // the aggregate reads the Python model
@@ -113,25 +113,25 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   assert.deepEqual(r.python.map((m) => m.input), ['fct_analytics_events', `${r.model}_s2`]);
   // a SQL stage that names a column the python stage did not declare is refused at validation
   const PY_NO_OUT = { ...PY_STAGE, output: undefined };
-  await assert.rejects(() => e.register_native_model({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }] } }), /unknown column 'revenue_z'/);
+  await assert.rejects(() => e._buildPipeline({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }] } }), /unknown column 'revenue_z'/);
   // a rebuild with a SHORTER chain leaves no orphaned _sN model behind
-  const r2 = await e.register_native_model({ name: 'chain', context_id: r.context_id, pipeline: { source: 'events', stages: [AGG, PY_OUT] } });
+  const r2 = await e._buildPipeline({ name: 'chain', context_id: r.context_id, pipeline: { source: 'events', stages: [AGG, PY_OUT] } });
   assert.deepEqual(pipeFiles(e, r.context_id), [`${r2.model}.py`, `${r2.model}.yml`, `${r2.model}_s1.sql`]);
 });
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = stageUnion(e.schemas.register_native_model, 'stages').find((s) => s.properties.stage.enum?.[0] === 'python');
+  const items = stageBranch(e.contracts['build_pipeline_model.pipeline'], 'python', 'stages');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
+  await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
   // a bare string is no longer an import declaration
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
+  await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
 });
 
 test('python stage: a step must call a declared function with exactly its parameters', async () => {
   const e = engine();
-  const bad = (steps) => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, steps }] } }));
+  const bad = (steps) => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, steps }] } }));
   await assert.rejects(() => bad([{ call: 'nope', args: {} }]), /'nope' is not a declared function. Declared: zscore/);
   await assert.rejects(() => bad([{ call: 'zscore', args: { column: 'revenue' } }]), /'zscore' needs 'as_'/);
   await assert.rejects(() => bad([{ call: 'zscore', args: { column: 'revenue', as_: 'z', extra: 1 } }]), /has no parameter 'extra'/);
@@ -142,7 +142,7 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
   if (skipNoPy(t)) return;
   const e = engine();
   const bad = { name: 'bad', params: ['df'], body: ['import os', "x = eval('1')", "df['t'] = dbt.this", 'return df.__class__'] };
-  const err = await e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [bad], steps: [{ call: 'bad' }] }] } })).catch((x) => x);
+  const err = await e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [bad], steps: [{ call: 'bad' }] }] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /bad line 1 \(import os\): an import inside a function body/);
   assert.match(err.message, /bad line 2 .*: 'eval' is not available here/);
@@ -152,21 +152,21 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
   // fetches by name) has no spelling either — the hole a blocklist of literal dunders leaves open.
   const sneaky = { name: 'sneaky', params: ['df'], body: ['sess = getattr(getattr(df, "__class__"), "__init__")', 'return df'] };
   await assert.rejects(
-    () => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [sneaky], steps: [{ call: 'sneaky' }] }] } })),
+    () => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [sneaky], steps: [{ call: 'sneaky' }] }] } })),
     /sneaky line 1 .*: 'getattr' is not available here/,
   );
   // …and so does a name the declaration never bound (no `imports` entry for it).
   const undeclared = { name: 'undeclared', params: ['df'], body: ["df['c'] = os.getcwd()", 'return df'] };
   await assert.rejects(
-    () => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [undeclared], steps: [{ call: 'undeclared' }] }] } })),
+    () => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [undeclared], steps: [{ call: 'undeclared' }] }] } })),
     /undeclared line 1 .*: 'os' is not available here/,
   );
   // a syntax error is caught here, not on the warehouse runtime
   const syn = { name: 'syn', params: ['df'], body: ['return df['] };
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1 \(return df\[\): syntax error/);
+  await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1 \(return df\[\): syntax error/);
   // a function that never returns the frame is refused too
   const noret = { name: 'noret', params: ['df'], body: ["df['x'] = 1"] };
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [noret], steps: [{ call: 'noret' }] }] } })), /must `return` the frame/);
+  await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [noret], steps: [{ call: 'noret' }] }] } })), /must `return` the frame/);
   // nothing was written by a refused declaration
   assert.equal(e.ctxs.list().length, 0);
 });
@@ -176,7 +176,7 @@ test('python stage: a package the runtime lacks goes to dbt\'s packages config; 
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } }));
   const st = { ...PY_STAGE, imports: [{ package: 'sklearn', submodule: 'cluster', names: ['KMeans'] }, { package: 'scipy', submodule: 'stats' }, { package: 'numpy', as: 'np' }] };
-  const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
+  const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
   assert.equal(r.dry_run, true);
   assert.deepEqual(r.python[0].packages, ['scikit-learn', 'scipy']);
   assert.equal(r.materialized, 'table');
@@ -194,11 +194,11 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
-  const pkgEnum = () => stageUnion(e.schemas.register_native_model, 'stages')
+  const pkgEnum = () => stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
-  const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
+  const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
   assert.equal(r.python[0].runtime, 'pyspark', 'the model is compiled for the same runtime the schema described');
 });
 
@@ -225,7 +225,7 @@ test('incremental builder: add_step python → columns, nothing may follow, prev
 test('python stage: body structure — nesting is indentation, headers open blocks, no spaces-as-indent', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const withBody = (body) => e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body }], steps: [{ call: 'f', args: { k: 2 } }] }] } }));
+  const withBody = (body) => e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body }], steps: [{ call: 'f', args: { k: 2 } }] }] } }));
   // a real nested body renders as indented Python the gate accepts
   // (that nesting becomes the RIGHT indentation is proven by running such a body — the branches
   // pick different values, and the rows say which one ran: test/integration/python-stage.test.js)
@@ -248,17 +248,16 @@ test('python stage: body structure — nesting is indentation, headers open bloc
 test('python stage: the body schema is a recursive $ref to $defs.py_block hoisted to each tool root', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  for (const tool of ['build_pipeline_model', 'register_native_model']) {
-    const root = e.schemas[tool];
+  for (const tool of ['build_pipeline_model', 'build_pipeline_model.pipeline']) {
+    const root = e.schemas[tool] || e.contracts[tool];
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
-    const stages = stageUnion(root, tool === 'build_pipeline_model' ? 'stage' : 'stages');
-    const py = stages.find((st) => st.properties.stage.enum?.[0] === 'python');
+    const py = stageBranch(root, 'python', tool === 'build_pipeline_model' ? 'stage' : 'stages');
     assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
   }
   // twelve levels deep validates and renders — deeper than any unrolled schema allowed
   const deep = (n) => (n === 0 ? ['return df'] : [`if k > ${n}:`, deep(n - 1), 'else:', ['return df']]);
-  const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
+  const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
   assert.equal(r.dry_run, true); // and such a body RUNS (integration: twelve levels deep, by rows)
 });
 
@@ -302,7 +301,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     assert.ok(!stagesPg.includes('python'), `no python stage on redshift: ${stagesPg.join(', ')}`);
     assert.ok(!ePg.schemas.build_pipeline_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
-    await assert.rejects(() => ePg.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*redshift.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
+    await assert.rejects(() => ePg._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*redshift.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
     // the overview says so
     const ov = await ePg.semantic_index({});
     assert.equal(ov.python_models.available, false);
@@ -330,9 +329,8 @@ test('python stage: the profile decides the runtime and what it may import', () 
   assert.equal(profileOf({ runtime: 'duckdb' }).key, 'duckdb');
   // the platform's own package is importable only where it exists
   assert.ok(importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'bigframes' })).has('bigframes'));
-  assert.ok(importAllowlist({}, profileOf({ runtime: 'databricks' })).has('pyspark'));
-  assert.ok(!importAllowlist({}, profileOf({ runtime: 'databricks' })).has('bigframes'));
-  assert.ok(importAllowlist({}, profileOf({ runtime: 'snowflake' })).has('snowflake'));
+  assert.ok(importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'serverless' })).has('pyspark'));
+  assert.ok(!importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'serverless' })).has('bigframes'));
   assert.ok(!importAllowlist({}).has('bigframes'), 'no platform package without a runtime');
   // and the compiled model records the runtime it was compiled for
   const compiled = compilePythonStage(
@@ -375,11 +373,9 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
   assert.match(bq.guide, /OrderRequiredError/);
-  const spark = frameProfile({ runtime: 'databricks' });
+  const spark = frameProfile({ runtime: 'bigquery', method: 'serverless' });
   assert.match(spark.ml, /pyspark\.ml/);
   assert.ok(!spark.guide.includes('bigframes'), 'no BigFrames rules on Spark');
-  const snow = frameProfile({ runtime: 'snowflake' });
-  assert.match(snow.ml, /snowflake\.ml\.modeling/);
   // and they land in the live schema for a BigQuery bigframes profile
   const dir = mkdtempSync(join(tmpdir(), 'bqprof-'));
   writeFileSync(join(dir, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n      project: x\n      submission_method: bigframes\n      gcs_bucket: b\n      compute_region: us-central1\n');
@@ -398,7 +394,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
 });
 
 // dbt's adapter and this server's SQL writer read the SAME profile and can disagree: dbt connects
-// with snowflake (and runs Python models there) while no SQL dialect is written for it, so pipelines
+// with snowflake while no SQL dialect is written for it, so pipelines
 // are rendered in another dialect's syntax against it. That is a fact about the deployment — it is
 // reported, not assumed away.
 test('an adapter with no SQL dialect of its own is reported, not silently rendered as another', async () => {
@@ -434,12 +430,12 @@ test('a chain with several python stages is gated in one run, and errors name th
   // count the gate's interpreter runs by wrapping the engine's own gate entry point
   const gate = e._gateCompiled.bind(e);
   e._gateCompiled = async (units) => { if (units.length) runs += 1; return gate(units); };
-  const ok = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, second] } }));
+  const ok = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, second] } }));
   assert.equal(ok.python.length, 2, 'two python models in the chain');
   assert.equal(runs, 1, 'gated in a single run');
   // and a body that is refused in the SECOND stage is reported against that stage's model
   const bad = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: ["df['t'] = getattr(df, 'x')", 'return df'] }], steps: [{ call: 'tag' }] };
-  const err = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
+  const err = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /pipe_seg: tag line 1 .*'getattr' is not available here/, 'the model whose body was refused is named (here the chain\'s last, which carries the pipeline name)');
 });
@@ -524,7 +520,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
     assert.ok(text.includes(needle), `the guide covers ${needle}`);
   }
   // …and the stage description points at it rather than repeating it
-  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ guide: "python" \}\)/);
+  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ request: \{ guide: "python" \} \}\)/);
 
   // a deployment that runs no python models says so instead of showing another runtime's guide
   const plain = loadCatalog(CATALOG, {});
@@ -590,7 +586,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // stays small, the detail arrives when it is asked for.)
   assert.match(py.description, /read the ones your question involves/, 'the description asks for them to be read');
   assert.ok(py.description.includes(`${entries.filter((r) => !['bf_ml_signatures', 'bf_frame_method_rules'].includes(r.id)).length} worked`), 'it says how many there are (the generated references apart)');
-  assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+  assert.match(py.description, /semantic_index\(\{ request: \{ recipe: "<id>" \} \}\)/, 'and the description says HOW to fetch one');
   // The ids it may name are the two REFERENCES generated from the library (its signatures, its
   // method preconditions), because that lookup is what a caller needs mid-write; the worked recipes
   // are fetched from the guide's index.
@@ -606,12 +602,12 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // what it still carries itself: why this runtime bites, and where the reasoning lives
   assert.match(py.description, /NullIndexError/);
   assert.match(py.description, /OrderRequiredError/);
-  assert.match(py.description, /semantic_index\(\{ guide: "python" \}\)/);
+  assert.match(py.description, /semantic_index\(\{ request: \{ guide: "python" \} \}\)/);
 
   const g = await e.semantic_index({ guide: 'python' });
   assert.deepEqual(g.recipes.ids, ids);
   assert.deepEqual(g.recipes.moves, entries.map((r) => `${r.id}: ${r.title}`), 'the guide names the move behind every id too');
-  assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
+  assert.match(g.recipes.fetch, /semantic_index\(\{ request: \{ recipe: '/);
   assert.match(g.read_next, /Read the recipes before you write/);
   assert.match(g.recipes.note, /Read these before writing a function/);
 
@@ -625,7 +621,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
       assert.ok(body.reference.version, `${id} must name the version it was read from`);
       assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
     } else {
-      assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.pipeline_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
       assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
     }
   }
@@ -701,7 +697,7 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
   assert.equal(many.added, 2, JSON.stringify(many.error || many).slice(0, 300));
 
   // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
-  const dry = await engine().register_native_model({ name: 'bigpy3', dry_run: true, pipeline: { source: 'events', stages: [AGG, big] } });
+  const dry = await engine()._buildPipeline({ name: 'bigpy3', dry_run: true, pipeline: { source: 'events', stages: [AGG, big] } });
   assert.equal(dry.dry_run, true, JSON.stringify(dry.error || {}).slice(0, 300));
   assert.equal(dry.python?.length, 1, 'one python model in the chain');
 });
@@ -740,10 +736,10 @@ test('a python stage with no preparation before it is told so; one after an SQL 
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)
-  const dry = await engine().register_native_model({ name: 'raw_py2', dry_run: true, pipeline: { source: 'events', stages: [PY_STAGE] } });
+  const dry = await engine()._buildPipeline({ name: 'raw_py2', dry_run: true, pipeline: { source: 'events', stages: [PY_STAGE] } });
   assert.ok(nudge(dry).length === 1, `register should nudge too: ${JSON.stringify(dry.warnings || [])}`);
   // …and a pipeline-level time_range is preparation: it is a leading WHERE on the source's time
-  const windowed = await engine().register_native_model({
+  const windowed = await engine()._buildPipeline({
     name: 'raw_py3', dry_run: true,
     pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-05' }, stages: [PY_STAGE] },
   });
@@ -779,14 +775,14 @@ test('the SQL-vs-python division of labour is in the stage description and the g
 // as "reads 'events' as it is".
 test('the preparation nudge does not fire where the stage reads a table rather than the source', () => {
   const e = engine();
-  const nudges = (stages, opts) => e._stageWarnings('events', stages, opts).filter((w) => /as it is/.test(w));
+  const nudges = (stages, opts) => e.advisor.stageWarnings('events', stages, opts).filter((w) => /as it is/.test(w));
 
   // one python stage on the raw source: the one case the nudge is for
   assert.equal(nudges([PY_STAGE]).length, 1);
   // a SECOND python stage after it reads the first one's table — it is not the source any more
   assert.equal(nudges([PY_STAGE, PY_STAGE]).length, 1, 'only the first stage may be nudged');
   // …and the one that is nudged is the FIRST one
-  assert.match(e._stageWarnings('events', [PY_STAGE, PY_STAGE]).find((w) => /as it is/.test(w)), /'events'/);
+  assert.match(e.advisor.stageWarnings('events', [PY_STAGE, PY_STAGE]).find((w) => /as it is/.test(w)), /'events'/);
   // a pipeline continued from a materialized prefix starts at a built table: nothing to say
   assert.deepEqual(nudges([PY_STAGE], { startsFromTable: true }), []);
   assert.deepEqual(nudges([PY_STAGE, PY_STAGE], { startsFromTable: true }), []);

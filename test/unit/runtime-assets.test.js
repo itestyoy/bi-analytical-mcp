@@ -1,6 +1,6 @@
 // A BUILD check, and the reason it exists: the server shells out to two Python scripts that no
 // JavaScript imports — python/ast_gate.py (the static gate over a python stage) and
-// python/mf_sidecar.py (the warm MetricFlow process). The image was built with `COPY src ./src`
+// python/mf_group_bys.py (what MetricFlow says a metric can be grouped by). The image was built with `COPY src ./src`
 // alone, so both were missing in production and the first python stage died with
 //
 //   ast gate failed (python3 exit 2): can't open file '/app/python/ast_gate.py'

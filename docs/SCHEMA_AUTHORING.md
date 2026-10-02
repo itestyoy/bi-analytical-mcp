@@ -35,7 +35,7 @@
   тому, кто уже пришёл именно за этим полем.
 - **Агент никогда не пишет путь соединения.** Атрибут адресуется только тем, где он лежит:
   `group_by: [{ model: 'users', attribute: 'country' }]`,
-  `where: { field: { kind: 'dimension', model: 'users', attribute: 'country' } }`,
+  `where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }]`,
   `order_by: [{ key: { model: 'users', attribute: 'country' } }]`. Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —
@@ -74,13 +74,9 @@
         dimension: {}
 ```
 
-Загрузчик (`src/catalog.js`, `mcpMetaOf`) читает ОБА места, `config.meta` побеждает по ключам — так
-что проект на полпути миграции работает. Перенести существующий файл целиком:
-`python3 scripts/meta-to-config.py --check <путь>` покажет, что изменится (и вернёт 1, если что-то
-осталось в старом месте — годится для CI), `--write` перенесёт. Правка построчная: комментарии,
-пустые строки и кавычки остаются на месте, а результат перед записью разбирается и сверяется с
-ожидаемым документом. Блок, у которого уже есть свой `config:`, и `meta:` внутри flow-мэппинга
-(`- { name: ts, meta: { … } }`) скрипт не трогает, а называет — их сливают руками.
+Загрузчик (`src/catalog/from-dbt-schema.js`, `mcpOf`) читает только это место — `config.meta.mcp`. Блок под
+верхним `meta:` и ключ, которого загрузчик не читает (опечатка или снятый ключ), отклоняются при загрузке с
+указанием модели или колонки — молча пропущенными они оставили бы объявление без действия.
 
 ### 2.1. Роль — идентичность источника
 
@@ -130,7 +126,7 @@ SELECT <ключ> FROM <таблица владельца> GROUP BY 1 HAVING cou
 
 ```yaml
 - name: cost
-  meta: { mcp: { measure: { unit: usd, label: "UA cost" } } }   # сумма, среднее, p90 — по вопросу
+  config: { meta: { mcp: { measure: { unit: usd, label: "UA cost" } } } }   # сумма, среднее, p90 — по вопросу
 ```
 
 Добавление `agg` — **опт-ин исключение**: дополнительно публикуется губернируемая величина
@@ -151,8 +147,8 @@ measures:
 ### 2.5. Окно валидности — только на медленно меняющейся размерности
 
 ```yaml
-- { name: valid_from,  meta: { mcp: { dimension: { validity: start } } } }
-- { name: valid_until, meta: { mcp: { dimension: { validity: end } } } }
+- { name: valid_from,  config: { meta: { mcp: { dimension: { validity: start } } } } }
+- { name: valid_until, config: { meta: { mcp: { dimension: { validity: end } } } } }
 ```
 
 Такая модель соединяется point-in-time и может иметь **ровно один** ключ соединения — свой
@@ -217,7 +213,7 @@ measures:
 | `dimension: true` или `{ … }` | на источнике событий — сделать колонку атрибутом модели (`app_version`, `device_model` на источнике падений). Именно эти атрибуты становятся доступны **через связь** `<связь>__<атрибут>`, когда другой источник на эту модель ссылается. |
 | `dimension: false` | **опт-аут:** реальная колонка, но не атрибут — не появляется среди групповых, не профилируется. Для технических полей (`ingest_batch_id`). В pipeline читается. |
 | `dimension: { type }` | принудить тип (`time` / `categorical`), когда `data_type` вводит в заблуждение. |
-| `dimension: { validity: start \| end }` | граница окна валидности. Только парой, только на размерности, делает модель медленно меняющейся: соединение point-in-time, сущность `natural`, меры запрещены, один ключ соединения. Переопределяется `MCP_SCD_VALIDITY_PARAMS=false` для старых версий DSI. |
+| `dimension: { validity: start \| end }` | граница окна валидности. Только парой, только на размерности, делает модель медленно меняющейся: соединение point-in-time, сущность `natural`, меры запрещены, один ключ соединения. |
 | `dimension: { bundle: true }` | на источнике событий: эта колонка — **идентификатор приложения**. Индекс начинает мерить покрытие свойств по приложениям — **отдельно для каждого источника**: одно и то же приложение шлёт события в каждый источник со своим числом строк и своим набором пустых свойств, поэтому приложение везде — пара (источник, приложение), и вид `semantic_index({ source, bundle })` отвечает по одному источнику (без `source` — по каждому в своём блоке, никогда не сливая). Обзор перечисляет приложения по источникам. |
 | `index: false` | **опт-аут индекса:** группировать можно, значения не профилируются. Для идентификаторов, свободного текста, высокой кардинальности — иначе индекс тратит время на бесполезный топ-N. |
 
@@ -227,7 +223,7 @@ measures:
 |---|---|
 | `array: { items: <тип>, encoding? }` | плоская колонка — **массив скаляров**. `encoding: native` (настоящий ARRAY/REPEATED) или `json` (JSON-массив в колонке — как STRING с текстом JSON, так и настоящая JSON/jsonb-колонка с `data_type: json`; по умолчанию для `data_type: string`). Открывает `array_length`, `contains`, `element_at`, `unnest` в pipeline. |
 | `array: { fields: { <поле>: <тип> }, encoding? }` | **массив структур**: `unnest` с выбором поля, `struct_field`. |
-| `properties:` под `is_event_data` | свойства, живущие **в JSON-blob без плоской колонки**: `{ <имя>: { type, items?, fields?, values?, description? } }`. Скалярные типы: `string` (по умолчанию), `int` / `bigint`, `numeric`, `float` / `double` — числовые приводятся при извлечении; сложные: `array`, `array<struct>`. Читаются извлечением из JSON. |
+| `properties:` под `is_event_data` | свойства, живущие **в JSON-blob без плоской колонки**: `{ <имя>: { type, items?, fields?, description? } }`. Скалярные типы: `string` (по умолчанию), `int` / `bigint`, `numeric`, `float` / `double` — числовые приводятся при извлечении; сложные: `array`, `array<struct>`. Читаются извлечением из JSON. |
 | JSON-объект в колонке | не объявляется отдельно; читается `struct_field` / `compute json_field`. Индекс профилирует скаляры, вложенные поля — нет, поэтому форму объекта описывают в `description` (§7). |
 
 Что делает **тип данных** сам по себе (без ключей): `date` / `timestamp*` / `datetime` → атрибут времени; числовые типы → свойство считается `numeric` и агрегируется без приведения; `string` с `unit` → сервер предупредит привести к числу.
@@ -237,7 +233,6 @@ measures:
 | переменная | что меняет |
 |---|---|
 | `MCP_REQUIRE_TIME_RANGE` | включает / выключает требование окна времени для **всего** каталога поверх `require_time_range` моделей |
-| `MCP_SCD_VALIDITY_PARAMS=false` | выключает окна валидности (модели рендерятся с обычным `primary`-ключом) — для старых DSI |
 | `MCP_GROUND_CATALOG=0` | выключает заземление по физическим колонкам (§1) — для работы без склада; по умолчанию включено |
 | `MCP_INDEX_*` | режим value-индекса: окно дней, батч, порог высокой кардинальности, таймаут — влияет на то, **что** агент увидит в `sample_values`, не на схему |
 
@@ -261,119 +256,123 @@ models:
       Time axis is device_time (player's zone). Joins to dim_users by player (point-in-time —
       dim_users is slowly-changing). Payload is flattened into *_of_event_data columns; the raw
       event_data JSON is kept only for complex (array) properties.
-    meta:
-      mcp:                                         # ── уровень МОДЕЛИ ──
-        role: events                               # идентичность источника
-        primary_entity: event                      # строкой: у событий нет ключа-колонки
-        require_time_range: true                   # (опц.) запрет запросов без окна времени
-        partition_column: event_date               # (опц.) подсказка стоимости + граница по партиции
-        partition_late_days: 31                    # (опц.) событие ложится в партицию до N дней позже своего дня
-        known_events: [first_launch, new_session, level_completed, iap_purchase_completed, ad_finished]
-        event_semantics:                           # какие события что значат
-          acquisition_event: first_launch
-          session_event: new_session
-          purchase_event: iap_purchase_completed
-          ad_impression_event: ad_finished
-        entities:                                  # связи с СОСТАВНЫМ ключом — только здесь
-          ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
+    config:
+      meta:
+        mcp:                                         # ── уровень МОДЕЛИ ──
+          role: events                               # идентичность источника
+          primary_entity: event                      # строкой: у событий нет ключа-колонки
+          require_time_range: true                   # (опц.) запрет запросов без окна времени
+          partition_column: event_date               # (опц.) подсказка стоимости + граница по партиции
+          partition_late_days: 31                    # (опц.) событие ложится в партицию до N дней позже своего дня
+          known_events: [first_launch, new_session, level_completed, iap_purchase_completed, ad_finished]
+          event_semantics:                           # какие события что значат
+            acquisition_event: first_launch
+            session_event: new_session
+            purchase_event: iap_purchase_completed
+            ad_impression_event: ad_finished
+          entities:                                  # связи с СОСТАВНЫМ ключом — только здесь
+            ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
     columns:                                       # ── уровень КОЛОНКИ ──
       - name: player_id_of_internal
         description: "Stable internal player id — the join key to dim_users and experiments."
-        meta: { mcp: { entity: { name: user, type: foreign } } }      # одноколоночный ключ
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }      # одноколоночный ключ
       - name: session_number
-        meta: { mcp: { entity: { name: session, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: session, type: foreign } } } }
       - name: device_time
         description: "When the event happened on the device, in the player's time zone."
-        meta: { mcp: { is_time: true } }                              # ось времени
+        config: { meta: { mcp: { is_time: true } } }                              # ось времени
       - name: event_name
-        meta: { mcp: { is_event_name: true } }                        # делает модель источником событий
+        config: { meta: { mcp: { is_event_name: true } } }                        # делает модель источником событий
       - name: bundle_id
-        meta: { mcp: { dimension: { bundle: true } } }                # идентификатор приложения
+        config: { meta: { mcp: { dimension: { bundle: true } } } }                # идентификатор приложения
       - name: tracking_id
-        meta: { mcp: { index: false } }                               # ключ; не профилировать
+        config: { meta: { mcp: { index: false } } }                               # ключ; не профилировать
       - name: event_date
-        meta: { mcp: { dimension: false } }                           # техническая, не атрибут
+        config: { meta: { mcp: { dimension: false } } }                           # техническая, не атрибут
 
       # плоские СКАЛЯРНЫЕ свойства payload — property: true делает колонку свойством события
       - name: price_in_usd_of_event_data
         data_type: numeric
         description: "IAP price in USD as charged by the store, before tax."
-        meta: { mcp: { property: true, unit: usd } }
+        config: { meta: { mcp: { property: true, unit: usd } } }
       - name: result_of_event_data
         data_type: string
-        meta: { mcp: { property: true } }   # словарь-контракт
+        config: { meta: { mcp: { property: true } } }   # словарь-контракт
 
       # сырой JSON — нужен для СЛОЖНЫХ свойств без плоской колонки (см. §2c)
       - name: event_data
         data_type: jsonb
-        meta:
-          mcp:
-            is_event_data: true
-            properties:
-              words_collected: { type: array, items: string, description: "Words collected on a level." }
-              rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted." }
+        config:
+          meta:
+            mcp:
+              is_event_data: true
+              properties:
+                words_collected: { type: array, items: string, description: "Words collected on a level." }
+                rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted." }
 
   # ────────────────────────── 2. ВТОРОЙ ИСТОЧНИК СОБЫТИЙ ──────────────────────────
   - name: fct_crashlytics_events
     description: "Crash reports: one row = one report. Independent event vocabulary. See §5."
-    meta:
-      mcp:
-        role: crashlytics
-        primary_entity: crash
-        known_events: [fatal_crash, non_fatal, anr]
-        entities:
-          ad_funnel:                               # одна связь, НЕСКОЛЬКО альтернативных колонок
-            type: foreign
-            variants:
-              rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
-              interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
-              banner:       { key: [banner_tracking_id, player_id_of_internal] }
+    config:
+      meta:
+        mcp:
+          role: crashlytics
+          primary_entity: crash
+          known_events: [fatal_crash, non_fatal, anr]
+          entities:
+            ad_funnel:                               # одна связь, НЕСКОЛЬКО альтернативных колонок
+              type: foreign
+              variants:
+                rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
+                interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
+                banner:       { key: [banner_tracking_id, player_id_of_internal] }
     columns:
       - name: player_id_of_internal
-        meta: { mcp: { entity: { name: user, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
       - name: event_time
-        meta: { mcp: { is_time: true } }
+        config: { meta: { mcp: { is_time: true } } }
       - name: event_name
-        meta: { mcp: { is_event_name: true } }
+        config: { meta: { mcp: { is_event_name: true } } }
       - name: app_version                          # атрибут ФАКТА — доступен через связь
-        meta: { mcp: { dimension: true } }         #   как { model: crashlytics, attribute: app_version } у того, кто ссылается
+        config: { meta: { mcp: { dimension: true } } }         #   как { model: crashlytics, attribute: app_version } у того, кто ссылается
       - name: device_model
-        meta: { mcp: { dimension: true } }
+        config: { meta: { mcp: { dimension: true } } }
       - name: anr_duration_of_event_data
         data_type: numeric
-        meta: { mcp: { property: true, unit: seconds } }
+        config: { meta: { mcp: { property: true, unit: seconds } } }
       # сложные типы в ПЛОСКИХ колонках — полностью в §2c
       - name: breadcrumbs_of_event_data
         data_type: string
-        meta: { mcp: { array: { items: string, encoding: json } } }
+        config: { meta: { mcp: { array: { items: string, encoding: json } } } }
       - name: stack_frames_of_event_data
         data_type: string
-        meta: { mcp: { array: { encoding: json, fields: { file: string, line: int, in_app: boolean } } } }
+        config: { meta: { mcp: { array: { encoding: json, fields: { file: string, line: int, in_app: boolean } } } } }
       - name: custom_keys_of_event_data
         data_type: string
         description: "Custom keys attached to the report — a JSON object { level, coins, network }."
-        meta: { mcp: { property: true } }
+        config: { meta: { mcp: { property: true } } }
 
   # ───────────────────── 3. РАЗМЕРНОСТЬ ПОЛЬЗОВАТЕЛЕЙ (SCD-2) ─────────────────────
   - name: dim_users
     description: >
       Player attributes: one row = one player PER VERSION of their attributes. Slowly-changing:
       every join is point-in-time on [install_time_valid_from, install_time_valid_until).
-    meta:
-      mcp:
-        role: users                                # primary_entity не нужна: ключ на колонке
+    config:
+      meta:
+        mcp:
+          role: users                                # primary_entity не нужна: ключ на колонке
     columns:
       - name: player_id_of_internal
-        meta: { mcp: { entity: { name: user, type: primary } } }     # владелец связи user
+        config: { meta: { mcp: { entity: { name: user, type: primary } } } }     # владелец связи user
       - name: install_time_valid_from
         data_type: timestamp
-        meta: { mcp: { dimension: { validity: start } } }           # окно — ПАРОЙ
+        config: { meta: { mcp: { dimension: { validity: start } } } }           # окно — ПАРОЙ
       - name: install_time_valid_until
         data_type: timestamp
-        meta: { mcp: { dimension: { validity: end } } }
+        config: { meta: { mcp: { dimension: { validity: end } } } }
       - name: install_date
         data_type: date
-        meta: { mcp: { is_time: true } }                              # ось времени размерности
+        config: { meta: { mcp: { is_time: true } } }                              # ось времени размерности
       - name: platform
         data_type: string
       - name: country                              # без пометок: на размерности КАЖДАЯ колонка — атрибут
@@ -384,12 +383,13 @@ models:
   # ─────────────────────────── 4. НАЗНАЧЕНИЯ A/B-ТЕСТОВ ───────────────────────────
   - name: fct_experiment_assignments
     description: "A/B assignments: one row = (player, experiment) with the [assigned_at, ended_at] window."
-    meta:
-      mcp:
-        role: experiments
+    config:
+      meta:
+        mcp:
+          role: experiments
     columns:
       - name: player_id_of_internal
-        meta: { mcp: { entity: { name: user, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
       - { name: experiment_name, data_type: string }
       - { name: variant_group,   data_type: string }
       - { name: assigned_at,     data_type: timestamp }
@@ -398,32 +398,33 @@ models:
   # ───────────────────────────── 5. ИСТОЧНИК МЕР ─────────────────────────────────
   - name: fct_player_acquisition
     description: "Acquisition spend: one row = (player, day). Amounts, not events. Joins to players by (player, day)."
-    meta:
-      mcp:
-        role: acquisition
-        primary_entity: acquisition                # объектная форма не нужна: ключ на колонке
-        measures:                                  # выражения над колонками
-          cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }             # функцию выберет вызывающий
-          total_spend:    { expr: cost, agg: sum, unit: usd, description: "Total spend." }  # + губернируемая
+    config:
+      meta:
+        mcp:
+          role: acquisition
+          primary_entity: acquisition                # объектная форма не нужна: ключ на колонке
+          measures:                                  # выражения над колонками
+            cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }             # функцию выберет вызывающий
+            total_spend:    { expr: cost, agg: sum, unit: usd, description: "Total spend." }  # + губернируемая
     columns:
       - name: acquisition_id
-        meta: { mcp: { entity: { name: acquisition, type: primary } } }
+        config: { meta: { mcp: { entity: { name: acquisition, type: primary } } } }
       - name: player_id_of_internal
-        meta: { mcp: { entity: { name: user, type: foreign } } }
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
       - name: spend_date
         data_type: timestamp
-        meta: { mcp: { is_time: true } }
+        config: { meta: { mcp: { is_time: true } } }
       - name: cost
         data_type: numeric
-        meta: { mcp: { measure: { unit: usd, label: "UA cost" } } }   # сумма, не атрибут
+        config: { meta: { mcp: { measure: { unit: usd, label: "UA cost" } } } }   # сумма, не атрибут
       - name: clicks
         data_type: integer
-        meta: { mcp: { measure: true } }
+        config: { meta: { mcp: { measure: true } } }
       - { name: media_source, data_type: string }                    # атрибуты — без пометок
       - name: campaign_id
-        meta: { mcp: { index: false } }
+        config: { meta: { mcp: { index: false } } }
       - name: ingest_batch_id
-        meta: { mcp: { dimension: false } }
+        config: { meta: { mcp: { dimension: false } } }
 ```
 
 Три правила размещения, которые чаще всего путают:
@@ -462,11 +463,12 @@ models:
 - name: breadcrumbs_of_event_data
   data_type: string                        # или ARRAY<STRING> на BigQuery
   description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
-  meta:
-    mcp:
-      array:
-        items: string                      # тип элемента
-        encoding: json                     # строка с JSON-массивом; для ARRAY-колонки — native
+  config:
+    meta:
+      mcp:
+        array:
+          items: string                      # тип элемента
+          encoding: json                     # строка с JSON-массивом; для ARRAY-колонки — native
 ```
 
 `encoding` можно не писать: для `data_type: string` подразумевается `json`, для остального —
@@ -479,7 +481,7 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одна строка на элемент — «на каком шаге ломалось»
-{ stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' }
+{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }
 //   → 20 строк; group_by crumb: level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, …
 
 // длина массива, не меняя грань
@@ -491,9 +493,9 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 //   → retried = true у 3 отчётов (net_retry встречается 4 раза, но k8 записал его дважды)
 
 // первый / последний элемент — «куда вошёл, где умер»
-{ stage: 'compute', name: 'trail',   op: 'json_parse_array', column: 'breadcrumbs_of_event_data' }
-{ stage: 'compute', name: 'entered', op: 'element_at', column: 'trail', index: 1 }
-{ stage: 'compute', name: 'died_at', op: 'array_last',  column: 'trail' }
+{ stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } }
+{ stage: 'compute', name: 'entered', expr: { fn: 'element_at', args: [{ column: 'trail' }], index: 1 } }
+{ stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } }
 ```
 
 `unnest` **меняет грань**: строки без массива (NULL) выпадают. Если нужно сохранить все
@@ -508,14 +510,15 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 - name: stack_frames_of_event_data
   data_type: string
   description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
-  meta:
-    mcp:
-      array:
-        encoding: json
-        fields:                            # форма элемента — делает тип array<struct>
-          file: string
-          line: int
-          in_app: boolean
+  config:
+    meta:
+      mcp:
+        array:
+          encoding: json
+          fields:                            # форма элемента — делает тип array<struct>
+            file: string
+            line: int
+            in_app: boolean
 ```
 
 `fields` — то, что отличает массив структур от массива скаляров: без него `unnest` отдаст
@@ -523,14 +526,14 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одно поле элемента, одной стадией — «какие файлы падают»
-{ stage: 'unnest', source: 'stack_frames_of_event_data', as: 'file', field: 'file' }
+{ stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' }
 //   → 16 кадров по 10 отчётам; group_by file: Game.cs 5, Net.cs 4, Engine.cs 3, Shop.cs 2, Decode.cs 1, Ads.cs 1
 
 // несколько полей — элемент целиком, потом json_field по каждому
-{ stage: 'unnest',  source: 'stack_frames_of_event_data', as: 'frame' }
-{ stage: 'compute', name: 'file',   op: 'json_field', column: 'frame', field: 'file' }
-{ stage: 'compute', name: 'line',   op: 'json_field', column: 'frame', field: 'line', type: 'int' }
-{ stage: 'compute', name: 'in_app', op: 'json_field', column: 'frame', field: 'in_app' }
+{ stage: 'unnest',  source: 'stack_frames_of_event_data', name: 'frame' }
+{ stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } }
+{ stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } }
+{ stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } }
 //   → where in_app = false: 3 кадра (все три — Engine.cs); true: 13
 
 // глубина стека без разворота
@@ -552,9 +555,10 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   description: >
     Custom keys attached to the report — a JSON object. Known keys: level (int), coins (int),
     network (wifi | cellular). Read a key with struct_field / json_field.
-  meta:
-    mcp:
-      property: true
+  config:
+    meta:
+      mcp:
+        property: true
 ```
 
 Специальной пометки у объекта **нет** — он остаётся обычным event-scoped свойством. Поэтому
@@ -567,8 +571,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 //   → wifi 8 / cellular 5
 
 // один ключ с приведением типа — для сумм
-{ stage: 'compute', name: 'coins', op: 'json_field', column: 'custom_keys_of_event_data', field: 'coins', type: 'int' }
-{ stage: 'compute', name: 'level', op: 'json_field', column: 'custom_keys_of_event_data', field: 'level', type: 'int' }
+{ stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } }
+{ stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } }
 //   → sum(coins) 5205; max(level) 31; median(level) 12
 ```
 
@@ -584,21 +588,22 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 - name: event_data
   data_type: jsonb
   description: "Raw per-event JSON payload; kept for complex array properties that have no flat column."
-  meta:
-    mcp:
-      is_event_data: true
-      properties:                          # свойства, живущие ТОЛЬКО в blob
-        words_collected:
-          type: array
-          items: string
-          description: "Words collected on a completed level."
-        rewards:
-          type: "array<struct>"
-          fields: { item: string, qty: int }
-          description: "Rewards granted on level completion (item + quantity)."
-        difficulty:                        # скаляр в blob тоже можно — но плоская колонка лучше
-          type: int
-          description: "Level difficulty tier."
+  config:
+    meta:
+      mcp:
+        is_event_data: true
+        properties:                          # свойства, живущие ТОЛЬКО в blob
+          words_collected:
+            type: array
+            items: string
+            description: "Words collected on a completed level."
+          rewards:
+            type: "array<struct>"
+            fields: { item: string, qty: int }
+            description: "Rewards granted on level completion (item + quantity)."
+          difficulty:                        # скаляр в blob тоже можно — но плоская колонка лучше
+            type: int
+            description: "Level difficulty tier."
 ```
 
 Свойство из `properties` адресуется **по имени ключа**, а не по колонке, и читается
@@ -607,8 +612,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 ```js
 { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' }
 { stage: 'derive', name: 'has_cat', op: 'contains',     source: 'words_collected', value: 'cat' }
-{ stage: 'unnest', source: 'rewards', as: 'rw' }          // элемент-структура целиком
-{ stage: 'compute', name: 'item', op: 'json_field', column: 'rw', field: 'item' }
+{ stage: 'unnest', source: 'rewards', name: 'rw' }          // элемент-структура целиком
+{ stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item' } }
 ```
 
 Когда blob, а когда плоская колонка: **плоская всегда лучше** — она типизирована,
@@ -657,7 +662,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 (`src/python-guide.js`) публикует этот лист как рецепты, которые можно ЗАБРАТЬ ПО ID посреди
 написания кода: `bf_ml_signatures` (конструкторы всех оценщиков `bigframes.ml` с разделением на
 позиционные и keyword-only) и `bf_frame_method_rules` (какие методы фрейма требуют порядка, какие
-— индекса, и подписи, которые удивляют). У такого рецепта нет `register_payload` — его тело это
+— индекса, и подписи, которые удивляют). У такого рецепта нет `pipeline_payload` — его тело это
 поле `reference`; он подчиняется тем же правилам видимости (`requires`, `runtime`), у него
 `origin: generated`, и развёртывание всё равно может переопределить его id своим файлом. Правило
 простое: список, который агент рискует вспомнить неправильно, генерируется из источника и
@@ -687,7 +692,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 `semantic_index({ recipe })` возвращает рецепт как есть плюс две рамки: имена метрик
 **намеспейсятся именем задачи** (`<name>_<metric>` — в `example_queries` уже полные имена), и
 рецепт — **строительный блок**: взять `hack`, адаптировать payload под точный вопрос, отдать
-`create_payload` в `build_semantic_model`, а pipeline — в `build_pipeline_model`.
+`semantic_payload` в `build_semantic_model`, а pipeline — в `build_pipeline_model`.
 
 Поэтому самое ценное поле — не payload, а **`hack`**: обобщённый приём, из которого агент
 собирает решение задачи, для которой рецепта нет. Payload — доказательство, что приём работает.
@@ -705,12 +710,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
-| `create_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
-| `register_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
+| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
+| `pipeline_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
-| `example_queries` | для `create_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
-| `ab_test` | для A/B | сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })` | см. таблицу ниже |
-| `srm_check` | для SRM | `{ group_field, n_field, expected_ratio? }` | → `experiment({ action: 'check_split' })` |
+| `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
+| `experiment` | для A/B | `{ action: 'analyze', metric, … }` — сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, n_field, expected_ratio? }` → `experiment({ action: 'check_split' })` | см. таблицу ниже |
 | `approach` | для приёма | форма, которая работает | одна строка кода в обратных кавычках + чем она является; только в рецепте-приёме |
 | `instead_of` | для приёма | форма, которая падает, и почему | называйте класс ошибки (`NullIndexError`, `OrderRequiredError`) или в чём тихая неправильность |
 | `read_first` | для python | куда пойти ДО написания функции | `semantic_index({ guide: "python" })` — правила рантайма; рецепт есть один приём оттуда |
@@ -724,7 +728,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `metric_types` | губернируемые метрики: простая по метрик-тайму, ratio, derived, cumulative, conversion-окно, boolean-мера, выбор агрегации под вопрос, губернируемая мера из схемы, воронка из шагов-свойств, две шкалы событий и нетто, одна мера на двух гранах, мера не-событийного источника |
 | `joins` | связи: группировка по атрибуту другой модели, когортная сетка по двум временным осям, метрики двух независимых источников, джойн пайплайна по имени связи, point-in-time джойн |
 | `pipeline` | шаблоны стадий: оконный lag и дельта, эпизоды по разрыву, ось возраста через date_diff, упорядоченная последовательность (match_recognize), unnest массива, переформатирование (unpivot/pivot), проверка объёма и покрытия |
-| `ab_test` | статистика: proportion, mean (Welch), CUPED, ratio (delta-метод), SRM, планирование мощности, две любые группы без эксперимента |
+| `experiment` | статистика: proportion, mean (Welch), CUPED, ratio (delta-метод), SRM, планирование мощности, две любые группы без эксперимента |
 | `bigframes` | ходы на python-рантайме: правильная форма одной операции над фреймом рядом с падающей (см. четвёртую форму ниже) |
 
 Семейства ВАШЕГО слоя — какие захотите (`trends`, `monetization`, `ads`, `economy`,
@@ -737,7 +741,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 ### Четыре формы рецепта
 
-**Управляемая метрика** — `create_payload` + `example_queries`. Самая частая форма. Агент
+**Управляемая метрика** — `semantic_payload` + `example_queries`. Самая частая форма. Агент
 может не только выполнить пример, но и **переспросить** тот же контекст любым другим срезом.
 
 ```json
@@ -750,7 +754,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "required_properties": ["price_in_usd"],
   "required_user_attrs": ["country", "platform", "media_source", "acquisition_type"],
   "metric_types": ["simple", "ratio"],
-  "create_payload": {
+  "semantic_payload": {
     "name": "rev_segment",
     "use_base_models": ["users"],
     "semantic_models": [{
@@ -776,28 +780,26 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Pipeline** — `register_payload` c `pipeline`, часто с `ab_test` / `srm_check`. Для того, чего
+**Pipeline** — `pipeline_payload` c `pipeline`, часто с `experiment`. Для того, чего
 управляемая метрика не выражает. Результат — таблица; тест требует **не меньше двух строк**.
 
 ```json
 {
-  "id": "ab_test_conversion",
-  "task_type": "ab_test",
+  "id": "experiment_conversion",
+  "task_type": "experiment",
   "required_roles": ["experiments"],
   "metric_types": ["proportion"],
-  "register_payload": {
+  "pipeline_payload": {
     "name": "ab_checkout_conversion",
     "pipeline": {
       "source": "events",
       "stages": [
         { "stage": "join", "with": "experiments", "via": "user",
-          "attrs": ["experiment_name", "variant_group", "assigned_at", "ended_at"] },
+          "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
         { "stage": "where", "conditions": [
           { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
           { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
-        { "stage": "compute", "name": "is_conv", "op": "case", "type": "int",
-          "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }],
-          "else": { "value": 0 } },
+        { "stage": "compute", "name": "is_conv", "expr": { "fn": "case", "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }], "else": { "value": 0 }, "type": "int" } },
         { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
           "measures": [{ "name": "converted", "fn": "max", "column": "is_conv" }] },
         { "stage": "aggregate", "group_by": ["experiment_name", "variant_group"],
@@ -806,13 +808,13 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
       ]
     }
   },
-  "ab_test": { "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
+  "experiment": { "action": "analyze", "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
   "notes": "Rows are n + conversions per variant (exposed = users with in-window events). Control = the control variant_group row, variants = the rest.",
   "hack": "Join experiments, window events to [assigned_at, ended_at], flag conversion per user (case → max), aggregate n + conversions per variant, call experiment({ action: 'analyze' }). Extrapolate: any per-variant rate."
 }
 ```
 
-Сопоставление `ab_test` — какие колонки результата нужны для какого теста:
+Сопоставление `experiment` (`action: 'analyze'`) — какие колонки результата нужны для какого теста:
 
 | `metric` | обязательные поля сопоставления | что должен отдать pipeline на каждую группу |
 |---|---|---|
@@ -828,8 +830,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 ```json
 {
-  "id": "ab_test_power",
-  "task_type": "ab_test",
+  "id": "experiment_power",
+  "task_type": "experiment",
   "metric_types": ["power"],
   "required_events": [], "required_properties": [], "required_user_attrs": [], "required_roles": [],
   "tool_calls": [
@@ -841,7 +843,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Приём работы с python-рантаймом** — `register_payload` со стадией `python`, `requires:
+**Приём работы с python-рантаймом** — `pipeline_payload` со стадией `python`, `requires:
 "python_models"`, `runtime: "<рантайм>"` и парой `approach` / `instead_of`. Такой рецепт описан
 НЕ по бизнес-задаче, а по ОДНОМУ ДЕЙСТВИЮ над фреймом: подставить значение из справочника,
 вернуть агрегат группы на строки, взять топ-N, посчитать порог, предсказать модель, закешировать
@@ -871,7 +873,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "requires": "python_models",
   "runtime": "bigframes",
   "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-  "register_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
+  "pipeline_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
   "notes": "…",
   "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group."
 }
@@ -895,10 +897,10 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 | форма | что проверяется |
 |---|---|
-| `create_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
-| `register_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `ab_test` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `srm_check` — то же для `check_split` |
+| `semantic_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
+| `pipeline_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
-| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `register_native_model({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
+| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `_buildPipeline({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
 
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не
@@ -936,7 +938,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 - [ ] `id` по задаче, `task_type` из существующих семейств (или осознанно новое);
 - [ ] `when_to_use` — формулировками вопроса; `title` — что считаем;
-- [ ] ровно одна форма: `create_payload` + `example_queries` / `register_payload` (+ `ab_test`/`srm_check`) / `tool_calls`;
+- [ ] ровно одна форма: `semantic_payload` + `example_queries` / `pipeline_payload` (+ `experiment`) / `tool_calls`;
 - [ ] все имена в payload существуют в фикстуре; первый пример возвращает строки;
 - [ ] для A/B: результат отсортирован по группе, контроль первой строкой, сопоставление полей полное;
 - [ ] `required_*` заполнены честно, `required_roles` — если нужна роль кроме событий и пользователей;

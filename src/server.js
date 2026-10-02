@@ -3,9 +3,11 @@
 // Built on the official MCP SDK v2 (@modelcontextprotocol/server), which implements protocol
 // revision 2026-07-28 and serves every earlier revision from the same factory: `createMcpHandler`
 // builds a fresh server per request (src/mcp-server.js) and decides by itself how the request is
-// spoken — there is no second code path here for an older client, and no session state to lose on
-// a restart.
+// spoken. A 2025 client that initializes gets a session of the SDK's own sessionful transport
+// (src/legacy-sessions.js) — for its cancellation and its GET stream — and a session id a restart
+// lost is served statelessly, never refused, so a restart breaks no client.
 
+import { loadSettings, setting } from './settings.js';
 import { join, dirname } from 'node:path';
 import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -21,11 +23,12 @@ import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { resolveFeatures } from './features.js';
 import { loadProjectSemantics } from './project-semantics.js';
-import { BackgroundIndexer } from './value-index.js';
+import { BackgroundIndexer } from './value-indexer.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
 import { answerTaskRequest } from './mcp-tasks.js';
+import { LegacySessions } from './legacy-sessions.js';
 import { withClientCapabilities, envelopeCapabilities } from './client-extensions.js';
 
 export { buildToolDefs };
@@ -63,25 +66,27 @@ export function graceMsFromEnv(raw, fallbackSeconds, name = 'grace') {
 }
 
 export async function makeEngine(opts = {}) {
-  const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
+  // every setting this start reads, from the one table (src/settings.js)
+  const S = loadSettings(opts.env || process.env);
+  const baseProjectDir = opts.baseProjectDir || S.DBT_BASE_PROJECT;
   // Catalog source precedence: explicit CATALOG_PATH (a standalone catalog file) →
   // the dbt project itself (discover MCP-tagged models from its schema YAMLs) →
   // the bundled sample catalog. Dialect is resolved from env / the dbt profile.
-  const catalogSource = opts.catalogPath || process.env.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
+  const catalogSource = opts.catalogPath || S.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
   // MCP_REQUIRE_TIME_RANGE=1 (or anchor meta.mcp.require_time_range) blocks unbounded
   // (no time window) queries — the cost guardrail for partitioned warehouses.
-  const requireTimeRange = process.env.MCP_REQUIRE_TIME_RANGE != null ? !/^(0|false|no|off)$/i.test(String(process.env.MCP_REQUIRE_TIME_RANGE).trim()) : undefined;
-  const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir, requireTimeRange });
+  const requireTimeRange = S.MCP_REQUIRE_TIME_RANGE;
+  const catalog = loadCatalog(catalogSource, { profilesDir: S.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir, requireTimeRange });
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
-  if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
+  if (baseProjectDir && !S.SKIP_PROJECT_VALIDATION) validateDbtProject(baseProjectDir, catalog);
   const runner = opts.runner !== undefined
     ? opts.runner
     : baseProjectDir
       // dbt runs ONLY in one of this tool's environments (a venv under DBT_ENVS_DIR built from its
       // lock — DBT_ENV, else `dbt-v2`; MetricFlow's is `metricflow`); anything else is refused. The
       // client reads its version from the binary (DBT_VERSION pins it).
-      ? createDbt({ version: process.env.DBT_VERSION || 'auto', environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      ? createDbt({ version: S.DBT_VERSION, environment: S.DBT_ENV || DEFAULT_ENV, profilesDir: S.DBT_PROFILES_DIR || baseProjectDir, timeout: S.DBT_TIMEOUT_SECONDS * 1000 })
       : null;
   // what the installed dbt can run decides what is offered (dbt v2 runs no Python models on DuckDB)
   gatePythonRuntime(catalog, runner);
@@ -90,7 +95,7 @@ export async function makeEngine(opts = {}) {
   // the deployment winning an id collision. Before this, RECIPES_PATH REPLACED the system set, so a
   // deployment with its own recipes silently lost every shipped one.
   const systemRecipes = assetPath('systemRecipes');
-  const deploymentRecipes = opts.recipesPath || process.env.RECIPES_PATH || '';
+  const deploymentRecipes = opts.recipesPath || S.RECIPES_PATH || '';
   const recipes = (systemRecipes || deploymentRecipes)
     ? loadRecipes(systemRecipes, deploymentRecipes, {
       dialect: catalog.dialect,
@@ -100,26 +105,25 @@ export async function makeEngine(opts = {}) {
     : undefined;
   const ctxs = new ContextManager({
     baseProjectDir,
-    workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,
+    workspaceRoot: opts.workspaceRoot || S.MCP_WORKSPACE,
     timeSpineDialect: catalog.dialect,
   });
-  const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
+  const queryTimeoutMs = graceMsFromEnv(S.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
-  const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
-  // Ensure the parent dir exists so a custom path persists (a missing dir would make the
-  // open fail and silently fall back to an in-memory store).
+  const dbPath = opts.dbPath || S.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
+  // Ensure the parent dir exists so a custom path persists (a missing dir would make the open fail).
   try { mkdirSync(dirname(dbPath), { recursive: true }); } catch { /* best effort */ }
   // MCP_DB_RESET wipes the store (jobs + value index) on startup. DEFAULT OFF so state
   // (the value index, job history) SURVIVES a restart — opt IN to a clean slate with
   // MCP_DB_RESET=1/true. (Persistence still needs the DB on a durable volume + Node >= 22.5.)
-  const resetDb = /^(1|true|yes|on)$/i.test(String(process.env.MCP_DB_RESET ?? 'false').trim());
+  const resetDb = S.MCP_DB_RESET;
   if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on — clearing the store on startup (state will NOT survive this restart)`);
   // GROUND the catalog to the physical warehouse BEFORE building the engine (its tool
   // schemas + value index derive from the catalog): a column the dbt schema declares but
   // the physical table lacks is pruned, so it never appears in any tool. Best-effort and
   // opt-out via MCP_GROUND_CATALOG=0 (e.g. offline/catalog-only dev).
-  if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
+  if (runner && baseProjectDir && S.MCP_GROUND_CATALOG) {
     try {
       const { pruned, unavailable } = await groundCatalogToPhysical(catalog, runner, baseProjectDir, (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`));
       // The report lists columns the table lacks, plus anything that had to go with them —
@@ -137,12 +141,12 @@ export async function makeEngine(opts = {}) {
     }
   }
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
-  // configured (+ a key); otherwise null and memory({ search }) stays purely fuzzy.
+  // configured (+ a key); otherwise null and memory({ request: { search } }) stays purely fuzzy.
   const embedder = createEmbedder();
   // Durability for the memory tool: by default findings share the store (and survive
   // MCP_DB_RESET), but the store lives on the container FS — point MCP_MEMORY_DB at a
   // PERSISTENT volume to retain findings across container restarts.
-  const memoryDbPath = opts.memoryDbPath || process.env.MCP_MEMORY_DB || undefined;
+  const memoryDbPath = opts.memoryDbPath || S.MCP_MEMORY_DB || undefined;
   if (memoryDbPath) {
     try { mkdirSync(dirname(memoryDbPath), { recursive: true }); } catch { /* best effort */ }
     console.error(`[mcp] ${new Date().toISOString()} memory: persisting findings to ${memoryDbPath} (dedicated, never reset)`);
@@ -152,22 +156,21 @@ export async function makeEngine(opts = {}) {
   // THE FEATURES THIS DEPLOYMENT TURNS ON (src/features.js) — each off unless its flag says on, and
   // left out with its reason when it cannot run here; read once, at start, like every other flag
   const { features, status: featureStatus } = resolveFeatures({
-    env: process.env, catalog, baseProjectDir,
-    profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir,
+    env: opts.env || process.env, catalog, baseProjectDir,
+    profilesDir: S.DBT_PROFILES_DIR || baseProjectDir,
     log: (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`),
   });
   // MCP_TABLE_EXPIRATION_DAYS: the tables built for tasks expire this many days after they are built
-  // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again
-  const rawExpiry = process.env.MCP_TABLE_EXPIRATION_DAYS;
-  const tableExpirationDays = rawExpiry == null || rawExpiry === '' ? 30 : Number(rawExpiry);
-  if (!Number.isInteger(tableExpirationDays) || tableExpirationDays < 0) throw new Error(`MCP_TABLE_EXPIRATION_DAYS must be a whole number of days (0 keeps the tables), got '${rawExpiry}'`);
+  // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again. A value
+  // that is not a whole number of days is the default, as for every setting (src/config.js).
+  const tableExpirationDays = S.MCP_TABLE_EXPIRATION_DAYS;
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
   // schema names them, and query_semantic_model runs them in their own context with no build
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
   if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);
   const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project });
-  // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
+  // Persistence surfaces as semantic_index({ request: { status } }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.
   if (dbPath && !engine.valueIndex.persistent) {
@@ -180,23 +183,10 @@ export async function makeEngine(opts = {}) {
 
 // ── the HTTP endpoint ──────────────────────────────────────────────────────────────────────
 
-/** "a, b ,c" → ['a','b','c'] (empty → []). */
-const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
-
 // Hostnames a browser page may call from without being listed: the loopback names (the MCP
 // Inspector, a local tool). The SDK's Express app validates Origin by hostname.
 const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
-/**
- * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
- * validation) with `createMcpHandler` mounted on /mcp.
- *
- * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
- * every native client, every hosted connector calling from its backend — passes; a browser page
- * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
- * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
- * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
- */
 /**
  * One line for every request the endpoint REFUSED or failed (status >= 400) — including the ones the
  * SDK's Host/Origin fences reject before any handler runs, which otherwise leave no trace: a client
@@ -247,12 +237,22 @@ function logRequest(req, res) {
   res.on('finish', () => logLine('http', `${bits.join(' ')} → ${res.statusCode}`));
 }
 
+/**
+ * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
+ * validation) with `createMcpHandler` mounted on /mcp.
+ *
+ * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
+ * every native client, every hosted connector calling from its backend — passes; a browser page
+ * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
+ * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
+ * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
+ */
 export function createApp(engine, opts = {}) {
   const services = opts.services || servicesFor(engine);
-  const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
-  const allowedHosts = opts.allowedHosts ?? csv(process.env.MCP_ALLOWED_HOSTS);
+  const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? setting('MCP_ALLOWED_ORIGINS'))];
+  const allowedHosts = opts.allowedHosts ?? setting('MCP_ALLOWED_HOSTS');
   const app = createMcpExpressApp({
-    host: opts.host ?? process.env.HOST ?? '127.0.0.1',
+    host: opts.host ?? setting('HOST'),
     allowedOrigins,
     ...(allowedHosts.length ? { allowedHosts } : {}),
     jsonLimit: '4mb',
@@ -263,9 +263,15 @@ export function createApp(engine, opts = {}) {
     bus: services.bus,
   });
   const node = toNodeHandler(handler);
+  // a 2025 client's session (src/legacy-sessions.js): opened by its initialize, served by its own server
+  const sessions = new LegacySessions(services);
   app.all('/mcp', (req, res) => {
     logRequest(req, res);
-    if (answerTaskRequest(services.tasks, req, res)) return;
+    // the transport asks for it on an SSE response: a buffering proxy (nginx) then passes each event
+    // through as it is written — a progress heartbeat, a list_changed on a listen stream
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (answerTaskRequest(services.tasks, req, res, services.serverInfo)) return;
+    if (sessions.claims(req)) return void sessions.handle(req, res).catch((e) => { logLine('session', `✗ ${e?.message || e}`); if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: `Internal error: ${e?.message || e}` }, id: null }); });
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)
     void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));
@@ -290,20 +296,21 @@ export function createApp(engine, opts = {}) {
   outer.disable('x-powered-by');
   outer.use(logRefusals);
   outer.use(app);
-  outer.locals.close = () => handler.close();
+  outer.locals.close = async () => { await sessions.close(); await handler.close(); };
   return outer;
 }
 
 // Entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
+  const S = loadSettings();
   const engine = await makeEngine();
   const app = createApp(engine);
-  const port = Number(process.env.PORT || 3000);
-  const host = process.env.HOST || '127.0.0.1'; // localhost by default; set HOST=0.0.0.0 in containers
+  const port = S.PORT;
+  const host = S.HOST; // localhost by default; set HOST=0.0.0.0 in containers
   const httpServer = app.listen(port, host, () => console.log(`dbt-semantic-mcp streamable-HTTP on ${host}:${port}/mcp`));
 
   // Optional periodic reclamation of idle contexts (bounds workspace growth).
-  const ttlMs = Number(process.env.CONTEXT_TTL_MS) || 0;
+  const ttlMs = S.CONTEXT_TTL_MS;
   let gcTimer;
   if (ttlMs > 0) {
     gcTimer = setInterval(() => { try { engine.gc(ttlMs); } catch { /* noop */ } }, Math.min(ttlMs, 300000));
@@ -314,50 +321,45 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // (top values + cardinality) for semantic_index. Initial pass is fire-and-forget
   // (start() does NOT await) so server startup is never blocked; then refreshes on
   // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule.
-  const intervalMs = process.env.VALUE_INDEX_REFRESH_MS !== undefined ? Number(process.env.VALUE_INDEX_REFRESH_MS) : 21600000;
-  const maxValues = Number(process.env.VALUE_INDEX_MAX_VALUES) || 50;
+  const intervalMs = S.VALUE_INDEX_REFRESH_MS;
+  const maxValues = S.VALUE_INDEX_MAX_VALUES;
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
   // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
-  const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
-  // Approximate (HLL) distinct counts during indexing — cheaper on a large fact, and the
-  // project's preferred distinct-count method. DEFAULT ON; dialect-gated (bigquery/snowflake/
-  // duckdb/redshift use APPROX_COUNT_DISTINCT, unknown fall back to EXACT). Disable
-  // with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to force exact everywhere.
-  const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
+  const windowDays = S.MCP_INDEX_WINDOW_DAYS;
+  // Approximate (HLL) distinct counts during indexing — cheaper on a large fact. DEFAULT ON; the
+  // dialect's own expression (BigQuery: APPROX_COUNT_DISTINCT; DuckDB counts exactly, where the
+  // numbers are checked). Disable with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to count exactly.
+  const approxDistinct = S.MCP_INDEX_APPROX_DISTINCT;
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed
   // batch degrades to per-property. Tune down on very wide facts / strict column limits.
-  const batchSize = Number(process.env.MCP_INDEX_BATCH) || 40;
-  // Dedicated timeout (seconds) for the heavy index scans — a combined top-k over the full
-  // fact can exceed the runner's default 180s and get SIGTERM-killed. Generous default (600s)
-  // so indexing finishes; ordinary user queries keep the smaller runner timeout. Tune via
-  // MCP_INDEX_TIMEOUT_SECONDS (or pair with MCP_INDEX_WINDOW_DAYS to bound the scan instead).
+  const batchSize = S.MCP_INDEX_BATCH;
   // Dedicated timeout for the heavy value-index scans — default 2 HOURS (7200s): a combined
   // scan over a large full events fact genuinely needs it, and it is separate from the general
   // dbt runner timeout (which stays short so ordinary user queries never hang). Pair with the
   // incremental knobs below to shorten individual runs.
-  const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 7200) * 1000;
+  const scanTimeout = S.MCP_INDEX_TIMEOUT_SECONDS * 1000;
   // Incremental MERGE (default ON): re-scan an already-indexed anchor property only for rows
   // NEWER than its watermark and ADD the counts to what is stored — each cycle scans a small
   // delta, not the whole history. Disable with MCP_INDEX_MERGE=false. It is mutually exclusive
   // with a rolling MCP_INDEX_WINDOW_DAYS (merge accumulates all-time; the window ages data out),
   // so a configured window turns merge OFF and takes precedence.
-  const mergeOn = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_MERGE ?? 'true').trim());
+  const mergeOn = S.MCP_INDEX_MERGE;
   const merge = mergeOn && !windowDays;
   if (mergeOn && windowDays) console.error(`[mcp] ${new Date().toISOString()} value-index: MCP_INDEX_WINDOW_DAYS=${windowDays} set — incremental merge disabled (rolling window takes precedence)`);
   // Auto-skip near-unique (ID-like) fields once indexed: distinct ≥ this PERCENT of the field's
   // (non-null) rows → its top-N is noise, so it is not re-scanned on later syncs. Relative to the
   // field's own size (adapts to any table). Default 90%; set MCP_INDEX_HIGH_CARD_PCT=0 to disable.
-  const highCardPct = process.env.MCP_INDEX_HIGH_CARD_PCT !== undefined ? Number(process.env.MCP_INDEX_HIGH_CARD_PCT) : 90;
+  const highCardPct = S.MCP_INDEX_HIGH_CARD_PCT;
   // Rebuild-then-index (DEFAULT ON): each sync `dbt run`s the catalog's source models BEFORE
   // indexing, so the index + data_freshness reflect a freshly computed table (not the last
   // externally-built one). Disable with MCP_INDEX_DBT_RUN=false if an external scheduler
   // (Airflow/dbt Cloud) already builds the models. MCP_INDEX_DBT_RUN_SELECT overrides the selector.
-  const runModels = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_DBT_RUN ?? 'true').trim());
-  const runModelsSelect = process.env.MCP_INDEX_DBT_RUN_SELECT || null;
+  const runModels = S.MCP_INDEX_DBT_RUN;
+  const runModelsSelect = S.MCP_INDEX_DBT_RUN_SELECT || null;
   const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
-  // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.
+  // Graceful shutdown: stop accepting, close the runner and the SQLite handle.
   let shuttingDown = false;
   const shutdown = (sig) => {
     if (shuttingDown) return;

@@ -1,95 +1,126 @@
-// A tool schema is read by TWO kinds of client, and only one of them reads all of JSON Schema.
+// A tool schema is read by the host's API before the model sees it, and every API reads a SUBSET of
+// JSON Schema: Anthropic's refuses a whole request whose tool schema has a union at its root, OpenAI's
+// strict mode refuses `allOf`, `not` and `if/then/else`, and neither documents `oneOf`. What they all
+// take is a plain object at the root, and `anyOf`, `enum`, `const`, `$ref` below it.
 //
-// An MCP client that passes the schema through keeps everything. A client that rewrites it for
-// OpenAI-style function calling keeps a SUBSET: a union at the ROOT is not in it, so such a client
-// drops the union — and if the root had nothing but the union, the model is shown an object with no
-// fields at all. That is how "the server demanded `source` and it was not in the schema" happens on
-// a schema where `source` is declared in every branch that takes it.
-//
-// So the shape of every tool's input is a flat root `properties` map (what survives the rewrite)
-// PLUS the union (what narrows it, for clients that keep it). The union's branches must be CLOSED,
-// which is what makes `anyOf` reject exactly what `oneOf` would.
+// So every tool takes ONE field, `request` (src/schema/transport.js wireSchema), and a tool with modes
+// is an `anyOf` of CLOSED forms under it (src/schema-kit.js): each form exactly its own fields, told
+// apart from the others by a pinned value or by the fields it requires — which is what makes the
+// `anyOf` mean what a `oneOf` would. These checks hold every schema to that, on the fixture and the
+// production catalog.
 //
 // These are input-validation checks: what the tool accepts and refuses, asserted through the
 // validator the server itself uses — not string matching on generated output.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
+import { eachSchema, transportSchema } from '../../src/schema/transport.js';
+import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema } from '../../src/retentioneering/schema.js';
+import { buildToolDefs } from '../../src/mcp-surface.js';
+import { Engine } from '../../src/engine.js';
+import { ContextManager } from '../../src/context-manager.js';
+import { deref, forms, pinned } from '../helpers/schema-nav.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
+const PRODUCTION = fileURLToPath(new URL('../../config/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
 const schemas = buildSchemas(catalog);
 
-// The two tools that genuinely take no input; everything else has to name its fields.
-const NO_PARAMS = new Set(['list_contexts', 'list_query_jobs']);
+/** The tool list a client is handed, for a catalog. */
+/** Every tool schema of a catalog: the core's, and the retentioneering feature's (built as it registers them). */
+const allSchemas = (path) => {
+  const c = loadCatalog(path, {});
+  return { ...buildSchemas(c), build_retentioneering_model: transportSchema(eventstreamSchema(c)), query_retentioneering_model: transportSchema(pathQuerySchema()), display_retentioneering_result: transportSchema(pathDisplaySchema()) };
+};
+const listed = (path) => buildToolDefs(new Engine({ catalog: loadCatalog(path, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'portable-')) }) }));
 
-const unionsOf = (node, out = []) => {
-  if (Array.isArray(node)) node.forEach((n) => unionsOf(n, out));
-  else if (node && typeof node === 'object') {
-    for (const key of ['anyOf', 'oneOf']) if (Array.isArray(node[key])) out.push({ key, branches: node[key], owner: node });
-    for (const v of Object.values(node)) unionsOf(v, out);
-  }
+// the constructs outside what every host's API takes — anywhere in a schema, not only at its root
+const NOT_PORTABLE = ['oneOf', 'allOf', 'not', 'if', 'then', 'else', 'dependentRequired', 'dependentSchemas', 'discriminator'];
+
+for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) {
+  test(`every tool takes one field, request, at a root every API takes (${label} catalog)`, () => {
+    for (const tool of listed(path)) {
+      const s = tool.inputSchema;
+      assert.equal(s.type, 'object', `${tool.name}: the root is an object`);
+      assert.equal(s.additionalProperties, false, `${tool.name}: the root is closed`);
+      assert.deepEqual(s.required, ['request'], `${tool.name}: request is required`);
+      assert.deepEqual(Object.keys(s.properties), ['request'], `${tool.name}: request is the one field`);
+      for (const k of ['anyOf', ...NOT_PORTABLE]) assert.ok(!(k in s), `${tool.name}: no ${k} at the root`);
+      assert.ok(typeof deref(s, s.properties.request).description === 'string', `${tool.name}: request says what it holds`);
+    }
+  });
+
+  // an answer's schema is listed too: an object at its root, with no union or other construct a host may refuse
+  test(`every outputSchema is one object in the portable subset (${label} catalog)`, () => {
+    const outputs = listed(path).filter((t) => t.outputSchema);
+    assert.ok(outputs.length > 0, 'some tool declares its answer');
+    for (const t of outputs) {
+      assert.equal(t.outputSchema.type, 'object', `${t.name}: the root is an object`);
+      eachSchema(t.outputSchema, (node) => { for (const k of ['anyOf', ...NOT_PORTABLE]) assert.ok(!(k in node), `${t.name}: its answer's schema uses ${k}`); });
+    }
+  });
+
+  test(`no schema uses a construct outside the portable subset (${label} catalog)`, () => {
+    const all = [...listed(path).flatMap((t) => [[t.name, t.inputSchema], ...(t.outputSchema ? [[`${t.name} (output)`, t.outputSchema]] : [])]), ...Object.entries(allSchemas(path))];
+    for (const [name, schema] of all) {
+      // schema positions only: a field NAMED `then` or `else` (a CASE branch) is a property, not a keyword
+      eachSchema(schema, (node) => { for (const k of NOT_PORTABLE) assert.ok(!(k in node), `${name}: a schema node uses ${k}`); });
+    }
+  });
+}
+
+const unionsOf = (doc) => {
+  const out = [];
+  eachSchema(doc, (node) => { if (Array.isArray(node.anyOf)) out.push(node); });
   return out;
 };
 
-test('every tool declares its fields at the ROOT, so a client that strips unions still sees them', () => {
-  for (const [name, schema] of Object.entries(schemas)) {
-    assert.equal(schema.type, 'object', `${name}: the root of a tool input must be an object`);
-    const props = Object.keys(schema.properties || {});
-    if (NO_PARAMS.has(name)) continue;
-    assert.ok(props.length > 0, `${name}: the root has no properties — a client that drops root unions would show the model an object with no fields`);
+/** Whether no value can match both object forms: a field both pin to values that do not meet (and one
+ *  of them requires), or a field one requires that the other does not take. */
+const apart = (doc, a, b) => {
+  for (const k of Object.keys(a.properties || {})) {
+    const pa = pinned(doc, a, k); const pb = pinned(doc, b, k);
+    if (pa.length && pb.length && !pa.some((v) => pb.includes(v)) && ((a.required || []).includes(k) || (b.required || []).includes(k))) return true;
   }
-});
+  const lacks = (x, y) => (x.required || []).some((k) => !(k in (y.properties || {})));
+  return lacks(a, b) || lacks(b, a);
+};
 
-test('a schema stripped to the function-calling subset still names every field its tool needs', () => {
-  // What such a client keeps: type/properties/required/enum/description. What it drops here:
-  // anyOf/oneOf/allOf/if/then/not at the root. After that the fields must still be there.
-  const strip = (schema) => {
-    const { anyOf, oneOf, allOf, if: _if, then: _then, not, ...rest } = schema;
-    return rest;
-  };
-  for (const [name, schema] of Object.entries(schemas)) {
-    if (NO_PARAMS.has(name)) continue;
-    const stripped = strip(schema);
-    assert.ok(Object.keys(stripped.properties || {}).length > 0, `${name}: nothing left to call the tool with`);
-    assert.ok(typeof stripped.description === 'string' && stripped.description.length > 0, `${name}: no description left to say how the fields combine`);
-  }
-  // semantic_index is the one this was found on: the fields of its views must be in that map.
-  const si = strip(schemas.semantic_index).properties;
-  for (const f of ['source', 'event', 'property', 'model', 'search', 'recipe', 'guide', 'status', 'run', 'limit']) {
-    assert.ok(si[f], `semantic_index: '${f}' is not visible without the union`);
-  }
-  // …and a name is STILL not offered without its owner: no source-less enum of event names.
-  assert.ok(!si.event.enum, 'event names must not be enumerated outside their source');
-  assert.ok(!si.property.enum, 'property names must not be enumerated outside their source');
-  assert.deepEqual(si.source.enum, catalog.modelKeys(), 'the root `source` is the list of sources');
-});
-
-test('every union branch is closed and named, which is what makes anyOf as strict as oneOf', () => {
-  for (const [name, schema] of Object.entries(schemas)) {
-    for (const { key, branches } of unionsOf(schema)) {
-      for (const [i, b] of branches.entries()) {
-        if (b.$ref || b.const !== undefined || b.enum !== undefined || b.type === 'string' || b.type === 'number') continue; // a value union, not a shape union
-        if (b.type !== 'object') continue;
-        assert.equal(b.additionalProperties, false, `${name}: ${key}[${i}] is an open object branch — an unknown field would be accepted by SOME branch`);
+for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) {
+  test(`every union of objects is closed, named and told apart — anyOf as strict as oneOf (${label} catalog)`, () => {
+    for (const [name, schema] of Object.entries(allSchemas(path))) {
+      for (const union of unionsOf(schema)) {
+        const branches = union.anyOf.flatMap((b) => forms(schema, b));
+        // a union is of FORMS (each a closed object) or of VALUES (a pattern, an enum, a type) — never a
+        // bare constraint on fields beside open properties ({ required: [...] }), which no form closes
+        for (const b of branches) {
+          assert.ok(!(b && b.required && !b.properties), `${name}: a union branch requires fields it does not declare (${JSON.stringify(b)}) — write the modes as closed forms`);
+        }
+        const objects = branches.filter((b) => b && b.type === 'object' && b.properties);
+        if (objects.length < 2) continue;
+        for (const [i, b] of objects.entries()) {
+          assert.equal(b.additionalProperties, false, `${name}: a form of a union is open — an unknown field would be accepted by SOME form (${b.title || i})`);
+        }
+        for (let i = 0; i < objects.length; i++) {
+          for (let j = i + 1; j < objects.length; j++) {
+            assert.ok(apart(schema, objects[i], objects[j]), `${name}: the forms '${objects[i].title || i}' and '${objects[j].title || j}' overlap — an input could match both`);
+          }
+        }
       }
     }
-  }
-  // A refusal has to be able to NAME the modes. Two ways to make that possible, and a root union
-  // must use one: a `title` per branch (semantic_index), or a `discriminator` field whose value
-  // picks the branch (ab_test / sample_size pick on `metric`), which ajv reports by itself.
-  for (const tool of ['semantic_index', 'memory', 'ab_test', 'sample_size']) {
-    const root = schemas[tool];
-    const branches = root.anyOf || root.oneOf || [];
-    assert.ok(branches.length > 1, `${tool}: expected a root union`);
-    const tagged = !!root.discriminator;
-    for (const [i, b] of branches.entries()) {
-      assert.ok(b.title || tagged, `${tool}: root branch ${i} is neither titled nor picked by a discriminator`);
-    }
+  });
+}
+
+test('a tool with modes names them: every form under request has a title', () => {
+  for (const [name, schema] of Object.entries(allSchemas(CATALOG))) {
+    for (const f of schema.anyOf ? schema.anyOf.map((b) => deref(schema, b)) : []) assert.ok(f.title, `${name}: a form with no title — a refusal could not name it`);
   }
 });
 
@@ -218,17 +249,20 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   // both the single-stage and the list-of-stages field point at.
   const bnm = schemas.build_pipeline_model;
   assert.ok(bnm.$defs?.pipeline_stage, 'the stage union is a definition');
-  assert.equal(bnm.properties.stage.$ref, '#/$defs/pipeline_stage');
-  assert.equal(bnm.properties.stages.items.$ref, '#/$defs/pipeline_stage');
+  const stageField = forms(bnm, bnm).map((f) => f.properties?.stage).find(Boolean);
+  const stagesField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.stages).find(Boolean));
+  assert.equal(deref(bnm, stageField), bnm.$defs.pipeline_stage, 'the stage field points at it');
+  assert.equal(deref(bnm, stagesField.items), bnm.$defs.pipeline_stage, 'and so does every item of the list of stages');
 });
 
-// The point of the fold is SIZE — what every request carries before a word of the conversation.
-// The ceiling is deliberately loose (it grows with the catalog), but it is a ceiling: a tool that
-// doubles because a description grew unchecked should fail here, not in production.
-test('the tool surface stays within its size budget on the production catalog', () => {
-  const tools = buildSchemas(loadCatalog(fileURLToPath(new URL('../../config/catalog.yml', import.meta.url)), {}));
-  const total = Object.values(tools).reduce((n, s) => n + JSON.stringify(s).length, 0);
-  assert.ok(total < 220000, `the tool schemas are ${total} characters — they were ~150k after the fold; something is being dumped into every request again`);
+// The point of the fold is SIZE — what every request carries before a word of the conversation: the
+// tool list a client is handed (the tools callable by name only are never in it). The ceiling is
+// deliberately loose: it grows with the catalog, and with every name closed as an enum per model (an
+// attribute, a joined column) — exactness is worth the bytes. But it is a ceiling: a tool that doubles
+// because a description grew unchecked should fail here, not in production.
+test('the tool list stays within its size budget on the production catalog', () => {
+  const total = JSON.stringify(listed(PRODUCTION)).length;
+  assert.ok(total < 260000, `the tool list is ${total} characters — it was ~206k with every form folded and the catalog's names closed per model; something is being dumped into every request again`);
 });
 
 test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
@@ -260,10 +294,10 @@ test('the card declaration (display) is structural: each kind is a closed branch
   ]) assert.equal(check(bad).ok, false, why);
   // the declaration lives on display_model_result alone: no other tool takes one
   assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
-  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_id: 'abc123abc123', display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
+  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
-  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_id with a query');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_id: 'abc123abc123', transform: {} }).ok, false, 'task_id with a transform');
+  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_ids with a query');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], transform: {} }).ok, false, 'task_ids with a transform');
   assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
-  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
+  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

@@ -6,7 +6,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,8 +15,8 @@ import { ContextManager } from '../../src/context-manager.js';
 import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { settle, one } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -68,7 +68,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
       { metrics: ['mon_revenue'] },
       { metrics: ['mon_revenue'], group_by: byCountry },
       { metrics: ['mon_revenue'], group_by: byCountry, materialize: true },
-      { metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }] } },
+      { metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
@@ -82,7 +82,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
   assert.equal(stored.table, `qr_${stored.task_id}`);
   const s = revenueBy(stored.rows);
   assert.deepEqual([s.US, s.GB, s.BR], [35, 25, 25]);
-  const page = await engine.query_semantic_model({ task_id: stored.task_id, limit: 2 });
+  const page = await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 2 }));
   assert.equal(page.rows.length, 2);
   assert.equal(page.page.has_more, true);
   assert.equal(num(us.rows[0].mon_revenue), 35);
@@ -100,10 +100,10 @@ test('a batch of projections over a built pipeline model: count, non-NULL count 
   const started = await engine.raw.query_pipeline_model({
     context_id: s.draft_id,
     queries: [
-      { transform: { aggregations: [{ fn: 'count', as: 'rows' }] } },
-      { transform: { aggregations: [{ fn: 'count', column: 'price', as: 'priced' }] } },
-      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ fn: 'sum', column: 'price', as: 'revenue' }] } },
-      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ fn: 'sum', column: 'price', as: 'amount' }], order_by: [{ key: 'event_name' }] } },
+      { transform: { aggregations: [{ agg: 'count', name: 'rows' }] } },
+      { transform: { aggregations: [{ agg: 'count', column: 'price', name: 'priced' }] } },
+      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
+      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');

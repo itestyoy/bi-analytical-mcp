@@ -7,19 +7,19 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
+
+import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -39,7 +39,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'vi-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   // A temp-file value index so the index is real SQLite (not just the engine's default).
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
@@ -51,7 +51,7 @@ before(async () => {
   await indexer.refresh();
 }, opts);
 
-after(async () => { backend?.close(); index?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); index?.close(); if (wh) await wh.stop(); });
 
 // Verify the EXACT property names against the fixture catalog via semantic_index.
 test('exact property names: ad_finished + level_completed carry the *_of_event_data props', opts, async (t) => {
@@ -413,7 +413,7 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
   assert.ok(ret.recipe_matches.some((r) => r.id === 'conversion_metric_window'), JSON.stringify(ret.recipe_matches));
-  assert.ok(ret.recommendations.some((r) => r.includes('semantic_index({ recipe')), 'search guides to the recipe view');
+  assert.ok(ret.recommendations.some((r) => r.includes('semantic_index({ request: { recipe')), 'search guides to the recipe view');
 });
 
 // Per-app (bundle) coverage from the REAL warehouse: the seed assigns level events to
@@ -455,7 +455,7 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
 
 // Triple (property × bundle × event) coverage from the REAL warehouse: the seed puts level
 // events on com.omg.colorfit, so ad_type is NULL there while result IS present — the exact
-// per-cell fill that powers the native-model "field is empty for this app+event" warning.
+// per-cell fill that powers the pipeline-model "field is empty for this app+event" warning.
 test('triple coverage: per (bundle × event) cell fill matches the seeded data', opts, async (t) => {
   if (skip(t)) return;
   // ad_type_of_event_data is NULL on colorfit's level_started rows (it only carries on ad_*).

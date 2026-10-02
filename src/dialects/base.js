@@ -19,17 +19,22 @@ export function isTimeType(type) {
   return TIME_TYPES.has(String(type || '').toLowerCase());
 }
 
+/** A safe SQL literal — written the same way by every dialect. */
+export function sqlLiteral(value) {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
+  return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
+}
+
 export class Dialect {
   /* eslint-disable class-methods-use-this */
   get name() { throw new Error('abstract'); }
 
   /** A safe SQL string/number/boolean literal (shared across dialects). */
   sqlLiteral(value) {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'number') return String(value);
-    if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-    // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
-    return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
+    return sqlLiteral(value);
   }
 
   /** Validate a SQL identifier (column/alias/json key) — guards injection. */
@@ -49,7 +54,7 @@ export class Dialect {
    * schema says they join on, whatever each side's column type is.
    */
   keyPartExpr(part, qualify = (c) => c) {
-    const col = qualify(this.ident(part.column));
+    const col = qualify(this.quoteIdent(part.column));
     return part.grain ? this.grainExpr(part.grain, col) : col;
   }
 
@@ -72,12 +77,12 @@ export class Dialect {
   joinKeyParts(op, qualifyLeft = (c) => c, qualifyRight = (c) => c) {
     if (op.onKeys) {
       return op.onKeys.left.map((lp, i) => ({
-        name: this.ident(lp.column),
+        name: this.quoteIdent(lp.column),
         left: this.keyPartExpr(lp, qualifyLeft),
         right: this.keyPartExpr(op.onKeys.right[i], qualifyRight),
       }));
     }
-    return op.on.map((c) => ({ name: this.ident(c), left: qualifyLeft(this.ident(c)), right: qualifyRight(this.ident(c)) }));
+    return op.on.map((c) => ({ name: this.quoteIdent(c), left: qualifyLeft(this.quoteIdent(c)), right: qualifyRight(this.quoteIdent(c)) }));
   }
 
   /** True when a key part is compared as an EXPRESSION (a declared grain truncates it) rather than
@@ -106,9 +111,9 @@ export class Dialect {
     const eq = this.joinKeyParts(op, (c) => `base.${c}`, (c) => `j.${c}`)
       .map((k) => `${k.left} = ${k.right}`).join(' AND ');
     const btw = op.between
-      ? ` AND ${this.validityWindow(`base.${this.ident(op.between.value)}`, `j.${this.ident(op.between.from)}`, `j.${this.ident(op.between.to)}`)}`
+      ? ` AND ${this.validityWindow(`base.${this.quoteIdent(op.between.value)}`, `j.${this.quoteIdent(op.between.from)}`, `j.${this.quoteIdent(op.between.to)}`)}`
       : '';
-    const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
+    const attrs = op.attrs.map((a) => `j.${this.quoteIdent(a.column)} AS ${this.quoteIdent(a.as)}`);
     return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
   }
 
@@ -136,6 +141,15 @@ export class Dialect {
   // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
   /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */
   dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
+  /** The seconds from one timestamp to another, as a number (a funnel's time between steps). */
+  secondsBetween(_fromExpr, _toExpr) { throw new Error('abstract secondsBetween'); }
+  /** The body of the daily time spine MetricFlow needs: one `date_day` per day, start..end inclusive. */
+  timeSpineSelect(_start, _end) { throw new Error('abstract timeSpineSelect'); }
+  /**
+   * A read of a representative random subset of `ref` (about `percent` of it), shaped by `project`
+   * (rel → select over it) — rather than its first rows by physical order.
+   */
+  sampleQuery(_ref, _percent, _project) { throw new Error('abstract sampleQuery'); }
   /** A stable bucket in [0, buckets) for a value — the same value always lands in the same bucket,
    *  on every run: a deterministic sample of users is `bucket < share * buckets`. */
   valueBucket(_expr, _buckets) { throw new Error('abstract valueBucket'); }
@@ -198,6 +212,16 @@ export class Dialect {
   get approximateStats() { return []; }
   /** Approximate distinct count (HLL++ where available). */
   approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
+  // ── the value index's scans ─────────────────────────────────────────────────
+  /** Rows of the last `days` days on time column `col` (a positive integer, checked by the caller). */
+  recentSince(_col, _days) { throw new Error('abstract recentSince'); }
+  /** Rows STRICTLY NEWER than an epoch-ms watermark on time column `col`. */
+  sinceTimestampMs(_col, _ms) { throw new Error('abstract sinceTimestampMs'); }
+  /** The K most frequent values WITH their counts in one aggregate, as a JSON string
+   *  ([{ value, count }]), or null where the warehouse has none that carries the counts. */
+  approxTopK(_expr, _k) { return null; }
+  /** One cell of approxTopK's output as [{ value, freq }] — read by the dialect that writes it. */
+  parseTopK(_raw) { throw new Error('abstract parseTopK'); }
   // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────
   /** Build a sketch over a column (aggregate). */
   hllInit(_columnSql) { throw new Error('abstract hllInit'); }

@@ -1,4 +1,4 @@
-// Funnels are PIPELINES: register_native_model builds a pipe-syntax pipeline whose
+// Funnels are PIPELINES: _buildPipeline builds a pipe-syntax pipeline whose
 // match_recognize stage produces one row per user, and downstream stages (join,
 // aggregate) slice it. The model's rows ARE the result. Data-only assertions on
 // the returned rows (the CTE equivalent on DuckDB here; BigQuery MATCH_RECOGNIZE in prod).
@@ -6,17 +6,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -29,7 +28,7 @@ const reached = (rows, step) => rows.filter((r) => tru(r[`reached_${step}`])).le
 
 // Build a funnel/transform pipeline and return the materialized result rows.
 async function pipe(stages, name) {
-  const out = await engine.register_native_model({ name: name || `fnl_${seq++}`, context_id: ctxId, pipeline: { source: 'events', stages } });
+  const out = await engine._buildPipeline({ name: name || `fnl_${seq++}`, context_id: ctxId, pipeline: { source: 'events', stages } });
   assert.equal(out.kind, 'pipeline');
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;
@@ -52,11 +51,11 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
 // per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
 // instant to attribute a funnel to: the user as they were when the funnel started.
@@ -68,12 +67,12 @@ const AT_EVENT = { value: 'device_time', from: 'install_time_valid_from', to: 'i
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
-test('native pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
+test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
   if (skip(t)) return;
   const count = async (time_range) => {
-    const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range, stages: [
+    const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
     ] } });
     assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
     ctxId = out.context_id;
@@ -88,14 +87,28 @@ test('native pipeline time_range bounds the window: full 8 purchases vs windowed
 // the PREVIOUS UTC day, and a partition bound not widened past the local date would drop them.
 test('time_range with a timezone keeps the events on the other UTC day of a partitioned source: 39 (9 on 01-01)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' }, stages: [
-    { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', fn: 'count' }] },
+  const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' }, stages: [
+    { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;
   const byDay = Object.fromEntries(out.rows.map((r) => [String(r.utc_day).slice(0, 10), Number(r.n)]));
   assert.deepEqual(byDay, { '2026-01-01': 9, '2026-01-02': 30 });
+});
+
+// A funnel's own window follows the pipeline's one rule for a window: a timezone's wall-clock day, the
+// whole of a date-only end — the players it keeps are those of the same window given to the pipeline.
+test('a funnel filter window in a timezone keeps the players of the same window on the pipeline', opts, async (t) => {
+  if (skip(t)) return;
+  const tr = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
+  const own = await pipe([matchActivation({ filter: { time_range: tr }, steps: activationSteps.slice(0, 2) })]);
+  const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: tr, stages: [matchActivation({ steps: activationSteps.slice(0, 2) })] } });
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  ctxId = out.context_id;
+  const rows = (o) => o.rows.map((r) => JSON.stringify(r)).sort();
+  assert.ok(own.rows.length > 0, 'the window keeps players');
+  assert.deepEqual(rows(own), rows(out));
 });
 
 // The partition bound is a pruning aid, never a filter of its own: whatever bounds the time axis —
@@ -108,8 +121,8 @@ test('a where on the time axis and a funnel window read the same rows with the p
   const rowsOf = async (stages) => (await pipe(stages)).rows.map((r) => JSON.stringify(r)).sort();
   const byDay = [
     { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 10:00:00' }, { column: 'device_time', op: 'lt', value: '2026-01-02 10:00:00' }] },
-    { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ];
   const funnel = [matchActivation({ filter: { time_range: { start: '2026-01-01 09:30:00', end: '2026-01-02' } }, steps: activationSteps.slice(0, 2) })];
   const pruned = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
@@ -172,9 +185,9 @@ test('pipeline response: output_columns (carried partition key) + the task that 
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
 test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
   if (skip(t)) return;
-  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] }];
-  const wide = await engine.register_native_model({ dry_run: true, name: 'est_wide', pipeline: { source: 'events', stages } });
-  const narrow = await engine.register_native_model({ dry_run: true, name: 'est_narrow', pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
+  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }];
+  const wide = await engine._buildPipeline({ dry_run: true, name: 'est_wide', pipeline: { source: 'events', stages } });
+  const narrow = await engine._buildPipeline({ dry_run: true, name: 'est_narrow', pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
   assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
   assert.ok(narrow.estimated_source_rows > 0 && narrow.estimated_source_rows < wide.estimated_source_rows, 'a single day scans fewer rows than the whole fact');
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
@@ -182,7 +195,7 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 
 // Feature C: incremental build_pipeline_model. Each add_step returns the columns
 // available for the next stage; a committed draft yields the SAME rows as the
-// all-at-once register_native_model (fidelity), proven on the activation funnel.
+// all-at-once _buildPipeline (fidelity), proven on the activation funnel.
 test('build_pipeline_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
@@ -296,7 +309,7 @@ test('funnel sliced by a user attribute: join dim_users → reached_tut1 by coun
   if (skip(t)) return;
   // The funnel is sliced by joining dim_users AFTER match_recognize — all within
   // the pipeline (no separate semantic layer).
-  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country', 'platform'] }]);
+  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: [{ column: 'country' }, { column: 'platform' }] }]);
   assert.ok(out.rows.every((r) => 'country' in r && 'platform' in r), 'attrs joined onto each row');
   assert.equal(reached(out.rows, 'tut1'), 8);
   const byCountry = {};
@@ -310,7 +323,7 @@ test('funnel sliced + aggregated in-pipeline: aggregate count by furthest_step_n
   // semantic-model "users by furthest step".
   const out = await pipe([
     matchActivation(),
-    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'users', direction: 'desc' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.furthest_step_name), num(r.users)]));
@@ -325,7 +338,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // user-attribute filtering is now a pipeline concern: join dim_users, where on
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await pipe([
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
     { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
   ]);
@@ -348,7 +361,7 @@ test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 
     { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
-      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'avg', property: 'n_words', step: 'lvl1' }] },
+      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'average', property: 'n_words', step: 'lvl1' }] },
   ]);
   assert.equal(reached(out.rows, 'lvl1'), 12);
   const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.pv_avg_words));
@@ -371,8 +384,8 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
   assert.equal(by.US, 35); assert.equal(by.GB, 25); assert.equal(by.BR, 25);
@@ -383,17 +396,17 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
-    { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
+    { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(out.rows.length, 1);
   assert.equal(num(out.rows[0].US), 35);
   assert.equal(num(out.rows[0].GB), 25);
 });
 
-test('register_native_model: dry_run returns SQL without building', opts, async (t) => {
+test('_buildPipeline: dry_run returns SQL without building', opts, async (t) => {
   if (skip(t)) return;
-  const dr = await engine.register_native_model({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] }] } });
+  const dr = await engine._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] }] } });
   assert.equal(dr.dry_run, true);
   assert.equal(dr.kind, 'pipeline');
   assert.equal(typeof dr.model_sql, 'string');
@@ -402,10 +415,10 @@ test('register_native_model: dry_run returns SQL without building', opts, async 
   assert.equal(dr.model_sql_bigquery, undefined);
 });
 
-test('register_native_model: same name in two contexts → distinct relations', opts, async (t) => {
+test('_buildPipeline: same name in two contexts → distinct relations', opts, async (t) => {
   if (skip(t)) return;
-  const a = await engine.register_native_model({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
-  const b = await engine.register_native_model({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
+  const a = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
+  const b = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
   assert.notEqual(a.context_id, b.context_id);
   assert.notEqual(a.model, b.model);
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
@@ -433,11 +446,11 @@ test('semantic_index: overview lists models, then { model } drills into the usab
 });
 
 // #2: a date-only time_range bound includes the WHOLE day (not collapsed to midnight).
-test('native pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
+test('pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: `day_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
+  const out = await engine._buildPipeline({ name: `day_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;

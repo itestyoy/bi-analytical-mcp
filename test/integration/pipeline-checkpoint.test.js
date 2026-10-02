@@ -7,17 +7,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, readTable } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -33,11 +32,11 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'cpt-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // The pipeline used throughout: completed levels → their score → per-player totals → a filter on
@@ -47,7 +46,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 const STEPS = [
   { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
   { stage: 'derive', name: 'score', op: 'extract', source: 'daily_level_score_of_event_data', type: 'numeric' },
-  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', fn: 'count' }, { name: 'total_score', fn: 'sum', column: 'score' }] },
+  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', agg: 'count' }, { name: 'total_score', agg: 'sum', column: 'score' }] },
   { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] },
 ];
 
@@ -133,7 +132,7 @@ test('a funnel and a payload read run on top of a materialized event slice, with
     partition_by: ['player_id_of_internal'],
     steps: [{ name: 'started', event_name: ['level_started'] }, { name: 'completed', event_name: ['level_completed'] }],
   };
-  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', fn: 'count' }] };
+  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', agg: 'count' }] };
 
   const whole = await build('cp_fn_whole', [SLICE, FUNNEL, COUNT]);
   const split = await build('cp_fn_split', [SLICE, FUNNEL, COUNT], [1]); // the slice is the prefix
@@ -144,8 +143,8 @@ test('a funnel and a payload read run on top of a materialized event slice, with
   assert.deepEqual(tally(split.result), tally(whole.result));
 
   // The payload column survived the slice too, so a derive on top of the prefix reads it.
-  const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }]);
-  const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }], [1]);
+  const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }]);
+  const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }], [1]);
   assert.equal(splitScore.result.from_checkpoint.at, 1);
   assert.equal(num(splitScore.result.rows[0].total), num(wholeScore.result.rows[0].total));
   assert.ok(num(wholeScore.result.rows[0].total) > 0, 'the payload actually carried values');

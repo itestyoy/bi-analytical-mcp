@@ -12,6 +12,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DbtV1 } from './v1.js';
+import { SEMANTIC_MANIFEST } from './output.js';
 
 const NO_PYTHON_MODELS = new Set(['duckdb']);
 
@@ -23,6 +24,10 @@ export class DbtV2 extends DbtV1 {
 
   get semanticSpec() { return 'latest'; }
 
+  /** dbt v2 parses every SQL model (static analysis) and does not know BigQuery's pipe syntax: it
+   *  warns "mismatched input 'FROM'" on each such model and learns nothing from it. The model says so. */
+  unparsedSqlConfig() { return { static_analysis: 'off' }; }
+
   pythonModelsOn(adapter) { return !NO_PYTHON_MODELS.has(String(adapter || '').toLowerCase()); }
 
   /**
@@ -33,7 +38,7 @@ export class DbtV2 extends DbtV1 {
    */
   async parse(projectDir) {
     const r = await super.parse(projectDir);
-    const file = join(projectDir, 'target', 'semantic_manifest.json');
+    const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (r.ok && existsSync(file)) {
       try {
         const manifest = JSON.parse(readFileSync(file, 'utf8'));

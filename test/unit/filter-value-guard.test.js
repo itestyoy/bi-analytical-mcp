@@ -123,7 +123,7 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'de' }] } }),
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'de' }] }),
     /different casing.*'DE'/s,
   );
 });

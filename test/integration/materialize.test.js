@@ -7,17 +7,16 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { settle, isStartedTask, taskResult, one } from '../helpers/settle.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -33,7 +32,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mat-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
     name: 'mon', use_base_models: ['users'],
@@ -44,7 +43,7 @@ before(async () => {
   ctxId = out.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 test('materialize: the query is a task whose result is a stored table — rows read back = total revenue 85', opts, async (t) => {
@@ -61,7 +60,7 @@ test('materialize: the query is a task whose result is a stored table — rows r
 test('resilient re-read: once the in-memory response is gone, query_semantic_model({ task_id }) reads the stored table', opts, async (t) => {
   if (skip(t)) return;
   engine.raw._taskResults.delete(globalThis.__matTask); // what a restart (or an hour) does to the held response
-  const r = await engine.query_semantic_model({ task_id: globalThis.__matTask });
+  const r = await one(engine.query_semantic_model({ task_ids: [globalThis.__matTask] }));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(r.status, 'done');
   assert.equal(num(r.rows[0].mon_revenue), 85); // recomputes nothing — reads the table
@@ -91,14 +90,14 @@ test('a pipeline started FROM a stored result re-slices it without recomputing (
     return built.rows;
   };
   // (a) compress to a single total
-  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'mon_revenue' }] }]);
+  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'mon_revenue' }] }]);
   assert.equal(num(total.total), 85);
   // (b) one country -> exact seed value (US revenue = 35)
-  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] }]);
+  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] }]);
   assert.equal(num(us.rev), 35);
   // (c) group, then keep the groups whose total clears a bar
   const big = await from('big', [
-    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] },
+    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] },
     { stage: 'where', conditions: [{ column: 'rev', op: 'gte', value: 25 }] },
   ]);
   assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25));
@@ -111,18 +110,18 @@ test('a drawn card reads its views from its own task: values are bound as litera
   const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'mon_revenue' }] } });
   assert.equal(card.drawn, true, JSON.stringify(card).slice(0, 300));
   assert.equal(card.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85, 'the top level is the whole result, folded by country');
-  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
   assert.equal(num(us.rows[0].rev), 35);
   // injection/escaping proven on DATA: a value containing a quote+SQL is bound as a literal ->
   // the read runs safely and simply matches nothing.
-  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
   assert.equal(inj.ok, true, JSON.stringify(inj.error));
   assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null);
 });
 
 // QUERYING A BUILT PIPELINE MODEL: query_pipeline_model({ context_id, transform }) filters, groups
 // and aggregates the stored table without recomputing it. A count with a `column` must count
-// NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on DATA: a native pipeline derives
+// NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on DATA: a pipeline derives
 // `price` (populated only on iap_purchase_completed, NULL on every other event), so count(price) <
 // count(*), and count(price) + (rows where price IS NULL) == count(*). A regression to COUNT(*) makes
 // them equal. A value carrying SQL is bound as a literal.
@@ -132,23 +131,23 @@ test('query_pipeline_model over a built model: count(column) counts NON-NULL onl
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' } });
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const started = await engine.raw.query_pipeline_model({ context_id: s.draft_id, transform: { aggregations: [{ fn: 'count', column: '*', as: 'total' }] } });
+  const started = await engine.raw.query_pipeline_model({ context_id: s.draft_id, transform: { aggregations: [{ agg: 'count', name: 'total' }] } });
   assert.ok(isStartedTask(started), 'a query over a built model is a task too');
   const totalR = await taskResult(engine, started.task_id);
   const read = (transform) => engine.query_pipeline_model({ context_id: s.draft_id, transform });
-  const nnR = await read({ aggregations: [{ fn: 'count', column: 'price', as: 'nn' }] });
-  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ fn: 'count', column: '*', as: 'nulls' }] });
+  const nnR = await read({ aggregations: [{ agg: 'count', column: 'price', name: 'nn' }] });
+  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ agg: 'count', name: 'nulls' }] });
   assert.equal(totalR.ok !== false && nnR.ok !== false && nullR.ok !== false, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
   const total = num(totalR.rows[0].total); const nonNull = num(nnR.rows[0].nn); const nulls = num(nullR.rows[0].nulls);
   assert.ok(nulls > 0, `fixture must have NULL price rows, got ${nulls}`);
   assert.ok(nonNull < total, `count(price)=${nonNull} must exclude NULLs (< total ${total}) — a COUNT(*) regression makes them equal`);
   assert.equal(nonNull + nulls, total, `count(column) + null_count must equal count(*): ${nonNull} + ${nulls} != ${total}`);
   // grouped: the priced rows per event name add back up to the non-NULL count, and only purchase events carry a price
-  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ fn: 'count', column: 'price', as: 'n' }] });
+  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'count', column: 'price', name: 'n' }] });
   assert.ok(byEvent.rows.every((r) => String(r.event_name).startsWith('iap_purchase')), JSON.stringify(byEvent.rows));
   assert.equal(byEvent.rows.reduce((a, r) => a + num(r.n), 0), nonNull);
   // injection/escaping proven on DATA: the literal matches nothing, and the query runs
-  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] });
+  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], aggregations: [{ agg: 'count', name: 'n' }] });
   assert.equal(num(inj.rows[0].n), 0);
   // a semantic context is not a pipeline model
   await assert.rejects(() => engine.query_pipeline_model({ context_id: ctxId }), /no built pipeline model/);
@@ -164,22 +163,22 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   const per = new Map();
   for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
   const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
-  const step = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, include_columns: true, stage: { stage: 'compute', name: 'prev_event', op: 'window', fn: 'lag', column: 'event_name', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } });
+  const step = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, include_columns: true, stage: { stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } } });
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
   const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ fn: 'count', as: 'n' }] } });
+  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ agg: 'count', name: 'n' }] } });
   assert.ok(prev.rows.every((r) => typeof r.prev_event === 'string' && src.some((x) => x.e === r.prev_event)), 'its values are event names');
   const r = await engine.query_pipeline_model({ context_id: s.draft_id, transform: {
     group_by: ['player_id_of_internal'],
     aggregations: [
-      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], as: 'starts' },
-      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], as: 'completes' },
+      { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], name: 'starts' },
+      { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], name: 'completes' },
     ],
     then: { aggregations: [
-      { fn: 'count', as: 'players' },
-      { fn: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], as: 'completed_once' },
-      { fn: 'sum', column: 'starts', as: 'starts' },
+      { agg: 'count', name: 'players' },
+      { agg: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], name: 'completed_once' },
+      { agg: 'sum', column: 'starts', name: 'starts' },
     ] },
   } });
   assert.equal(r.ok !== false, true, JSON.stringify(r.error));
@@ -189,21 +188,21 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // a second level reads the first's columns only
-  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ fn: 'count', as: 'n' }], then: { aggregations: [{ fn: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
 });
 
 test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(m.status, 'done', JSON.stringify(m));
-  const full = await engine.query_semantic_model({ task_id: m.task_id, limit: 1000 });
+  const full = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 1000 }));
   const total = full.row_count;
   assert.ok(total >= 2, `expected multiple country rows, got ${total}`);
   // page through in chunks of 2; has_more drives the loop and must terminate.
   const collected = [];
   let offset = 0; let last; let guard = 0;
   do {
-    last = await engine.query_semantic_model({ task_id: m.task_id, limit: 2, offset });
+    last = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 2, offset }));
     assert.equal(last.ok, true, JSON.stringify(last.error));
     collected.push(...last.rows);
     offset += 2;
@@ -221,11 +220,11 @@ test('a described pipeline builds and returns exactly the rows of the same pipel
   const stages = [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'purchases', fn: 'count' }] },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'purchases', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'player_id_of_internal', direction: 'asc' }] },
   ];
   const build = async (name, description) => {
-    const out = await engine.register_native_model({ name, ...(description ? { description } : {}), pipeline: { source: 'events', stages } });
+    const out = await engine._buildPipeline({ name, ...(description ? { description } : {}), pipeline: { source: 'events', stages } });
     assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
     return out;
   };
@@ -239,6 +238,6 @@ test('a described pipeline builds and returns exactly the rows of the same pipel
   // …and the label is what the context now says this model is for
   const described = await engine.context({ action: 'describe', context_id: labelled.context_id });
   assert.equal(described.models?.[0]?.description, 'revenue per payer — the weekly monetization readout');
-  await engine.delete_native_model({ context_id: plain.context_id });
-  await engine.delete_native_model({ context_id: labelled.context_id });
+  await engine._deletePipelineModel({ context_id: plain.context_id });
+  await engine._deletePipelineModel({ context_id: labelled.context_id });
 });

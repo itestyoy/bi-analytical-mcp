@@ -12,14 +12,15 @@ const v = (tool, input) => validateInput(validators[tool], input);
 
 test('a task is addressed by its id alone — no table name or path reaches a read', () => {
   for (const tool of ['query_semantic_model', 'query_pipeline_model', 'display_model_result']) {
-    assert.equal(v(tool, { task_id: "x') }} ; drop table dim_users -- " }).ok, false, `${tool}: a task id is hex`);
-    assert.equal(v(tool, { task_id: 'aabbccddeeff', table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
-    assert.ok(v(tool, { task_id: 'aabbccddeeff' }).ok);
+    const id = (x) => (tool === 'display_model_result' ? { task_id: x } : { task_ids: [x] });
+    assert.equal(v(tool, id("x') }} ; drop table dim_users -- ")).ok, false, `${tool}: a task id is hex`);
+    assert.equal(v(tool, { ...id('aabbccddeeff'), table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
+    assert.ok(v(tool, id('aabbccddeeff')).ok);
   }
   assert.equal(v('drill_result', { task_id: 'aabbccddeeff', transform: {}, table: 'qr_aabbccddeeff' }).ok, false);
 });
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
-  for (const tool of ['query_semantic_model', 'drop_context', 'describe_context']) {
+  for (const tool of ['query_semantic_model', 'delete_context.context', 'context.describe']) {
     const base = tool === 'query_semantic_model' ? { metrics: ['m'] } : {};
     assert.equal(v(tool, { ...base, context_id: '../../../etc/passwd' }).ok, false, `${tool} should reject traversal`);
     assert.equal(v(tool, { ...base, context_id: 'a/b' }).ok, false, `${tool} should reject slashes`);
@@ -32,7 +33,7 @@ test('derived metric expr is restricted to a safe arithmetic grammar', () => {
     semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
     metrics: [
       { name: 'r', type: 'simple', measure: { name: 'r' } },
-      { name: 'bad', type: 'derived', expr: "r) as x, (select 1 from creds--", metrics: [{ name: 'r' }] },
+      { name: 'bad', type: 'derived', expr: "r) as x, (select 1 from creds--", metrics: [{ metric: 'r' }] },
     ],
   }), /unknown identifier|illegal characters/);
 });

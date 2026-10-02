@@ -12,6 +12,7 @@ import { buildToolDefs } from '../../src/server.js';
 import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 import { settle } from '../helpers/settle.js';
+import { deref, field } from '../helpers/schema-nav.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -31,10 +32,9 @@ test('advertised tools: folded tools removed, context + experiment present', () 
   }
   // every advertised tool has a real description (not name-as-description).
   for (const d of buildToolDefs(engine())) assert.notEqual(d.description, d.name, `${d.name} has a description`);
-  // every advertised tool has a human-readable title (top-level + annotations), distinct from name.
+  // every advertised tool has a human-readable title, distinct from name.
   for (const d of buildToolDefs(engine())) {
     assert.ok(typeof d.title === 'string' && d.title.length > 0, `${d.name} has a title`);
-    assert.equal(d.annotations?.title, d.title, `${d.name} mirrors title into annotations`);
     assert.notEqual(d.title, d.name, `${d.name} title is not the raw name`);
   }
 });
@@ -72,8 +72,8 @@ test('experiment tool: plan / check_split / analyze dispatch + strict fields', (
   );
 });
 
-// context({ action }) — the unified lifecycle tool — dispatches + validates strictly.
-test('context tool: list / describe / drop dispatch and strict fields', async () => {
+// context reads the contexts; delete_context removes them — each validated strictly.
+test('context lists and describes, delete_context removes — and a read never removes', async () => {
   const e = engine();
   // start a draft to create a context.
   const s = await e.build_pipeline_model({ action: 'start', name: 'ctxtool', source: 'events' });
@@ -84,11 +84,14 @@ test('context tool: list / describe / drop dispatch and strict fields', async ()
   // strict: describe requires context_id; list forbids it.
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
-  // delete_semantic_model requires semantic_model.
-  await assert.rejects(() => e.context({ action: 'delete_semantic_model', context_id: s.draft_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
-  // drop tears the context down.
-  await e.context({ action: 'drop', context_id: s.draft_id });
+  // context only reads: an action that would remove is not one of its actions
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /must be one of: list, describe/);
+  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
+  // delete_context: semantic_model needs its model; context forbids the model's fields
+  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);
+  await assert.rejects(() => e.delete_context({ context_id: s.draft_id, cascade: true }), /invalid input/);
+  await e.delete_context({ context_id: s.draft_id });
   const after = await e.context({ action: 'list' });
   assert.ok(!after.contexts.some((c) => c.context_id === s.draft_id), 'dropped context is gone');
 });
@@ -100,7 +103,7 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   assert.ok(Array.isArray(overview.recipes) && overview.recipes.some((r) => r.id === 'conversion_metric_window'), 'overview lists recipe ids');
   const r = await e.semantic_index({ recipe: 'conversion_metric_window' });
   assert.equal(r.id, 'conversion_metric_window');
-  assert.ok(r.hack && (r.create_payload || r.register_payload), 'recipe payload + hack returned');
+  assert.ok(r.hack && (r.semantic_payload || r.pipeline_payload), 'recipe payload + hack returned');
   assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
   await assert.rejects(() => e.semantic_index({ recipe: 'conversion_metric_window', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
@@ -113,7 +116,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'sampled', source: 'events' });
   await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'sample', percent: 10 } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
   const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
@@ -121,14 +124,14 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'exact', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
   const out2 = await e.build_pipeline_model({ action: 'materialize', draft_id: s2.draft_id });
   assert.equal(out2.provenance.approximate, undefined);
   assert.equal(out2.sampling, undefined);
 });
 
 // Recipes are building blocks reached THROUGH semantic_index, not a standalone tool.
-test('recipes have no standalone tool; get_recipe payload is framed as a building block', async () => {
+test('recipes have no standalone tool; _recipe payload is framed as a building block', async () => {
   const names = buildToolDefs(engine()).map((d) => d.name);
   assert.ok(!names.includes('get_recipe') && !names.includes('list_recipes'), 'no standalone recipe tools');
   const r = await engine().semantic_index({ recipe: 'conversion_metric_window' });
@@ -147,12 +150,12 @@ test('add_step warns when an event-specific property is used without its event s
   ] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
-  const a = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  const a = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
   assert.ok(a.recommendations.some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(a.recommendations));
   // with an upstream where scoping event_name to those events → no NULL warning.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'scoped', source: 'events' });
   await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
-  const a2 = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  const a2 = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
   assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
 });
 
@@ -227,7 +230,7 @@ test('memory targets: { source, name } resolves; a bare name is not a target', a
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
   const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
   assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
 });
@@ -270,7 +273,7 @@ test('a task dimension is reported under its declared attribute even when one ta
     ],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
-  const out = await e.update_semantic_model({
+  const out = await e.build_semantic_model({ action: 'update',
     context_id: first.context_id,
     semantic_model: 'users',
     task: 'ret_v2',
@@ -296,8 +299,9 @@ test('a task dimension is reported under its declared attribute even when one ta
 // magic word means a relationship, and nothing in the engine knows what any relationship is called.
 test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
   const e = engine();
-  const st = stageBranch(e.schemas.build_pipeline_model, 'match_recognize');
-  const branches = st.properties.partition_by.items.oneOf;
+  const bpm = e.schemas.build_pipeline_model;
+  const st = stageBranch(bpm, 'match_recognize');
+  const branches = deref(bpm, field(bpm, st, 'partition_by').items).anyOf.map((b) => deref(bpm, b));
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
   assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
@@ -325,15 +329,38 @@ test('the instructions open with a paragraph of at most 512 characters — what 
   }
 });
 
+// A question about how the server is built is declined: the opening carries the rule's brief, for a
+// client that reads 512 characters, the core block the rule itself, which extends that same brief —
+// whatever the client was offered — and semantic_index's description it again, for a client that
+// reads no instructions.
+test('the opening, the core block and the first tool all carry the refusal to talk about how the server is built', async () => {
+  const { coreInstructions } = await import('../../src/mcp-surface.js');
+  const { SELF_REFUSAL, SELF_REFUSAL_BRIEF, SELF_REFUSAL_TOOL } = await import('../../src/self-refusal.js');
+  assert.ok(SELF_REFUSAL.startsWith(SELF_REFUSAL_BRIEF) && SELF_REFUSAL_TOOL.startsWith(SELF_REFUSAL_BRIEF), 'one wording: each form extends the brief');
+  for (const offer of [{}, { apps: true, skillUris: ['skill://a/SKILL.md'], featureLines: ['a feature line'] }]) {
+    const core = coreInstructions(offer);
+    assert.ok(core.split('\n\n')[0].includes(SELF_REFUSAL_BRIEF), 'the opening states the brief');
+    assert.ok(core.includes(SELF_REFUSAL), 'the core block states the rule');
+  }
+  // a client that reads no instructions still meets it, on the tool every question starts with
+  assert.ok(buildToolDefs(engine()).find((d) => d.name === 'semantic_index').description.includes(SELF_REFUSAL_TOOL), 'semantic_index states it');
+});
+
 test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {
   const { coreInstructions, servicesFor } = await import('../../src/mcp-surface.js');
   for (const d of buildToolDefs(engine())) assert.ok(d.description.length <= 2048, `${d.name}: ${d.description.length} characters`);
-  const skillUris = ['skill://omg-analytics/SKILL.md'];
-  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }]) {
+  // the served skills under one root, and the feature's line: the largest core a deployment can serve
+  const skillUris = ['skill://omg-analytics/analytics/SKILL.md', 'skill://omg-analytics/research/SKILL.md', 'skill://omg-analytics/python-stage/SKILL.md'];
+  const { INSTRUCTIONS_LINE } = await import('../../src/retentioneering/guide.js');
+  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }, { apps: true, skillUris, featureLines: [INSTRUCTIONS_LINE] }]) {
     const core = coreInstructions(offer);
     assert.ok(core.length <= 2048, `${JSON.stringify(offer)}: ${core.length} characters`);
   }
   const services = servicesFor(engine());
+  // the skills are found within the cut: the core names the root every served skill sits under
+  const { skillRoot } = await import('../../src/mcp-surface.js');
+  const served = services.skills?.skills.map((s) => s.uri) ?? [];
+  assert.ok(served.length && served.every((u) => u.startsWith(skillRoot(served))) && coreInstructions({ skillUris: served }).includes(skillRoot(served)), 'the core names where the skills are');
   for (const offer of [{}, { apps: true, skills: true }]) {
     assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
   }

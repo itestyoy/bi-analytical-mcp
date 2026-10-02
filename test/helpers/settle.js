@@ -1,6 +1,6 @@
 // A call that STARTS work (build_semantic_model, query_semantic_model, build_pipeline_model
-// materialize, query_pipeline_model, register_native_model) returns only { task_id, … }; what it
-// produced is read back with the query tool of its side ({ task_id }). Most tests are about what the work produced, so they run their engine through
+// materialize, query_pipeline_model, a pipeline built in one call) returns only { task_id, … }; what it
+// produced is read back with the query tool of its side ({ task_ids }). Most tests are about what the work produced, so they run their engine through
 // `settle(engine)`: the same engine, where a call that started a task returns that task's result
 // (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
 // `engine.raw`, for a test about the task itself.
@@ -13,11 +13,16 @@ export function isStartedTask(out) {
     && Object.keys(out).every((k) => STARTED_KEYS.has(k)) && 'next' in out;
 }
 
-/** The public read of a task: the query tool of its side (the engine's own mapping), with { task_id }. */
+/** A read of ONE task through a query tool ({ task_ids: [id] }) answers it under `results`: that one result. */
+export function one(answer) {
+  return Promise.resolve(answer).then((r) => (Array.isArray(r?.results) && r.results.length === 1 ? r.results[0] : r));
+}
+
+/** The public read of a task: the query tool of its side (the engine's own mapping), with { task_ids: [id] }. */
 export function readTask(engine, taskId, extra = {}) {
   const raw = engine.raw || engine;
   const tool = raw._taskSide(raw.jobs.get(taskId)) === 'pipeline' ? 'query_pipeline_model' : 'query_semantic_model';
-  return raw[tool]({ task_id: taskId, ...extra });
+  return one(raw[tool]({ task_ids: [taskId], ...extra }));
 }
 
 /** Wait for a task and return what its query tool says once it is no longer running. */
@@ -38,7 +43,7 @@ function refusal(r) {
   return Object.assign(new Error(r.error.message), { stage: r.error.stage, field: r.error.field, code: r.error.code });
 }
 
-const TASK_TOOLS = new Set(['build_semantic_model', 'update_semantic_model', 'query_semantic_model', 'register_native_model', 'build_pipeline_model', 'query_pipeline_model']);
+const TASK_TOOLS = new Set(['build_semantic_model', 'query_semantic_model', '_buildPipeline', 'build_pipeline_model', 'query_pipeline_model']);
 
 /** The engine, with every started task settled into its result. */
 export function settle(engine) {
@@ -69,4 +74,26 @@ export function settle(engine) {
 export function readTable(engine, contextId, table, { transform, limit = 1000 } = {}) {
   const raw = engine.raw || engine;
   return raw._readTable(raw.ctxs.dir(contextId), table, limit, transform);
+}
+
+/**
+ * One MCP tool call, the way an assistant makes it: a call that STARTS work answers with its task_id,
+ * and the result is read back with the query tool its answer names (`read_with`), called again while it
+ * says running — up to `deadlineMs`, past which the task is reported as not finishing rather than
+ * waited on forever. Returns { res, out }: the last MCP result and its parsed payload.
+ */
+export async function settleMcp(client, name, args, { deadlineMs = 10 * 60 * 1000 } = {}) {
+  let res = await client.callTool({ name, arguments: { request: args } });
+  let out = JSON.parse(res.content[0].text);
+  if (!res.isError && isStartedTask(out)) {
+    const { read_with: reader, task_id: taskId } = out;
+    const until = Date.now() + deadlineMs;
+    do {
+      if (Date.now() > until) throw new Error(`task ${taskId} (${name}) still running after ${Math.round(deadlineMs / 1000)}s`);
+      res = await client.callTool({ name: reader, arguments: { request: { task_ids: [taskId] } } });
+      out = JSON.parse(res.content[0].text);
+      if (!res.isError) out = await one(out);
+    } while (!res.isError && out.status === 'running');
+  }
+  return { res, out };
 }

@@ -1,9 +1,9 @@
 // DB-level A/B integration test: compute the per-variant PRELIMINARY AGGREGATES
 // in the warehouse (DuckDB + dbt) by materializing each A/B recipe's pipeline as a
 // real model, read back the per-variant rows, then compute the FINAL STATISTICS
-// (proportion / mean / CUPED) via the ab_test tool. We assert on the NUMBERS the
+// (proportion / mean / CUPED) via experiment({ action: 'analyze' }). We assert on the NUMBERS the
 // tool returns — derived by hand from the seed — proving the full path:
-//   events + experiments  ──pipeline──▶  per-variant rows  ──ab_test──▶  stats.
+//   events + experiments  ──pipeline──▶  per-variant rows  ──experiment analyze──▶  stats.
 //
 // Seed facts (window = experiment assignment 2026-01-01 → 2026-02-01):
 //   experiments  control  = {u1,u3,u5,u7,u9,u11}   variant_b = {u2,u4,u6,u8,u10,u12}
@@ -15,18 +15,17 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -45,25 +44,25 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'ab-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 
 // Materialize a recipe's pipeline in the warehouse and return its per-variant rows
 // keyed by variant_group (control / variant_b), plus a cleanup handle.
 async function aggregatesFor(id) {
   const r = recipe(id);
-  const out = await engine.register_native_model(r.register_payload);
+  const out = await engine._buildPipeline(r.pipeline_payload);
   assert.equal(out.build.ok, true, `build failed for ${id}: ${JSON.stringify(out.error || out.build)}`);
-  const map = r.ab_test;
+  const map = r.experiment;
   const byGroup = {};
   for (const row of out.rows) byGroup[String(row[map.group_field])] = row;
   return { map, byGroup, context_id: out.context_id };
 }
 
-// Turn one per-variant row into an ab_test arm using the recipe's field mapping.
+// Turn one per-variant row into an experiment arm using the recipe's field mapping.
 function arm(map, row) {
   const a = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
   if (map.conversions_field) a.conversions = Number(row[map.conversions_field]);
@@ -74,7 +73,7 @@ function arm(map, row) {
 
 test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs variant 1/6)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_conversion');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
   try {
     // preliminary counts computed IN the warehouse
     assert.equal(Number(byGroup.control.n), 6);
@@ -82,7 +81,7 @@ test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs varian
     assert.equal(Number(byGroup.control.conversions), 6);   // all six controls purchased
     assert.equal(Number(byGroup.variant_b.conversions), 1); // only u10 in variant_b
 
-    const res = engine.ab_test({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
+    const res = engine._analyzeExperiment({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
     assert.equal(res.ok, true);
     const v = res.results[0];
     close(v.control_rate, 1.0);
@@ -90,31 +89,31 @@ test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs varian
     close(v.absolute_lift, 1 / 6 - 1);
     assert.equal(v.significant, true); // 100% vs 17% on n=6 is a clear drop
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine.delete_native_model({ context_id }); }
+  } finally { await engine._deletePipelineModel({ context_id }); }
 });
 
 test('revenue/user: DB aggregates → Welch t-test (means 10.833 vs 3.333)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_revenue');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_revenue');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
     close(Number(byGroup.control.rev_mean), 65 / 6);   // (15+5+20+10+5+10)/6
     close(Number(byGroup.variant_b.rev_mean), 20 / 6); // only u10 = 20
 
-    const res = engine.ab_test({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
+    const res = engine._analyzeExperiment({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
     assert.equal(res.ok, true);
     const v = res.results[0];
     close(v.control_mean, 65 / 6);
     close(v.variant_mean, 20 / 6);
     close(v.absolute_lift, 20 / 6 - 65 / 6);
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine.delete_native_model({ context_id }); }
+  } finally { await engine._deletePipelineModel({ context_id }); }
 });
 
 test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-period)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_cuped');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_cuped');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
@@ -123,7 +122,7 @@ test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-peri
     close(Number(byGroup.control.sum_x), 0);   // no events precede assigned_at ⇒ X≡0
     close(Number(byGroup.variant_b.sum_x), 0);
 
-    const res = engine.ab_test({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
+    const res = engine._analyzeExperiment({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
     assert.equal(res.ok, true);
     close(res.theta, 0, 1e-9);                 // Var(X)=0 ⇒ θ=0 ⇒ CUPED == plain test
     const v = res.results[0];
@@ -132,12 +131,12 @@ test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-peri
     close(v.control_mean, 65 / 6);             // adjusted mean == raw mean
     close(v.variant_mean, 20 / 6);
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine.delete_native_model({ context_id }); }
+  } finally { await engine._deletePipelineModel({ context_id }); }
 });
 
 test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 10/12)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_ratio');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_ratio');
   try {
     assert.equal(Number(byGroup.control.n), 6);
     assert.equal(Number(byGroup.variant_b.n), 6);
@@ -145,25 +144,25 @@ test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 1
     close(Number(byGroup.control.sum_num), 15); close(Number(byGroup.control.sum_den), 16);   // 15 of 16 started levels completed
     close(Number(byGroup.variant_b.sum_num), 10); close(Number(byGroup.variant_b.sum_den), 12); // 10 of 12 completed
 
-    const res = engine.ab_test({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
+    const res = engine._analyzeExperiment({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
     assert.equal(res.ok, true);
     const v = res.results[0];
     close(v.control_ratio, 15 / 16);      // 0.9375
     close(v.variant_ratio, 10 / 12);      // ≈ 0.8333
     close(v.absolute_lift, 10 / 12 - 15 / 16);
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine.delete_native_model({ context_id }); }
+  } finally { await engine._deletePipelineModel({ context_id }); }
 });
 
 test('SRM: per-variant sizes computed in the DB pass the guardrail (6 vs 6)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('ab_test_conversion');
+  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
   try {
     // feed the warehouse-computed group sizes into the SRM check — a clean 6/6 split
     const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
-    const res = engine.srm_check({ groups });
+    const res = engine._checkSplit({ groups });
     assert.equal(res.ok, true);
     close(res.chi_square, 0);             // 6 vs 6 against an even split
     assert.equal(res.srm_detected, false);
-  } finally { await engine.delete_native_model({ context_id }); }
+  } finally { await engine._deletePipelineModel({ context_id }); }
 });

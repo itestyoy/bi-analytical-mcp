@@ -54,11 +54,8 @@ models:
       - name: country
         data_type: string
 ```
-`meta` sits under `config:` because **dbt 1.10 moved it there**: dbt Core 1.11 still reads the old
-top-level `meta:` and only warns, but dbt Fusion calls that key unknown (`UnusedConfigKey`, dbt1060)
-and drops it — which would leave this server with an empty catalog. The loader accepts both places
-(`config` wins per key), and `python3 scripts/meta-to-config.py --check <path>` moves an existing
-project (`--write` to apply; it keeps your comments and verifies the result before writing).
+`meta` sits under `config:` — the place dbt 1.10+ and dbt Fusion read it, and the only place the
+loader reads.
 Two models claiming the same role is a config error. Prefer a standalone catalog
 file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 
@@ -78,7 +75,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   **Values above 30 s are capped at 30**, with a line on stderr saying so — a longer wait inside one
   tool call outlives the calling client's own timeout, which this server cannot raise. (A query or a
   build never holds a call at all: it is a task — the call returns its `task_id` at once and
-  the query tool of its side, given `{ task_id }`, waits for it, at most 30 s per call.)
+  the query tool of its side, given `{ task_ids }`, waits for it, at most 30 s per call.)
 - `CONTEXT_TTL_MS` — context GC tuning.
 - `MCP_ALLOWED_ORIGINS` — comma-separated browser origin HOSTNAMES allowed to call the endpoint
   (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
@@ -111,11 +108,11 @@ analytics:
 - dbt runs in named environments — one virtualenv each under `/opt/dbt-envs` (`DBT_ENVS_DIR`), picked by `DBT_ENV`: `dbt-v2` is dbt v2, `dbt-v1` is dbt 1.x with the DuckDB and BigQuery adapters. MetricFlow is an environment of its own, `metricflow` (`MF_ENV` names another), which every dbt environment queries metrics through. The build installs each with `scripts/dbt-env.mjs create`: exactly the packages, at exactly the versions, `src/dbt/environment-specs.js` names — there is no requirements file to pass. Every environment carries both warehouses' adapters, so the image is the same for DuckDB and BigQuery; dbt picks the adapter from your profile. `docker-compose.yml` runs `dbt-v2`, the BigQuery setup `dbt-v1` until the python stage is proven on v2 there. The server runs dbt only from these environments — one built with other versions than the spec names, or a venv not built by `create`, is refused, and there is no binary to name from outside — and reads the dbt version from the binary (`DBT_VERSION` pins it). On v2 the semantic layer is written in dbt's latest YAML spec, and the python stage is not offered on DuckDB. v2 downloads its ADBC driver from dbt's CDN on the first run — allow that once, or warm it at build time.
 - For BigQuery, use `docker-compose.bigquery.yml` (and `.env.bigquery.example`).
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
-- **Restarting the container loses nothing a client holds.** The server keeps no sessions (the SDK
-  serves each request from a fresh server instance), so a client connected before a deploy keeps
-  calling after it with no new handshake; a stale `Mcp-Session-Id` is ignored. (This replaced a
-  session table that lived in the process: after a restart, clients got errors for a session id the
-  new process had never issued until the connector was re-added by hand.)
+- **Restarting the container breaks no client.** A 2025 client that initializes gets a session (the
+  SDK's sessionful transport — its cancellation and its GET stream live there), but a session id the
+  new process never issued is served statelessly, never answered 404, so a client connected before a
+  deploy keeps calling after it with no new handshake. (A 404 there is what once left clients stuck
+  until the connector was re-added by hand.) A 2026-07-28 client keeps no session at all.
 
 ## The error log
 
@@ -125,6 +122,12 @@ with the `explore_errors` tool:
 - a task that ended in an error, with what dbt or the warehouse said;
 - what a start could not serve: the dbt project's semantic layer, a join it leaves out, a feature
   that cannot run here.
+
+Each error keeps what reproduces it: the call's arguments (a task's input — for a pipeline build its
+steps), the state of the context it worked on (a semantic declaration, a pipeline draft with every
+step, an eventstream with its steps), for a failed task the code of each generated model its message
+names — as written and as dbt ran it, which is where a warehouse error's `[line:column]` points — and
+the runtime: server version and surface, dbt, dialect.
 
 `explore_errors()` gives the newest 20 and a summary by source, tool and stage. `since` / `until`,
 `source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `text` narrow them, and `{ id }`
@@ -185,7 +188,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   between two segment levels — checked by the library first on what the eventstream holds.
   It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
   BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
-  start. `{ task_id }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  start. `{ task_ids }` reads it back, summarized for the model (`detail: "full"`: every record). The
   feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
   for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
@@ -248,9 +251,8 @@ at startup (`surface <fingerprint> — changed since the last start …`). A hos
 still needs its tool list refreshed by hand after a deploy.
 
 Each extension below is offered ONLY to a client that declares it in the request being served —
-its capabilities in the 2026-07-28 envelope. A 2025 client declares capabilities once, in
-`initialize`, and this server keeps no sessions, so its later requests carry nothing to go by: it is
-offered none of them (src/client-extensions.js). The listings that differ by client are cached
+its capabilities in the 2026-07-28 envelope. The extensions are 2026-07-28's: a 2025 client is
+offered none of them, whatever its `initialize` declared (src/client-extensions.js). The listings that differ by client are cached
 `private`.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
@@ -270,8 +272,8 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   reachable through `semantic_index`.
 - **Apps** (`io.modelcontextprotocol/ui`) — drawing is offered ONLY to a client that declares the extension
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
-  request carries its capabilities. Every other client — including a 2025 client that declared it in
-  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no card
+  request carries its capabilities. Every other client — including a 2025 client, whatever its
+  `initialize` declared (the extensions are 2026-07-28's) — gets no card
   instructions and no `show_to_user` hint, and a call that would draw (`display_model_result`, `card`
   on `experiment`) is refused. The tool list (with `_meta.ui`) and the view page are the same for
   every client, as the official ext-apps `registerAppTool` serves them: a host re-draws a card
@@ -323,12 +325,14 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
   and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
   query) returns only `{ task_id }` and never waits; the query tool of the same side, given
-  `{ task_id }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  `{ task_ids }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
-  card by construction: `structuredContent` (what a host draws a card from) is carried only by a
-  `display_model_result` that drew, or an `experiment` called with `card: true`; every other answer,
-  of every tool, is text alone. A task still running
+  card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
+  carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
+  tools whose answer has one shape and no card (`time`, `context`, `delete_context`, `memory`,
+  `explore_errors`, `build_semantic_model`) declare an `outputSchema` and carry every successful
+  answer as `structuredContent` too; every other answer is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `drill_result`, `["model", "app"]` (served only for a drawn task); the view resource declares
@@ -344,7 +348,8 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
 
 Also: `Origin` is always validated (403), every refusal is a JSON-RPC error body (including a body
 that is not JSON, `-32700`), every tool declares `readOnlyHint` / `destructiveHint` /
-`idempotentHint` / `openWorldHint`, and every result carries `structuredContent` next to its text.
+`idempotentHint` / `openWorldHint`, and a tool with an `outputSchema` carries `structuredContent`
+conforming to it next to its text.
 
 ## BigQuery
 BigQuery is a managed warehouse — there's no local DB service. Use the dedicated

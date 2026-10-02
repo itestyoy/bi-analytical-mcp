@@ -19,7 +19,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { graceMsFromEnv, MAX_BUILD_GRACE_SECONDS } from '../../src/server.js';
-import { isStartedTask, taskResult } from '../helpers/settle.js';
+import { isStartedTask, taskResult, one } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is the minutes-long build
@@ -28,7 +28,7 @@ const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 const skipNoPy = (t) => { if (!HAS_PY) { t.skip('no python interpreter for the static gate'); return true; } return false; };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
 const PY_STAGE = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
@@ -57,7 +57,6 @@ function heldRunner() {
 }
 
 const tick = (ms = 0) => new Promise((resolve) => { setTimeout(resolve, ms); });
-const settled = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
 /** Wait until a build is actually in flight (compiling + gating a python stage takes a moment). */
 const untilHeld = async (runner) => { for (let i = 0; i < 400 && !runner.held.length; i += 1) await tick(5); };
 /** Let the build a started task is waiting on finish, and return what the task produced. */
@@ -104,8 +103,8 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
-  assert.ok(e.list_query_jobs().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
-  const peek = await e.query_pipeline_model({ task_id: bg.task_id, wait_seconds: 0 });
+  assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
+  const peek = await one(e.query_pipeline_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.
@@ -188,7 +187,7 @@ test('a build whose builder is gone does not wedge the draft: the restart retire
   await taskResult(e, bg.task_id);
 });
 
-test('a view prefix is called out (reading it re-runs its SQL), and describe_context shows the open draft', async (t) => {
+test('a view prefix is called out (reading it re-runs its SQL), and context describe shows the open draft', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
@@ -199,7 +198,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   assert.ok(r.warnings.some((w) => /VIEW/.test(w)), 'a view is not a computed prefix — said once, here');
   assert.equal(r.checkpoint.carries_source, 'events', 'a filtered slice is still the source\'s events');
 
-  const d = await e.describe_context({ context_id: draft_id });
+  const d = await e._describeContext({ context_id: draft_id });
   assert.deepEqual(d.draft.checkpoints.map((c) => [c.at, c.model, c.carries_source]), [[1, r.model, 'events']]);
   assert.equal(d.draft.steps.length, 1);
   // preview says what materialize would actually build now (nothing — everything is the table).

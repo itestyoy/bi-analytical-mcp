@@ -1,7 +1,7 @@
 // RESEARCH GUIDES — how to run an analytical investigation with this server, and what matters in
 // three domains of a free-to-play product: engagement / retention, monetization, user acquisition.
 //
-// Served by semantic_index({ guide: "research" }) and ({ guide: "research/<domain>" }), and as the
+// Served by semantic_index({ request: { guide: "research" } }) and ({ guide: "research/<domain>" }), and as the
 // `research` skill (src/skills.js renders these same objects — no second copy of the text). They
 // are METHOD, not data: no column, event or model is named here — the catalog says what exists
 // (semantic_index), and every "how" points at a tool or a shipped recipe (config/recipes.json;
@@ -39,10 +39,10 @@ const RESEARCH = {
     { step: 'Lock the metric contract', do: 'Find the real fields with semantic_index (overview → { source, event } → { source, property } / { search }), and fix the definition: numerator, denominator, grain (per event / per user / per day), filters, timezone of the day boundary, window. Prefer a governed metric (build_semantic_model) — its definition is reusable and reviewable; a pipeline only when no metric can express it.', why: 'Two analysts who disagree usually measured two different things. The catalog is the starting map of what exists, not the edge of what can be asked.' },
     { step: 'Check the data before the behaviour', do: 'Volume and NULL coverage per day, per app version and per platform around the period (recipe "pipeline_volume_and_coverage_check"); the latest data time (freshness); duplicates; test / internal users excluded. A break confined to one version or platform is usually tracking.', why: 'A tracking change looks exactly like a behaviour change in the aggregate.' },
     { step: 'Reproduce the headline', do: 'Recompute the number the question is about, with the contract above, and compare it with the figure the person saw. Compare against the right baseline: the same weekday a week earlier, the same period a year earlier, complete periods only.', why: 'An investigation of a number you cannot reproduce investigates the wrong thing; seasonality and weekday mix explain many "changes".' },
-    { step: 'Decompose', do: 'Split the metric into its drivers and find which one moved: a rate into numerator vs denominator; a total into its multiplicative factors (revenue = DAU × payer conversion × ARPPU + ad revenue; DAU = new + retained + resurrected). Then segment the driver that moved, in a fixed order — platform → app version → country → acquisition source → install cohort → payer status — with one breakdown per query (several at once in one batch: query_semantic_model({ context_id, queries: [ … ] })).', why: 'A driver tree localises the change; a fixed segment order keeps you from stopping at the first plausible cut.' },
+    { step: 'Decompose', do: 'Split the metric into its drivers and find which one moved: a rate into numerator vs denominator; a total into its multiplicative factors (revenue = DAU × payer conversion × ARPPU + ad revenue; DAU = new + retained + resurrected). Then segment the driver that moved, in a fixed order — platform → app version → country → acquisition source → install cohort → payer status — with one breakdown per query (several at once in one batch: query_semantic_model({ request: { context_id, queries: [ … ] } })).', why: 'A driver tree localises the change; a fixed segment order keeps you from stopping at the first plausible cut.' },
     { step: 'Separate mix from rate', do: 'For each segment show both its share of the population and its own value, in the base and the current period. A total can move while every segment stays flat (the mix shifted) — or against every segment (Simpson\'s paradox). Reconcile: the segment contributions should add up to the total change, or size the residual.', why: 'A burst of low-quality installs lowers total retention with no segment getting worse; the fix is in acquisition, not in the product.' },
     { step: 'Localise in the product', do: 'Where in the journey it happens: a funnel over the steps (recipe "funnel_from_event_property_steps", or an ordered sequence: recipe "pipeline_ordered_sequence"), time between steps, per segment.', why: 'The drop sits at one step far more often than everywhere at once.' },
-    { step: 'Test the explanation', do: 'An experiment answers causation: per-group aggregates in a pipeline, then experiment({ action: "check_split" }) and ({ action: "analyze" }) (recipe "ab_test_conversion" for a rate, recipe "ab_test_revenue" for a mean, recipe "ab_test_srm" for the split check). Two groups that are not an experiment: recipe "two_sample_significance". Without either, look for variation the user did not choose (a staged rollout, a region, a date), and say what the evidence cannot rule out.', why: 'Users who adopt a feature are already different users — a comparison of adopters and non-adopters measures selection, not the feature.' },
+    { step: 'Test the explanation', do: 'An experiment answers causation: per-group aggregates in a pipeline, then experiment({ request: { action: "check_split" } }) and ({ action: "analyze" }) (recipe "experiment_conversion" for a rate, recipe "experiment_revenue" for a mean, recipe "experiment_srm" for the split check). Two groups that are not an experiment: recipe "two_sample_significance". Without either, look for variation the user did not choose (a staged rollout, a region, a date), and say what the evidence cannot rule out.', why: 'Users who adopt a feature are already different users — a comparison of adopters and non-adopters measures selection, not the feature.' },
     { step: 'Review, then report', do: 'Run the checks below, rate the result (ready / share with caveats / needs revision), and report as described under `report`.', why: 'The first plausible story is rarely the whole one; a result that confirms the hypothesis without friction deserves a second look.' },
   ],
   checks: [
@@ -90,7 +90,7 @@ const PRODUCT = {
     { question: 'Why did DAU drop?', approach: 'Growth accounting → segment the component that moved → mix vs rate decomposition.' },
     { question: 'Why did D1 retention drop?', approach: 'Tracking check by version → install-cohort retention by source and country → onboarding funnel per segment.' },
     { question: 'What drives retention?', approach: 'Retention of users who did / did not do behaviour X in their first session or day — a hypothesis until an experiment confirms it (engaged users do more of everything).' },
-    { question: 'Did the feature / release help?', approach: 'An experiment if there was one (recipe "ab_test_conversion", recipe "ab_test_revenue"). Otherwise compare cohorts before / after the release at the same cohort age, and a region or rollout that did not get it; say what the comparison cannot rule out.' },
+    { question: 'Did the feature / release help?', approach: 'An experiment if there was one (recipe "experiment_conversion", recipe "experiment_revenue"). Otherwise compare cohorts before / after the release at the same cohort age, and a region or rollout that did not get it; say what the comparison cannot rule out.' },
     { question: 'Is engagement healthy?', approach: 'DAU/MAU plus the days-active distribution, per cohort age.' },
   ],
   pitfalls: [
@@ -119,7 +119,7 @@ const MONETIZATION = {
     'Segment that factor: platform, country, payer tier, cohort age — with the mix next to each value.',
     'Choose the view by the question: calendar (what happened this week, across all users) or cohort (what users acquired in a period are worth by day N).',
     'Concentration: share of revenue from the top 1 / 5 / 10 % of payers; ARPPU with and without them.',
-    'Offer / price analysis and first-purchase timing; an experiment for any change (recipe "ab_test_revenue", recipe "ab_test_ratio", recipe "ab_test_cuped").',
+    'Offer / price analysis and first-purchase timing; an experiment for any change (recipe "experiment_revenue", recipe "experiment_ratio", recipe "experiment_cuped").',
   ],
   metrics: [
     { metric: 'ARPDAU', definition: 'Revenue on a day ÷ that day\'s DAU. Weekday and weekend differ — compare like with like.' },
@@ -134,7 +134,7 @@ const MONETIZATION = {
   questions: [
     { question: 'Why did revenue fall?', approach: 'Validate → DAU × conversion × ARPPU + impressions/DAU × eCPM → segment the factor that moved (a derived metric per factor: recipe "derived_metric_formula", recipe "ratio_metric").' },
     { question: 'Is a cohort monetizing better?', approach: 'Cumulative ARPU curves by install week at equal cohort ages.' },
-    { question: 'Did the offer / price change work?', approach: 'Conversion and ARPPU by price point and segment in an experiment (recipe "ab_test_revenue"; CUPED for variance), watching for cannibalisation of other products.' },
+    { question: 'Did the offer / price change work?', approach: 'Conversion and ARPPU by price point and segment in an experiment (recipe "experiment_revenue"; CUPED for variance), watching for cannibalisation of other products.' },
     { question: 'Are we dependent on a few payers?', approach: 'Revenue share of the top 1 / 5 / 10 % of payers (a pipeline: rank payers by revenue, then aggregate by tier); medians alongside means.' },
     { question: 'Does ad load hurt retention?', approach: 'Retention by band of impressions per user — correlation (heavy players see more ads); confirm with an experiment.' },
   ],
@@ -207,9 +207,11 @@ export const RESEARCH_DOMAINS = Object.keys(RESEARCH_GUIDES).filter((k) => k !==
  * instructions and the research skill all interpolate it rather than keep a wording of their own.
  */
 export const RESEARCH_SCOPE = 'an open question rather than a lookup — why a metric moved, what drives an outcome, whether a change worked, a deep dive';
-export const RESEARCH_ROUTE = `semantic_index({ guide: "research" }) — the investigation sequence, checks and report, with a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
+export const RESEARCH_ROUTE = 'semantic_index({ request: { guide: "research" } }) — the investigation sequence, checks and report';
+/** The domain guides by name, said where the route has room for them — the core instructions name only the route, so a new domain costs their budget nothing. */
+export const RESEARCH_DOMAIN_NAMES = `with a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
 
-const HOW_TO_FETCH = 'A recipe "<id>" named here is fetched with semantic_index({ recipe: "<id>" }): a worked, warehouse-proven payload of that technique.';
+const HOW_TO_FETCH = 'A recipe "<id>" named here is fetched with semantic_index({ request: { recipe: "<id>" } }): a worked, warehouse-proven payload of that technique.';
 
 /** Whether `name` names a research guide (research, research/<domain>), in any case. */
 export function isResearchGuide(name) {
@@ -230,7 +232,7 @@ export function researchGuide(name) {
     ...g,
     ...(key === 'research'
       ? { domains: Object.fromEntries(RESEARCH_DOMAINS.map((d) => [d, RESEARCH_GUIDES[d].when_to_use])) }
-      : { start_with: 'semantic_index({ guide: "research" }) — the investigation sequence, the checks and the report this domain guide plugs into.' }),
+      : { start_with: 'semantic_index({ request: { guide: "research" } }) — the investigation sequence, the checks and the report this domain guide plugs into.' }),
     recipes_note: HOW_TO_FETCH,
   };
 }

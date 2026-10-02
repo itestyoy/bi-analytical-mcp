@@ -1,10 +1,10 @@
 // THE PATH-ANALYSIS GUIDE — how to use the retentioneering feature, served while the feature is on:
-// semantic_index({ guide: "retentioneering" }) returns it, the analyst guide's routing carries its
+// semantic_index({ request: { guide: "retentioneering" } }) returns it, the analyst guide's routing carries its
 // triggers, the core instructions one line, and the `retentioneering` skill renders the same object.
 // Method, not data: it names no column or event (the catalog and the eventstream summary say what
 // exists), and every parameter it mentions is one the tool schema offers.
 
-import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED, COMPLEX_EVENT_LOGIC } from './schema.js';
+import { retentioneeringFacts, analysisKinds, offeredOps, NOT_OFFERED, COMPLEX_EVENT_LOGIC, pathPatternUses } from './schema.js';
 import { CHARTED_KINDS, DIFF_CARD_KINDS } from './view-model.js';
 
 export const GUIDE_NAME = 'retentioneering';
@@ -12,11 +12,14 @@ export const GUIDE_NAME = 'retentioneering';
 export const ROUTING_TRIGGERS = [
   {
     if: 'a question about paths and sequences — what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are — or about transitions between states or outcomes a pipeline computed (one attempt, cycle or load → the next)',
-    do: `path analysis: build_retentioneering_model (the eventstream: source, window, events, segments — or from_task, a pipeline build's table, for states and outcomes computed there), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card: its transition graph, step matrix and sankey are the standard pictures of paths, so there is no need to draw a diagram of your own. semantic_index({ guide: "${GUIDE_NAME}" }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_pipeline_model funnel.`,
+    do: `path analysis: build_retentioneering_model (the eventstream: source, window, events, segments — or from_task, a pipeline build's table, for states and outcomes computed there), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card: its transition graph, step matrix and sankey are the standard pictures of paths, so there is no need to draw a diagram of your own. semantic_index({ request: { guide: "${GUIDE_NAME}" } }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_pipeline_model funnel.`,
   },
 ];
 
-export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model; its cards are the picture of them. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
+export const INSTRUCTIONS_LINE = `For paths, sequences and transitions between states (a pipeline's too, via from_task), use build_retentioneering_model → query_retentioneering_model; semantic_index({ request: { guide: "${GUIDE_NAME}" } }) explains the analyses.`;
+
+/** The analyses the library lets take a diff: those with a `diff` parameter. */
+const DIFF_KINDS = () => analysisKinds().filter((k) => retentioneeringFacts().analyses[k].params.some((p) => p.name === 'diff'));
 
 export function retentioneeringGuide() {
   const f = retentioneeringFacts();
@@ -26,11 +29,11 @@ export function retentioneeringGuide() {
     library: `retentioneering ${f.version} (Apache-2.0) — the analyses are its own headless computations, run in the warehouse`,
     sequence: [
       { step: 'Frame the paths', do: `Decide whose paths (each user\'s history, or sessions), over which window, and which events matter. Technical noise (heartbeats, screen pings) hides the story: exclude it, or merge near-duplicates into one name with events.groups. An event whose meaning lies in a parameter becomes several with events.split (by a property\'s value, or by conditions). A slice of the data — one environment, one app — is a where on the source\'s own column or event property. ${COMPLEX_EVENT_LOGIC} Then name that table\'s user, event and time columns in columns.` },
-      { step: 'Build the eventstream', do: 'build_retentioneering_model({ name, source, time_range, events, segments, sessions?, sample? }). Read its summary with query_retentioneering_model({ task_id }): users, events, the vocabulary after grouping. Every event keeps its name; if a long tail of rare names makes the graph unreadable, events.top merges all but the N most frequent into "other". Too large to analyze: sample.share keeps a share of users with their whole paths (every analysis stays exact for them); when one event drowns the rest, sample.events keeps a share of its rows only — its counts and the transitions around it are then approximate, so say so.' },
+      { step: 'Build the eventstream', do: 'build_retentioneering_model({ request: { name, source, time_range, events, segments, sessions?, sample? } }). Read its summary with query_retentioneering_model({ request: { task_ids } }): users, events, the vocabulary after grouping. Every event keeps its name; if a long tail of rare names makes the graph unreadable, events.top merges all but the N most frequent into "other". Too large to analyze: sample.share keeps a share of users with their whole paths (every analysis stays exact for them); when one event drowns the rest, sample.events keeps a share of its rows only — its counts and the transitions around it are then approximate, so say so.' },
       { step: 'Size it', do: 'One analysis run holds the whole eventstream in memory on the warehouse runtime. For a very large source, sample: { share } keeps a stable subset of users (a hash of the key), so every later analysis reads the same people.' },
-      { step: 'Shape the paths, if needed', do: 'Add the library\'s own steps ({ type, ...params }) one at a time: build_retentioneering_model({ action: "add_step", context_id, eventstream, step }) — filter_paths on a metric condition, truncate_paths between two anchors, collapse_events (loops, groups, bounds), split_sessions by a timeout or separator, add_segment / add_clusters to make a segment the analyses can split by, sample_paths, rename and drop events. The library checks each step on what the eventstream holds at that point and answers at once: refused with its own message (fix that step), or what it changed — the events, the path columns, the segments and their levels — which is what the next step is checked against. edit_step, insert_step, delete_step and truncate re-check every step after; fork makes a variant (one filter for one analysis, another for the next) without touching the original; preview lists the steps. Then materialize (a task, one start-up of the warehouse runtime): the analyses read the eventstream after its steps. What SQL can say (the window, the events, the attributes) belongs in the start.' },
-      { step: 'Run the analyses together', do: 'query_retentioneering_model({ context_id, eventstream, analyses: [...] }) — list everything the question needs in ONE call: they are computed in one run (one start-up of the warehouse runtime), after the library has checked them on what the eventstream holds. Each analysis takes the library\'s own parameters. Read the task with { task_id } (a summary; detail: "full" for every record).' },
-      { step: 'Show and read', do: 'display_retentioneering_result({ task_id, analysis }) draws one analysis as a card, once. Report what the numbers say — the transitions with their shares, the step where paths split, the cluster sizes and what sets each apart — with the window and any sample.' },
+      { step: 'Shape the paths, if needed', do: 'Add the library\'s own steps ({ type, ...params }) one at a time: build_retentioneering_model({ request: { action: "add_step", context_id, eventstream, step } }) — filter_paths on a metric condition, truncate_paths between two anchors, collapse_events (loops, groups, bounds), split_sessions by a timeout or separator, add_segment / add_clusters to make a segment the analyses can split by, sample_paths, rename and drop events. The library checks each step on what the eventstream holds at that point and answers at once: refused with its own message (fix that step), or what it changed — the events, the path columns, the segments and their levels — which is what the next step is checked against. edit_step, insert_step, delete_step and truncate re-check every step after; fork makes a variant (one filter for one analysis, another for the next) without touching the original; preview lists the steps. Then materialize (a task, one start-up of the warehouse runtime): the analyses read the eventstream after its steps. What SQL can say (the window, the events, the attributes) belongs in the start.' },
+      { step: 'Run the analyses together', do: 'query_retentioneering_model({ request: { context_id, eventstream, analyses: [...] } }) — list everything the question needs in ONE call: they are computed in one run (one start-up of the warehouse runtime), after the library has checked them on what the eventstream holds. Each analysis takes the library\'s own parameters. Read the task with { task_ids: [id] } (a summary; detail: "full" for every record).' },
+      { step: 'Show and read', do: 'display_retentioneering_result({ request: { task_id, analysis } }) draws one analysis as a card, once. Report what the numbers say — the transitions with their shares, the step where paths split, the cluster sizes and what sets each apart — with the window and any sample.' },
     ],
     analyses: {
       transition_graph: 'Which event follows which. Every weight comes back at once (' + f.edge_weights.join(', ') + '), so the card switches between them: proba_out answers "after X, where do users go", proba_in "how do users arrive at Y", count and unique_paths the volume, time_median the wait between the two.',
@@ -39,10 +42,19 @@ export function retentioneeringGuide() {
       funnel: 'How many paths reach each event of an ordered list (in that order), and the conversion step to step. For steps defined by an event property value, build a pipeline funnel instead.',
       cluster_analysis: `Groups of similar paths from per-path metrics (features, e.g. { metric: "event_count_bulk" } — how often each event occurs), with ${f.cluster_methods.join(' or ')}; method_args.n_clusters as a list tries several and the best silhouette wins. overview_metrics say what each cluster's profile shows (length, duration, the share of paths with each event).`,
       segment_overview: 'Per-path metrics compared across the levels of a segment (segment_col): a user attribute listed in segments at start, or one an add_segment / add_clusters step made (materialized).',
-      ...Object.fromEntries(ANALYSIS_KINDS.filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
+      ...Object.fromEntries(analysisKinds().filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
     },
-    diff: 'transition_graph, step_matrix, step_sankey and funnel take diff: [segment_col, level_1, level_2] — the same analysis for two levels and their difference, returned as tables; ' + `the diff of ${DIFF_CARD_KINDS.join(', ')} is drawn as heatmaps, and any other diff is answered in words.`,
-    steps: Object.fromEntries(OFFERED_OPS.map((op) => [op, f.ops[op].summary])),
+    // which analyses take a diff, and what it takes, are the library's (its parameter and its docstring)
+    diff: `${DIFF_KINDS().join(', ')} take diff — the same analysis for two groups of paths and their difference. ${f.analyses[DIFF_KINDS()[0]].params.find((p) => p.name === 'diff').doc} The diff of ${DIFF_CARD_KINDS.join(', ')} has a card; any other is answered in words.`,
+    // the language of path_pattern, an anchor's pattern and matches_pattern — the library's parser's own
+    path_patterns: {
+      used_by: pathPatternUses().join(', '),
+      tokens: f.path_patterns.tokens.map((t) => `\`${t.token}\` — ${t.meaning}`),
+      matching: f.path_patterns.matching,
+      occurrence: f.path_patterns.occurrence,
+      rules: f.path_patterns.rules,
+    },
+    steps: Object.fromEntries(offeredOps().map((op) => [op, f.ops[op].summary])),
     not_offered: { ...NOT_OFFERED.ops, ...Object.fromEntries(Object.entries(NOT_OFFERED.params).map(([p, why]) => [`the ${p} parameter`, why])) },
     path_metrics: f.path_metrics,
     metric_aggregations: f.segment_aggs,
@@ -63,11 +75,12 @@ export function retentioneeringSkill() {
   const body = [
     `# ${g.title}`,
     '',
-    `The same guide the tool returns: \`semantic_index({ guide: "${GUIDE_NAME}" })\`. ${g.library}.`,
+    `The same guide the tool returns: \`semantic_index({ request: { guide: "${GUIDE_NAME}" } })\`. ${g.library}.`,
     '',
     '## Sequence', '', md(g.sequence),
     '', '## Which analysis answers what', '', md(g.analyses),
     '', '## Diff', '', g.diff,
+    '', '## Path patterns', '', `Used by ${g.path_patterns.used_by}.`, '', md(g.path_patterns.tokens), '', md(g.path_patterns.matching), '', 'occurrence (of an anchor):', '', md(g.path_patterns.occurrence), '', ...g.path_patterns.rules.flatMap((r) => [r, '']),
     '', '## Steps', '', md(g.steps),
     '', '## Not offered', '', md(g.not_offered),
     '', '## Path metrics (features, overview and segment metrics)', '', md(g.path_metrics), '', `Roll-ups: ${g.metric_aggregations.join(', ')}.`,

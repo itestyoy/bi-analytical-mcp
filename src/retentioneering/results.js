@@ -72,11 +72,17 @@ function generic(parts) {
 }
 
 function shape({ kind, parts }) {
-  // a diff says so: the analysis step marks it, whatever shape the library gave the comparison
-  return { kind, ...(parts.diff?.length ? { diff: true } : {}), ...charted(kind, parts), ...generic(parts) };
+  // an analysis the library raised on is its error alone: the others of the call keep their results
+  if (parts.error?.length) return { kind, error: { type: parts.error[0].type, message: parts.error[0].message } };
+  // a diff says so: the analysis step marks it, with its two groups and the form it stored it in — the
+  // analysis's own shape (diff_charted) or the library's tables
+  const d = parts.diff?.[0];
+  const groups = d?.groups ? JSON.parse(d.groups) : null;
+  return { kind, ...(d ? { diff: true, ...(d.charted ? { diff_charted: true } : {}), ...(groups ? { diff_groups: groups } : {}) } : {}), ...charted(kind, parts), ...generic(parts) };
 }
 
-/** The charted analyses' own shape — present when the analysis step wrote it (not for a diff). */
+/** The charted analyses' own shape — present when the analysis step wrote it: for an analysis, and
+ *  for a diff stored in its analysis's shape (diff_charted). */
 function charted(kind, parts) {
   if (kind === 'transition_graph' && parts.edge) {
     const layout = Object.fromEntries((parts.layout || []).map((p) => [p.event, { x: p.x, y: p.y }]));
@@ -117,6 +123,7 @@ const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digit
 /** What the model reads of one analysis: the numbers that answer, not every cell. */
 export function summarize(result) {
   const { kind } = result;
+  if (result.error) return { kind, error: result.error };
   const libraryTables = summarizeGeneric(result);
   if (kind === 'transition_graph' && result.edges) {
     const edges = [...result.edges].sort((a, b) => b.count - a.count || byText(a.source, b.source) || byText(a.target, b.target));
@@ -125,7 +132,7 @@ export function summarize(result) {
       events: result.nodes.map((n) => ({ event: n.event, count: n.count })),
       transitions: edges.length,
       top_transitions: edges.slice(0, TOP_EDGES).map((e) => ({ from: e.source, to: e.target, count: e.count, unique_paths: e.unique_paths, proba_out: round(e.proba_out), proba_in: round(e.proba_in), time_median_s: round(e.time_median, 1) })),
-      ...(edges.length > TOP_EDGES ? { note: `${edges.length - TOP_EDGES} smaller transitions are in the card.` } : {}),
+      ...(edges.length > TOP_EDGES ? { note: `${edges.length - TOP_EDGES} smaller transitions are left out here; read with detail: "full" for every one.` } : {}),
     };
   }
   if ((kind === 'step_matrix' || kind === 'step_sankey') && result.blocks) {
@@ -138,6 +145,11 @@ export function summarize(result) {
         })),
       })),
     };
+  }
+  if (kind === 'funnel' && result.steps && result.diff) {
+    // each step for both groups and their difference (first minus second), under the groups' names
+    const side = (s, p) => ({ unique_paths: s[`${p}_unique_paths`], conversion_rate: round(s[`${p}_conversion_rate`]), step_conversion_rate: round(s[`${p}_step_conversion_rate`]) });
+    return { kind, diff: true, ...(result.diff_groups ? { groups: result.diff_groups } : {}), steps: result.steps.map((s) => ({ step: s.step, first: side(s, 'funnel1'), second: side(s, 'funnel2'), difference: side(s, 'delta') })), ...libraryTables };
   }
   if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...libraryTables };
   if ((kind === 'cluster_analysis' || kind === 'segment_overview') && result.levels) {
@@ -166,7 +178,7 @@ export function summarize(result) {
       ...libraryTables,
     };
   }
-  return { kind, ...libraryTables };
+  return { kind, ...(result.diff ? { diff: true, ...(result.diff_groups ? { groups: result.diff_groups } : {}) } : {}), ...libraryTables };
 }
 
 /** Whether a result holds only the first rows of one of its tables (the rest is in the stored table). */

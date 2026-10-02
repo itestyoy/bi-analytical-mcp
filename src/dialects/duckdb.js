@@ -15,6 +15,9 @@ const keyPath = (key) => `'$."${key}"'`;
 export class DuckDBDialect extends Dialect {
   get name() { return 'duckdb'; }
 
+  /** A pipeline is lowered to chained CTEs: plain SQL any parser reads. */
+  get writesPipeSyntax() { return false; }
+
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 
   /**
@@ -114,6 +117,12 @@ export class DuckDBDialect extends Dialect {
 
   valueBucket(expr, buckets) { return `(hash(CAST(${expr} AS VARCHAR)) % ${Number(buckets)})`; }
 
+  secondsBetween(from, to) { return `EXTRACT(EPOCH FROM (${to} - ${from}))`; }
+  // range() is a table of timestamps, one per day
+  timeSpineSelect(start, end) { return `select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)`; }
+  // ORDER BY random() over the whole (small) result table: block sampling can return nothing there
+  sampleQuery(ref, _percent, project) { return `select * from (${project(ref)}) _s order by random()`; }
+
   dateDiff(unit, from, to) {
     switch (unit) {
       case 'day': return `date_diff('day', CAST(${from} AS DATE), CAST(${to} AS DATE))`;
@@ -171,6 +180,10 @@ export class DuckDBDialect extends Dialect {
   // (approx_count_distinct exists, but an HLL estimate would make a test's number a coin toss).
   approxCountDistinct(c) { return `count(distinct ${c})`; }
 
+  recentSince(col, days) { return `${col} >= CAST(now() AS TIMESTAMP) - INTERVAL '${Math.floor(Number(days))} days'`; }
+  sinceTimestampMs(col, ms) { return `${col} > epoch_ms(${Math.floor(Number(ms))})`; }
+  // approx_top_k returns the values WITHOUT their counts, so the index groups each property instead
+
   // EXACT, MERGEABLE sketch: a sketch is the chr(1)-joined set of distinct values. init dedups;
   // merge_partial concatenates (a coarser sketch); merge and extract dedup-and-count. Same additive
   // semantics as HLL++, exact.
@@ -208,37 +221,37 @@ export class DuckDBDialect extends Dialect {
       case 'where':
         return `SELECT * FROM ${prev} WHERE ${op.preds.join(' AND ')}`;
       case 'extend':
-        return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
+        return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.quoteIdent(c.name)}`).join(', ')} FROM ${prev}`;
       case 'unnest': {
         const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
-        return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
+        return `SELECT s.*, ${element} AS ${this.quoteIdent(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join':
         return this.joinCte(prev, op);
       case 'aggregate': {
-        const sel = [...op.groupBy.map((c) => this.ident(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`)];
-        return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
+        const sel = [...op.groupBy.map((c) => this.quoteIdent(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.quoteIdent(a.as)}`)];
+        return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
       }
       case 'pivot': {
         // conditional aggregation; one output column per value.
-        const cols = op.values.map((v) => `${op.fn}(CASE WHEN ${this.ident(op.on)} = ${this.sqlLiteral(v)} THEN ${this.ident(op.valueCol)} END) AS ${pivotCol(v)}`);
-        return `SELECT ${op.groupBy.map((c) => this.ident(c)).join(', ')}${op.groupBy.length ? ', ' : ''}${cols.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
+        const cols = op.values.map((v) => `${op.fn}(CASE WHEN ${this.quoteIdent(op.on)} = ${this.sqlLiteral(v)} THEN ${this.quoteIdent(op.valueCol)} END) AS ${pivotCol(v)}`);
+        return `SELECT ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}${op.groupBy.length ? ', ' : ''}${cols.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
       }
       case 'unpivot': {
         // one branch per unpivoted column — the same rows a LATERAL VALUES gives, in plain SQL
-        const keep = op.keep.map((c) => this.ident(c));
-        const branches = op.columns.map((c) => `SELECT ${keep.join(', ')}${keep.length ? ', ' : ''}${this.sqlLiteral(c)} AS ${this.ident(op.nameAs)}, ${this.ident(c)} AS ${this.ident(op.valueAs)} FROM ${prev}`);
+        const keep = op.keep.map((c) => this.quoteIdent(c));
+        const branches = op.columns.map((c) => `SELECT ${keep.join(', ')}${keep.length ? ', ' : ''}${this.sqlLiteral(c)} AS ${this.quoteIdent(op.nameAs)}, ${this.quoteIdent(c)} AS ${this.quoteIdent(op.valueAs)} FROM ${prev}`);
         return branches.join('\n  UNION ALL\n  ');
       }
       case 'order_by':
-        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.quoteIdent(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
       case 'sample':
         // a row-level (Bernoulli) sample that works at any stage (TABLESAMPLE needs a table)
         return `SELECT * FROM ${prev} WHERE random() < ${Number(op.percent) / 100}`;
       case 'limit':
         return `SELECT * FROM ${prev} LIMIT ${Number(op.n)}`;
       case 'project':
-        return `SELECT ${op.cols.map((c) => this.ident(c)).join(', ')} FROM ${prev}`;
+        return `SELECT ${op.cols.map((c) => this.quoteIdent(c)).join(', ')} FROM ${prev}`;
       default:
         throw new Error(`duckdb: unknown pipeline op '${op.op}'`);
     }

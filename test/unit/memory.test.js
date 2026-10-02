@@ -235,53 +235,6 @@ test('memory strict input validation', async () => {
   await assert.rejects(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
 });
 
-// A store written before a target carried its source keys a property/event by BARE name, which no
-// source owns: the note then surfaces on every source that happens to use the name. Opening an
-// Engine rewrites those keys once — into searchable terms. Which entity was meant is not
-// recoverable from a name, and attributing one would be a guess, so none is made.
-test('memory targets written without a source become searchable terms at open', async () => {
-  const store = openStore({});
-  const e0 = engineWithStore(store);
-  // three legacy keys: one owned by exactly one source, one owned by two, one gone from the catalog
-  store.memory.add({ id: 'legacy1', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data', 'event:ad_finished'], aliases: [], links: [], created_at: Date.now() });
-  store.memory.add({ id: 'legacy2', note: 'app_version is on both sources', targets: ['property:app_version'], aliases: [], links: [], created_at: Date.now() });
-  store.memory.add({ id: 'legacy3', note: 'a column that no longer exists', targets: ['property:dropped_column'], aliases: [], links: [], created_at: Date.now() });
-  assert.ok(e0);
-
-  const e = engineWithStore(store); // a fresh Engine over the same store runs the migration
-  const targetsOf = (id) => store.memory.get(id).targets;
-  // rewritten INTO THE SAME SHAPE a recorded target has — a structure, not a folded key string
-  assert.deepEqual(targetsOf('legacy1'), [{ kind: 'term', term: 'ad_type_of_event_data' }, { kind: 'term', term: 'ad_finished' }], 'a name with no source names no entity — it becomes a term');
-  assert.deepEqual(targetsOf('legacy2'), [{ kind: 'term', term: 'app_version' }], 'and so does a name two sources carry');
-  assert.deepEqual(targetsOf('legacy3'), [{ kind: 'term', term: 'dropped_column' }], 'and one the catalog no longer has');
-
-  // nothing is attached to a source that was never written down
-  const listed = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
-  assert.ok(!listed.notes.some((n) => n.id === 'legacy1'), JSON.stringify(listed));
-  // …but every rewritten note stays findable by its own words
-  for (const [id, word] of [['legacy1', 'ad_type_of_event_data'], ['legacy2', 'app_version'], ['legacy3', 'dropped_column']]) {
-    const found = await e.memory({ action: 'search', query: word });
-    assert.ok(found.notes.some((n) => n.id === id), `${id} findable by '${word}'`);
-  }
-});
-
-// Grounding may set a DECLARED model aside for one run (its table was being rebuilt, the warehouse
-// blinked). The legacy-key migration is one-way, so it must not demote that model's notes to terms:
-// once the table is back the link would be gone for good.
-test('the memory migration keeps a legacy target on a model grounding set aside this run', () => {
-  const store = openStore({});
-  store.memory.add({ id: 'legacy-users', note: 'country comes from the store listing', targets: ['model:users', 'property:users.country'], aliases: [], links: [], created_at: Date.now() });
-  const catalog = loadCatalog(CATALOG, {});
-  // the table cannot be introspected this run: grounding moves `users` to catalog.unavailable
-  catalog.groundToPhysical({ users: { unavailable: 'relation "dim_users" is being rebuilt' } });
-  assert.ok(!catalog.models.users && catalog.unavailable.users, 'users is set aside for this run');
-  settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), store }));
-  assert.deepEqual(store.memory.get('legacy-users').targets, [
-    { kind: 'model', source: 'users' },
-    { kind: 'property', source: 'users', name: 'country' },
-  ], 'still the structure it named, not a term');
-});
-
 // An entity is ALWAYS { source, name }; a phrase is { term }. Neither a bare name nor the glued
 // '<source>.<name>' spelling exists, so a finding is never linked by a string that has to be taken
 // apart — or silently kept as a free phrase, which would link it to nothing.
@@ -289,11 +242,11 @@ test('memory target: an entity is { source, name }, a phrase is { term }, and a 
   const e = engine();
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'x', targets: ['users.country'] }),
-    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+    /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/,
   );
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'x', targets: ['country'] }),
-    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+    /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/,
   );
   // …and a phrase says it is one
   const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: [{ term: 'v2.4 rollout' }] });
@@ -323,4 +276,14 @@ test('a memory target is stored structurally and read back without decoding', as
   const again = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
   assert.deepEqual(again.target, { source: 'events', name: 'ad_type_of_event_data' });
   assert.ok(again.notes.some((n) => n.id === rec.id));
+});
+
+test('a note an earlier server stored with bare-string targets is read with each one as the phrase it is', async () => {
+  const { MemoryStore } = await import('../../src/memory.js');
+  const store = openStore({});
+  store.memory.add({ id: 'old1', note: 'ad_type is empty on purchases', targets: ['property:events.ad_type', 'model:users'], created_at: 1 });
+  const mem = new MemoryStore({ store });
+  assert.deepEqual(mem.get('old1').targets, [{ kind: 'term', term: 'property:events.ad_type' }, { kind: 'term', term: 'model:users' }]);
+  assert.deepEqual(mem.forTargets(['term:model:users']).map((n) => n.id), ['old1']);
+  assert.deepEqual((await mem.search('ad_type', { fuzzy: false })).notes.map((n) => n.id), ['old1']);
 });

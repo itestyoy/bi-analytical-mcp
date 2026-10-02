@@ -24,18 +24,15 @@ import { z } from 'zod';
 import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
 import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine, unknownToolMessage } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
-import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
-import { clientCapabilities, declaresExtension } from './client-extensions.js';
-import { SKILLS_EXTENSION } from './skills.js';
+import { RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
+import { clientCapabilities, declaresExtension, UI_EXTENSION, SKILLS_EXTENSION, TASKS_EXTENSION } from './client-extensions.js';
 import { LIST_TTL_MS } from './surface-change.js';
 
-export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
-// Nothing this server lists changes while it runs. What it lists and says depends on which
-// extensions the client declared (src/client-extensions.js), so those answers are its own to cache.
-const STATIC = { ttlMs: 3600000, cacheScope: 'public' };
-// A client may cache the lists and server/discover for LIST_TTL_MS — short, so a deploy that changes
-// them reaches it within a minute even when no subscription stream is open (src/surface-change.js).
+// What this server lists and says depends on which extensions the client declared
+// (src/client-extensions.js), so those answers are its own to cache — for LIST_TTL_MS, short, so a
+// deploy that changes them reaches it within a minute even when no subscription stream is open
+// (src/surface-change.js). Skills are part of the surface's fingerprint, so their list is too.
 const PER_CLIENT = { ttlMs: LIST_TTL_MS, cacheScope: 'private' };
 
 const SkillsListParams = z.object({ cursor: z.string().optional() }).passthrough();
@@ -76,7 +73,6 @@ const missingExtension = (id) => new ProtocolError(-32021, 'Missing required cli
 export function createMcpServer(services, { era, offer = offeredExtensions(services, { era }) } = {}) {
   const { engine, tasks } = services;
   const renders = offer.apps;
-  const variant = renders ? 'apps' : 'plain';
   const server = new Server(services.serverInfo || SERVER_INFO, {
     capabilities: serverCapabilities(services),
     instructions: services.instructionsFor(offer),
@@ -84,8 +80,8 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
   });
 
   server.setRequestHandler('tools/list', async () => {
-    logLine('rpc', `tools/list → ${services.toolDefs[variant].length} tools (${era || '?'}, apps=${renders})`);
-    return { tools: services.toolDefs[variant] };
+    logLine('rpc', `tools/list → ${services.toolDefs.length} tools (${era || '?'}, apps=${renders})`);
+    return { tools: services.toolDefs };
   });
 
   server.setRequestHandler('tools/call', async (request, ctx) => {
@@ -151,13 +147,14 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     // served to a client that declared the Skills extension in this request, refused to any other
     server.setRequestHandler('skills/list', { params: SkillsListParams, result: AnyResult }, async () => {
       if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
-      return { skills: services.skills.list(), ...STATIC };
+      return { skills: services.skills.list(), ...PER_CLIENT };
     });
     server.setRequestHandler('skills/get', { params: SkillsGetParams, result: AnyResult }, async ({ uri }) => {
       if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
       const s = services.skills.get(uri);
       if (!s) throw new ProtocolError(-32602, `Not a skill this server serves: ${uri}`);
-      return { skill: s };
+      // the extension requires the caching hints on skills/get as on skills/list
+      return { skill: s, ...PER_CLIENT };
     });
   }
 

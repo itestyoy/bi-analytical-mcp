@@ -6,36 +6,39 @@
 // server announces like any other (src/surface-change.js).
 //
 // The core never names a feature: it walks `engine.features` at the few points a tool is defined,
-// dispatched, read back, drawn, guided and described. A feature module exports a DEFINITION:
+// dispatched, read back, drawn, guided and described. A feature is written against the engine's
+// public surface — engine.tasks (src/task-runner.js), engine.host, engine.ctxs, engine.catalog,
+// engine.jobs — never its private `_` members. A feature module exports a DEFINITION:
 //
 //   { id, flag, resolve({ env, catalog, profilesDir, baseProjectDir }) → { feature } | { reason } }
 //
 // and the resolved `feature` is an object with (every key optional but `id` and `tools`):
 //   tools:   { <name>: { schema(catalog) → JSON Schema, run(engine, input) → result,
-//                        title, description, behaviour (ToolAnnotations),
-//                        side (the task side this tool starts and reads), draws (true for the tool
-//                        that draws a card), waits (true for a call that waits on a task),
-//                        precheck(engine, args) (what a waiting call would refuse, before waiting) } }
-//   sides:   { <side>: <the tool that reads that side's tasks back> }
+//                        title, description, annotations (ToolAnnotations),
+//                        side (the task side this tool starts), reads (the side its read returns —
+//                        the tool that reads that side's tasks back), draws (true for the tool that
+//                        draws a card, into the feature's view), waits (true for a call that waits on
+//                        a task), precheck(engine, args) (what a waiting call would refuse, before
+//                        waiting) } } — each becomes a tool definition like a core tool's
+//                        (src/tools/define.js), in the one registry the engine holds
 //   view:    { uri, name, title, description, asset (a RUNTIME_ASSETS key), viewModel(result, args) }
-//   guide:   { name (a reserved semantic_index({ guide }) name), build(catalog) → object,
+//   guide:   { name (a reserved semantic_index({ request: { guide } }) name), build(catalog) → object,
 //              triggers: [{ if, do }] (routing triggers added to the analyst guide) }
 //   skill(engine) → { path, frontmatter, body, references: [[relPath, text]] }
 //   instructions: one line for the core instructions
 //   overview(engine) → what semantic_index's overview says about it
 
 import { retentioneeringDefinition } from './retentioneering/index.js';
+import { defineTool } from './tools/define.js';
 
 /** Every feature this server knows. Each is off unless its flag turns it on. */
 export const FEATURE_DEFINITIONS = [retentioneeringDefinition];
 
-const OFF = /^(0|false|no|off)$/i;
 const ON = /^(1|true|yes|on)$/i;
 
 /** Whether an env flag is on: only an explicit yes turns a feature on — a feature is opt-in. */
 export function flagOn(value) {
-  const v = String(value ?? '').trim();
-  return ON.test(v) && !OFF.test(v);
+  return ON.test(String(value ?? '').trim());
 }
 
 /**
@@ -63,19 +66,13 @@ export function resolveFeatures({ env = process.env, catalog, profilesDir, baseP
   return { features, status };
 }
 
-/** name → { feature, tool } over the resolved features (a name defined twice is a defect). */
-export function featureTools(features = []) {
-  const map = new Map();
-  for (const feature of features) {
-    for (const [name, tool] of Object.entries(feature.tools || {})) {
-      if (map.has(name)) throw new Error(`tool '${name}' is defined by two features (${map.get(name).feature.id}, ${feature.id})`);
-      map.set(name, { feature, tool });
-    }
-  }
-  return map;
-}
-
-/** The feature tool `name` of this engine, or null. */
-export function featureTool(engine, name) {
-  return engine?._featureTools?.get(name) || null;
+/** The tool definitions the resolved features add (src/tools/define.js) — each like a core tool's. */
+export function featureToolDefinitions(features = []) {
+  return features.flatMap((feature) => Object.entries(feature.tools || {}).map(([name, { draws, ...tool }]) => defineTool({
+    name,
+    ...tool,
+    // the tool that draws draws into the feature's own view, for a client that renders MCP Apps
+    ...(draws ? { view: feature.view, appsOnly: true } : {}),
+    feature,
+  })));
 }

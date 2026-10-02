@@ -39,7 +39,7 @@ import retentioneering.data_processors as processors  # noqa: E402
 from retentioneering import Eventstream  # noqa: E402
 from retentioneering.metrics import condition_ast, metric_builder  # noqa: E402
 from retentioneering.ops import registered_ops  # noqa: E402
-from retentioneering.paths import anchors  # noqa: E402
+from retentioneering.paths import anchors, tokens as pattern_tokens  # noqa: E402
 from retentioneering.tools import segment_overview, cluster_analysis  # noqa: E402
 from retentioneering.utils import clustering_methods  # noqa: E402
 
@@ -64,17 +64,19 @@ SCALARS = {str: {"type": "string"}, int: {"type": "integer"}, float: {"type": "n
 
 
 def anchor_schema():
-    """An anchor spec as the library defines it (paths.anchors): a pattern, or an object of its keys."""
+    """An anchor spec as the library defines it (paths.anchors): a pattern, or an object of its keys.
+    Every union this sheet writes is an `anyOf` of alternatives told apart by their type or their pinned
+    values — the one union every client's schema reader takes (src/schema-kit.js)."""
     return {
-        "oneOf": [
+        "anyOf": [
             {"type": "string", "description": "An event, or a '->'-separated pattern of events."},
             {
                 "type": "object", "additionalProperties": False, "required": ["pattern"],
                 "properties": {
                     "pattern": {"type": "string"},
-                    "at": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "at": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                     "occurrence": {"enum": list(anchors.OCCURRENCES)},
-                    "offset": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "offset": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                     "offset_side": {"enum": list(anchors.OFFSET_SIDES)},
                     "event_col": {"type": "string"},
                 },
@@ -401,24 +403,32 @@ def condition_schema(grammar):
         primitive = [{"type": k} for k in kinds]
         one = primitive[0] if len(primitive) == 1 else {"anyOf": primitive}
         note = value_note(metric)
-        leaf = {
-            "type": "object", "additionalProperties": False, "title": metric,
-            "required": ["op", "metric", "value", *(["metric_args"] if required else [])],
+        # a comparison takes one constant, membership a list of them: two forms, told apart by `op`
+        base_required = ["op", "metric", "value", *(["metric_args"] if required else [])]
+        metric_args = ({"metric_args": {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}} if args else {})
+        described = lambda text: text + (f" {note}" if note else "")
+        leaves.append({
+            "type": "object", "additionalProperties": False, "title": f"{metric} compared",
+            "required": base_required,
             "properties": {
-                "op": {"enum": [*grammar["compare"], grammar["membership"]]},
+                "op": {"enum": list(grammar["compare"])},
                 "metric": {"const": metric},
-                "value": {"anyOf": [*primitive, {"type": "array", "minItems": 1, "items": one}], "description": f"A constant; a list of them for '{grammar['membership']}'." + (f" {note}" if note else "")},
+                "value": {**one, "description": described("A constant.")} if "anyOf" not in one else {"anyOf": one["anyOf"], "description": described("A constant.")},
+                **metric_args,
             },
-        }
-        if args:
-            leaf["properties"]["metric_args"] = {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}
-        # membership takes a list of constants, a comparison one constant
-        leaf["if"] = {"properties": {"op": {"const": grammar["membership"]}}}
-        leaf["then"] = {"properties": {"value": {"type": "array"}}}
-        leaf["else"] = {"properties": {"value": {"not": {"type": "array"}}}}
-        leaves.append(leaf)
+        })
+        leaves.append({
+            "type": "object", "additionalProperties": False, "title": f"{metric} {grammar['membership']} a list",
+            "required": base_required,
+            "properties": {
+                "op": {"const": grammar["membership"]},
+                "metric": {"const": metric},
+                "value": {"type": "array", "minItems": 1, "items": one, "description": described("The constants.")},
+                **metric_args,
+            },
+        })
     node = {"$ref": CONDITION_REF}
-    return {"oneOf": [
+    return {"anyOf": [
         *leaves,
         {"type": "object", "additionalProperties": False, "title": "/".join(grammar["logical"]), "required": ["op", "args"],
          "properties": {"op": {"enum": grammar["logical"]}, "args": {"type": "array", "minItems": 1, "items": node}}},
@@ -522,7 +532,7 @@ def metric_config_schema(mode, many, metrics=None):
         if rolls_up:
             branch["properties"]["agg"] = {"enum": sorted(segment_overview.AGG_FUNCTIONS) + ["complement_distance"]}
         branches.append(branch)
-    item = {"type": "object", "required": ["metric"], "oneOf": branches, "discriminator": {"propertyName": "metric"}}
+    item = {"type": "object", "anyOf": branches}
     return {"type": "array", "items": item} if many else item
 
 
@@ -614,7 +624,7 @@ def params_of(method, processor=None):
         if "anchor" in p.name:
             schema = anchor_schema()
             if "list" in doc_type:
-                schema = {"oneOf": [*anchor_schema()["oneOf"], {"type": "array", "items": anchor_schema()}]}
+                schema = {"anyOf": [*anchor_schema()["anyOf"], {"type": "array", "items": anchor_schema()}]}
         elif (method.__name__, p.name) in CONSTANT_OVERRIDES:
             schema = CONSTANT_OVERRIDES[(method.__name__, p.name)]()
         elif re.match(r"condition tree", doc_text, re.I):
@@ -656,7 +666,7 @@ def dedupe(schema):
     """The same alternative twice (two hints naming one JSON type) is one alternative."""
     if isinstance(schema, dict):
         schema = {k: dedupe(v) for k, v in schema.items()}
-        for key in ("anyOf", "oneOf"):
+        for key in ("anyOf",):
             if key in schema:
                 unique = []
                 for part in schema[key]:
@@ -699,6 +709,79 @@ def build():
         "anchor_keys": sorted(anchors.SPEC_KEYS),
         "anchor_occurrences": list(anchors.OCCURRENCES),
         "anchor_offset_sides": list(anchors.OFFSET_SIDES),
+        "path_patterns": path_patterns(),
+        "errors": library_errors(),
+    }
+
+
+def library_errors():
+    """The library's own error classes, each with the one it derives from — what a refusal can name."""
+    import importlib
+    import pkgutil
+
+    import retentioneering
+
+    found = {}
+    for info in pkgutil.walk_packages(retentioneering.__path__, "retentioneering."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # noqa: BLE001 — a module that does not import (an optional widget) names no error
+            continue
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if issubclass(cls, BaseException) and cls.__module__.startswith("retentioneering."):
+                found[name] = cls.__mro__[1].__name__
+    return dict(sorted(found.items()))
+
+
+DOCS = "https://retentioneering.com"
+
+
+def absolute_links(value):
+    """The library's docstrings link its own site relatively (`](/docs/…)`), which says nothing to a
+    reader outside it: every such link is made absolute."""
+    if isinstance(value, str):
+        return value.replace("](/docs/", f"]({DOCS}/docs/")
+    if isinstance(value, list):
+        return [absolute_links(v) for v in value]
+    if isinstance(value, dict):
+        return {k: absolute_links(v) for k, v in value.items()}
+    return value
+
+
+def _paragraphs(text):
+    """A docstring's paragraphs, each on one line, RST markup reduced to plain text."""
+    text = re.sub(r":(?:func|mod|class|meth):`~?([^`]+)`", r"\1", text)
+    text = re.sub(r"``([^`]+)``", r"`\1`", text)
+    text = re.sub(r"\s*\(ADR-\d+\)", "", text)
+    return [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _bullets(paragraph):
+    return [b.strip() for b in re.split(r"(?:^|\s)\*\s+", paragraph) if b.strip()]
+
+
+def path_patterns():
+    """The path-pattern language — what `path_pattern`, an anchor's `pattern`, `matches_pattern` and a
+    collapse/truncate anchor read — from the library's own parser modules: the token table and rules
+    of paths.tokens, and the matching semantics and occurrences of paths.anchors."""
+    tdoc = inspect.getdoc(pattern_tokens) or ""
+    adoc = inspect.getdoc(anchors) or ""
+    rows = re.findall(r"^``(.+?)``\s{2,}(.+)$", tdoc, re.M)
+    if not rows:
+        raise SystemExit("paths.tokens: the token table was not found in its docstring")
+    token_paras = _paragraphs(tdoc)
+    matching = next((p for p in _paragraphs(adoc) if p.startswith("* a pattern is")), None)
+    occurrence = next((p for p in _paragraphs(adoc) if p.startswith('* `"first"`')), None)
+    if not matching or not occurrence:
+        raise SystemExit("paths.anchors: the matching semantics were not found in its docstring")
+    keep = ("Two deviations", "* members are", "Everything else", "A boundary sentinel")
+    return {
+        "source": "retentioneering.paths.tokens and retentioneering.paths.anchors (their docstrings)",
+        # the table's own words, less its history of the language ("as before": what a token meant earlier)
+        "tokens": [{"token": t, "meaning": re.sub(r"(?:,| —) as before$", "", _paragraphs(m)[0])} for t, m in rows],
+        "matching": _bullets(matching),
+        "occurrence": _bullets(occurrence),
+        "rules": [p for p in token_paras if p.startswith(keep)],
     }
 
 
@@ -707,7 +790,7 @@ def normalized(facts):
 
 
 def main(argv):
-    facts = build()
+    facts = absolute_links(build())
     if "--check" in argv:
         try:
             with open(OUT, encoding="utf-8") as f:

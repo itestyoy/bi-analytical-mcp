@@ -18,19 +18,19 @@ function project(schemaFiles) {
 const eventsYml = `version: 2
 models:
   - name: fct_events
-    meta: { mcp: { role: events, primary_entity: event, known_events: [login, purchase] } }
+    config: { meta: { mcp: { role: events, primary_entity: event, known_events: [login, purchase] } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
-      - { name: props, data_type: json, meta: { mcp: { is_event_data: true, properties: { amount: { type: numeric } } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
+      - { name: props, data_type: json, config: { meta: { mcp: { is_event_data: true, properties: { amount: { type: numeric } } } } } }
 `;
 const usersYml = `version: 2
 models:
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
 
@@ -73,70 +73,52 @@ test('error when no MCP-tagged models are present', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// dbt 1.10 MOVED `meta` UNDER `config:` — on models and on columns alike. dbt Core 1.11 still reads
-// the old place and only warns (PropertyMovedToConfigDeprecation), but dbt Fusion calls the
-// top-level key unknown (UnusedConfigKey, dbt1060) and DROPS it. Everything this server knows about
-// a source lives in that block, so a Fusion-parsed project would hand us a catalog with no roles,
-// no dimensions and no measures — the reader has to take it from either place.
-//
-// Lifecycle/validation checks on the loader: what is read, from where, and who wins.
-const movedEventsYml = `version: 2
-models:
-  - name: fct_events
-    config:
-      meta: { mcp: { role: events, primary_entity: event, known_events: [login, purchase] } }
-    columns:
-      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
-      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
-      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
-      - { name: props, data_type: json, config: { meta: { mcp: { is_event_data: true, properties: { amount: { type: numeric } } } } } }
-`;
-const movedUsersYml = `version: 2
-models:
-  - name: dim_users
-    config:
-      meta: { mcp: { role: users } }
-    columns:
-      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
-      - { name: country, data_type: string }
-`;
-
-test('meta under config: (dbt 1.10+) builds exactly the same catalog as the pre-1.10 place', () => {
-  const legacy = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
-  const moved = project({ 'events.yml': movedEventsYml, 'users.yml': movedUsersYml });
-  try {
-    const a = loadCatalogFromProject(legacy, { dialect: 'duckdb' });
-    const b = loadCatalogFromProject(moved, { dialect: 'duckdb' });
-    // the whole registry, not a spot check: roles, entities, the time axis, the payload properties
-    assert.deepEqual(JSON.parse(JSON.stringify(b.raw)), JSON.parse(JSON.stringify(a.raw)));
-    // …and the surface a caller sees is the same too
-    assert.deepEqual(b.modelKeys(), a.modelKeys());
-    assert.deepEqual(b.eventNames('events'), ['login', 'purchase']);
-    assert.equal(b.getModel('events').time.column, 'ts');
-  } finally { rmSync(legacy, { recursive: true, force: true }); rmSync(moved, { recursive: true, force: true }); }
+test('a meta.mcp block at the top level is refused, naming the model or column it sits on', () => {
+  const modelTop = usersYml.replace('config: { meta: { mcp: { role: users } } }', 'meta: { mcp: { role: users } }');
+  const columnTop = eventsYml.replace("config: { meta: { mcp: { is_time: true } } }", 'meta: { mcp: { is_time: true } }');
+  for (const [files, where] of [[{ 'users.yml': modelTop, 'events.yml': eventsYml }, /model 'dim_users'/], [{ 'events.yml': columnTop, 'users.yml': usersYml }, /column 'fct_events\.ts'/]]) {
+    const dir = project(files);
+    try {
+      assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), where);
+      assert.throws(() => loadCatalog(join(dir, 'models', Object.keys(files)[0]), { dialect: 'duckdb' }), /config\.meta\.mcp/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });
 
-test('a project caught HALF-WAY through the move works, and config: wins key by key', () => {
-  // dbt's own precedence: what is under config: overrides the property of the same name.
-  const mixed = `version: 2
-models:
-  - name: fct_events
-    meta: { mcp: { role: legacy_role, primary_entity: event, known_events: [login] } }
-    config:
-      meta: { mcp: { role: events, known_events: [login, purchase] } }
-    columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
-`;
-  const dir = project({ 'events.yml': mixed, 'users.yml': movedUsersYml });
+test('a key the loader does not read is refused at load, on a model and on a column, with the keys it takes', () => {
+  const onModel = usersYml.replace('mcp: { role: users }', 'mcp: { role: users, anchor: true }');
+  const onColumn = eventsYml.replace('mcp: { is_time: true }', 'mcp: { is_time: true, values: [a] }');
+  const mistypedRole = usersYml.replace('mcp: { role: users }', 'mcp: { rol: users }');
+  const columnOnly = usersYml.replace('config: { meta: { mcp: { role: users } } }', 'description: users');
+  for (const [files, where] of [[{ 'users.yml': onModel, 'events.yml': eventsYml }, /model 'dim_users': config\.meta\.mcp has no key 'anchor' — it takes role,/], [{ 'events.yml': onColumn, 'users.yml': usersYml }, /column 'fct_events\.ts': config\.meta\.mcp has no key 'values' — it takes entity,/],
+    [{ 'users.yml': mistypedRole, 'events.yml': eventsYml }, /model 'dim_users': config\.meta\.mcp has no key 'rol'/], [{ 'users.yml': columnOnly, 'events.yml': eventsYml }, /catalog model 'dim_users' is missing config\.meta\.mcp\.role/]]) {
+    const dir = project(files);
+    try { assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), where); } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('a catalog file that is not a dbt model-schema YAML is refused', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cat-'));
+  try {
+    writeFileSync(join(dir, 'catalog.json'), JSON.stringify({ models: { events: { dbt_model: 'fct_events' } } }));
+    writeFileSync(join(dir, 'registry.yml'), 'models:\n  events: { dbt_model: fct_events }\n');
+    for (const f of ['catalog.json', 'registry.yml']) assert.throws(() => loadCatalog(join(dir, f), { dialect: 'duckdb' }), /dbt model-schema YAML/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('primary_entity: null is no primary entity — the model loads and its keys are its entities\' own', () => {
+  const nulled = usersYml.replace('config: { meta: { mcp: { role: users } } }', 'config: { meta: { mcp: { role: users, primary_entity: null } } }');
+  const dir = project({ 'events.yml': eventsYml, 'users.yml': nulled });
   try {
     const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
-    assert.deepEqual(c.modelKeys().sort(), ['events', 'users'], 'the role from config: is the one that counts');
-    assert.deepEqual(c.eventNames('events'), ['login', 'purchase'], 'and so is its event list');
-    // keys only the old block carries are still read — a half-migrated file is not a broken one
-    assert.equal(c.getModel('events').primary_entity?.name || c.getModel('events').primary_entity, 'event');
-    assert.equal(c.getModel('events').time.column, 'ts', 'a column that moved is read from its new place');
-    assert.ok(c.getModel('events').entities?.user || c.getModel('events').foreign_entities?.user || true);
+    assert.deepEqual(c.entityKeyColumns('users'), ['user_id']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('model-paths: [] is refused — dbt parses no model then, so none this server reads would be seen', () => {
+  const dir = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
+  try {
+    writeFileSync(join(dir, 'dbt_project.yml'), 'name: test\nprofile: test\nmodel-paths: []\n');
+    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), /model-paths is empty, so dbt parses no model/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -6,18 +6,17 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
-import { settle, isStartedTask } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { settle, isStartedTask, one } from '../helpers/settle.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -32,7 +31,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'detq-')), timeSpineDialect: 'duckdb' });
-  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
     name: 'mon', use_base_models: ['users'],
@@ -43,19 +42,19 @@ before(async () => {
   ctxId = out.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], ...input });
 const byCountry = [{ model: 'users', attribute: 'country' }];
-const paying = { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }] };
+const paying = [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }];
 
 test('a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse\'s rows', opts, async (t) => {
   if (skip(t)) return;
   const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
   assert.ok(isStartedTask(started), JSON.stringify(started));
   assert.match(started.task_id, /^[a-f0-9]{12}$/);
-  const done = await engine.query_semantic_model({ task_id: started.task_id });
+  const done = await one(engine.query_semantic_model({ task_ids: [started.task_id] }));
   assert.equal(done.status, 'done', 'one wait is enough for a query this size');
   assert.ok(done.waited_seconds === undefined, 'a finished task answers with its result, not a wait report');
   assert.equal(done.tool, 'query_semantic_model');
@@ -73,7 +72,7 @@ test('a query task keeps its grouping and the caller-facing column names', opts,
 test('a query that FAILS in the warehouse is a task that ended in error', opts, async (t) => {
   if (skip(t)) return;
   // a filter on a value the warehouse cannot compare fails in the warehouse
-  const done = await q({ where: { op: 'and', conditions: [{ field: { kind: 'metric_time' }, op: 'eq', value: 'not-a-date' }] } }).catch((e) => ({ refused: e }));
+  const done = await q({ where: [{ field: { time: 'metric_time' }, op: 'eq', value: 'not-a-date' }] }).catch((e) => ({ refused: e }));
   if (done.refused) return; // refused before running is fine too
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');
@@ -154,7 +153,7 @@ test('a task is drawn once: a second display_model_result is refused, and readin
   const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'] };
   assert.equal((await engine.display_model_result({ task_id: done.task_id, display })).drawn, true);
   await assert.rejects(engine.display_model_result({ task_id: done.task_id, display }), /shown already/);
-  const again = await engine.query_semantic_model({ task_id: done.task_id });
+  const again = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
   assert.equal(again.drawn, undefined, 'a read is never a card');
   assert.equal(again.show_to_user, undefined, 'and no longer suggests showing it');
   assert.equal(again.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
@@ -168,16 +167,16 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   const done = await q({});
   assert.equal(Number(done.rows[0].mon_revenue), 85);
   engine.raw._taskResults.delete(done.task_id);
-  const forgotten = await engine.query_semantic_model({ task_id: done.task_id });
+  const forgotten = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
   assert.deepEqual([forgotten.ok, forgotten.error.code], [false, 'result_gone']);
   assert.deepEqual(buildViewModel('display_model_result', forgotten), { kind: 'none', reason: 'gone' });
   // a task this server never ran
-  await assert.rejects(engine.query_semantic_model({ task_id: 'ffffffffffff' }), (e) => e.code === 'result_gone');
+  await assert.rejects(one(engine.query_semantic_model({ task_ids: ['ffffffffffff'] })), (e) => e.code === 'result_gone');
   // a materialized result whose table definition was deleted
   const built = await q({ materialize: true });
   assert.equal(Number(built.rows[0].mon_revenue), 85);
   engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
-  const deleted = await engine.query_semantic_model({ task_id: built.task_id, limit: 10 });
+  const deleted = await one(engine.query_semantic_model({ task_ids: [built.task_id], limit: 10 }));
   assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
   // …while a query that FAILED stays an error
   assert.equal(buildViewModel('display_model_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');

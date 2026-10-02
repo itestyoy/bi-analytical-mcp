@@ -9,44 +9,27 @@
 //   completed          {}                          users reaching the last step
 //   conversion         { from, to }                reached(to) / reached(from)
 //   avg_seconds_between{ from, to }                avg seconds between two steps
-//   agg_at_step        { agg, property, step }     sum/avg/min/max of a property at a step
+//   agg_at_step        { agg, property, step }     sum/average/min/max of a property at a step
 //
 // BigQuery specifics honored: JSON_VALUE, one-row-per-match (no ONE ROW PER
 // MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
-import { jsonExtract, sqlLiteral } from './dialect.js';
-import { partitionConditions } from './time-range.js';
-import { registerStage, prepareColumns } from './pipeline.js';
-import { oneOfOr, strEnum } from './schema-kit.js';
+import { timeRangeConditions, isValidTimezone } from './time-range.js';
+import { registerStage } from './pipeline.js';
+import { getDialect } from './dialects/index.js';
+import { OPS, comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
+import { anyOfOr, strEnum, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from './schema-kit.js';
+import { sqlAgg } from './pipeline/sql.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
-/** Date-only 'YYYY-MM-DD' end → the NEXT day (exclusive upper bound), so the whole
- *  day is included when comparing a timestamp column. Returns null if not date-only
- *  (a full datetime is used as-is). Avoids `<= 'YYYY-MM-DD'` collapsing to midnight. */
-export function dateEndExclusive(end) {
-  if (typeof end !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
-  const d = new Date(`${end}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + 1);
-  return d.toISOString().slice(0, 10);
-}
+/** A step's or the prefilter's comparison, its constants written in the type of what they are
+ *  compared with (src/conditions.js: a flag spelled "true" is TRUE, a number spelled "5" is 5). */
+const comparePred = (lhs, op, value, type = null, name = lhs) => comparison(lhs, op, value, { lit: typedAs(type, name) });
 
-/** Render a single comparison `lhs OP value` with the value bound as a literal. */
-function comparePred(lhs, op, value) {
-  const arr = Array.isArray(value) ? value : [value];
-  switch (op) {
-    case 'eq': return `${lhs} = ${sqlLiteral(value)}`;
-    case 'neq': return `${lhs} != ${sqlLiteral(value)}`;
-    case 'gt': return `${lhs} > ${sqlLiteral(value)}`;
-    case 'gte': return `${lhs} >= ${sqlLiteral(value)}`;
-    case 'lt': return `${lhs} < ${sqlLiteral(value)}`;
-    case 'lte': return `${lhs} <= ${sqlLiteral(value)}`;
-    case 'in': return `${lhs} IN (${arr.map(sqlLiteral).join(', ')})`;
-    case 'not_in': return `${lhs} NOT IN (${arr.map(sqlLiteral).join(', ')})`;
-    default: throw new Error(`unsupported filter op: ${op}`);
-  }
-}
+/** The type of a model column, as the catalog declares it. */
+const columnType = (catalog, source, name) => catalog.modelColumns(source).find((x) => x.name === name)?.type || null;
 
 /** Step/prefilter event names, normalized to the SOURCE fact's physical values. A
  *  row-pattern match scans ONE table, so an event of another fact cannot participate. */
@@ -62,17 +45,17 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   // carries no qualifier — so half of a qualified predicate would silently stay unqualified.
   const evCol = m.event_name.column;
   const names = factEventNames(catalog, source, step.event_name);
-  const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
-  const props = (step.where || []).map((c) => {
+  const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
+  const props = conditionsSql(step.where, (c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
-      return comparePred(c.property, c.op, c.value);
+      return comparePred(c.property, c.op, c.value, prepCols.get(c.property)?.type || null);
     }
     const p = (m.properties || {})[c.property];
     if (!p) {
       // a physical model column (envelope/dimension column like bundle_id) → compare it
       // directly, so a step filter can use model columns without a separate where stage.
-      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value);
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
     if (catalog.isComplexEventProp(c.property, source)) {
@@ -80,7 +63,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
     }
     // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
     // payload column — unqualified, like every other clause here
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value);
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
   });
   return [ev, ...props].join(' AND ');
 }
@@ -101,26 +84,22 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
   if (!f) return '';
   const m = catalog.getModel(source);
   const evNameCol = m.event_name.column;
-  const timeCol = m.time.column;
   const clauses = [];
-  if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
-  if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
-  // a source partitioned by the day of its time axis is scanned only on the days the window touches
-  if (partitionCol && (f.time_range?.start || f.time_range?.end)) {
-    const ex = f.time_range.end ? dateEndExclusive(f.time_range.end) : null;
-    for (const c of partitionConditions(m, { start: f.time_range.start || null, endExclusive: ex, end: ex ? null : (f.time_range.end || null) })) clauses.push(`${partitionCol} ${c.op === 'gte' ? '>=' : '<'} ${sqlLiteral(c.value)}`);
-  }
-  if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
+  // the window by the one rule every stage applies (a timezone's wall-clock bounds, the whole last day
+  // of a date-only end), and the partition column only where the scanned relation still carries it
+  if (f.time_range?.timezone && !isValidTimezone(f.time_range.timezone)) throw new Error(`filter.time_range: unknown timezone '${f.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`);
+  for (const c of timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []) clauses.push(comparePred(c.column, c.op, c.value));
+  if (f.event_name?.length) clauses.push(comparison(evNameCol, 'in', factEventNames(catalog, source, f.event_name)));
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
-  for (const c of f.where || []) {
+  clauses.push(...conditionsSql(f.where, (c) => {
     const p = (m.properties || {})[c.property];
     if (!p) {
       // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value)); continue; }
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
-    clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value));
-  }
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
+  }));
   return clauses.join(' AND ');
 }
 
@@ -133,13 +112,13 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
  * what dropped out, instead of as a warehouse error after the build.
  */
 function requireSourceColumns(catalog, spec, source, availableCols) {
-  if (!availableCols) return; // standalone resolve (no pipeline column set to check against)
   const m = catalog.getModel(source);
   const need = new Map(); // physical column -> what reads it
   const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
   want(m.event_name?.column, 'the event name');
   want(spec.order_by || m.time?.column, 'the sequence order');
-  const tested = [...(spec.filter?.where || []), ...(spec.steps || []).flatMap((st) => st.where || [])];
+  const tested = [];
+  for (const list of [spec.filter?.where, ...(spec.steps || []).map((st) => st.where)]) eachCondition(list, (c) => tested.push(c));
   for (const c of tested) {
     if (availableCols.has(c.property)) continue; // already a real column here (upstream stage / prepare)
     if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
@@ -153,7 +132,7 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   );
 }
 
-function resolve(catalog, spec, dialect, availableCols = null, source) {
+function resolve(catalog, spec, dialect, availableCols, source) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
@@ -219,10 +198,9 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     ? spec.metrics
     : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
 
-  // Real columns referenceable in step `where` / agg_at_step (vs event_data
-  // properties). In a pipeline these are the columns produced by earlier stages
-  // (passed in as availableCols); standalone, they come from spec.prepare.
-  const prepCols = availableCols || prepareColumns(catalog, dialect, spec.prepare || [], source);
+  // Real columns referenceable in step `where` / agg_at_step (vs event_data properties): the
+  // columns the stages before this one produced.
+  const prepCols = availableCols;
 
   // resolve metrics + collect which property values must be captured per step
   const propCaptures = []; // { id, idx, property, type, isColumn }
@@ -233,7 +211,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     else if (mt.type === 'conversion') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
     else if (mt.type === 'avg_seconds_between') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
     else if (mt.type === 'agg_at_step') {
-      out.idx = stepIdx(mt.step); out.agg = (mt.agg || 'sum').toUpperCase();
+      out.idx = stepIdx(mt.step); out.agg = sqlAgg(mt.agg || 'sum').toUpperCase();
       let type; const isColumn = prepCols.has(mt.property);
       if (isColumn) type = prepCols.get(mt.property).type;
       else {
@@ -288,6 +266,7 @@ function gapModeFor(r) {
  * ev/r1..rn/joined) over fromRel, in the dialect `dialectName`.
  */
 export function matchStepCte(r, fromRel, catalog, dialectName) {
+  const d = getDialect(dialectName);
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the CTE equivalent other warehouses run");
   }
@@ -334,60 +313,23 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(j.t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`j.t${m.from}`, `j.t${m.to}`)} AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `j.${c.id}`),
   ];
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
 
-/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…).
- *  rows handling, to stay numerically consistent with the CTE lowering:
- *  - one_per_match: emit `AFTER MATCH SKIP TO NEXT ROW` so a new match can begin on
- *    the very next row — every occurrence of the start step yields a match (overlapping
- *    matches), matching the "every S1 starts a match" CTE lowering. (Without it,
- *    BigQuery's default AFTER MATCH SKIP PAST LAST ROW gives NON-overlapping matches,
- *    which would diverge from the CTE lowering.)
- *  - one_per_partition: keep BigQuery's default skip and take the first match per
- *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
- *    match, equivalent regardless of skip mode. */
-export function matchStepBigQuery(r, fromRel, catalog) {
-  const preds = r.stepPreds('bigquery');
-  const sym = r.steps.map((s) => `S${s.idx}`);
-  const measures = [
-    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
-  ].join(',\n');
-  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
-  const gapMode = gapModeFor(r);
-  if (gapMode === 'single') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
-  else if (gapMode === 'perlevel') for (let i = 1; i < r.steps.length; i++) defines.push(`    G${i} AS NOT (${preds[i]})`);
-  const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
-  const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
-  const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
-  return `SELECT
-${r.partCols.map((c) => `    ${c},`).join('\n')}
-    t1 AS first_seen_at,
-    CASE ${furthestCase} END AS furthest_step_name,
-    t${r.steps.length} IS NOT NULL AS completed,
-${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
-  FROM ${fromRel} MATCH_RECOGNIZE (
-    PARTITION BY ${r.partCols.join(', ')}
-    ORDER BY ${r.timeCol}
-    MEASURES
-${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
-    PATTERN ${nestedPattern(r.steps, gapMode)}
-    DEFINE
-${defines.join(',\n')}
-  )${r.rows === 'one_per_match' ? '' : `\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) = 1`}`;
-}
-
-/** BigQuery PIPE lowering: the funnel as `|> MATCH_RECOGNIZE` pipe operators (BigQuery
- *  pipe syntax supports MATCH_RECOGNIZE as a pipe operator), so the whole pipeline stays
- *  pipe-form. Same MEASURES/PATTERN/DEFINE semantics as the table form; the derived
- *  reached/completed/secs columns become `|> EXTEND`, the one_per_partition first-match
- *  pick becomes a ROW_NUMBER window + `|> WHERE`, and a final `|> SELECT` projects the
- *  output columns (dropping the internal t1..tn). */
+/** BigQuery lowering: the funnel as `|> MATCH_RECOGNIZE` pipe operators (BigQuery pipe syntax
+ *  supports MATCH_RECOGNIZE as a pipe operator), so the whole pipeline stays pipe-form. The derived
+ *  reached/completed/secs columns become `|> EXTEND` and a final `|> SELECT` projects the output
+ *  columns (dropping the internal t1..tn). `rows`, numerically consistent with the CTE lowering:
+ *  - one_per_match: `AFTER MATCH SKIP TO NEXT ROW`, so a new match can begin on the very next row —
+ *    every occurrence of the start step yields a match (overlapping matches), as in the CTE lowering
+ *    (BigQuery's default, AFTER MATCH SKIP PAST LAST ROW, gives non-overlapping ones);
+ *  - one_per_partition: BigQuery's default skip, and the first match per partition by a ROW_NUMBER
+ *    window + `|> WHERE` — the earliest start's match, whatever the skip mode. */
 export function matchStepBigQueryPipe(r, spec, catalog) {
+  const d = getDialect('bigquery');
   const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
@@ -404,7 +346,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(t${s.idx} IS NOT NULL) AS reached_${s.name}`),
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`t${m.from}`, `t${m.to}`)} AS secs_${m.name}`),
   ];
   const outCols = [
     ...r.partCols,
@@ -445,17 +387,16 @@ function matchOutputColumns(r) {
   return cols;
 }
 
-/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 /** Every relationship name the events sources declare — what `partition_by: { entity }` may name. */
 function relationshipNames(catalog) {
   return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
 }
 
+/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 function matchRecognizeSchema(catalog) {
-  const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
-  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
-  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
-  const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
+  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: OPS }, value: { ...CONSTANT, description: 'The constant (an array for in/not_in, [low, high] for between, a string for the text operators, none for is_null/is_not_null).' } } };
+  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: conditionList(stepWhere, 'Extra conditions narrowing the step: all of them hold (an item may be { or: [...] }).') } };
+  const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'average', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
     description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). OUTPUT COLUMNS (all available to downstream join/where/aggregate stages): the `partition_by` column(s) are CARRIED THROUGH unchanged (e.g. the user key, so you can join dim_users after); plus first_seen_at, furthest_step_name, completed, one reached_<step> boolean per step, secs_<metric> for each avg_seconds_between metric, and one column per captured property. For funnels, conversion, and time-between-steps.',
@@ -465,12 +406,12 @@ function matchRecognizeSchema(catalog) {
         type: 'array',
         // A catalog whose sources declare no relationship offers only the column form — the
         // { entity } branch is left out rather than carrying an empty vocabulary.
-        items: oneOfOr([
+        items: anyOfOr([
           { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
           ...(relationshipNames(catalog).length ? [{
             title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
             description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
-            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).') },
+            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ request: { model } }) lists them).') },
           }] : []),
         ]),
         minItems: 1,
@@ -483,9 +424,9 @@ function matchRecognizeSchema(catalog) {
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {
-          time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
-          event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
-          where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
+          time_range: { type: 'object', additionalProperties: false, properties: { start: { ...ISO_TIME }, end: { ...ISO_TIME }, timezone: { ...TIMEZONE, description: 'IANA timezone the bounds are wall-clock times in (default: as stored).' } }, description: 'Event-time window (ISO); a date-only end includes that whole day.' },
+          event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
+          where: conditionList(stepWhere, 'event_data/column conditions across the scan: all of them hold (an item may be { or: [...] }).'),
         },
       },
       steps: { type: 'array', minItems: 2, items: step, description: 'The ordered funnel steps (>= 2).' },
@@ -496,20 +437,20 @@ function matchRecognizeSchema(catalog) {
 
 registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
+  recommend: () => ["The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country)."],
   build: ({ d, catalog, cols, source }, p) => {
-    const spec = p._resolved ? p.spec : p; // accept a stage object OR a preresolved wrapper
-    const r = p._resolved || resolve(catalog, spec, d.name, cols, source);
+    const spec = p;
+    const r = resolve(catalog, spec, d.name, cols, source);
     return {
       op: {
         op: 'match_recognize',
         // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel is a pipe step
-        // (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulated as a self-contained
-        // SELECT (render), which the dialect places as one CTE of its chain.
+        // (bqPipe). DuckDB has no MATCH_RECOGNIZE → emulated as a self-contained SELECT (render),
+        // which its dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
           const pre = buildPrefilter(catalog, spec, dn, r.fact, { partitionCol: r.partitionCol });
-          const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
-          return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepCte(r, fromRel, catalog, dn);
+          return matchStepCte(r, pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev, catalog, dn);
         },
       },
       cols: matchOutputColumns(r),

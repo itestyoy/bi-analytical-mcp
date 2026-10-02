@@ -401,7 +401,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 
 | что случилось | что говорит ошибка |
 |---|---|
-| имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', as: 'events_event_name' }` |
+| имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', name: 'events_event_name' }` |
 | имя уже есть, и это **колонка ключа связи** | `'player_id_of_internal' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs` |
 | два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`as\`` |
 
@@ -414,10 +414,10 @@ semantic_index({ model: 'acquisition' }) describes them.
 ```json
 { "stage": "join", "with": "users", "via": "user",
   "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-  "attrs": [{ "column": "app_version", "as": "users_app_version" }, "country"] }
+  "attrs": [{ "column": "app_version", "as": "users_app_version" }, { column: "country" }] }
 ```
 
-Так же ведёт себя и путь «конвейер целиком» — `register_native_model`, в том числе
+Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
 `dry_run`: тот же отказ, а не тихо собранная модель без поля.
 
 ### Несколько соединений подряд
@@ -428,10 +428,10 @@ semantic_index({ model: 'acquisition' }) describes them.
 
 ```json
 { "source": "crashlytics", "stages": [
-  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": ["event_id"] },
-  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": ["country"],
+  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ column: "event_id" }] },
+  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ column: "country" }],
     "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
-  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": ["media_source", "cost"] }
+  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ column: "media_source" }, { column: "cost" }] }
 ] }
 ```
 
@@ -560,7 +560,7 @@ MetricFlow умеет соединять только по уникальном�
 { "source": "acquisition", "stages": [
   { "stage": "join", "with": "users", "via": "user",
     "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-    "kind": "inner", "attrs": ["country"] },
+    "kind": "inner", "attrs": [{ column: "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
     "measures": [{ "name": "total", "fn": "sum", "column": "cost" }] }
 ] }
@@ -571,7 +571,7 @@ MetricFlow умеет соединять только по уникальном�
 ```json
 { "source": "crashlytics", "stages": [
   { "stage": "join", "with": "events", "via": "ad_funnel_rewarded",
-    "kind": "inner", "attrs": ["event_id", "event_name"] }
+    "kind": "inner", "attrs": [{ column: "event_id" }, { column: "event_name" }] }
 ] }
 ```
 
@@ -631,4 +631,4 @@ MetricFlow умеет соединять только по уникальном�
 | `test/integration/declared-joins.test.js` | 51 сценарий на живом складе: поведение связей, заземление, генерация SQL, вызов через MCP, цепочка на все четыре источника, полнота полей при join |
 | `test/integration/fixtures/SEED_DATA.md` | §12-13: тестовые данные по связям и по SCD-2 |
 | `config/catalog.yml` | закомментированный шаблон в составе прод-каталога |
-| `CLAUDE.md` | правила модели данных, которым эта схема обязана соответствовать |
+| `AGENTS.md` (через `CLAUDE.md`) | правила модели данных, которым эта схема обязана соответствовать |

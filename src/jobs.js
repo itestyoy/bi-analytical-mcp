@@ -5,6 +5,9 @@
 // survives restarts. Falls back to in-memory when no persistent store is available.
 
 import { randomBytes } from 'node:crypto';
+
+/** What a task id looks like: 6 random bytes in hex, as create() hands them out. */
+export const TASK_ID_PATTERN = '^[a-f0-9]{12}$';
 import { openStore } from './store.js';
 
 export class JobManager {

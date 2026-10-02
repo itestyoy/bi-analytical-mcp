@@ -28,7 +28,12 @@ Design docs:
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
-| `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |
+| `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
+
+Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
+The shapes above are that field's content. A tool's schema is a closed root with this one field,
+and its modes are an `anyOf` of closed forms under it. That shape is accepted as-is by the Anthropic
+and OpenAI APIs, so a client is shown the whole schema the server checks.
 
 ## Architecture
 
@@ -50,10 +55,10 @@ AI ──► query_semantic_model (enum-constrained)
   context (base template + task additions).
 - **Contexts** (`src/context-manager.js`): per-context overlay dbt project +
   persistent, disk-reconciled registry, leases, teardown.
-- **Runner** (`src/dbt-runner.js`): shells `dbt parse` and `mf query` (NOT
+- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and `mf query` (NOT
   `dbt sl query`, which is dbt-platform/remote and incompatible with local
-  per-context isolation). A warm-process programmatic backend
-  (`src/backends/mf-engine.js` + `python/mf_sidecar.py`) is a drop-in alternative.
+  per-context isolation). The integration tests run the same client, so the numbers
+  they prove are the ones production returns.
 - **Time spine** is a predefined model **always present** in every context:
   `ContextManager.ensureTimeSpine` writes a dialect-aware `metricflow_time_spine`
   if the base project doesn't already define one (required for `metric_time`,
@@ -77,7 +82,7 @@ boolean measure, the aggregation chosen per question, a governed measure),
 `joins` (an attribute of another model, a cohort grid on two time axes, two
 independent sources, a pipeline join by relationship name, a point-in-time
 join), `pipeline` (window lag, episodes by gap, an age axis, an ordered
-sequence, unnest, reshape, a volume/coverage check), `ab_test` (proportion,
+sequence, unnest, reshape, a volume/coverage check), `experiment` (A/B: proportion,
 mean, CUPED, ratio, SRM, power) and `bigframes` (below). A real question
 combines two or three of them. Domain recipes — your events, your funnels, your
 conventions — go in a deployment file via `RECIPES_PATH`, which is merged on top
@@ -128,7 +133,7 @@ npm install
 DBT_BASE_PROJECT=/path/to/dbt_project \
 DBT_PROFILES_DIR=/path/to/dbt_project \
 DBT_ENV=dbt-v2 \
-CATALOG_PATH=./config/catalog.json \
+CATALOG_PATH=./config/catalog.yml \
 npm start            # streamable-HTTP MCP on :3000/mcp
 ```
 

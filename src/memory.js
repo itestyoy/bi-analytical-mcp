@@ -17,7 +17,6 @@ import { rankFuzzy } from './fuzzy.js';
 
 /** The lookup key of a target: assembled from its parts, never parsed back. */
 export function targetKey(t) {
-  if (!t || typeof t !== 'object') return String(t); // a key from an older store: opaque, as-is
   if (t.kind === 'term') return `term:${String(t.term).toLowerCase()}`;
   if (t.kind === 'model') return `model:${t.source}`;
   return `${t.kind}:${t.source}.${t.name}`;
@@ -25,9 +24,14 @@ export function targetKey(t) {
 
 /** The words of a target, for search and embedding — the parts, not the assembled key. */
 export function targetWords(t) {
-  if (!t || typeof t !== 'object') return String(t);
   return t.kind === 'term' ? String(t.term) : [t.source, t.name].filter(Boolean).join('.');
 }
+
+/**
+ * A note as read: every target a structure. A bare string an earlier server stored names nothing
+ * this catalog can address, so it is read as the phrase it is — searchable, never taken apart.
+ */
+const asRead = (e) => e && { ...e, targets: (e.targets || []).map((t) => (t && typeof t === 'object' ? t : { kind: 'term', term: String(t) })) };
 
 // Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
 // genuinely related-but-differently-worded texts well above this; noise stays below).
@@ -65,36 +69,13 @@ export class MemoryStore {
     return entry;
   }
 
-  /**
-   * Rewrite stored target keys in place. `rule(canon)` -> a replacement key, or null to keep it.
-   * Used ONCE at open to bring keys written by an older layout onto the current canonical form —
-   * the caller supplies the rule because only it holds the catalog. Returns { notes, targets }.
-   */
-  retarget(rule) {
-    let notes = 0; let targets = 0;
-    for (const e of this.all({ limit: 100000 })) {
-      let changed = false;
-      const next = [];
-      const seen = new Set();
-      for (const t of e.targets || []) {
-        const to = rule(t);
-        const keep = to || t;
-        if (to) { changed = true; targets += 1; }
-        const k = targetKey(keep);
-        if (!seen.has(k)) { seen.add(k); next.push(keep); }
-      }
-      if (changed && this.store.memory.setTargets(e.id, next)) notes += 1;
-    }
-    return { notes, targets };
-  }
-
-  get(id) { return this.store.memory.get(id); }
+  get(id) { return asRead(this.store.memory.get(id)); }
 
   /** Delete one note by id. Returns whether a row existed. */
   forget(id) { return this.store.memory.remove(id); }
 
   /** All notes, most recent first. */
-  all(opts = {}) { return this.store.memory.all(opts); }
+  all(opts = {}) { return this.store.memory.all(opts).map(asRead); }
 
   /** { notes } — coverage counts. */
   counts() { return this.store.memory.counts(); }

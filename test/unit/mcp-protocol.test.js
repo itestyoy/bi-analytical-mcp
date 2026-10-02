@@ -47,7 +47,7 @@ test('2026-07-28 on the wire: discover and lists carry caching hints, the result
 });
 
 test('the SDK enforces the 2026-07-28 request rules: header/body mismatch is -32020, an unknown method 404', async () => {
-  const mismatch = await s.modern('tools/call', { name: 'time', arguments: { seconds: 0 } }, { headers: { 'mcp-name': 'semantic_index' } });
+  const mismatch = await s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 0 } } }, { headers: { 'mcp-name': 'semantic_index' } });
   assert.equal(mismatch.status, 400);
   assert.equal(mismatch.body.error.code, -32020);
   const unknown = await s.modern('nope/nothing');
@@ -64,7 +64,7 @@ test('an unknown tool — or a private engine method — is -32602 in both eras,
   try {
     for (const c of [await s.client({ era: 'legacy' }), await s.client({ era: 'modern' })]) {
       for (const name of ['nope', '_draftStart', 'close', 'gc', 'constructor']) {
-        await assert.rejects(() => c.callTool({ name, arguments: {} }), (e) => e.code === -32602, `${c.getProtocolEra()} ${name}`);
+        await assert.rejects(() => c.callTool({ name, arguments: { request: {} } }), (e) => e.code === -32602, `${c.getProtocolEra()} ${name}`);
       }
     }
     assert.equal(closed, false, 'engine.close was never reached');
@@ -75,7 +75,7 @@ test('progress reaches a client that asked for it, in both eras', async () => {
   for (const era of ['legacy', 'modern']) {
     const c = await s.client({ era });
     const seen = [];
-    const r = await c.callTool({ name: 'time', arguments: { seconds: 1 } }, { onprogress: (p) => seen.push(p) });
+    const r = await c.callTool({ name: 'time', arguments: { request: { seconds: 1 } } }, { onprogress: (p) => seen.push(p) });
     assert.ok(seen.length >= 2, `${era}: heartbeats every 200ms over 1s (got ${seen.length})`);
     assert.deepEqual(seen.map((p) => p.progress), [...seen.map((p) => p.progress)].sort((a, b) => a - b), `${era}: progress increases`);
     assert.equal(JSON.parse(r.content[0].text).waited_seconds, 1);
@@ -88,7 +88,7 @@ test('closing the request cancels the call — the work stops, not just the resp
   s.engine.time = async (input) => { outcome = await real(input); return outcome; };
   try {
     const ctl = new AbortController();
-    const p = s.modern('tools/call', { name: 'time', arguments: { seconds: 20 } }, { signal: ctl.signal }).catch(() => null);
+    const p = s.modern('tools/call', { name: 'time', arguments: { request: { seconds: 20 } } }, { signal: ctl.signal }).catch(() => null);
     await new Promise((r) => setTimeout(r, 300));
     ctl.abort();
     await p;
@@ -97,4 +97,12 @@ test('closing the request cancels the call — the work stops, not just the resp
     assert.equal(outcome?.cancelled, true);
     assert.ok(outcome.waited_seconds < 5, `it stopped when the client left (waited ${outcome.waited_seconds}s)`);
   } finally { s.engine.time = real; }
+});
+
+test('an event-stream response asks a proxy not to buffer it (X-Accel-Buffering: no)', async () => {
+  await s.post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+  const res = await s.post({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { 'mcp-protocol-version': '2025-11-25' });
+  await res.text();
+  assert.match(res.headers.get('content-type'), /text\/event-stream/);
+  assert.equal(res.headers.get('x-accel-buffering'), 'no');
 });

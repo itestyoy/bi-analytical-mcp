@@ -1,6 +1,6 @@
 // Coverage proof: EACH analytics task family in config/recipes.json can be served
 // by a dbt Semantic Layer model built through this engine. For every family we
-// build the recipe's model ONCE via engine.get_recipe(id).create_payload (writes
+// build the recipe's model ONCE via engine._recipe(id).semantic_payload (writes
 // YAML + dbt parse), then run several query_semantic_model calls and assert on
 // DATA: res.ok === true plus EXACT figures from fixtures/SEED_DATA.md and
 // invariants (grouped sum == grand total; rate in [0,1]; DAU <= MAU; completers
@@ -15,18 +15,17 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -49,16 +48,16 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'at-')), timeSpineDialect: 'duckdb' });
-  const runner = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  const runner = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner, recipes }));
 }, opts);
 
 after(async () => { engine?.runner?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-// Build a recipe's model once via the published get_recipe payload.
+// Build a recipe's model once via the published _recipe payload.
 async function buildRecipe(t, id) {
-  const out = await engine.build_semantic_model(engine.get_recipe({ id }).create_payload);
+  const out = await engine.build_semantic_model(engine._recipe({ id }).semantic_payload);
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }
@@ -120,7 +119,6 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(typeof ex.sql === 'string' && ex.sql.length > 0);            // rendered SQL returned
   assert.ok(ex.plan && typeof ex.plan === 'object');                     // plan object returned
   assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
-  assert.ok(typeof ex.plan.execution_plan === 'string' && ex.plan.execution_plan.length > 0); // execution plan present
 
   // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
   // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.
@@ -129,6 +127,12 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
   assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time_day
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
+  // a key is the result column it is handed as — the same 7 days, desc puts the latest first — never
+  // the token the server resolves it to
+  const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day', direction: 'desc' }] });
+  assert.equal(byColumn.row_count, 7);
+  assert.deepEqual(byColumn.rows.map((r) => String(r.metric_time_day)), sorted.rows.map((r) => String(r.metric_time_day)).reverse());
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time__day' }] }), /Orderable:/);
 });
 
 // ── 2. joins: group_by_joined_attribute ──────────────────────────────────────

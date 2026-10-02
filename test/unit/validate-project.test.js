@@ -8,16 +8,16 @@ import { loadCatalogFromProject, validateDbtProject } from '../../src/catalog.js
 const SCHEMA = `version: 2
 models:
   - name: fct_events
-    meta: { mcp: { role: events, primary_entity: event, known_events: [login] } }
+    config: { meta: { mcp: { role: events, primary_entity: event, known_events: [login] } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
-      - { name: props, data_type: json, meta: { mcp: { is_event_data: true, properties: {} } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: foreign } } } } }
+      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is_time: true } } } }
+      - { name: event_name, data_type: string, config: { meta: { mcp: { is_event_name: true } } } }
+      - { name: props, data_type: json, config: { meta: { mcp: { is_event_data: true, properties: {} } } } }
   - name: dim_users
-    meta: { mcp: { role: users } }
+    config: { meta: { mcp: { role: users } } }
     columns:
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
 const MACRO = '{% macro mcp_relation_columns(model_name) %}{% endmacro %}\n';

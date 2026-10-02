@@ -17,8 +17,7 @@
 
 import { classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
 import { SERVER_INFO } from './mcp-surface.js';
-import { TASKS_EXTENSION } from './mcp-server.js';
-import { envelopeCapabilities, declaresExtension } from './client-extensions.js';
+import { envelopeCapabilities, declaresExtension, TASKS_EXTENSION } from './client-extensions.js';
 
 const METHODS = new Set(['tasks/get', 'tasks/cancel']);
 
@@ -31,9 +30,10 @@ function decodeHeader(v) {
 
 /**
  * Answer a 2026-07-28 tasks/get or tasks/cancel. Returns true when it answered, false when the
- * request is not one (the caller hands it to the SDK).
+ * request is not one (the caller hands it to the SDK). `serverInfo` is the one every other answer
+ * carries — its version with the surface's fingerprint (src/surface-change.js).
  */
-export function answerTaskRequest(tasks, req, res) {
+export function answerTaskRequest(tasks, req, res, serverInfo = SERVER_INFO) {
   const body = req.body;
   if (req.method !== 'POST' || !body || Array.isArray(body) || !METHODS.has(body.method)) return false;
   const outcome = classifyInboundRequest({
@@ -57,10 +57,12 @@ export function answerTaskRequest(tasks, req, res) {
   if (!declaresExtension(envelopeCapabilities(body, CLIENT_CAPABILITIES_META_KEY), TASKS_EXTENSION)) {
     return fail(400, -32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
   }
+  // a task this server does not know is the handler's answer, so it is in-band (HTTP 200) like every
+  // handler error — only the entry checks above (-32020, -32021, the classifier's) are HTTP 400
   const t = typeof taskId === 'string' ? tasks.get(taskId) : null;
-  if (!t) return fail(400, -32602, 'Failed to retrieve task: Task not found (it never existed, or it ended more than its TTL ago)');
+  if (!t) return fail(200, -32602, 'Failed to retrieve task: Task not found (it never existed, or it ended more than its TTL ago)');
 
   if (body.method === 'tasks/cancel') tasks.cancel(t.taskId, 'Cancelled by the client (tasks/cancel).');
   const result = body.method === 'tasks/get' ? tasks.detailed(t) : {};
-  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: { name: SERVER_INFO.name, version: SERVER_INFO.version } } } });
+  return reply(200, { result: { ...result, resultType: 'complete', _meta: { [SERVER_INFO_META_KEY]: serverInfo } } });
 }

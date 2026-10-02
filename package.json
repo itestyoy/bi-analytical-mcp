@@ -12,7 +12,10 @@
     "test:integration": "node --test test/integration/*.test.js",
     "test:all": "node --test test/unit/*.test.js test/integration/*.test.js",
     "build:app": "vite build --config src/apps/result-view/vite.config.js && vite build --config src/apps/retentioneering-view/vite.config.js",
-    "dbt:env": "node scripts/dbt-env.mjs"
+    "dbt:env": "node scripts/dbt-env.mjs",
+    "settings:example": "node scripts/env-example.mjs",
+    "eval": "node evals/run.mjs",
+    "eval:check": "node evals/check.mjs"
   },
   "license": "MIT",
   "dependencies": {
@@ -31,6 +34,7 @@
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.130.0",
     "@modelcontextprotocol/client": "^2.1.0",
     "chart.js": "^4.5.1",
     "chartjs-chart-sankey": "^0.19.1",

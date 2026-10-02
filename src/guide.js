@@ -8,7 +8,7 @@
 // Built from the catalog (roles/event_semantics) + recipes (the per-task playbooks),
 // so it stays correct for ANY catalog without hardcoding names.
 
-import { RESEARCH_GUIDES, RESEARCH_ROUTE, RESEARCH_SCOPE, isResearchGuide, researchGuide } from './research-guides.js';
+import { RESEARCH_DOMAIN_NAMES, RESEARCH_GUIDES, RESEARCH_ROUTE, RESEARCH_SCOPE, isResearchGuide, researchGuide } from './research-guides.js';
 
 export function buildGuide(catalog, recipes, { task, python = null, features = [] } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
@@ -39,7 +39,7 @@ export function buildGuide(catalog, recipes, { task, python = null, features = [
   ];
 
   const routing_triggers = [
-    { if: RESEARCH_SCOPE, do: `read ${RESEARCH_ROUTE} before the first query, then follow it with these tools.` },
+    { if: RESEARCH_SCOPE, do: `read ${RESEARCH_ROUTE}, ${RESEARCH_DOMAIN_NAMES}, before the first query, then follow it with these tools.` },
     // what each feature this deployment runs adds to the routing (src/features.js)
     ...features.flatMap((f) => f.guide?.triggers || []),
     { if: 'a named KPI / rate / cumulative metric', do: 'governed metric: build_semantic_model + query_semantic_model — NOT a hand-rolled pipeline.' },

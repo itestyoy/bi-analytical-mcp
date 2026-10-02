@@ -20,7 +20,7 @@ import { parseArgs } from 'node:util';
 import Anthropic from '@anthropic-ai/sdk';
 import { CASES } from './cases.js';
 import { startEval, callTool, truthOf, valueOf } from './harness.mjs';
-import { ANSWER_FORMAT, answerStates, toolsMeet } from './grade.mjs';
+import { ANSWER_FORMAT, answerStates, disclosures, toolsMeet } from './grade.mjs';
 
 const { values: opt } = parseArgs({
   options: {
@@ -47,6 +47,7 @@ const ZERO = () => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
 async function runCase(world, c, trace) {
   const tools = (await world.client.listTools()).tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
   const system = world.client.getInstructions() || '';
+  trace.instructions = system;
   const messages = [{ role: 'user', content: `${c.prompt}\n\n${ANSWER_FORMAT}` }];
   const started = Date.now();
   try {
@@ -119,7 +120,7 @@ function save() {
 const evalRun = await startEval();
 try {
   for (const c of cases) {
-    const trace = { final: '', stop: null, turns: 0, calls: [], usage: ZERO(), ms: 0 };
+    const trace = { final: '', instructions: '', stop: null, turns: 0, calls: [], usage: ZERO(), ms: 0 };
     let truth = null; let decoy = null; let error = null; let world = null;
     try {
       truth = await truthOf(evalRun.wh, c.answer);
@@ -132,15 +133,16 @@ try {
       await world?.close().catch(() => {});
     }
     const toolCheck = toolsMeet(c.expect, trace.calls);
+    const disclosed = disclosures(c.withhold, trace.final, trace.instructions);
     const answered = !error && trace.stop === 'end_turn' && answerStates(c.answer, truth, trace.final, { decoy });
     const r = {
-      id: c.id, kind: c.kind, pass: answered && toolCheck.ok, answer_ok: answered, tools_ok: toolCheck.ok, tool_problems: toolCheck.problems,
+      id: c.id, kind: c.kind, pass: answered && toolCheck.ok && !disclosed.length, answer_ok: answered, tools_ok: toolCheck.ok, tool_problems: toolCheck.problems, disclosed,
       truth, decoy, stop: trace.stop, turns: trace.turns, calls: trace.calls.length, failed_calls: trace.calls.filter((x) => x.is_error).length,
       tools_called: trace.calls.map((x) => x.name), usage: trace.usage, ms: trace.ms, final: trace.final, trace: trace.calls, ...(error ? { error } : {}),
     };
     results.push(r);
     save();
-    const why = [error ? `error: ${error}` : !answered ? `stated answer (stop ${r.stop}) is not ${JSON.stringify(truth)}` : '', ...toolCheck.problems].filter(Boolean).join('; ');
+    const why = [error ? `error: ${error}` : !answered ? `stated answer (stop ${r.stop}) is not ${JSON.stringify(truth)}` : '', ...toolCheck.problems, ...disclosed].filter(Boolean).join('; ');
     console.log(`${r.pass ? 'PASS' : 'FAIL'} ${c.kind.padEnd(8)} ${c.id.padEnd(24)} calls=${r.calls} failed=${r.failed_calls} turns=${r.turns} tokens=${r.usage.input + r.usage.output}${r.pass ? '' : `  ${why}`}`);
   }
 } finally {

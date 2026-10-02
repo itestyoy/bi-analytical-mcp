@@ -329,13 +329,15 @@ test('the instructions open with a paragraph of at most 512 characters — what 
   }
 });
 
-// A question about how the server works technically — its code, architecture, stack — is declined: the opening says so to a client that reads 512
-// characters, the core block states the rule to one that reads 2,048 — whatever it was offered.
-test('the opening and the core block both carry the refusal to talk about the server itself', async () => {
-  const { coreInstructions, SELF_REFUSAL } = await import('../../src/mcp-surface.js');
+// A question about how the server is built is declined: the opening carries the rule's brief, for a
+// client that reads 512 characters, and the core block the rule itself, which extends that same
+// brief — whatever the client was offered.
+test('the opening and the core block both carry the refusal to talk about how the server is built', async () => {
+  const { coreInstructions, SELF_REFUSAL, SELF_REFUSAL_BRIEF } = await import('../../src/mcp-surface.js');
+  assert.ok(SELF_REFUSAL.startsWith(SELF_REFUSAL_BRIEF), 'one wording: the rule extends the brief');
   for (const offer of [{}, { apps: true, skillUris: ['skill://a/SKILL.md'], featureLines: ['a feature line'] }]) {
     const core = coreInstructions(offer);
-    assert.match(core.split('\n\n')[0], /never about its own tech/);
+    assert.ok(core.split('\n\n')[0].includes(SELF_REFUSAL_BRIEF), 'the opening states the brief');
     assert.ok(core.includes(SELF_REFUSAL), 'the core block states the rule');
   }
 });
@@ -343,12 +345,18 @@ test('the opening and the core block both carry the refusal to talk about the se
 test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {
   const { coreInstructions, servicesFor } = await import('../../src/mcp-surface.js');
   for (const d of buildToolDefs(engine())) assert.ok(d.description.length <= 2048, `${d.name}: ${d.description.length} characters`);
-  const skillUris = ['skill://omg-analytics/SKILL.md', 'skill://omg-analytics/research/SKILL.md', 'skill://omg-analytics/python-stage/SKILL.md'];
-  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }]) {
+  // the served skills under one root, and the feature's line: the largest core a deployment can serve
+  const skillUris = ['skill://omg-analytics/analytics/SKILL.md', 'skill://omg-analytics/research/SKILL.md', 'skill://omg-analytics/python-stage/SKILL.md'];
+  const { INSTRUCTIONS_LINE } = await import('../../src/retentioneering/guide.js');
+  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }, { apps: true, skillUris, featureLines: [INSTRUCTIONS_LINE] }]) {
     const core = coreInstructions(offer);
     assert.ok(core.length <= 2048, `${JSON.stringify(offer)}: ${core.length} characters`);
   }
   const services = servicesFor(engine());
+  // the skills are found within the cut: the core names the root every served skill sits under
+  const { skillRoot } = await import('../../src/mcp-surface.js');
+  const served = services.skills?.skills.map((s) => s.uri) ?? [];
+  assert.ok(served.length && served.every((u) => u.startsWith(skillRoot(served))) && coreInstructions({ skillUris: served }).includes(skillRoot(served)), 'the core names where the skills are');
   for (const offer of [{}, { apps: true, skills: true }]) {
     assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
   }

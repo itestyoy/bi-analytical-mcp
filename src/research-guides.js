@@ -207,7 +207,9 @@ export const RESEARCH_DOMAINS = Object.keys(RESEARCH_GUIDES).filter((k) => k !==
  * instructions and the research skill all interpolate it rather than keep a wording of their own.
  */
 export const RESEARCH_SCOPE = 'an open question rather than a lookup — why a metric moved, what drives an outcome, whether a change worked, a deep dive';
-export const RESEARCH_ROUTE = `semantic_index({ request: { guide: "research" } }) — the sequence, checks and report, and a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
+export const RESEARCH_ROUTE = 'semantic_index({ request: { guide: "research" } }) — the investigation sequence, checks and report';
+/** The domain guides by name, said where the route has room for them — the core instructions name only the route, so a new domain costs their budget nothing. */
+export const RESEARCH_DOMAIN_NAMES = `with a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
 
 const HOW_TO_FETCH = 'A recipe "<id>" named here is fetched with semantic_index({ request: { recipe: "<id>" } }): a worked, warehouse-proven payload of that technique.';
 

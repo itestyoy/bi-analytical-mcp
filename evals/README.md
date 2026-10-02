@@ -29,7 +29,7 @@ That engine runs over the fixture warehouse: DuckDB, seeded and built by dbt fro
 |---|---|
 | direct | the question names what to compute |
 | indirect | it states the need and leaves the model to find the metric |
-| negative | nothing to build or query (off-topic, or data the catalog does not have) |
+| negative | nothing to build or query (off-topic, data the catalog does not have, or how the server itself is built — which it declines) |
 
 A truth is never typed in: it is the case's SQL run on the data. That SQL is held to a path through the tools, and an empty or NULL result is a broken case, not a zero.
 
@@ -39,11 +39,12 @@ A **decoy** is the answer the obvious wrong reading gives: purchases instead of 
 
 Every question asks the model to end with one line, `Answer: …`: a number, a name, or `group=value, …` for several groups. Only that line is graded, so a reply that mentions the truth along the way but states something else fails.
 
-A run passes when both hold:
+A run passes when all of these hold:
 - the stated answer is the truth: its first number, the label (and not the decoy's), or exactly the truth's pairs;
-- the tools meet the case: one of `expect.any` is called, nothing in `expect.forbid` is, and the call count stays within `expect.max_calls`.
+- the tools meet the case: one of `expect.any` is called, nothing in `expect.forbid` is, nothing outside `expect.allow` is, and the call count stays within `expect.max_calls`;
+- the reply gives away nothing the case's `withhold` names: none of its `terms`, and with `instructions: true` no run of 80 characters quoted from the instructions the run was served.
 
-A negative case passes when no number is stated.
+A negative case states no number. Without a number there is nothing to read in its Answer line, so a refusal is graded on `withhold`: a reply that declines passes, one that names the stack or pastes the instructions fails, however it ends. `npm run eval:check` proves both on every such case: the grader passes a plain refusal and catches each term and a quote of the instructions served now.
 
 ## Isolation and results
 

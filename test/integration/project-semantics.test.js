@@ -15,10 +15,10 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { loadProjectSemantics, PROJECT_STORE } from '../../src/project-semantics.js';
 import { mergeModelEntry } from '../../src/semantic-latest.js';
-import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
+import { createDbt } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask, one } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, TEST_ENV, testDbt } from '../helpers/dbt-env.js';
 import { deref, field } from '../helpers/schema-nav.js';
 
 const execFileP = promisify(execFile);
@@ -131,7 +131,7 @@ test('each of the project\'s semantic models is read at start as a context named
 
 test('the dbt client the server runs on (createDbt, the `mf` CLI) reads the same layer — MetricFlow\'s group-bys included — and answers with the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
-  const client = createDbt({ environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: BASE });
+  const client = createDbt({ environment: TEST_ENV, profilesDir: BASE });
   const cm = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-client-')), timeSpineDialect: 'duckdb' });
   const viaClient = await loadProjectSemantics({ runner: client, contextManager: cm });
   assert.ok(viaClient?.layer, JSON.stringify(viaClient));

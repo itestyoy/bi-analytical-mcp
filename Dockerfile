@@ -12,7 +12,7 @@ RUN apt-get update \
 WORKDIR /app
 
 # dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
-# the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary. WHAT goes into
+# the server uses DBT_ENV (else `dbt-v1`, for now — src/dbt/environments.js DEFAULT_ENV) and reads its dbt version from the binary. WHAT goes into
 # each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact version
 # of every package, and scripts/dbt-env.mjs installs exactly those. There is no requirements file to
 # hand in, and no warehouse to choose: each carries the adapters of both DuckDB and BigQuery, and dbt
@@ -56,7 +56,7 @@ COPY config ./config
 ENV HOST=0.0.0.0 \
     PORT=3000 \
     MCP_WORKSPACE=/workspace \
-    DBT_ENV=dbt-v2
+    DBT_ENV=dbt-v1
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

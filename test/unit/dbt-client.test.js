@@ -66,7 +66,7 @@ test('the client is chosen by the dbt major version: 1.x reads the legacy semant
   assert.throws(() => createDbt({ version: 3 }), /dbt 3\.x is not supported/);
 });
 
-test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an environment of its own', async () => {
+test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFlow is an environment of its own', async () => {
   const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
   const { environmentBuild, INSTALLER } = await import('../../src/dbt/environment-specs.js');
   const { mkdirSync } = await import('node:fs');
@@ -86,11 +86,11 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   venv('metricflow', ['mf', 'dbt', 'python'], '1.11.11');       // MetricFlow (+ the dbt-core it queries with)
   assert.deepEqual(listEnvironments({ dir }).map((e) => e.name), ['dbt-v1', 'dbt-v2', 'metricflow']);
   const d = resolveEnvironment(undefined, { dir, env: {} });
-  assert.equal(d.name, 'dbt-v2');
-  assert.equal(d.dbtBin, join(dir, 'dbt-v2', 'bin', 'dbt'));
+  assert.equal(d.name, 'dbt-v1');
+  assert.equal(d.dbtBin, join(dir, 'dbt-v1', 'bin', 'dbt'));
   assert.deepEqual([d.metricflowFrom, d.mfBin, d.pythonBin], ['metricflow', join(dir, 'metricflow', 'bin', 'mf'), join(dir, 'metricflow', 'bin', 'python')]);
-  const one = resolveEnvironment(undefined, { dir, env: { DBT_ENV: 'dbt-v1' } });
-  assert.deepEqual([one.name, one.metricflowFrom], ['dbt-v1', 'metricflow'], 'DBT_ENV names another dbt; MetricFlow stays its own');
+  const one = resolveEnvironment(undefined, { dir, env: { DBT_ENV: 'dbt-v2' } });
+  assert.deepEqual([one.name, one.metricflowFrom], ['dbt-v2', 'metricflow'], 'DBT_ENV names another dbt; MetricFlow stays its own');
   assert.throws(() => resolveEnvironment('nope', { dir }), /environment 'nope' not found.*there: dbt-v1, dbt-v2, metricflow\)/);
   assert.throws(() => resolveEnvironment(undefined, { dir, env: { MF_ENV: 'mf2' } }), /MetricFlow environment 'mf2' not found/);
   // only OUR environments run: a name the specs do not define, a venv not built by `create`, or one
@@ -114,5 +114,5 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*not built by this tool/);
   // the client takes the environment's binaries, and its version from them
   const c = createDbt({ environment: d });
-  assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [2, d.dbtBin, d.mfBin, 'dbt-v2']);
+  assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [1, d.dbtBin, d.mfBin, 'dbt-v1']);
 });

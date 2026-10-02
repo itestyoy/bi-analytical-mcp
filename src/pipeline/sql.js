@@ -78,10 +78,15 @@ export const sourceProp = (catalog, source, name) => (source
 // to the warehouse.
 export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
 
-export function rawUnknownColumns(sql, cols) {
-  const text = String(sql)
+/** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */
+export function unquotedSql(sql) {
+  return String(sql)
     .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
     .replace(/'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, ' ');
+}
+
+export function rawUnknownColumns(sql, cols) {
+  const text = unquotedSql(sql);
   const known = new Set([...cols.keys()].map((c) => c.toLowerCase()));
   for (const m of text.matchAll(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*->/gi)) known.add((m[1] || m[2]).toLowerCase());
   const unknown = [];

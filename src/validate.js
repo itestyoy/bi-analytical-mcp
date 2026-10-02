@@ -30,7 +30,7 @@ export function makeValidators(schemas) {
  * a caller used to SQL or another tool writes `avg`, `q`, `fn`, `as` — and the refusal says what
  * this server calls it, when that name is allowed where it was written.
  */
-const CROSS_PATH_SPELLING = {
+export const CROSS_PATH_SPELLING = {
   avg: 'average',
   mean: 'average',
   q: 'percentile',

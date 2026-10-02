@@ -6,7 +6,7 @@
 // constant's TYPE should be is the other half of the rule, typedLiteral below, used where the type
 // of what is compared is known.
 
-import { sqlLiteral } from './dialects/base.js';
+import { sqlLiteral, isNumericType } from './dialects/base.js';
 
 /** The comparison operators, as the tools spell them → SQL. */
 export const COMPARE_SQL = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
@@ -74,7 +74,6 @@ export function comparison(lhs, op, value, { lit = sqlLiteral } = {}) {
 // HERE, when the stage is added, rather than by the warehouse when it runs. A column typed 'string'
 // is left as it is: that is also the type of what nothing more is known about.
 const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
-const NUMERIC_TYPES = new Set(['numeric', 'int', 'integer', 'float']);
 
 /** A constant as a literal of `type` (the compared column's; null for unknown). `where` names it in a refusal. */
 export function typedLiteral(type, v, where) {
@@ -84,7 +83,7 @@ export function typedLiteral(type, v, where) {
     if (b === undefined) throw new Error(`${where} is a boolean column: compare it with true or false, not ${JSON.stringify(v)}`);
     return sqlLiteral(b);
   }
-  if (NUMERIC_TYPES.has(type)) {
+  if (isNumericType(type)) {
     if (typeof v === 'number') return sqlLiteral(v);
     if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return sqlLiteral(Number(v));
     throw new Error(`${where} is a numeric column: compare it with a number, not ${JSON.stringify(v)}`);

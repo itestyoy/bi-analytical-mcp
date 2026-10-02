@@ -8,7 +8,7 @@
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
-import { FNS, exprCalls, conditionCalls } from '../pipeline/compute.js';
+import { FNS, exprCalls } from '../pipeline/compute.js';
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -82,10 +82,10 @@ export class PipelineAdvisor {
    * from here there is no way to know how many rows arrive.
    */
   globalWindowWarnings(stage) {
-    // every function the stage's expressions call, nested ones and those in conditions included (a
-    // where's conditions take no window function, but a raw SQL there may carry one)
-    const calls = stage?.stage === 'compute' ? exprCalls(stage.expr) : stage?.stage === 'where' ? conditionCalls(stage.conditions) : [];
-    if (!calls.length) return [];
+    // every function the computed column's expression calls, nested ones and those a CASE's conditions
+    // test included (a where takes no window function at all: it is refused when the step is added)
+    if (stage?.stage !== 'compute') return [];
+    const calls = exprCalls(stage.expr);
     const windowed = calls.find((c) => FNS[c.fn]?.window && !(c.over?.partition_by || []).length);
     // Raw SQL is where this actually came from: a window function is only reachable through its
     // `over`, but `fn: 'raw'` carries whatever the caller wrote.

@@ -9,7 +9,8 @@
 import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
-import { rawUnknownColumns, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
+import { isNumericType, isTimeType } from '../dialects/base.js';
+import { rawUnknownColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
 import { conditionsSql, eachCondition } from '../conditions.js';
 import { form, SCALAR } from '../schema-kit.js';
 
@@ -50,13 +51,20 @@ const params = () => ({
   over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION, order_by: ORDER, frame: FRAME } },
 });
 
-/** The type of a value picked from several (coalesce, least, greatest): the one the typed arguments
- *  share — numbers of any kind are numeric — else `fallback`; an untyped constant (null) says nothing. */
-const NUMBERS = new Set(['int', 'integer', 'numeric', 'float']);
+// a window clause in raw SQL, outside its string literals, quoted names and comments
+const RAW_OVER = /\bover\s*\(/i;
+
+/** The type of a value picked from several (coalesce, least, greatest): the one its typed arguments
+ *  share; numbers of any kind are numeric, moments of any kind a time; arguments of kinds that do not
+ *  meet are 'unknown' (compared as written); with no typed argument, `fallback`. An untyped constant
+ *  (null) says nothing. */
 function commonType(types, fallback) {
   const typed = [...new Set(types.filter((t) => t && t !== 'unknown'))];
+  if (!typed.length) return fallback;
   if (typed.length === 1) return typed[0];
-  return typed.length && typed.every((t) => NUMBERS.has(t)) ? 'numeric' : fallback;
+  if (typed.every(isNumericType)) return 'numeric';
+  if (typed.every(isTimeType)) return 'time';
+  return 'unknown';
 }
 
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
@@ -134,7 +142,10 @@ export const FNS = {
   // escape hatch: verbatim dialect SQL — over columns that exist at this point
   raw: {
     args: 0, needs: ['sql'], may: ['type'],
-    sql: ({ cols, p }) => {
+    sql: ({ cols, p, opts }) => {
+      // a raw window is still a window: where SQL takes none, it is refused as the structured one is
+      if (opts.windows === false && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and a where cannot compare one — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column');
+      if (opts.inWindow && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and it cannot be an argument of another window function — compute it into a column first (a compute stage), then use that column');
       const unknown = rawUnknownColumns(p.sql, cols);
       if (unknown.length) throw new Error(`pipeline: a raw expression names ${unknown.map((n) => `'${n}'`).join(', ')}, not ${unknown.length === 1 ? 'a column' : 'columns'} at this stage (available: ${[...cols.keys()].join(', ')}) — a raw expression reads the columns the steps before it produced`);
       return { expr: `(${p.sql})`, type: p.type || 'string' };
@@ -157,7 +168,6 @@ export const FNS = {
 /** The parameter a function's spec names, as the caller writes it (`over_frame` is written `over`). */
 const written = (name) => (name === 'over_frame' ? 'over' : name);
 
-/** The expression's SQL and type over the columns at this step. `at` names it in a refusal. */
 /**
  * The expression's SQL and type over the columns at this step. `at` names it in a refusal. `opts`:
  * `windows: false` where SQL takes no window function (a where condition — it filters rows before

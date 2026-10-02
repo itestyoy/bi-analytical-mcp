@@ -9,10 +9,11 @@ import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRu
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { samplingNote, pageBlock } from './helpers.js';
+import { READ_PAGE } from '../schema/fields.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 
-/** How many rows of a built table its build hands back (the table holds them all; a read pages it). */
-const SHOWN_ROWS = 200;
+/** How many rows of a built table its build hands back — a read's page (the table holds them all; a read pages it). */
+const SHOWN_ROWS = READ_PAGE;
 /** Whether a pipeline's rows come out sorted: its last stage that is not a limit is an order_by. */
 const endsSorted = (stages) => [...(stages || [])].reverse().find((st) => st.stage !== 'limit')?.stage === 'order_by';
 

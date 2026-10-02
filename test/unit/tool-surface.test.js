@@ -385,4 +385,9 @@ test('a call with nothing in it is the empty request, and fields at the top are 
   assert.equal(both.result.isError, true);
   assert.match(JSON.parse(both.result.content[0].text).error.message, /the field 'model' goes inside request, not beside it/);
   assert.equal((await runTool(e, 'semantic_index', { request: 'users' })).result.isError, true);
+  // a request written as the JSON text of an object is that object — the whole call too; text that is
+  // not one stays refused
+  assert.deepEqual(await answer({ request: JSON.stringify({ model: 'users' }) }), await answer({ request: { model: 'users' } }));
+  assert.deepEqual(await answer(JSON.stringify({ request: { model: 'users' } })), await answer({ request: { model: 'users' } }));
+  for (const request of ['{ model: users', '["users"]']) assert.equal((await runTool(e, 'semantic_index', { request })).result.isError, true, request);
 });

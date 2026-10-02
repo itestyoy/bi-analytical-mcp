@@ -125,6 +125,12 @@ export function isCallableTool(engine, name) {
   return typeof name === 'string' && toolsOf(engine).has(name);
 }
 
+/** A value written as the JSON text of an object, read as that object; any other value as it is. */
+function asObject(v) {
+  if (typeof v !== 'string' || !/^\s*\{/.test(v)) return v;
+  try { const o = JSON.parse(v); return isPlainObject(o) ? o : v; } catch { return v; }
+}
+
 /**
  * The input of a call: the value of its one field, `request`. What a client is SHOWN is that one
  * field (wireSchema); what it SENDS is read for what it means, because a model does not always send
@@ -133,18 +139,22 @@ export function isCallableTool(engine, name) {
  * an empty object. So a call with nothing in it is the empty request, and a call whose fields sit at
  * the top is that request — either way validated against the same schema as `{ request }`. Only a
  * call that is both — `request` beside other fields — is refused, since which one is meant cannot be
- * told; as is a `request` that is not an object.
+ * told; as is a `request` that is not an object. A model also writes a nested object as its JSON text
+ * (seen on display_model_result, whose `display` is large): text that parses to an object is that
+ * object, anything else stays what it is and is refused.
  */
 export function requestOf(name, args) {
-  const given = isPlainObject(args) ? args : {};
+  const parsed = asObject(args);
+  const given = isPlainObject(parsed) ? parsed : {};
   const keys = Object.keys(given);
   if (!keys.includes('request')) return { request: given };
-  if (keys.length === 1 && isPlainObject(given.request)) return { request: given.request };
+  const request = asObject(given.request);
+  if (keys.length === 1 && isPlainObject(request)) return { request };
   const others = keys.filter((k) => k !== 'request');
   const call = others.length
     ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request, not beside it`
     : `${name}({ request: { … } }) — request holds the fields the tool's schema lists ({ request: {} } when it needs none)`;
-  const bad = !isPlainObject(given.request) ? ' (request must be an object)' : '';
+  const bad = !isPlainObject(request) ? ' (request must be an object)' : '';
   return { error: `${name} takes its input under one field, request: call ${call}${bad}` };
 }
 
@@ -192,7 +202,8 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // (the ids a call carried, under request or at the top — a call refused for putting fields beside
   // request is still found by them)
   const top = isPlainObject(args) ? args : {};
-  const inner = { ...top, ...(isPlainObject(top.request) ? top.request : {}) };
+  const given = requestOf(name, args).request;
+  const inner = { ...top, ...(isPlainObject(given) ? given : {}) };
   const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');

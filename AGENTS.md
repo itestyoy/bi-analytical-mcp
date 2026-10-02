@@ -277,7 +277,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the same schema it published, so what the model sees and what is checked are one schema. That point
   reads a call for what it means: nothing at all is the empty request, and fields at the top are the
   request (a host holding an earlier version's cached list, or one that drops an empty object) —
-  checked by the same schema; only `request` beside other fields is refused, as ambiguous. There are no
+  checked by the same schema, and a `request` written as the JSON text of an object is that object;
+  only `request` beside other fields is refused, as ambiguous. There are no
   old names: every tool is listed and called by its one name (no alias, no unlisted tool). What a tool
   hands its input to is a private engine METHOD (`_analyzeExperiment`, `_buildPipeline`, `_dropContext` …)
   with an input contract named `<tool>.<mode>` (`experiment.analyze`, `build_pipeline_model.pipeline`,

@@ -33,10 +33,36 @@ function entityExpr(catalog, ent) {
 }
 
 
+/**
+ * A measure as THIS warehouse's semantic layer can compute it. Where the warehouse computes a median
+ * or a percentile only approximately (the dialect's `approximateStats` — BigQuery's APPROX_QUANTILES,
+ * the same function a pipeline's percentile runs), MetricFlow refuses an exact one: there a median is
+ * the approximate continuous 50th percentile, and every percentile is approximate.
+ */
+function onWarehouse(catalog, me) {
+  if (me.agg !== 'median' && me.agg !== 'percentile') return me;
+  const approx = getDialect(catalog.dialect).approximateStats;
+  if (!approx.includes(me.agg)) return me;
+  if (me.agg === 'median') return { ...me, agg: 'percentile', agg_params: { percentile: 0.5, use_discrete_percentile: false, use_approximate_percentile: true } };
+  return { ...me, agg_params: { ...me.agg_params, use_discrete_percentile: false, use_approximate_percentile: true } };
+}
+
+/** A time column of a model as its semantic model's dimension reads it (the dialect's semanticTimeExpr). */
+function timeExpr(catalog, key, column) {
+  const dataType = catalog.getModel(key).data_types?.[column];
+  return dataType ? getDialect(catalog.dialect).semanticTimeExpr(column, dataType) : column;
+}
+
+/** A time dimension named for its column, with an `expr` only where the warehouse reads the column as another type. */
+function timeDimension(catalog, key, name, granularity, column = name) {
+  const expr = timeExpr(catalog, key, column);
+  return { name, type: 'time', type_params: { time_granularity: granularity || 'day' }, ...(expr !== name ? { expr } : {}) };
+}
+
 /** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED
  *  aggregation, so every task computes them the same way. */
-function declaredMeasures(m) {
-  return Object.entries(m.measures || {}).map(([name, mm]) => ({
+function declaredMeasures(catalog, m) {
+  return Object.entries(m.measures || {}).map(([name, mm]) => onWarehouse(catalog, {
     name, agg: mm.agg, expr: mm.expr,
     ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
     ...(mm.label ? { label: mm.label } : {}),
@@ -57,7 +83,7 @@ export function renderBaseModel(catalog, key) {
     sm.primary_entity = primaryEntityName(m);
     sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: entityExpr(catalog, e) }));
     sm.dimensions = [
-      { name: EVENT_TIME_DIM, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' }, expr: m.time.column },
+      timeDimension(catalog, key, EVENT_TIME_DIM, m.time.granularity, m.time.column),
       ...partitionDim(m),
     ];
     // …and its own declared ATTRIBUTES. A fact is not only a measure carrier: when another
@@ -65,10 +91,14 @@ export function renderBaseModel(catalog, key) {
     // FOR — `<relationship>__<attribute>` can only resolve to a dimension the manifest actually
     // carries, so a fact whose attributes were left out advertised join paths nothing could
     // serve. They cost nothing when unused.
+    // The event NAME is an attribute of every event — which event it was — and the catalog offers it
+    // as one (modelDimensionColumns); without it here, "group by event" was offered and refused.
+    const eventName = m.event_name?.column;
+    if (eventName && !(m.dimensions || {})[eventName] && eventName !== EVENT_TIME_DIM) sm.dimensions.push({ name: eventName, type: 'categorical' });
     for (const [name, d] of Object.entries(m.dimensions || {})) {
       if (name === EVENT_TIME_DIM) continue;
       sm.dimensions.push(d.type === 'time'
-        ? { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } }
+        ? timeDimension(catalog, key, name, d.granularity)
         : { name, type: 'categorical' });
     }
     // A source's own DECLARED measures (a `meta.mcp.measures` entry with `agg`, or a column
@@ -76,7 +106,7 @@ export function renderBaseModel(catalog, key) {
     // everyone. They are published for EVERY role: the catalog already offers them as base
     // measure references, so a fact that dropped them left a metric pointing at a measure the
     // manifest did not contain. Its agg_time_dimension is the event-time axis set above.
-    sm.measures = declaredMeasures(m);
+    sm.measures = declaredMeasures(catalog, m);
     return sm;
   }
 
@@ -114,10 +144,10 @@ export function renderBaseModel(catalog, key) {
   let timeDim = null;
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
-      const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
+      const dim = timeDimension(catalog, key, name, d.granularity);
       // validity_params is nested UNDER type_params (dbt-semantic-interfaces schema) — NOT a
       // sibling of it; the top-level placement is what dbt rejected as an unexpected property.
-      if (scd && d.validity) { dim.type_params.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
+      if (scd && d.validity) { dim.type_params.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = timeExpr(catalog, key, name); }
       sm.dimensions.push(dim);
       // the declared axis wins when it IS emitted; otherwise the first non-validity time dimension
       if (!(scd && d.validity) && (name === m.time?.column || !timeDim)) timeDim = name;
@@ -135,7 +165,7 @@ export function renderBaseModel(catalog, key) {
   // dimension-only and drop any catalog measures — measures belong on the events fact, not on a
   // slowly-changing dimension.
   if (!scd) {
-    const measures = declaredMeasures(m);
+    const measures = declaredMeasures(catalog, m);
     if (measures.length) sm.measures = measures;
   }
   return sm;
@@ -173,12 +203,13 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
       // schema either way). Two dimensions with one name is a manifest dbt rejects, so the base
       // one stands and the duplicate is dropped.
       const have = new Set(sm.dimensions.map((d) => d.name));
-      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(manifestOnly(d)); }
+      // a task's time dimension over a column of the model reads it as the base model's own do
+      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(d.type === 'time' && d._attribute ? { ...manifestOnly(d), expr: timeExpr(catalog, key, d.expr) } : manifestOnly(d)); }
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
         if (scd) { droppedMeasures.add(me.name); continue; }
-        const mm = { ...me };
+        const mm = onWarehouse(catalog, { ...me });
         if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
       }

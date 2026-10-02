@@ -62,6 +62,7 @@ import { taskResultMethods } from './engine/task-results.js';
 import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
+import { CONTEXT_PAGE } from './schema/fields.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -384,7 +385,7 @@ export class Engine {
    */
   async context(input = {}) {
     this._validate('context', input);
-    return input.action === 'list' ? this._listContexts() : this._describeContext({ context_id: input.context_id });
+    return input.action === 'list' ? this._listContexts(input) : this._describeContext({ context_id: input.context_id });
   }
 
   /** Remove a context, its pipeline model, or one model's task additions. */
@@ -430,8 +431,33 @@ export class Engine {
     return this.ctxs.checkpointConsumers(id).filter(({ consumer, model }) => reads(this.ctxs.get(consumer).state.draft, model));
   }
 
-  _listContexts() {
-    return { contexts: this.ctxs.list() };
+  /**
+   * The contexts, a PAGE at a time and the most recently used first: a long-running server holds every
+   * conversation's contexts (they carry no owner), and the whole list did not fit a model's window.
+   * `search` keeps those whose id, task names, metrics, notes or description contain the text; `total`
+   * and `next_offset` say how many there are and where the next page starts. A feature's context is
+   * listed with what the feature says it holds (its `describeContext` brief).
+   */
+  _listContexts({ limit = CONTEXT_PAGE, offset = 0, search } = {}) {
+    const needle = typeof search === 'string' && search.trim() ? search.trim().toLowerCase() : null;
+    const all = this.ctxs.list()
+      .map((entry) => {
+        const brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief;
+        return brief ? { ...entry, ...brief } : entry;
+      })
+      .filter((entry) => !needle || JSON.stringify(entry).toLowerCase().includes(needle))
+      .sort((a, b) => a.idle_ms - b.idle_ms);
+    const page = all.slice(offset, offset + limit);
+    return { total: all.length, offset, contexts: page, ...(offset + page.length < all.length ? { next_offset: offset + page.length } : {}) };
+  }
+
+  /** What a feature says context `ctx` holds (its describeContext), or null when it is none of a feature's. */
+  _featureContext(ctx) {
+    for (const f of this.features || []) {
+      const d = ctx && f.describeContext?.(this, ctx);
+      if (d) return d;
+    }
+    return null;
   }
 
   /**
@@ -515,6 +541,12 @@ export class Engine {
     this._validate('context.describe', input);
     const ctx = this._ctx(input.context_id);
     if (ctx.state.engine === 'project' && this.project) return { engine: 'project', ...this._projectOverview(ctx.id) };
+    // a feature's context, as the feature describes it (its eventstreams and their steps …)
+    const featured = this._featureContext(ctx);
+    if (featured) {
+      const { brief: _brief, ...described } = featured;
+      return { context_id: ctx.id, ...described, tasks: ctx.state.tasks || [], files: this.ctxs.generatedFiles(ctx.id) };
+    }
     // A pipeline-registered model is a normal dbt model whose rows are the result.
     // Report its model name and the output columns you can read — its rows come from its build's
     // task. The columns are grounded to the real relation below.

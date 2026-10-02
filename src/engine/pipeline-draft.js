@@ -23,7 +23,7 @@ export const pipelineDraftMethods = {
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ request: { action: 'start', name } })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps);
-    if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns);
+    if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns, input.include_steps);
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
@@ -256,7 +256,7 @@ export const pipelineDraftMethods = {
    * rolled back (nothing applied) and the failing step is named. NB: adding many steps blind is
    * discouraged — the response says so.
    */
-  async _draftAddSteps(ctx, draft, stages, includeColumns = false) {
+  async _draftAddSteps(ctx, draft, stages, includeColumns = false, includeSteps = false) {
     if (!Array.isArray(stages) || !stages.length) throw new ToolError('add_steps needs a non-empty `stages` array', { stage: 'validate', field: 'stages' });
     const snapshot = draft.stages.slice(); // atomic: restore on any failure so the draft is never half-applied
     const effects = [];
@@ -279,9 +279,11 @@ export const pipelineDraftMethods = {
     }
     const physSet = await this.probe.physicalColumns(draft.source);
     const after = this._draftColumns(draft, physSet);
+    // the steps just added — the caller has the earlier ones; the whole list with include_steps or preview
+    const all = this._draftSteps(draft);
     const resp = {
       draft_id: ctx.id, action: 'add_steps', added: effects.length,
-      steps: this._draftSteps(draft),
+      ...(includeSteps ? { steps: all } : { steps_added: all.slice(-effects.length), steps_count: all.length }),
       // The sequential effect of EACH stage, in order — the combined view of what would have been
       // N separate add_step replies. Read it top-to-bottom to see how the data narrowed/expanded.
       step_effects: effects,

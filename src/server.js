@@ -84,7 +84,7 @@ export async function makeEngine(opts = {}) {
     ? opts.runner
     : baseProjectDir
       // dbt runs ONLY in one of this tool's environments (a venv under DBT_ENVS_DIR built from its
-      // lock — DBT_ENV, else `dbt-v2`; MetricFlow's is `metricflow`); anything else is refused. The
+      // lock — DBT_ENV, else DEFAULT_ENV, for now `dbt-v1`; MetricFlow's is `metricflow`); anything else is refused. The
       // client reads its version from the binary (DBT_VERSION pins it).
       ? createDbt({ version: S.DBT_VERSION, environment: S.DBT_ENV || DEFAULT_ENV, profilesDir: S.DBT_PROFILES_DIR || baseProjectDir, timeout: S.DBT_TIMEOUT_SECONDS * 1000 })
       : null;

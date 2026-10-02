@@ -13,7 +13,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { currentSignal } from '../request-context.js';
+import { currentSignal, currentProgress } from '../request-context.js';
 import { setting } from '../settings.js';
 
 /**
@@ -59,10 +59,11 @@ export const warehouseTurns = new Turns();
  */
 export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null } = {}) {
   const signal = currentSignal();
+  const report = reporter(bin, args, turn);
   const asked = Date.now();
   let began = asked;
-  const start = () => { began = Date.now(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
-  const done = (r) => { timing(bin, args, asked, began, r); return r; };
+  const start = () => { began = Date.now(); report.running(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
+  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
   if (!turn) return start().then(done);
   return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
 }
@@ -75,10 +76,12 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
  */
 export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, turn = null } = {}) {
   const signal = currentSignal();
+  const report = reporter(bin, args, turn);
   const asked = Date.now();
   let began = asked;
   const start = () => new Promise((resolve) => {
     began = Date.now();
+    report.running();
     if (signal?.aborted) return resolve(cancelledResult('not started — the call was cancelled'));
     const child = spawn(bin, args, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) });
     let stdout = '';
@@ -95,9 +98,24 @@ export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, tur
     child.stdin.on('error', () => { /* the process may exit before reading */ });
     child.stdin.end(input);
   });
-  const done = (r) => { timing(bin, args, asked, began, r); return r; };
+  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
   if (!turn) return start().then(done);
   return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+}
+
+/**
+ * What a task's process tells the task's progress record (request-context withProgress): which
+ * command it is — `dbt run`, `mf query`, the script a python process runs — and whether it is
+ * waiting for the warehouse's turn or running, since when. Nothing outside a task.
+ */
+function reporter(bin, args, turn) {
+  const progress = currentProgress();
+  if (!progress) return { running() {}, done() {} };
+  const tool = basename(String(bin));
+  const command = /^python/.test(tool) && args[0] ? basename(String(args[0])) : `${tool}${args[0] && !String(args[0]).startsWith('-') ? ` ${args[0]}` : ''}`;
+  const mark = (state) => { progress.step = { command, state, since: Date.now() }; };
+  if (turn) mark('waiting for the warehouse');
+  return { running: () => mark('running'), done: () => { if (progress.step?.command === command) progress.step = null; } };
 }
 
 /**

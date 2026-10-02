@@ -308,10 +308,16 @@ export const STAGES = {
     build: ({ d, cols }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
-      const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile) }; });
+      const aggs = p.measures.map((m) => {
+        if (m.column) requireCol(cols, m.column);
+        // a measure's own where: it folds only the rows those conditions hold for (the grammar of a where stage)
+        const cond = m.where?.length ? conditionsSql(m.where, (c) => condPred(d, cols, c, { windows: false })).map((x) => `(${x})`).join(' AND ') : null;
+        return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile, cond) };
+      });
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : 'numeric' });
+      // the earliest / latest of a column is of the column's type (a time stays a time); every other aggregate is a number
+      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : (m.agg === 'min' || m.agg === 'max') && m.column ? (cols.get(m.column)?.type || 'unknown') : 'numeric' });
       return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },
@@ -390,8 +396,24 @@ export const STAGES = {
   },
 
   project: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { enum: ['project'] }, columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } } } }),
-    build: ({ cols }, p) => { p.columns.forEach((c) => requireCol(cols, c)); const out = new Map(); for (const c of p.columns) out.set(c, cols.get(c) || { type: 'string' }); return { op: { op: 'project', cols: p.columns }, cols: out }; },
+    schema: () => {
+      const names = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } };
+      return {
+        type: 'object',
+        description: 'Trim the columns before they are materialized: `columns` keeps exactly these (in this order), `drop` removes these and keeps the rest.',
+        anyOf: [
+          form({ title: 'keep these columns', required: ['stage', 'columns'], properties: { stage: { enum: ['project'] }, columns: { ...names, description: 'The columns to keep, in order.' } } }),
+          form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: { ...names, description: 'The columns to remove; every other column stays.' } } }),
+        ],
+      };
+    },
+    build: ({ cols }, p) => {
+      const keep = p.drop ? (p.drop.forEach((c) => requireCol(cols, c)), [...cols.keys()].filter((c) => !p.drop.includes(c))) : p.columns;
+      if (!keep.length) throw new Error('project: dropping every column leaves nothing to keep');
+      keep.forEach((c) => requireCol(cols, c));
+      const out = new Map(); for (const c of keep) out.set(c, cols.get(c) || { type: 'string' });
+      return { op: { op: 'project', cols: keep }, cols: out };
+    },
   },
 };
 
@@ -442,12 +464,15 @@ function aggregateMeasure(fnDescription) {
   const optional = AGG_FNS.filter((f) => f !== 'percentile' && !needColumn.includes(f));
   const name = { type: 'string', pattern: NAME };
   const column = { type: 'string' };
+  // a CONDITIONAL aggregate — the counters a compute + case pair made one by one: count / sum only the
+  // rows these conditions hold for (the same conditions as a where stage)
+  const where = CONDITIONS('A conditional aggregate: fold only the rows these conditions hold for — count the failed loads, sum the revenue of payers — instead of a compute + case per counter.');
   return {
     type: 'object',
     anyOf: [
-      form({ title: `agg: ${needColumn.join(' | ')}`, tag: ['agg', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column } }),
-      form({ title: `agg: ${optional.join(' | ')}`, tag: ['agg', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column } }),
-      form({ title: 'agg: percentile', tag: ['agg', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'percentile'], properties: { name, column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The percentile in (0,1), e.g. 0.95 for p95.' } } }),
+      form({ title: `agg: ${needColumn.join(' | ')}`, tag: ['agg', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column, where } }),
+      form({ title: `agg: ${optional.join(' | ')}`, tag: ['agg', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column, where } }),
+      form({ title: 'agg: percentile', tag: ['agg', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'percentile'], properties: { name, column, where, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The percentile in (0,1), e.g. 0.95 for p95.' } } }),
     ],
   };
 }

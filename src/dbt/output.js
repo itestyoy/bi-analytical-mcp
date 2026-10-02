@@ -92,12 +92,22 @@ export function extractPlan(stdout) {
 }
 
 /**
+ * An INTEGER THE WAREHOUSE WROTE EXACTLY STAYS EXACT. dbt prints an INT64 with all its digits, and a
+ * JSON number past 2^53 read as a double is rounded — a player id 3000624785682605657 came back as
+ * 3000624785682605600, and a list of ids exported for a join elsewhere matched nobody. Such an
+ * integer is kept as the digits dbt printed (a string); every other number is read as before.
+ */
+function exactIntegers(_key, value, context) {
+  return typeof value === 'number' && !Number.isSafeInteger(value) && /^-?\d+$/.test(context?.source ?? '') ? context.source : value;
+}
+
+/**
  * Parse `dbt show --output json` stdout: log lines, then the rows. dbt 1.x prints them as
  * { "show": [ {col:val}, ... ] }; dbt v2 prints the bare array [ {col:val}, ... ]. Both are read.
  */
 export function parseShowJson(stdout) {
   const cleaned = stripAnsi(stdout);
-  const tryParse = (from, to) => { try { return JSON.parse(cleaned.slice(from, to + 1)); } catch { return undefined; } };
+  const tryParse = (from, to) => { try { return JSON.parse(cleaned.slice(from, to + 1), exactIntegers); } catch { return undefined; } };
   const obj = cleaned.indexOf('{"show"') >= 0 ? tryParse(cleaned.indexOf('{"show"'), cleaned.lastIndexOf('}')) : undefined;
   if (Array.isArray(obj?.show)) return obj.show;
   // a JSON array of rows on a line of its own (v2), or the 1.x object spread over several lines

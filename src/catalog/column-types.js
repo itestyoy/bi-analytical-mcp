@@ -27,3 +27,18 @@ export function pipelineColumnType(cm, col) {
 
 /** A warehouse type that is a boolean (BigQuery BOOL / BOOLEAN, DuckDB BOOLEAN / BOOL). */
 export const isBooleanType = (t) => /^bool(ean)?$/i.test(String(t || '').trim());
+
+/**
+ * A pipeline column type from the type a WAREHOUSE reports for a built column (BigQuery's INT64,
+ * FLOAT64, TIMESTAMP, ARRAY<…>; DuckDB's BIGINT, DOUBLE, TIMESTAMP WITH TIME ZONE, VARCHAR[] …) —
+ * for a column whose type no stage could say before it was built.
+ */
+export function physicalColumnType(dtype) {
+  const t = String(dtype || '').trim().toLowerCase();
+  if (!t) return 'unknown';
+  if (/\[\]$|^(array|list)\b/.test(t)) return 'array';
+  if (isBooleanType(t)) return 'boolean';
+  if (/^(date|datetime|time|timestamp)\b/.test(t)) return 'time';
+  if (/^(tinyint|smallint|int|integer|bigint|hugeint|ubigint|uinteger|usmallint|utinyint|int64|float|float64|double|real|decimal|numeric|bignumeric)\b/.test(t)) return 'numeric';
+  return 'string';
+}

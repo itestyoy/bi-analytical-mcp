@@ -608,8 +608,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   dimensions cut it; preview_semantic_model({ context_id, metric }) gives one metric's definition
   and its full group_by.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
-  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
-  (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
+  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v1`
+  (used unless DBT_ENV names another — TEMPORARILY: every dbt v2 on PyPI lists a BigQuery dataset one
+  object at a time, dbt-labs/dbt#16423; `DEFAULT_ENV` says when to go back), `dbt-v2`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
   (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and python/mf_group_bys.py's
   Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
   binary. `npm run dbt:env -- create|list` manages them.
@@ -644,8 +645,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   never a number in a test. The fixture world (`buildWarehouse`, `connectMcp`,
   test/integration/warehouse-harness.js) and the task-following call (`settleMcp`, test/helpers/
   settle.js) have one definition, shared by the integration tests and the evals.
-- Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
-  since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
+- Tests run on the server's default environment (`DEFAULT_ENV` — for now `dbt-v1`; DBT_ENV picks
+  another); the python stage's file runs on `dbt-v1` (dbt 1.x) whatever it is, since v2 runs no Python
+  models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 
 ### Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

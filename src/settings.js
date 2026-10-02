@@ -42,7 +42,7 @@ export const SETTING_GROUPS = [
   ]],
   ['dbt and MetricFlow environments', [
     S('DBT_ENVS_DIR', 'string', 'Where the environments live. Default ./.venvs; the image sets /opt/dbt-envs.', { shown: '/opt/dbt-envs' }),
-    S('DBT_ENV', 'string', 'The dbt environment: dbt-v2 | dbt-v1 (dbt-v1 runs the python stage on DuckDB).', { default: 'dbt-v2', example: 'dbt-v2' }),
+    S('DBT_ENV', 'string', 'The dbt environment: dbt-v1 | dbt-v2. dbt-v1 for now: dbt v2 lists a BigQuery dataset one\nobject at a time before each command (dbt-labs/dbt#16423), minutes on a full dataset.', { default: 'dbt-v1', example: 'dbt-v1' }),
     S('MF_ENV', 'string', 'The MetricFlow environment.', { default: 'metricflow' }),
     S('DBT_VERSION', 'string', 'Pin dbt\'s major version (1 | 2) instead of reading it from the binary.', { default: 'auto' }),
     S('DBT_TIMEOUT_SECONDS', 'number', 'Timeout of one dbt process (seconds). Retentioneering\'s own default is 3600.', { default: 600, min: 1 }),

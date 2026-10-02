@@ -252,9 +252,10 @@ export function withLevels(out, detail) {
   };
 }
 
-export async function readTask(engine, feature, id, { wait_seconds: wait, detail } = {}) {
+export async function readTask(engine, feature, id, { wait_seconds: wait, detail, waited: already = null } = {}) {
   const job = engine.tasks.forSide(id, SIDE);
-  const waited = await engine.tasks.await([id], TaskRunner.clampWait(wait));
+  // a read of several waits for all of them once, and each answer says how long that was
+  const waited = already ?? await engine.tasks.await([id], TaskRunner.clampWait(wait));
   const { head, pending } = engine.tasks.status(id, waited);
   if (pending) return pending;
   const now = engine.jobs.get(id);
@@ -273,10 +274,10 @@ export async function readTask(engine, feature, id, { wait_seconds: wait, detail
 
 export async function readTasks(engine, feature, input) {
   for (const id of input.task_ids) engine.tasks.forSide(id, SIDE);
-  await engine.tasks.await(input.task_ids, TaskRunner.clampWait(input.wait_seconds));
+  const waited = await engine.tasks.await(input.task_ids, TaskRunner.clampWait(input.wait_seconds));
   const results = [];
-  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { wait_seconds: 0, detail: input.detail }));
-  return TaskRunner.readAnswer(results, QUERY);
+  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { waited, detail: input.detail }));
+  return TaskRunner.readAnswer(results, QUERY, { waited_seconds: waited });
 }
 
 /** A finished task's output: held in memory, else read from its stored table — a query task's with a

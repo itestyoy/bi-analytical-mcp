@@ -9,6 +9,7 @@ import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
 import { FNS, exprCalls } from '../pipeline/compute.js';
+import { eachCondition } from '../conditions.js';
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -211,12 +212,19 @@ export class PipelineAdvisor {
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
+    // the events a where keeps: only a condition that NAMES them (eq / in) at the top of a where scopes
+    // the rows to them — a neq / not_in, or one inside an { or }, keeps others too
     const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
-    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
+    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol && (cond.op === 'eq' || cond.op === 'in')) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
+    // the risk is ROWS WITHOUT THE FIELD: no scope at all (every other event reads NULL), or a scope that
+    // keeps an event the field is not populated on. A scope within the field's events is the right one.
+    const missing = (evs) => (hasScope ? [...scoped].filter((e) => !evs.includes(e)) : null);
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && (!hasScope || missing(evs).length); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+    return [hasScope
+      ? `'${p}' is populated only on event(s) ${evs.join(', ')} — your event_name scope also keeps ${missing(evs).join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`
+      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
   }
 
   /**
@@ -273,10 +281,31 @@ export class PipelineAdvisor {
     return warns.slice(0, 3);
   }
 
+  /**
+   * A where that bounds a TIME column from above by a bare date (`lte` / the high end of `between`):
+   * on a timestamp the date means that day's 00:00:00, so the whole last day is left out — the
+   * classic off-by-a-day. Said, never refused: on a DATE column the bound is exactly right.
+   */
+  dateBoundWarnings(stage, available = []) {
+    if (stage?.stage !== 'where') return [];
+    const timeCols = new Set(available.filter((c) => c.type === 'time').map((c) => c.name));
+    const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const hits = [];
+    eachCondition(stage.conditions, (c) => {
+      const col = c.column ?? c.left?.column;
+      if (!timeCols.has(col)) return;
+      const value = c.value ?? c.right?.value;
+      const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
+      if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
+    });
+    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
+  }
+
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
   stepRecommendations(stage, available) {
     const own = stageDef(stage.stage)?.recommend;
     return [
+      ...this.dateBoundWarnings(stage, available),
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
       'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
     ];

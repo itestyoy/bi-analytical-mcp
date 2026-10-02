@@ -12,7 +12,8 @@ import { getDialect } from '../dialects/index.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { DRILL_ROWS, buildViewModel } from '../apps/result-view-model.js';
 import { resultColumns, displayProblems, drillFirstRead } from '../display-check.js';
-import { isPlainObject, samplingNote } from './helpers.js';
+import { isPlainObject, samplingNote, pageBlock } from './helpers.js';
+import { READ_PAGE } from '../schema/fields.js';
 
 export const taskResultMethods = {
   /**
@@ -60,7 +61,7 @@ export const taskResultMethods = {
     const res = await this.runner.show(dir, base, limit + offset + 1);
     if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
     const pageRows = res.rows.slice(offset, offset + limit);
-    return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
+    return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: pageBlock({ offset, limit, returned: pageRows.length, has_more: res.rows.length > offset + limit, ordered: transform ? !!transform.order_by?.length : extra.ordered }), ...(transform ? { projected: true } : {}) };
   },
 
   /** The side a task belongs to (semantic | pipeline), from the tool that started it (persisted with the task). */
@@ -105,7 +106,9 @@ export const taskResultMethods = {
     for (const id of ids) this._taskForSide(id, side);
     const waited = await this.tasks.await(ids, TaskRunner.clampWait(input.wait_seconds));
     const results = [];
-    for (const id of ids) results.push(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit }));
+    // a read hands the model a PAGE (READ_PAGE rows unless it asks for another): the task keeps every row
+    // it holds — what a card draws — and the rest is a next_offset away
+    for (const id of ids) results.push(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }));
     return TaskRunner.readAnswer(results, this._readers[side], { waited_seconds: waited });
   },
 
@@ -192,22 +195,25 @@ export const taskResultMethods = {
     return this.tasks.await(ids, seconds);
   },
 
-  async _taskResult(id, { waited = 0, offset, limit } = {}) {
+  async _taskResult(id, { waited = 0, offset, limit, pageSize = null } = {}) {
     const job = this.jobs.get(id);
     const { head, pending } = this.tasks.status(id, waited);
     if (pending) return pending;
     const paging = offset != null || limit != null;
     const kept = this.tasks.results.get(id);
     const stored = job.status === 'ready' && !!job.table;
-    if (kept && paging && !stored && isPlainObject(kept.out) && Array.isArray(kept.out.rows)) {
-      // a result held in memory is the page the query returned: offset/limit page WITHIN it
+    if (kept && (paging || (pageSize && kept.out?.rows?.length > pageSize)) && !stored && isPlainObject(kept.out) && Array.isArray(kept.out.rows)) {
+      // a result held in memory is the page the query returned: offset/limit page WITHIN it (a read
+      // that names no page gets the first READ_PAGE rows)
       const out = kept.out;
-      const off = offset ?? 0; const lim = limit ?? out.rows.length;
+      const off = offset ?? 0; const lim = limit ?? pageSize ?? out.rows.length;
       const rows = out.rows.slice(off, off + lim);
       const beyond = off + lim > out.rows.length && !!out.page?.has_more;
+      // every row is known when the query was not cut: its own offset plus what it holds
+      const total = out.page?.has_more ? null : (out.page?.offset ?? 0) + out.rows.length;
       return {
         ...head, ...out, rows, row_count: rows.length, status: 'done',
-        page: { limit: lim, offset: off, held_rows: out.rows.length, has_more: off + lim < out.rows.length || beyond },
+        page: { ...pageBlock({ offset: off, limit: lim, returned: rows.length, has_more: off + lim < out.rows.length || beyond, total, ordered: out.page?.ordered === false ? false : undefined }), held_rows: out.rows.length },
         ...(beyond ? { warnings: [...(out.warnings || []), `the task holds the ${out.rows.length} row(s) its query returned — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
       };
     }
@@ -222,7 +228,7 @@ export const taskResultMethods = {
         return { ok: false, ...head, status: 'error', table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone) — run it again to rebuild it` } };
       }
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-      const page = await this._readTable(this.ctxs.dir(job.contextId), job.table, limit ?? 1000, undefined, {}, offset ?? 0);
+      const page = await this._readTable(this.ctxs.dir(job.contextId), job.table, limit ?? pageSize ?? 1000, undefined, {}, offset ?? 0);
       return { ...head, ...page, status: page.ok === false ? 'error' : 'done', ...(page.ok === false ? {} : this._showHint(id, page)) };
     }
     if (paging) throw new ToolError(`offset/limit page a stored table or a result still held in memory, and this task has neither — ${this._pageHint(job)}`, { stage: 'validate', field: offset != null ? 'offset' : 'limit' });

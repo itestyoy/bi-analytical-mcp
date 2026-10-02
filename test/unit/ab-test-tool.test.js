@@ -47,6 +47,17 @@ test('experiment analyze, mean: Welch t-test path', () => {
   assert.ok('t' in r.results[0] && 'df' in r.results[0]);
 });
 
+test('experiment analyze, mean from sums: the same test as from the mean and stddev those sums give', () => {
+  // control values 1..5 (mean 3, sample sd √2.5), B values 3..7 (mean 5, the same sd)
+  const sums = (xs) => ({ n: xs.length, sum: xs.reduce((a, x) => a + x, 0), sum_squares: xs.reduce((a, x) => a + x * x, 0) });
+  const fromSums = engine._analyzeExperiment({ metric: 'mean', control: sums([1, 2, 3, 4, 5]), variants: [{ label: 'B', ...sums([3, 4, 5, 6, 7]) }] });
+  const fromMoments = engine._analyzeExperiment({ metric: 'mean', control: { n: 5, mean: 3, stddev: Math.sqrt(2.5) }, variants: [{ label: 'B', n: 5, mean: 5, stddev: Math.sqrt(2.5) }] });
+  assert.equal(fromSums.ok, true);
+  for (const k of ['t', 'df', 'p_value', 'relative_lift']) assert.ok(Math.abs(fromSums.results[0][k] - fromMoments.results[0][k]) < 1e-9, k);
+  // one group alone has no spread to read from its sums
+  assert.throws(() => engine._analyzeExperiment({ metric: 'mean', control: { n: 1, sum: 3, sum_squares: 9 }, variants: [{ label: 'B', ...sums([3, 4]) }] }));
+});
+
 test('experiment analyze, ratio: delta-method path over per-user sums', () => {
   const r = engine._analyzeExperiment({
     metric: 'ratio',

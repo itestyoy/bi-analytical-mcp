@@ -118,3 +118,11 @@ test('a window bound with its own offset is that instant, with or without a time
     assert.throws(() => resolveTimeRange(tr), (e) => e.field === 'time_range.start' && /not a date or a date-time/.test(e.message), JSON.stringify(tr));
   }
 });
+
+test('the earliest or latest of a column is of that column\'s type — a time stays a time, and compares with a date', () => {
+  const out = render([
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'first_at', agg: 'min', column: 'device_time' }, { name: 'most', agg: 'max', column: 'session_number' }, { name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ column: 'first_at', op: 'gte', value: '2026-01-01' }] },
+  ]);
+  assert.deepEqual(['first_at', 'most', 'n'].map((c) => out.columns.get(c).type), [render([]).columns.get('device_time').type, 'numeric', 'numeric']);
+});

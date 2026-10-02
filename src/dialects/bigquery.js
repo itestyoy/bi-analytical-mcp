@@ -197,6 +197,12 @@ export class BigQueryDialect extends Dialect {
   // stage can say so and an answer can be labelled honestly.
   get approximateStats() { return ['median', 'percentile']; }
 
+  // MetricFlow computes time on BigQuery as DATETIME (its spine, DATETIME_TRUNC, its casts), and
+  // BigQuery compares a TIMESTAMP with neither a DATETIME nor a DATE: a cumulative metric's join to the
+  // spine failed on TIMESTAMP <= DATE and a conversion's window on TIMESTAMP > DATETIME. A TIMESTAMP
+  // column is read as the DATETIME of its UTC instant — the same moment, the type MetricFlow compares.
+  semanticTimeExpr(column, dataType) { return /^timestamp$/i.test(String(dataType || '').trim()) ? `CAST(${column} AS DATETIME)` : column; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

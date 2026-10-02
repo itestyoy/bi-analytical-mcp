@@ -49,6 +49,8 @@ test('the rows of `dbt show --output json` are read from dbt 1.x ({ "show": [...
   assert.deepEqual(parseShowJson('       dbt 2.0.6\n   Loading profiles.yml\n[{"event_name":"level_started","n":28}]\n Succeeded model main.inline (ephemeral) [1 of 1 in 0.04s]\n'), [{ event_name: 'level_started', n: 28 }]);
   assert.deepEqual(parseShowJson('       dbt 2.0.6\n[]\n'), []);
   assert.deepEqual(parseShowJson('no rows here'), []);
+  // an integer past 2^53 keeps every digit dbt printed; the rest are numbers as before
+  assert.deepEqual(parseShowJson('[{"id":3000624785682605657,"n":28,"x":1.5,"neg":-9007199254740993,"big":1e300}]'), [{ id: '3000624785682605657', n: 28, x: 1.5, neg: '-9007199254740993', big: 1e300 }]);
 });
 
 test('a log longer than the budget keeps its opening and its END — where a runtime writes the cause', () => {

@@ -159,8 +159,11 @@ export function toCallToolResult(result, name, args, engine = null) {
   // a tool that declares the shape of its answer (outputSchema) carries it on every success
   const declared = !!def?.output && isPlainObject(result) && result.ok !== false;
   const structured = declared || (!!viewModel && asked && isPlainObject(result) && viewModel(result, args).kind !== 'none');
+  // a drawn card's structured copy is the view's, whole; what the MODEL reads of it is the view's own
+  // say (a feature view's forModel — every record is the card's, not the conversation's)
+  const forModel = structured && !declared && typeof def?.view?.forModel === 'function' ? def.view.forModel(result, args) : result;
   return {
-    content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(forModel, null, 2) }],
     ...(structured ? { structuredContent: result } : {}),
     // a result the engine RETURNED as a failure ({ ok: false, error }) — a build that failed, a
     // query the warehouse refused — is a tool execution error like a thrown one (spec: isError)

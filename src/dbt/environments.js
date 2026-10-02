@@ -1,8 +1,8 @@
 // dbt ENVIRONMENTS — every dbt this server runs lives in a virtualenv of its own, by name.
 //
 // An environment is a directory under DBT_ENVS_DIR (default: ./.venvs; the image: /opt/dbt-envs)
-// holding a Python virtualenv, named for what is in it: `dbt-v2` (dbt v2 — used unless DBT_ENV names
-// another), `dbt-v1` (dbt 1.x), `metricflow`. The dbt client reads the version from the binary
+// holding a Python virtualenv, named for what is in it: `dbt-v1` (dbt 1.x — used unless DBT_ENV names
+// another, for now: see DEFAULT_ENV), `dbt-v2` (dbt v2), `metricflow`. The dbt client reads the version from the binary
 // (src/dbt/index.js), so the name is for the reader, not a switch.
 //
 // METRICFLOW IS AN ENVIRONMENT OF ITS OWN — `metricflow`, unless MF_ENV names another. dbt's docs,
@@ -42,7 +42,15 @@ export function notOurs(name, envDir, role) {
   return null;
 }
 
-export const DEFAULT_ENV = 'dbt-v2';
+/**
+ * The dbt environment used unless DBT_ENV names another — TEMPORARILY dbt 1.x. Every dbt v2 on PyPI
+ * (2.0.0–2.0.6) lists a BigQuery dataset one object at a time before each command (one tables.get per
+ * table, since v2.0.0-preview.206 — dbt-labs/dbt#16423, #16425; the revert #16433 was closed
+ * unmerged), so on a dataset this server fills with its contexts' tables every run, show and parse
+ * waits minutes. dbt 1.x lists it in one INFORMATION_SCHEMA query. Back to `dbt-v2` once a v2 release
+ * lists in bulk again. The tests run on the same one (test/helpers/dbt-env.js).
+ */
+export const DEFAULT_ENV = 'dbt-v1';
 export const DEFAULT_MF_ENV = 'metricflow';
 
 /** Where the environments live. */

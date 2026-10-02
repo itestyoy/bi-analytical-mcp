@@ -11,7 +11,7 @@ import { renderWhereClauses, wherePredicates } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
-import { uniqueRefs, clone } from './helpers.js';
+import { uniqueRefs, clone, pageBlock } from './helpers.js';
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -81,8 +81,10 @@ export const semanticQueryMethods = {
     for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
       if (d._attribute === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;
     }
-    if (!(target.dimensions || {})[attribute]) {
-      const known = Object.keys(target.dimensions || {});
+    // the model's own attributes: its dimensions and, on an events source, the event name (one set with
+    // the schema's — modelDimensionColumns)
+    if (!(target.dimensions || {})[attribute] && !c.modelDimensionColumns(model).includes(attribute)) {
+      const known = c.modelDimensionColumns(model);
       throw new ToolError(`${where}: '${attribute}' is not an attribute of '${model}'. Its attributes: ${known.slice(0, 20).join(', ') || '(none — a payload property is declared as a task dimension first)'}`, { stage: 'validate', field: 'attribute' });
     }
     // The sources whose MEASURES this task reads: a path starts from one of them. A model loaded
@@ -389,7 +391,8 @@ export const semanticQueryMethods = {
   _metricPaging(input) {
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
-    return { limit, offset, fetch: limit + offset + 1, page: (rows) => ({ rows: rows.slice(offset, offset + limit), page: { limit, offset, has_more: rows.length > offset + limit } }) };
+    const ordered = !!input.order_by?.length;
+    return { limit, offset, fetch: limit + offset + 1, page: (rows) => { const page = rows.slice(offset, offset + limit); return { rows: page, page: pageBlock({ offset, limit, returned: page.length, has_more: rows.length > offset + limit, ordered }) }; } };
   },
 
   /** The answer to a query that failed, or was only explained — null for one that ran. */

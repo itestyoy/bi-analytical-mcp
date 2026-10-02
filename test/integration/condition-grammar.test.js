@@ -136,3 +136,43 @@ test('a time window whose bounds carry their own offset is those instants, whate
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.equal(num(built.rows[0].n), want);
 });
+
+test('an aggregate measure takes a where of its own: a conditional count and sum beside the unconditional one, in one pass', opts, async (t) => {
+  if (skip(t)) return;
+  const all = await truth('select count(*) as n from fct_analytics_events');
+  const tutorials = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial' or event_name like 'level%'");
+  const early = await truth('select sum(session_number) as n from fct_analytics_events where session_number <= 2');
+  const { rows } = await pipe([
+    { stage: 'aggregate', measures: [
+      { name: 'n', agg: 'count' },
+      { name: 'n_tut', agg: 'count', where: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'starts_with', value: 'level' }] }] },
+      { name: 's_early', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'lte', value: 2 }] },
+    ] },
+  ]);
+  assert.ok(tutorials > 0 && tutorials < all, 'the condition keeps some rows, not all');
+  assert.deepEqual([num(rows[0].n), num(rows[0].n_tut), num(rows[0].s_early)], [all, tutorials, early]);
+});
+
+test('a project stage drops the columns it names and keeps the rest; the next stage still reads them', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth('select count(distinct event_name) as n from fct_analytics_events');
+  const { rows } = await pipe([
+    { stage: 'project', drop: ['session_number'] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(rows.length, want);
+  // once session_number is dropped the next stage cannot name it — refused as the step is added
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', agg: 'sum', column: 'session_number' }] }] }), (e) => !(e instanceof assert.AssertionError));
+});
+
+test('a query over a built model computes a sample stddev and variance, as the warehouse does', opts, async (t) => {
+  if (skip(t)) return;
+  const sd = await truth('select stddev_samp(session_number) as n from fct_analytics_events');
+  const vr = await truth('select var_samp(session_number) as n from fct_analytics_events');
+  const { draft_id } = await pipe([{ stage: 'where', conditions: [{ column: 'session_number', op: 'is_not_null' }] }]);
+  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }] } });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  assert.ok(sd > 0, 'the fixture has spread');
+  assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
+});

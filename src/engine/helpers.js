@@ -37,6 +37,22 @@ export function clone(x) {
 }
 
 /**
+ * THE PAGE A READ RETURNS — one shape for every tool that hands back rows (a metric query, a pipeline
+ * build, a projection, a task read): where it starts, how many it asked for and returned, the total
+ * when it is known (the rows ran out within the read), whether there are more and where the next page
+ * starts — and, when the rows were not sorted, that their order is no order at all, so a page boundary
+ * is not mistaken for a ranking and paging is done over a stable order.
+ */
+export function pageBlock({ offset = 0, limit, returned, has_more = false, total = null, ordered }) {
+  const known = total ?? (has_more ? null : offset + returned);
+  return {
+    offset, limit, returned, ...(known != null ? { total_rows: known } : {}), has_more,
+    ...(has_more ? { next_offset: offset + returned } : {}),
+    ...(ordered === false ? { ordered: false, order_note: 'no order_by: the rows come in no particular order — add order_by for a ranking, and for pages that hold the same rows each time' } : {}),
+  };
+}
+
+/**
  * The mandatory APPROXIMATE warning attached to any result computed over a random
  * sample: what it is safe for, what it is NOT, and how to get the exact answer. So the
  * caller is never misled into acting on a sampled number, and always has the choice.

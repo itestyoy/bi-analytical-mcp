@@ -1,0 +1,208 @@
+# The same project semantic layer as project_semantic_layer.yml, in the spec dbt 1.x reads (the
+# legacy one: `semantic_models:` with measures, metrics over them). test/integration/project-semantics
+# .test.js lays out whichever spec its dbt reads, and asserts the same numbers on both: what the
+# server reads from a project must not depend on which spec the project is written in.
+#
+# Each simple metric's measure carries the metric's own name (as a project writing `create_metric`
+# would); a 0 amount means "no value" and is turned back into NULL with nullif() before a max or an
+# average.
+semantic_models:
+  - name: project_acquisition
+    description: Paid acquisition, one row per player x day (a thin view over fct_player_acquisition).
+    model: ref('fct_project_acquisition')
+    defaults:
+      agg_time_dimension: spend_date
+    primary_entity: acquisition_observation
+    config:
+      meta:
+        owner: ua
+    entities:
+      - name: player
+        type: foreign
+        expr: player_id_of_internal
+        description: The player the spend is attributed to
+      - name: media_source
+        type: foreign
+        expr: media_source
+        description: Network the spend went to (organic rows carry no spend)
+      - name: channel
+        type: foreign
+        expr: channel
+        description: The channel the row was booked under (paid or organic)
+    dimensions:
+      - name: spend_date
+        type: time
+        label: Date
+        type_params:
+          time_granularity: day
+      - name: campaign
+        type: categorical
+        description: Campaign name
+    measures:
+      - name: project_impressions
+        agg: sum
+        expr: measure__impressions
+      - name: project_clicks
+        agg: sum
+        expr: clicks
+      - name: project_cost
+        agg: sum
+        expr: cost
+      - name: project_cost_max
+        agg: max
+        expr: nullif(cost, 0)
+      - name: project_cost_avg
+        agg: average
+        expr: nullif(cost, 0)
+      - name: project_paid_rows
+        agg: sum_boolean
+        expr: cost > 0
+      - name: project_impressions_last_day
+        agg: sum
+        expr: impressions
+        non_additive_dimension:
+          name: spend_date
+          window_choice: max
+
+  - name: project_media_sources
+    description: One row per media source (a thin view) — what a spend row's media_source joins onto.
+    model: ref('fct_project_media_sources')
+    entities:
+      - name: media_source
+        type: primary
+        expr: media_source
+      - name: channel
+        type: foreign
+        expr: channel
+    dimensions:
+      - name: label
+        type: categorical
+        expr: source_label
+        description: The source's display label
+
+  - name: project_channels
+    description: One row per channel (a thin view) — reached from a spend row directly, and through its media source.
+    model: ref('fct_project_channels')
+    entities:
+      - name: channel
+        type: primary
+        expr: channel
+    dimensions:
+      - name: kind
+        type: categorical
+        expr: channel_kind
+        description: The channel's kind
+
+  - name: project_events
+    description: One row per product-analytics event.
+    model: ref('fct_analytics_events')
+    defaults:
+      agg_time_dimension: event_at
+    primary_entity: project_event
+    entities:
+      - name: player
+        type: foreign
+        expr: player_id_of_internal
+    dimensions:
+      - name: event_name
+        type: categorical
+      - name: bundle_id
+        type: categorical
+      - name: event_at
+        type: time
+        expr: device_time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: project_events_total
+        agg: count
+        expr: event_id
+      - name: project_active_players
+        agg: count_distinct
+        expr: player_id_of_internal
+
+metrics:
+  - name: project_impressions
+    label: Impressions
+    type: simple
+    type_params: {measure: project_impressions}
+    config: {meta: {channel: paid}}
+  - name: project_clicks
+    label: Clicks
+    type: simple
+    type_params: {measure: project_clicks}
+  - name: project_cost
+    label: Cost
+    type: simple
+    type_params: {measure: project_cost}
+  - name: project_cost_max
+    label: Highest daily cost
+    description: 0 means no spend and is not a value
+    type: simple
+    type_params: {measure: project_cost_max}
+    config: {meta: {additive: false}}
+  - name: project_cost_avg
+    label: Average daily cost
+    type: simple
+    type_params: {measure: project_cost_avg}
+    config: {meta: {additive: false}}
+  - name: project_paid_rows
+    label: Paid player-days
+    type: simple
+    type_params: {measure: project_paid_rows}
+  - name: project_impressions_last_day
+    label: Impressions on the last day of the period
+    description: A snapshot — across days the last day of the period is taken
+    type: simple
+    type_params: {measure: project_impressions_last_day}
+    config: {meta: {additive: false}}
+  - name: project_events_total
+    label: Events
+    description: Every event.
+    type: simple
+    type_params: {measure: project_events_total}
+  - name: project_active_players
+    label: Active players
+    type: simple
+    type_params: {measure: project_active_players}
+  - name: project_touches
+    label: Touches
+    description: impressions + clicks
+    type: derived
+    type_params:
+      expr: views + taps
+      metrics:
+        - name: project_impressions
+          alias: views
+        - name: project_clicks
+          alias: taps
+  - name: project_ctr
+    label: Click-through rate
+    description: clicks / impressions (a ratio of sums, not a mean of daily rates)
+    type: ratio
+    type_params:
+      numerator: project_clicks
+      denominator: project_impressions
+  - name: project_cost_per_touch
+    label: Cost per touch
+    type: ratio
+    type_params:
+      numerator: project_cost
+      denominator: project_touches
+  - name: project_events_per_player
+    label: Events per player
+    type: ratio
+    type_params:
+      numerator: project_events_total
+      denominator: project_active_players
+  - name: project_events_per_click
+    label: Events per click
+    description: A metric of two semantic models — cut only by what both carry (the player entity) and metric_time
+    type: derived
+    type_params:
+      expr: events / nullif(clicks, 0)
+      metrics:
+        - name: project_events_total
+          alias: events
+        - name: project_clicks
+          alias: clicks

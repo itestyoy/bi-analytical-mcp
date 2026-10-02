@@ -21,12 +21,15 @@
 //                        a task), precheck(engine, args) (what a waiting call would refuse, before
 //                        waiting) } } — each becomes a tool definition like a core tool's
 //                        (src/tools/define.js), in the one registry the engine holds
-//   view:    { uri, name, title, description, asset (a RUNTIME_ASSETS key), viewModel(result, args) }
+//   view:    { uri, name, title, description, asset (a RUNTIME_ASSETS key), viewModel(result, args),
+//              forModel(result, args) — what the model reads of a drawn card (the card keeps the whole result) }
 //   guide:   { name (a reserved semantic_index({ request: { guide } }) name), build(catalog) → object,
 //              triggers: [{ if, do }] (routing triggers added to the analyst guide) }
 //   skill(engine) → { path, frontmatter, body, references: [[relPath, text]] }
 //   instructions: one line for the core instructions
 //   overview(engine) → what semantic_index's overview says about it
+//   describeContext(engine, ctx) → what a context of this feature holds, for context({ action: describe }),
+//              with `brief` for its line in the listing — null for a context that is not the feature's
 
 import { retentioneeringDefinition } from './retentioneering/index.js';
 import { defineTool } from './tools/define.js';

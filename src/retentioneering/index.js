@@ -27,6 +27,7 @@ import { buildSchema, querySchema, displaySchema, retentioneeringFacts, pathSour
 import { renderEventstream } from './eventstream.js';
 import { LibraryChecker } from './checker.js';
 import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI } from './view-model.js';
+import { summarize } from './results.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 import { SIDE, BUILD, QUERY, DISPLAY } from './names.js';
 import { contextFor, pathContext, basePaths } from './contexts.js';
@@ -124,11 +125,17 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview, a distribution\'s histogram or a diff\'s heatmaps.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
+      // what the MODEL reads of a drawn card: the analysis as a read summarizes it — the card holds every
+      // record (the structured copy), and every path's cluster label or a density's thousand points
+      // would not fit the conversation
+      forModel: (drawn) => (drawn?.result ? { ...drawn, result: summarize(drawn.result), note: 'The card holds every record; this is the summary a read gives (query_retentioneering_model with detail: "full" for all of it).' } : drawn),
     },
     guide: { name: GUIDE_NAME, build: () => retentioneeringGuide(), triggers: ROUTING_TRIGGERS },
     skill: () => retentioneeringSkill(),
     instructions: INSTRUCTIONS_LINE,
     close: () => feature.checker.close(),
+    // what a path-analysis context holds, for context({ action: list | describe }): null for any other
+    describeContext: (engine, ctx) => describePathContext(ctx),
     overview: () => ({
       library: `retentioneering ${retentioneeringFacts().version}`,
       analyses: analysisKinds(),
@@ -137,6 +144,31 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
     }),
   };
   return feature;
+}
+
+/**
+ * A path-analysis context as context() shows it: its description and each eventstream — its source
+ * (or the task it was started from), what it was forked from, its steps as preview gives them, how
+ * far they are materialized and the shape at the end — and how to go on with it. `brief` is the
+ * listing's line: the eventstreams by name, with their step counts.
+ */
+function describePathContext(ctx) {
+  const state = ctx.state?.retentioneering;
+  if (!state) return null;
+  const eventstreams = Object.entries(state.eventstreams || {}).map(([name, es]) => {
+    const p = preview(ctx, name, es);
+    return {
+      name, source: es.source, ...(es.from_task ? { from_task: es.from_task } : {}), ...(es.forked_from ? { forked_from: es.forked_from } : {}),
+      ...(es.description ? { description: es.description } : {}), base: p.base, steps: p.steps, materialized_through: p.materialized_through, ...(p.table ? { table: p.table } : {}), shape: p.shape,
+    };
+  });
+  return {
+    engine: SIDE,
+    ...(state.description ? { description: state.description } : {}),
+    eventstreams,
+    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, source: e.source, steps: e.steps.length, materialized_through: e.materialized_through })) },
+    continue_with: `${BUILD}({ request: { action: 'preview' | 'add_step' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it.`,
+  };
 }
 
 // ── build ─────────────────────────────────────────────────────────────────────────────────────

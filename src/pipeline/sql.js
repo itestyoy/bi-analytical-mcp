@@ -47,8 +47,8 @@ export const CONDITION = {
   description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
   // the left side is a column named outright or an operand — one of the two, never both
   anyOf: [
-    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
-    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: EXPR, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
+    form({ title: 'a column compared — { column, op, value } or { column, op, right: { column } }', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
+    form({ title: 'an operand compared — { left: { column } | { value } | { now: true } | { fn, args }, op, right: { … } or value }', required: ['left', 'op'], properties: { left: EXPR, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
   ],
 };
 
@@ -147,9 +147,11 @@ export function frameClause(f) {
 /** The SQL function of an aggregation where it differs from its name (the vocabulary is the semantic layer's). */
 export const sqlAgg = (agg) => (agg === 'average' ? 'avg' : agg);
 
-export function aggExpr(d, fn, column, q) {
-  if (fn === 'count' && !column) return 'count(*)';
-  const c = d.quoteIdent(column);
+export function aggExpr(d, fn, column, q, cond = null) {
+  // a CONDITIONAL aggregate folds only the rows `cond` holds for: the value is NULL on every other
+  // row, which every aggregate skips — count(case when …), sum(case when …) — the same on every warehouse
+  if (fn === 'count' && !column) return cond ? `count(CASE WHEN ${cond} THEN 1 END)` : 'count(*)';
+  const c = cond ? `CASE WHEN ${cond} THEN ${d.quoteIdent(column)} END` : d.quoteIdent(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
   if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
   if (fn === 'hll_init') return d.hllInit(c);

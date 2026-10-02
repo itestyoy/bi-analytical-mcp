@@ -585,6 +585,17 @@ test('49. two events sources: per-source freshness, headline = the staler (crash
   assert.equal(dayOf(r.provenance.data_freshness), '2026-01-08');
 });
 
+test('49b. freshness read over the recent partitions is the latest device_time of all; a source quiet for longer is read whole, to the same day', opts, async (t) => {
+  if (skip(t)) return;
+  const { WarehouseProbe } = await import('../../src/engine/warehouse-probe.js');
+  const truth = (await wh.query("select strftime(max(device_time), '%Y-%m-%d') as d from fct_analytics_events")).rows[0].d;
+  const probeAt = (iso) => new WarehouseProbe({ runner: engine.runner, ctxs: engine.ctxs, catalog: engine.catalog, valueIndex: null, queryTimeoutMs: engine.probe.queryTimeoutMs, timeRangeConditions: (s, tr) => engine._timeRangeConditions(s, tr), now: () => Date.parse(iso) });
+  // the day after the latest event: the lookback reaches it through the partitions
+  assert.equal(dayOf(await probeAt('2026-01-10T12:00:00Z').dataFreshness('events')), truth);
+  // months later: nothing in the lookback, so the whole source is read
+  assert.equal(dayOf(await probeAt('2026-06-01T00:00:00Z').dataFreshness('events')), truth);
+});
+
 // ═══════════ O. PER-APP COVERAGE PER SOURCE ═══════════
 
 test('50. apps are listed per source: two on events (131 / 53), none on the crash source', opts, async (t) => {

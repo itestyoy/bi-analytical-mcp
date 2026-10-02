@@ -7,8 +7,12 @@
 import { comparison } from '../conditions.js';
 import { detached } from '../request-context.js';
 
+/** How far back freshness looks first on a partitioned source (days): late enough data still lands in it. */
+const FRESHNESS_LOOKBACK_DAYS = 7;
+
 export class WarehouseProbe {
-  constructor({ runner, ctxs, catalog, valueIndex, queryTimeoutMs, timeRangeConditions }) {
+  constructor({ runner, ctxs, catalog, valueIndex, queryTimeoutMs, timeRangeConditions, now = () => Date.now() }) {
+    this.now = now; // the clock freshness looks back from
     this.runner = runner;
     this.ctxs = ctxs;
     this.catalog = catalog;
@@ -88,6 +92,10 @@ export class WarehouseProbe {
   /**
    * Data FRESHNESS of a source: the LATEST value of its time column, live —
    *   SELECT MAX(<time column>) FROM <the source's model>
+   * read first over the last FRESHNESS_LOOKBACK_DAYS only when the source is partitioned — the window
+   * a query's time_range would put on it, its partition column included, so the read prunes as a
+   * query does. The newest event, when there is one in that window, is the newest of all; only a
+   * source with nothing in it is read whole (a source gone quiet, where its age is the news).
    * It is a DATA aggregate (the newest event actually present), NOT a dbt-run/deploy timestamp,
    * partition metadata, or an orchestration mark — and it is scoped to THIS model's relation.
    * Recomputed ONCE PER INDEX SCAN: the cache is keyed on the value-index sync generation, so a
@@ -105,9 +113,14 @@ export class WarehouseProbe {
     if (hit && hit.gen === gen) return hit.value; // re-query only after the next index scan completes
     return this.bestEffort(`freshness:${sourceKey}:${gen}`, async () => {
       let latest = null;
+      const maxOver = async (where) => {
+        const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
+        return r.ok && r.rows?.[0]?.latest != null ? String(r.rows[0].latest) : null;
+      };
       try {
-        const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
-        if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
+        const recent = m.partition_column ? this.timeRangeConditions(sourceKey, { start: new Date(this.now() - FRESHNESS_LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10) }) : null;
+        if (recent) latest = await maxOver(` WHERE ${recent.map((c) => comparison(c.column, c.op, c.value)).join(' AND ')}`);
+        if (latest == null) latest = await maxOver('');
       } catch { /* freshness is best-effort */ }
       this.freshnessCache.set(sourceKey, { value: latest, gen });
       return latest;

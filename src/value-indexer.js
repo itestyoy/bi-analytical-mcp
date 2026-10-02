@@ -4,6 +4,10 @@
 // and each property's timing recorded. It writes; ValueIndex reads.
 
 import { getDialect } from './dialects/index.js';
+import { partitionConditions } from './time-range.js';
+import { comparison } from './conditions.js';
+
+const DAY_MS = 86400000;
 
 // Max (event × bundle) cells stored per property for the triple coverage (busiest kept) —
 // bounds prop_bundle_event_coverage on a portfolio with many apps × events.
@@ -152,7 +156,7 @@ export class BackgroundIndexer {
     const ref = `{{ ref('${c.getModel(fact).dbt_model}') }}`;
     const evCol = c.eventNameColumn(fact);
     const timeCol = c.getModel(fact).time?.column;
-    const { andWin, whereWin } = this._winClauses(evCol, timeCol);
+    const { andWin, whereWin } = this._winClauses(evCol, timeCol, fact);
     const wmOf = (rows) => rows.reduce((mx, r) => { const v = r.wm == null ? null : (Number.isFinite(Number(r.wm)) ? Number(r.wm) : Date.parse(r.wm)); return (v != null && (mx == null || v > mx)) ? v : mx; }, null);
     let done = 0;
     let written = 0; // example value rows stored — counted into the run's values_written
@@ -166,7 +170,7 @@ export class BackgroundIndexer {
       const expr = this._valueExpr(name, fact);
       try {
         const prior = this.index.stats?.(fact, name);
-        const since = (this.merge && prior?.dataWatermark != null) ? this._sinceClause(prior.dataWatermark, timeCol) : null;
+        const since = (this.merge && prior?.dataWatermark != null) ? this._sinceClause(prior.dataWatermark, timeCol, fact) : null;
         const covWhere = since ? ` WHERE ${since}` : whereWin;
         const sampWhere = ` WHERE ${presence}${since ? ` AND ${since}` : andWin}`;
         // per-event[/app] presence coverage + the delta's max event time (for the watermark)
@@ -279,9 +283,24 @@ export class BackgroundIndexer {
 
   /** Per-property recency window predicate (fact scans only), bounded on THAT fact's own
    *  time column, or '' when there is no window / no time axis. */
-  _winClauses(eventCol, timeCol) {
-    const win = (eventCol && this.windowDays > 0 && timeCol) ? getDialect(this.catalog.dialect).recentSince(timeCol, this.windowDays) : null;
+  _winClauses(eventCol, timeCol, source) {
+    const recent = (eventCol && this.windowDays > 0 && timeCol) ? getDialect(this.catalog.dialect).recentSince(timeCol, this.windowDays) : null;
+    // the window is the warehouse's clock; its partitions are bounded by this one, a day earlier so a
+    // clock that runs ahead of the warehouse's never cuts off a day the window still reads
+    const win = recent ? [recent, this._partitionSince(source, Date.now() - (this.windowDays + 1) * DAY_MS)].filter(Boolean).join(' AND ') : null;
     return { andWin: win ? ` AND ${win}` : '', whereWin: win ? ` WHERE ${win}` : '' };
+  }
+
+  /**
+   * The partition column's bound for the rows at or after `ms` (epoch) of a source partitioned by
+   * another column than its time axis — '' when it has none. A bound on the time axis alone reads every
+   * partition of the table; this is the same rule a query's time_range applies (partitionConditions:
+   * an event lies in its own day's partition, or a later one), so a scan prunes as a query does.
+   */
+  _partitionSince(source, ms) {
+    if (!source) throw new Error('value index: a bounded scan needs the source it reads, for its partitions');
+    const conditions = partitionConditions(this.catalog.getModel(source), { start: new Date(ms).toISOString().slice(0, 10) });
+    return conditions.map((c) => comparison(c.column, c.op, c.value)).join(' AND ');
   }
 
   /** Top-N values for ONE property via an exact GROUP BY (the per-property fallback path). */
@@ -317,7 +336,7 @@ export class BackgroundIndexer {
   /** One property's full stats via per-property scans (fallback when a batch query fails). */
   async _indexOneExact(t, bundleCol, runId) {
     const c = this.catalog;
-    const { andWin, whereWin } = this._winClauses(t.eventCol, t.timeCol);
+    const { andWin, whereWin } = this._winClauses(t.eventCol, t.timeCol, t.source);
     const values = (await this._topValuesExact(t.ref, t.expr, andWin)) || [];
     const distinctExpr = (this.approxDistinct && getDialect(c.dialect).approxCountDistinct(t.expr)) || `COUNT(DISTINCT ${t.expr})`;
     const card = await this.runner.show(this.baseProjectDir, `SELECT ${distinctExpr} AS d, COUNT(${t.expr}) AS t, COUNT(*) AS rows_total FROM ${t.ref}${whereWin}`, 1, this.scanTimeout);
@@ -353,7 +372,7 @@ export class BackgroundIndexer {
     const eventCol = batch[0].eventCol;
     const { andWin, whereWin } = where != null
       ? { andWin: where ? ` AND ${where}` : '', whereWin: where ? ` WHERE ${where}` : '' }
-      : this._winClauses(eventCol, batch[0].timeCol);
+      : this._winClauses(eventCol, batch[0].timeCol, batch[0].source);
     const timeCol = (withWm && eventCol) ? batch[0].timeCol : null;
     // Return the FULL raw cause verbatim (process-level error + stderr + stdout), no
     // reformatting, no truncation — so the actual reason is visible from ANY level: a
@@ -432,12 +451,14 @@ export class BackgroundIndexer {
   // ── incremental merge (opt-in) ───────────────────────────────────────────────
   /** Delta predicate keeping only rows newer than an epoch-ms watermark, or null if the dialect
    *  has no safe expression (→ caller does a full re-scan instead of an unbounded merge). */
-  _sinceClause(watermarkMs, timeCol) {
+  _sinceClause(watermarkMs, timeCol, source) {
     // The delta predicate is bounded on the TARGET's own time column, passed in by every caller.
     // There is deliberately no default: falling back to another source's time axis would build
     // `WHERE <other fact's column> > …` against this table and fail on every sync.
     if (!timeCol) throw new Error('value index: a delta scan needs the source\'s own time column');
-    return Number.isFinite(Number(watermarkMs)) ? getDialect(this.catalog.dialect).sinceTimestampMs(timeCol, watermarkMs) : null;
+    const since = Number.isFinite(Number(watermarkMs)) ? getDialect(this.catalog.dialect).sinceTimestampMs(timeCol, watermarkMs) : null;
+    // …and on its partitions: rows newer than the watermark lie in its day's partition or a later one
+    return since ? [since, this._partitionSince(source, Number(watermarkMs))].filter(Boolean).join(' AND ') : null;
   }
 
   /** Read the CURRENTLY-STORED stats for a property back into the merge shape. */
@@ -612,7 +633,7 @@ export class BackgroundIndexer {
             if (merging) {
               const fresh = batch.filter((t) => this.index.stats?.(t.source, t.property)?.dataWatermark != null);
               const newbies = batch.filter((t) => this.index.stats?.(t.source, t.property)?.dataWatermark == null);
-              const since = fresh.length ? this._sinceClause(Math.min(...fresh.map((t) => this.index.stats(t.source, t.property).dataWatermark)), batch[0].timeCol) : null;
+              const since = fresh.length ? this._sinceClause(Math.min(...fresh.map((t) => this.index.stats(t.source, t.property).dataWatermark)), batch[0].timeCol, batch[0].source) : null;
               if (fresh.length) await scanInto(fresh, since || '', !!since); // delta if the dialect supports it, else full
               if (newbies.length) await scanInto(newbies, '', false);         // NEW fields: full scan, on their own
             } else {
@@ -641,7 +662,7 @@ export class BackgroundIndexer {
               } else if (merging) {
                 // batch failed → per-property merge fallback (delta if a watermark exists, else full)
                 const prior = this.index.stats?.(t.source, t.property);
-                const since = (prior?.dataWatermark != null && t.timeCol) ? this._sinceClause(prior.dataWatermark, t.timeCol) : null;
+                const since = (prior?.dataWatermark != null && t.timeCol) ? this._sinceClause(prior.dataWatermark, t.timeCol, t.source) : null;
                 if (since) { const inc = await this._indexIncremental(t, t.bundleCol || null, runId, prior, since); r = inc.r; watermark = inc.watermark; mergedNoNew = inc.r === null; }
                 else { r = await this._scanProperty(t, t.bundleCol || null, runId, ''); watermark = r.maxTime; }
               } else {

@@ -37,6 +37,28 @@ const CHANNEL_OF_SOURCE = "case when media_source = 'organic' then 'organic' els
  * entry per model); a model that exists only for the layer — a thin view — is described ONLY in the
  * layer's own file; the ratio / derived metrics are a file of their own.
  */
+/** Whether the tests' dbt reads the legacy spec (dbt 1.x): each layer edit below is written in the spec it reads. */
+const legacy = () => backend.semanticSpec !== 'latest';
+const LEGACY_FILE = 'project_semantic_layer.yml';
+
+/** The layer in the spec dbt 1.x reads (legacy): one file of semantic models and metrics, the thin views beside it. */
+function declareLegacyLayer() {
+  const core = join(BASE, 'models', 'core');
+  mkdirSync(core, { recursive: true });
+  writeThinViews(core);
+  writeFileSync(join(core, LEGACY_FILE), readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'project_semantic_layer.legacy.yml'), 'utf8'));
+}
+
+/** The thin views the layer reads (a project's own models). */
+function writeThinViews(core) {
+  // (a column named the way a project names its amounts — with `__` in it, which nothing may rewrite)
+  // two different channels, so the two ways to project_channels give different numbers: the one a spend
+  // row is booked under (by its campaign) and the one its media source belongs to
+  writeFileSync(join(core, 'fct_project_acquisition.sql'), `{{ config(materialized='view') }}\nselect *, impressions as measure__impressions, ${CHANNEL_OF_ROW} as channel from {{ ref('fct_player_acquisition') }}\n`);
+  writeFileSync(join(core, 'fct_project_media_sources.sql'), `{{ config(materialized='view') }}\nselect distinct media_source, upper(media_source) as source_label, ${CHANNEL_OF_SOURCE} as channel from {{ ref('fct_player_acquisition') }}\n`);
+  writeFileSync(join(core, 'fct_project_channels.sql'), "{{ config(materialized='view') }}\nselect channel, upper(channel) as channel_kind from (select 'paid' as channel union all select 'organic')\n");
+}
+
 function declareProjectLayer() {
   const layer = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'project_semantic_layer.yml'), 'utf8'));
   const file = join(BASE, 'models', '_models.yml');
@@ -47,12 +69,7 @@ function declareProjectLayer() {
   writeFileSync(file, yaml.dump(doc, { lineWidth: 120, noRefs: true }));
   const core = join(BASE, 'models', 'core');
   mkdirSync(core, { recursive: true });
-  // (a column named the way a project names its amounts — with `__` in it, which nothing may rewrite)
-  // two different channels, so the two ways to project_channels give different numbers: the one a spend
-  // row is booked under (by its campaign) and the one its media source belongs to
-  writeFileSync(join(core, 'fct_project_acquisition.sql'), `{{ config(materialized='view') }}\nselect *, impressions as measure__impressions, ${CHANNEL_OF_ROW} as channel from {{ ref('fct_player_acquisition') }}\n`);
-  writeFileSync(join(core, 'fct_project_media_sources.sql'), `{{ config(materialized='view') }}\nselect distinct media_source, upper(media_source) as source_label, ${CHANNEL_OF_SOURCE} as channel from {{ ref('fct_player_acquisition') }}\n`);
-  writeFileSync(join(core, 'fct_project_channels.sql'), "{{ config(materialized='view') }}\nselect channel, upper(channel) as channel_kind from (select 'paid' as channel union all select 'organic')\n");
+  writeThinViews(core);
   writeFileSync(join(core, 'project_semantic_models.yml'), yaml.dump({ models: layer.models.filter((m) => !described.has(m.name)) }, { lineWidth: 120, noRefs: true }));
   writeFileSync(join(core, 'project_metrics.yml'), yaml.dump({ metrics: layer.metrics }, { lineWidth: 120, noRefs: true }));
 }
@@ -61,9 +78,9 @@ before(async () => {
   if (!HAS_DBT) return;
   wh = await startWarehouse();
   backend = testDbt({ profilesDir: BASE });
-  // the layer is written in the latest spec, the one the tests' dbt (v2) reads
-  if (backend.semanticSpec !== 'latest') return;
-  declareProjectLayer();
+  // the layer in the spec the tests' dbt reads: the latest (v2), or the legacy one (dbt 1.x) — the same
+  // models and metrics, so every number below holds on both
+  if (backend.semanticSpec === 'latest') declareProjectLayer(); else declareLegacyLayer();
   const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
@@ -76,7 +93,6 @@ before(async () => {
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => {
   if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; }
-  if (backend.semanticSpec !== 'latest') { t.skip('the fixture layer is in dbt\'s latest spec'); return true; }
   return false;
 };
 
@@ -286,7 +302,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   const readBack = () => readStored(stored.task_id);
   const clicks = (r) => Object.fromEntries(r.rows.map((x) => [x.media_source, num(x.project_clicks)]));
   // a start whose project does not parse serves nothing, and keeps what earlier starts stored
-  const metricsFile = join(BASE, 'models', 'core', 'project_metrics.yml');
+  const metricsFile = join(BASE, 'models', 'core', legacy() ? LEGACY_FILE : 'project_metrics.yml');
   const good = readFileSync(metricsFile, 'utf8');
   writeFileSync(metricsFile, 'metrics:\n  - name: [not closed\n'); // a property file dbt cannot read
   let failed;
@@ -448,11 +464,18 @@ test('validate names the metric and the dimension whose column the warehouse doe
   // parses it (the expression is the warehouse's to judge), MetricFlow compiles it, the run fails
   const broken = join(mkdtempSync(join(tmpdir(), 'projsem-broken-')), 'project');
   cpSync(BASE, broken, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
-  const file = join(broken, 'models', 'core', 'project_semantic_models.yml');
+  const file = join(broken, 'models', 'core', legacy() ? LEGACY_FILE : 'project_semantic_models.yml');
   const doc = yaml.load(readFileSync(file, 'utf8'));
-  const acq = doc.models.find((m) => m.name === 'fct_project_acquisition');
-  acq.metrics.push({ name: 'project_broken_amount', type: 'simple', agg: 'sum', expr: 'no_such_amount' });
-  acq.derived_semantics = { dimensions: [{ name: 'broken_dim', type: 'categorical', expr: 'no_such_column' }] };
+  if (legacy()) {
+    const acq = doc.semantic_models.find((m) => m.name === ACQ);
+    acq.measures.push({ name: 'project_broken_amount', agg: 'sum', expr: 'no_such_amount' });
+    acq.dimensions.push({ name: 'broken_dim', type: 'categorical', expr: 'no_such_column' });
+    doc.metrics.push({ name: 'project_broken_amount', label: 'Broken amount', type: 'simple', type_params: { measure: 'project_broken_amount' } });
+  } else {
+    const acq = doc.models.find((m) => m.name === 'fct_project_acquisition');
+    acq.metrics.push({ name: 'project_broken_amount', type: 'simple', agg: 'sum', expr: 'no_such_amount' });
+    acq.derived_semantics = { dimensions: [{ name: 'broken_dim', type: 'categorical', expr: 'no_such_column' }] };
+  }
   writeFileSync(file, yaml.dump(doc, { lineWidth: 120, noRefs: true }));
   const ctxs2 = new ContextManager({ baseProjectDir: broken, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem2-')), timeSpineDialect: 'duckdb' });
   const loaded2 = await loadProjectSemantics({ runner: backend, contextManager: ctxs2 });
@@ -531,24 +554,42 @@ test('nothing is keyed on a name: files moved and renamed, a semantic model and 
   const from = join(other, 'models', 'core');
   const to = join(other, 'models', 'marts', 'spend');
   mkdirSync(to, { recursive: true });
-  const doc = yaml.load(readFileSync(join(from, 'project_semantic_models.yml'), 'utf8'));
-  const metricsDoc = yaml.load(readFileSync(join(from, 'project_metrics.yml'), 'utf8'));
   // the semantic model and every metric under new names
   const renamed = (n) => n.replace(/^project_/, 'zz_');
-  const acq = doc.models.find((m) => m.semantic_model?.name === ACQ);
-  acq.semantic_model.name = 'paid_spend_daily';
-  for (const m of acq.metrics) m.name = renamed(m.name);
-  const keep = metricsDoc.metrics.filter((m) => ['project_touches', 'project_ctr', 'project_cost_per_touch'].includes(m.name)).map((m) => JSON.parse(JSON.stringify(m).replace(/"project_/g, '"zz_')));
-  writeFileSync(join(to, 'layer.yaml'), yaml.dump(doc, { lineWidth: 120, noRefs: true }));
-  writeFileSync(join(to, 'derived.yml'), yaml.dump({ metrics: keep }, { lineWidth: 120, noRefs: true }));
-  for (const f of ['project_semantic_models.yml', 'project_metrics.yml']) writeFileSync(join(from, f), '');
-  // and a semantic model no metric reads — dimensions only
-  const modelsFile = join(other, 'models', '_models.yml');
-  const modelsDoc = yaml.load(readFileSync(modelsFile, 'utf8'));
-  const users = modelsDoc.models.find((m) => m.name === 'dim_users');
-  Object.assign(users, { primary_entity: 'user_version', semantic_model: { enabled: true, name: 'user_profiles' } });
-  users.columns = users.columns.map((c) => (c.name === 'country' ? { ...c, dimension: { type: 'categorical' } } : c));
-  writeFileSync(modelsFile, yaml.dump(modelsDoc, { lineWidth: 120, noRefs: true }));
+  const derivedKept = ['project_touches', 'project_ctr', 'project_cost_per_touch'];
+  if (legacy()) {
+    const doc = yaml.load(readFileSync(join(from, LEGACY_FILE), 'utf8'));
+    const acq = doc.semantic_models.find((m) => m.name === ACQ);
+    acq.name = 'paid_spend_daily';
+    const acqMeasures = new Set(acq.measures.map((m) => m.name));
+    for (const m of acq.measures) m.name = renamed(m.name);
+    // its simple metrics under new names, the events' as they were, and three of the metrics over them
+    const metrics = doc.metrics
+      .filter((m) => m.type === 'simple' || derivedKept.includes(m.name))
+      .map((m) => (m.type === 'simple' ? (acqMeasures.has(m.type_params.measure) ? JSON.parse(JSON.stringify(m).replace(/"project_/g, '"zz_')) : m) : JSON.parse(JSON.stringify(m).replace(/"project_/g, '"zz_'))));
+    // and a semantic model no metric reads — dimensions only
+    doc.semantic_models.push({ name: 'user_profiles', model: "ref('dim_users')", primary_entity: 'user_version', dimensions: [{ name: 'country', type: 'categorical' }] });
+    writeFileSync(join(to, 'layer.yaml'), yaml.dump({ semantic_models: doc.semantic_models }, { lineWidth: 120, noRefs: true }));
+    writeFileSync(join(to, 'derived.yml'), yaml.dump({ metrics }, { lineWidth: 120, noRefs: true }));
+    writeFileSync(join(from, LEGACY_FILE), '');
+  } else {
+    const doc = yaml.load(readFileSync(join(from, 'project_semantic_models.yml'), 'utf8'));
+    const metricsDoc = yaml.load(readFileSync(join(from, 'project_metrics.yml'), 'utf8'));
+    const acq = doc.models.find((m) => m.semantic_model?.name === ACQ);
+    acq.semantic_model.name = 'paid_spend_daily';
+    for (const m of acq.metrics) m.name = renamed(m.name);
+    const keep = metricsDoc.metrics.filter((m) => derivedKept.includes(m.name)).map((m) => JSON.parse(JSON.stringify(m).replace(/"project_/g, '"zz_')));
+    writeFileSync(join(to, 'layer.yaml'), yaml.dump(doc, { lineWidth: 120, noRefs: true }));
+    writeFileSync(join(to, 'derived.yml'), yaml.dump({ metrics: keep }, { lineWidth: 120, noRefs: true }));
+    for (const f of ['project_semantic_models.yml', 'project_metrics.yml']) writeFileSync(join(from, f), '');
+    // and a semantic model no metric reads — dimensions only
+    const modelsFile = join(other, 'models', '_models.yml');
+    const modelsDoc = yaml.load(readFileSync(modelsFile, 'utf8'));
+    const users = modelsDoc.models.find((m) => m.name === 'dim_users');
+    Object.assign(users, { primary_entity: 'user_version', semantic_model: { enabled: true, name: 'user_profiles' } });
+    users.columns = users.columns.map((c) => (c.name === 'country' ? { ...c, dimension: { type: 'categorical' } } : c));
+    writeFileSync(modelsFile, yaml.dump(modelsDoc, { lineWidth: 120, noRefs: true }));
+  }
   // (the events semantic model stays where it was, on the project's own entry)
   const ctxs3 = new ContextManager({ baseProjectDir: other, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem3-')), timeSpineDialect: 'duckdb' });
   const loaded3 = await loadProjectSemantics({ runner: backend, contextManager: ctxs3 });
@@ -626,7 +667,11 @@ function projectWith(extra) {
   const roles = join(dir, 'models', 'roles');
   mkdirSync(roles, { recursive: true });
   for (const [name, { sql }] of Object.entries(extra)) writeFileSync(join(roles, `${name}.sql`), `{{ config(materialized='view') }}\n${sql}\n`);
-  writeFileSync(join(roles, 'roles.yml'), yaml.dump({ models: Object.entries(extra).map(([name, { entry }]) => ({ name, ...entry })) }, { lineWidth: 120, noRefs: true }));
+  const doc = legacy()
+    ? { semantic_models: Object.values(extra).map((x) => x.legacy.semantic_model), metrics: Object.values(extra).flatMap((x) => x.legacy.metrics || []) }
+    : { models: Object.entries(extra).map(([name, { entry }]) => ({ name, ...entry })) };
+  if (doc.metrics && !doc.metrics.length) delete doc.metrics;
+  writeFileSync(join(roles, 'roles.yml'), yaml.dump(doc, { lineWidth: 120, noRefs: true }));
   return dir;
 }
 
@@ -644,6 +689,15 @@ const ROLE_SPEND = {
       ],
       metrics: [{ name: 'role_cost', type: 'simple', agg: 'sum', expr: 'cost' }],
     },
+    legacy: {
+      semantic_model: {
+        name: 'role_spend', model: "ref('fct_role_spend')", defaults: { agg_time_dimension: 'spend_date' }, primary_entity: 'role_spend_row',
+        entities: [{ name: 'booked_channel', type: 'foreign', expr: 'booked_channel' }, { name: 'source_channel', type: 'foreign', expr: 'source_channel' }],
+        dimensions: [{ name: 'spend_date', type: 'time', type_params: { time_granularity: 'day' } }],
+        measures: [{ name: 'role_cost', agg: 'sum', expr: 'cost' }],
+      },
+      metrics: [{ name: 'role_cost', label: 'Role cost', type: 'simple', type_params: { measure: 'role_cost' } }],
+    },
   },
 };
 const channelsKeyedBy = (keys) => ({
@@ -654,6 +708,13 @@ const channelsKeyedBy = (keys) => ({
       ...keys.map((k, i) => ({ name: k, entity: { type: i ? 'unique' : 'primary', name: k } })),
       { name: 'channel_kind', dimension: { type: 'categorical', name: 'kind' } },
     ],
+  }),
+  legacy: (name, model) => ({
+    semantic_model: {
+      name, model: `ref('${model}')`,
+      entities: keys.map((k, i) => ({ name: k, type: i ? 'unique' : 'primary', expr: k })),
+      dimensions: [{ name: 'kind', type: 'categorical', expr: 'channel_kind' }],
+    },
   }),
 });
 /** Build `models` of a copy into the warehouse (new names only: the shared views are left alone). */
@@ -669,7 +730,7 @@ async function loadedFrom(dir) {
 test('a semantic model joined onto through several keys is not served — said at start, in the preview and in the refusal, with how to declare it', opts, async (t) => {
   if (skip(t)) return;
   const roles = channelsKeyedBy(['booked_channel', 'source_channel']);
-  const dir = projectWith({ ...ROLE_SPEND, fct_role_channels: { sql: roles.sql, entry: roles.entry('role_channels') } });
+  const dir = projectWith({ ...ROLE_SPEND, fct_role_channels: { sql: roles.sql, entry: roles.entry('role_channels'), legacy: roles.legacy('role_channels', 'fct_role_channels') } });
   const { out, eng } = await loadedFrom(dir);
   const [b] = out.layer.blocked;
   assert.deepEqual([b.semantic_model, b.keys, b.dimensions, b.metrics], ['role_channels', ['booked_channel', 'source_channel'], ['role_channels.kind'], ['role_cost']]);
@@ -696,7 +757,7 @@ test('declared as the fix says — one semantic model per key — each role is a
   if (skip(t)) return;
   const booked = channelsKeyedBy(['booked_channel']);
   const source = channelsKeyedBy(['source_channel']);
-  const dir = projectWith({ ...ROLE_SPEND, fct_booked_channels: { sql: booked.sql, entry: booked.entry('booked_channels') }, fct_source_channels: { sql: source.sql, entry: source.entry('source_channels') } });
+  const dir = projectWith({ ...ROLE_SPEND, fct_booked_channels: { sql: booked.sql, entry: booked.entry('booked_channels'), legacy: booked.legacy('booked_channels', 'fct_booked_channels') }, fct_source_channels: { sql: source.sql, entry: source.entry('source_channels'), legacy: source.legacy('source_channels', 'fct_source_channels') } });
   await runModels(dir, ['fct_role_spend', 'fct_booked_channels', 'fct_source_channels']);
   const { out, eng } = await loadedFrom(dir);
   assert.deepEqual(out.layer.blocked, []);

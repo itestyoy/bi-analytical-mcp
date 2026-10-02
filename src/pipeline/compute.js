@@ -10,8 +10,8 @@ import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
 import { rawUnknownColumns, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
-import { conditionsSql } from '../conditions.js';
-import { form, SCALAR, CONSTANT } from '../schema-kit.js';
+import { conditionsSql, eachCondition } from '../conditions.js';
+import { form, SCALAR } from '../schema-kit.js';
 
 const ORDER = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' };
 const PARTITION = { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' };
@@ -50,8 +50,19 @@ const params = () => ({
   over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION, order_by: ORDER, frame: FRAME } },
 });
 
+/** The type of a value picked from several (coalesce, least, greatest): the one the typed arguments
+ *  share — numbers of any kind are numeric — else `fallback`; an untyped constant (null) says nothing. */
+const NUMBERS = new Set(['int', 'integer', 'numeric', 'float']);
+function commonType(types, fallback) {
+  const typed = [...new Set(types.filter((t) => t && t !== 'unknown'))];
+  if (typed.length === 1) return typed[0];
+  return typed.length && typed.every((t) => NUMBERS.has(t)) ? 'numeric' : fallback;
+}
+
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
 const arith = (sym) => ({ args: 2, sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
+// An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
+// KNOWN non-array type fails — an array, or a column whose type is unknown (raw, native), passes.
 const ARRAY_TYPES = new Set(['array', 'unknown', undefined, null]);
 const needsArray = (fn, t) => { if (!ARRAY_TYPES.has(t)) throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`); };
 
@@ -88,9 +99,9 @@ export const FNS = {
   unix_date: { args: 1, sql: ({ d, a }) => ({ expr: d.unixDateExpr(a[0]), type: 'int' }) },
   hll_extract: { args: 1, sql: ({ d, a }) => ({ expr: d.hllExtract(a[0]), type: 'int' }) },
   json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: 'array' }) }, // STRING JSON array → native array (then unnest)
-  coalesce: { args: { min: 2 }, sql: ({ a }) => ({ expr: `coalesce(${a.join(', ')})`, type: 'string' }) },
-  least: { args: { min: 2 }, sql: ({ a }) => ({ expr: `least(${a.join(', ')})` }) },
-  greatest: { args: { min: 2 }, sql: ({ a }) => ({ expr: `greatest(${a.join(', ')})` }) },
+  coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
+  least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
+  greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `greatest(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
   concat: { args: { min: 1 }, sql: ({ a }) => ({ expr: `concat(${a.join(', ')})`, type: 'string' }) },
   cast: { args: 1, needs: ['type'], sql: ({ d, a, p }) => ({ expr: d.castExpr(a[0], p.type), type: p.type }) },
   substring: { args: 1, needs: ['start'], may: ['len'], sql: ({ d, a, p }) => ({ expr: d.substringExpr(a[0], p.start, p.len), type: 'string' }) },
@@ -115,8 +126,8 @@ export const FNS = {
   },
   case: {
     args: 0, needs: ['cases'], may: ['else', 'type'],
-    sql: ({ d, cols, p, sub }) => {
-      const branches = p.cases.map((cs) => `WHEN ${conditionsSql(cs.when, (c) => condPred(d, cols, c)).join(' AND ')} THEN ${sub(cs.then, 'then').sql}`);
+    sql: ({ d, cols, p, sub, opts }) => {
+      const branches = p.cases.map((cs) => `WHEN ${conditionsSql(cs.when, (c) => condPred(d, cols, c, opts)).join(' AND ')} THEN ${sub(cs.then, 'then').sql}`);
       return { expr: `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${sub(p.else, 'else').sql}` : ''} END`, type: p.type || 'string' };
     },
   },
@@ -147,13 +158,20 @@ export const FNS = {
 const written = (name) => (name === 'over_frame' ? 'over' : name);
 
 /** The expression's SQL and type over the columns at this step. `at` names it in a refusal. */
-export function exprSql(d, cols, e, at = 'expression') {
+/**
+ * The expression's SQL and type over the columns at this step. `at` names it in a refusal. `opts`:
+ * `windows: false` where SQL takes no window function (a where condition — it filters rows before
+ * any window is computed), `inWindow` inside a window function's own arguments (SQL nests none).
+ */
+export function exprSql(d, cols, e, at = 'expression', opts = {}) {
   if (e === null || typeof e !== 'object' || Array.isArray(e)) throw new Error(`${at}: must be { column } | { value } | { now: true } | { fn, … }`);
   if (e.column !== undefined) { requireCol(cols, e.column); return { sql: d.quoteIdent(e.column), type: cols.get(e.column)?.type || null }; }
   if (e.now) return { sql: d.nowExpr(), type: 'time' };
   if (e.fn === undefined) {
     if (!Object.hasOwn(e, 'value')) throw new Error(`${at}: needs column | value | now | fn`);
     const v = e.value;
+    // a list is a condition's constant (in / not_in / between: its `value`), never a value of its own
+    if (Array.isArray(v) || (v !== null && typeof v === 'object')) throw new Error(`${at}: a constant is a string, a number, a boolean or null — a list belongs in a condition's \`value\` (in / not_in / between)`);
     return { sql: d.sqlLiteral(v), type: typeof v === 'number' ? 'numeric' : typeof v === 'boolean' ? 'boolean' : v === null ? null : 'string' };
   }
   const spec = Object.hasOwn(FNS, e.fn) ? FNS[e.fn] : null;
@@ -162,20 +180,33 @@ export function exprSql(d, cols, e, at = 'expression') {
   const { min, max } = typeof spec.args === 'number' ? { min: spec.args, max: spec.args } : { min: spec.args.min, max: spec.args.max ?? Infinity };
   if (args.length < min || args.length > max) throw new Error(`${at}: ${e.fn} takes ${min === max ? min : max === Infinity ? `at least ${min}` : `${min} to ${max}`} argument${max === 1 ? '' : 's'}${spec.title ? ` ${spec.title}` : ''}, not ${args.length}`);
   for (const n of spec.needs || []) if (e[written(n)] === undefined) throw new Error(`${at}: ${e.fn} needs \`${written(n)}\``);
-  const rendered = args.map((x, i) => exprSql(d, cols, x, `${at} ${e.fn} args[${i}]`));
-  const out = spec.sql({ d, cols, p: e, a: rendered.map((r) => r.sql), t: rendered.map((r) => r.type), sub: (x, what) => exprSql(d, cols, x, `${at} ${e.fn} ${what}`) });
+  if (spec.window && opts.windows === false) throw new Error(`${at}: a window function (${e.fn}) cannot be compared in a where — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column`);
+  if (spec.window && opts.inWindow) throw new Error(`${at}: a window function (${e.fn}) cannot be an argument of another window function — compute the inner one into a column first (a compute stage), then use that column`);
+  const inner = spec.window ? { ...opts, inWindow: true } : opts;
+  const rendered = args.map((x, i) => exprSql(d, cols, x, `${at} ${e.fn} args[${i}]`, inner));
+  const out = spec.sql({ d, cols, p: e, opts: inner, a: rendered.map((r) => r.sql), t: rendered.map((r) => r.type), sub: (x, what) => exprSql(d, cols, x, `${at} ${e.fn} ${what}`, inner) });
   return { sql: out.expr, type: out.type || 'numeric' };
 }
 
-/** Every function an expression calls, nested ones included (to find a window, a raw SQL). */
+/** Every function an expression calls, nested ones included — in arguments, a CASE's branches and
+ *  the conditions they test (to find a window, a raw SQL). */
 export function exprCalls(e, out = []) {
   if (!e || typeof e !== 'object') return out;
   if (e.fn !== undefined) {
     out.push(e);
     for (const x of e.args || []) exprCalls(x, out);
-    for (const cs of e.cases || []) exprCalls(cs.then, out);
+    for (const cs of e.cases || []) {
+      conditionCalls(cs.when, out);
+      exprCalls(cs.then, out);
+    }
     if (e.else) exprCalls(e.else, out);
   }
+  return out;
+}
+
+/** Every function the expressions of a list of conditions call (their left and right sides). */
+export function conditionCalls(list, out = []) {
+  eachCondition(list, (c) => { exprCalls(c.left, out); exprCalls(c.right, out); });
   return out;
 }
 
@@ -213,7 +244,7 @@ export function exprSchema() {
     description: 'An expression: { column }, a constant { value }, the current time { now: true }, or a function { fn, args: [expressions], …its parameters } — arguments are expressions themselves, so a formula nests in one place (e.g. round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }). Window functions (row_number, rank, dense_rank, lag, lead, and sum / average / count / min / max of a frame) take `over`. raw is the escape hatch: dialect SQL in `sql`.',
     anyOf: [
       form({ title: 'a column', required: ['column'], properties: { column: { type: 'string' } } }),
-      form({ title: 'a constant', required: ['value'], properties: { value: CONSTANT } }),
+      form({ title: 'a constant', required: ['value'], properties: { value: SCALAR } }),
       form({ title: 'the current time', required: ['now'], properties: { now: { const: true } } }),
       ...forms,
     ],

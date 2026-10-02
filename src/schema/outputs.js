@@ -7,9 +7,11 @@
 // with a card (display_model_result, experiment, drill_result) declares none either: a host draws a
 // card for every answer that carries structuredContent (src/mcp-surface.js toCallToolResult).
 //
-// Each schema names what the answer always has (`required`) and types every field it may carry; a field
-// added to an answer later is allowed (the schemas are not closed), so an answer is never refused for
-// saying more.
+// Each schema is ONE object — no union, so it is in the portable subset every host reads (no anyOf at
+// its root, which OpenAI's strict mode refuses): it names what every answer of the tool has
+// (`required`), types every field an answer may carry, and says in its description which fields a mode
+// answers with. A field added to an answer later is allowed (the schemas are not closed), so an answer
+// is never refused for saying more.
 
 const str = { type: 'string' };
 const num = { type: 'number' };
@@ -40,15 +42,19 @@ export const OUTPUTS = {
     reason: str,
   }),
 
-  // list: { contexts }; describe: one context in depth
-  context: {
-    type: 'object',
-    description: 'The contexts (list), or one in depth (describe).',
-    anyOf: [
-      { type: 'object', required: ['contexts'], properties: { contexts: list(obj) } },
-      { type: 'object', required: ['context_id'], properties: { context_id: str, engine: str, tasks: list(), draft: obj, semantic_models: list(), measures: list(), metrics: list(), groupable: list(), files: list(str) } },
-    ],
-  },
+  // list: { contexts }; describe: one context in depth — one object, no union: what each mode answers is optional
+  context: shape('The contexts (list: `contexts`), or one in depth (describe: `context_id` and what it holds).', [], {
+    contexts: list(obj),
+    context_id: str,
+    engine: str,
+    tasks: list(),
+    draft: obj,
+    semantic_models: list(),
+    measures: list(),
+    metrics: list(),
+    groupable: list(),
+    files: list(str),
+  }),
 
   delete_context: shape('What was removed.', ['removed'], {
     removed: bool,
@@ -64,25 +70,33 @@ export const OUTPUTS = {
   }),
 
   // record: saved + id; list / search: notes; forget: forgotten + id
-  memory: {
-    type: 'object',
-    description: 'The note saved (record), the notes found (list, search), or the note removed (forget).',
-    anyOf: [
-      { type: 'object', required: ['saved', 'id'], properties: { saved: bool, id: str, note: str, linked_to: list(obj), unresolved_terms: list(str), aliases: list(str), links: list(), next: str } },
-      { type: 'object', required: ['notes'], properties: { total: int, query: str, semantic: bool, notes: list(obj) } },
-      { type: 'object', required: ['forgotten', 'id'], properties: { forgotten: bool, id: str } },
-    ],
-  },
+  memory: shape('The note saved (record: `saved`, `id`), the notes found (list, search: `notes`), or the note removed (forget: `forgotten`, `id`).', [], {
+    saved: bool,
+    forgotten: bool,
+    id: str,
+    note: str,
+    linked_to: list(obj),
+    unresolved_terms: list(str),
+    aliases: list(str),
+    links: list(),
+    next: str,
+    total: int,
+    query: str,
+    semantic: bool,
+    notes: list(obj),
+  }),
 
   // a page of failures, or one in full
-  explore_errors: {
-    type: 'object',
-    description: 'A page of the failures kept (newest first), or one in full ({ id }).',
-    anyOf: [
-      { type: 'object', required: ['total', 'errors'], properties: { ok: bool, total: int, shown: int, offset: int, errors: list(obj), by_source: list(obj), note: str } },
-      { type: 'object', required: ['error'], properties: { ok: bool, error: obj } },
-    ],
-  },
+  explore_errors: shape('A page of the failures kept, newest first (`errors`), or one in full ({ id }: `error`).', ['ok'], {
+    ok: bool,
+    total: int,
+    shown: int,
+    offset: int,
+    errors: list(obj),
+    by_source: list(obj),
+    note: str,
+    error: obj,
+  }),
 
   build_semantic_model: started,
 };

@@ -57,8 +57,18 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
     }
   });
 
+  // an answer's schema is listed too: an object at its root, with no union or other construct a host may refuse
+  test(`every outputSchema is one object in the portable subset (${label} catalog)`, () => {
+    const outputs = listed(path).filter((t) => t.outputSchema);
+    assert.ok(outputs.length > 0, 'some tool declares its answer');
+    for (const t of outputs) {
+      assert.equal(t.outputSchema.type, 'object', `${t.name}: the root is an object`);
+      eachSchema(t.outputSchema, (node) => { for (const k of ['anyOf', ...NOT_PORTABLE]) assert.ok(!(k in node), `${t.name}: its answer's schema uses ${k}`); });
+    }
+  });
+
   test(`no schema uses a construct outside the portable subset (${label} catalog)`, () => {
-    const all = [...listed(path).map((t) => [t.name, t.inputSchema]), ...Object.entries(allSchemas(path))];
+    const all = [...listed(path).flatMap((t) => [[t.name, t.inputSchema], ...(t.outputSchema ? [[`${t.name} (output)`, t.outputSchema]] : [])]), ...Object.entries(allSchemas(path))];
     for (const [name, schema] of all) {
       // schema positions only: a field NAMED `then` or `else` (a CASE branch) is a property, not a keyword
       eachSchema(schema, (node) => { for (const k of NOT_PORTABLE) assert.ok(!(k in node), `${name}: a schema node uses ${k}`); });

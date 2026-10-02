@@ -97,6 +97,20 @@ function sourceColumns(catalog, key, physicalCols = null) {
   return cols;
 }
 
+/**
+ * What a stage stored by an earlier version of this server carries that this version spells another
+ * way — a draft outlives a deploy, and its steps are rendered again on every edit: said as what it is,
+ * instead of a refusal that reads like a mistake of the caller's, or a field silently ignored.
+ */
+function earlierSpelling(st) {
+  if (st.stage === 'compute' && st.op !== undefined && st.expr === undefined) return `a computed column as { op: '${st.op}', … } (now { expr: { fn, args } })`;
+  if (st.stage === 'aggregate' && (st.measures || []).some((m) => m.fn !== undefined || m.q !== undefined)) return 'its measures with `fn` / `q` (now `agg` / `percentile`)';
+  if (st.stage === 'pivot' && st.fn !== undefined) return 'its aggregation in `fn` (now `agg`)';
+  if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return 'an attribute\'s new name in `as` (now `name`)';
+  if (st.stage === 'unnest' && st.as !== undefined) return 'the element\'s name in `as` (now `name`)';
+  return null;
+}
+
 // Fold stages -> { ops, cols } (validating column references along the way). `source`
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
@@ -116,6 +130,8 @@ function buildOps(catalog, d, baseColumns, stages, source) {
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
+    const earlier = earlierSpelling(st);
+    if (earlier) throw new Error(`this ${st.stage} stage${st.name ? ` ('${st.name}')` : ''} was stored by an earlier version of this server, which wrote ${earlier} — write it as this version does (edit_step it, or start the draft again); the stage's schema says how`);
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;

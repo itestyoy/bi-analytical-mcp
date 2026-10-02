@@ -293,7 +293,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         severity: { enum: ['error', 'warning'], description: 'error — something failed; warning — something was left out and served without it (a join the project declares that no reference can name, a feature that cannot run here).' },
         tool: { type: 'string', pattern: '^[a-z][a-z0-9_]*$', description: 'Only the errors of this tool (for a task: the tool that started it).' },
         stage: { type: 'string', pattern: '^[a-z_]+$', description: 'Only this stage (validate, query, build, task, …).' },
-        context_id: { type: 'string', pattern: '^[A-Za-z0-9_]+$', description: 'Only the errors on this context.' },
+        context_id: contextId('Only the errors on this context — the context_id a build returned, or one of the dbt project\'s own semantic models by its name.'),
         task_id: { type: 'string', pattern: TASK_ID, description: 'Only this task\'s errors.' },
         text: { type: 'string', minLength: 1, description: 'Only errors whose message contains this text (any case).' },
         detail: { type: 'boolean', description: 'Give each error of the page in full (arguments and detail), not only its message.' },

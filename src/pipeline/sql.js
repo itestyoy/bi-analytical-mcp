@@ -37,7 +37,6 @@ export function statAccuracyNote(catalog) {
 // An operand is an EXPRESSION (src/pipeline/compute.js: a column, a constant, now, or a function of
 // expressions), defined once in the stage schemas' $defs and referenced from every place that takes one.
 export const EXPR = { $ref: '#/$defs/expr' };
-export const OPERAND = EXPR;
 
 // One comparison, used identically by `where` and `case` branches. Either side is
 // a column / constant / now: shorthand `{column, op, value}` (column vs constant)
@@ -48,8 +47,8 @@ export const CONDITION = {
   description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
   // the left side is a column named outright or an operand — one of the two, never both
   anyOf: [
-    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: OPERAND } }),
-    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: OPERAND, op: { enum: CMP }, value: CONSTANT, right: OPERAND } }),
+    form({ title: 'a column compared', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
+    form({ title: 'an operand compared', required: ['left', 'op'], properties: { left: EXPR, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
   ],
 };
 
@@ -69,11 +68,6 @@ export const propEnum = (values, description) => (values.length ? { type: 'strin
 export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
-
-// SQL for one operand: an expression (src/pipeline/compute.js exprSql).
-export function operandSql(d, cols, o, label = 'operand') {
-  return exprSql(d, cols, o, label).sql;
-}
 
 // A RAW expression is the caller's own SQL, run as written — but a column it names has to exist at
 // this point, or the warehouse refuses the whole model ("Unrecognized name") minutes later. What is
@@ -105,10 +99,12 @@ export function rawUnknownColumns(sql, cols) {
 //   { column, op, value }        — column vs constant (shorthand)
 //   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
 //                                     constant vs column, etc.)
-export function condPred(d, cols, c) {
+/** One condition's SQL. `opts` passes on to the expressions it compares (src/pipeline/compute.js exprSql:
+ *  a where's condition takes no window function). */
+export function condPred(d, cols, c, opts = {}) {
   // the left side: a column named outright, or an expression — with the type its constants are written in
   let left;
-  if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left');
+  if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left', opts);
   else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null }; }
   else throw new Error('condition needs `column` or `left`');
   const name = c.column ?? c.left?.column ?? 'the left side';
@@ -121,7 +117,7 @@ export function condPred(d, cols, c) {
   }
   // an expression on the right (a column, now, a function): a plain comparison of the two
   if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
-  const r = exprSql(d, cols, right, 'right');
+  const r = exprSql(d, cols, right, 'right', opts);
   // a constant on the left compared with a column on the right is written in that column's type
   const lhs = c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined ? typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`) : left.sql;
   return `${lhs} ${OPSYM[c.op]} ${r.sql}`;
@@ -179,13 +175,3 @@ export function requireCol(cols, name) {
   throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }
 
-// Static type guard so a JSON/string column passed to an array op is rejected when the
-// stage is ADDED (renderPipeline), not at warehouse run time. Only KNOWN-bad types fail;
-// 'array' and unknown/untyped columns are allowed (benefit of the doubt for raw/native).
-export function requireArrayCol(cols, name, op) {
-  requireCol(cols, name);
-  const t = cols.get(name)?.type;
-  if (t && t !== 'array' && t !== 'unknown') {
-    throw new Error(`compute ${op}: column '${name}' is '${t}', not an array — produce an array first (a compute json_parse_array on a JSON/string column, or unnest a native array column), then ${op}.`);
-  }
-}

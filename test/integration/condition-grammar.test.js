@@ -122,3 +122,17 @@ test('a metric query\'s where names its field as group_by does, and takes the te
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].cond_where_rows), want);
 });
+
+test('a time window whose bounds carry their own offset is those instants, whatever timezone is named beside them', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 00:00:00' and device_time <= '2026-01-03 23:59:59'");
+  const all = await truth('select count(*) as n from fct_analytics_events');
+  // read as Anchorage wall-clock instead, the window would move nine hours later — and hold another count
+  const local = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 09:00:00' and device_time <= '2026-01-04 08:59:59'");
+  assert.ok(want > 0 && want < all && want !== local, 'the fixture tells the readings apart');
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+  const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
+  assert.equal(num(built.rows[0].n), want);
+});

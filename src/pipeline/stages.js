@@ -20,7 +20,7 @@ export const STAGES = {
         conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
       },
     }),
-    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c)) }, cols }),
+    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c, { windows: false })) }, cols }),
   },
 
   derive: {

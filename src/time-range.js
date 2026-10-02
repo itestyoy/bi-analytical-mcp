@@ -7,6 +7,8 @@
 // warehouse stores. (Grouping grain stays warehouse-side; converting bucket
 // boundaries inside MetricFlow-generated SQL is out of scope.)
 
+import { ToolError } from './validate.js';
+
 /** True if `tz` is a valid IANA timezone name. */
 export function isValidTimezone(tz) {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
@@ -23,19 +25,22 @@ function tzOffsetMs(tz, atUtc) {
   return asUtc - atUtc.getTime();
 }
 
-const LOCAL_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+const LOCAL_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
+// a moment that carries its own offset is an instant: no timezone reads it as a wall clock
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
-/** Parse 'YYYY-MM-DD[ HH:mm[:ss]]' into naive UTC ms (components taken literally), or null. */
+/** Parse 'YYYY-MM-DD[ HH:mm[:ss[.fff]]]' into naive UTC ms (components taken literally), or null. */
 function naiveMs(value) {
   const m = LOCAL_RE.exec(String(value));
   if (!m) return null;
-  return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), m[7] ? Math.floor(Number(`0.${m[7]}`) * 1000) : 0);
 }
 
 const fmtUtc = (ms) => {
   const d = new Date(ms);
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const frac = d.getUTCMilliseconds() ? `.${pad(d.getUTCMilliseconds(), 3)}` : '';
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${frac}`;
 };
 
 /**
@@ -44,6 +49,11 @@ const fmtUtc = (ms) => {
  * DST transitions. Returns null when the value isn't a plain date/datetime.
  */
 export function localToUtc(value, tz) {
+  // an instant (Z, or an offset of its own) is that instant whatever the zone
+  if (INSTANT_RE.test(String(value))) {
+    const t = Date.parse(String(value).replace(' ', 'T').replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+    return Number.isNaN(t) ? null : fmtUtc(t);
+  }
   const naive = naiveMs(value);
   if (naive == null) return null;
   let guess = naive - tzOffsetMs(tz, new Date(naive));
@@ -106,13 +116,20 @@ export function resolveTimeRange(tr) {
   const { start, end, timezone } = tr;
   if (!timezone) return { start: start ?? null, end: end ?? null, endExclusive: end && isDateOnly(end) ? nextDay(end) : null };
   const out = { start: null, end: null, endExclusive: null };
-  if (start) out.start = localToUtc(start, timezone);
+  // a bound that does not read as a moment is refused, never dropped: a window without it would
+  // scan the whole history and report it as the window asked for
+  const at = (v, which) => {
+    const utc = localToUtc(v, timezone);
+    if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh:mm)`, { stage: 'validate', field: `time_range.${which}` });
+    return utc;
+  };
+  if (start) out.start = at(start, 'start');
   if (end) {
     if (isDateOnly(end)) {
-      out.endExclusive = localToUtc(`${nextDay(end)} 00:00:00`, timezone); // whole local day
-      out.end = localToUtc(`${end} 23:59:59`, timezone); // inclusive form for engines without `lt`
+      out.endExclusive = at(`${nextDay(end)} 00:00:00`, 'end'); // whole local day
+      out.end = at(`${end} 23:59:59`, 'end'); // inclusive form for engines without `lt`
     } else {
-      out.end = localToUtc(end, timezone);
+      out.end = at(end, 'end');
     }
   }
   return out;

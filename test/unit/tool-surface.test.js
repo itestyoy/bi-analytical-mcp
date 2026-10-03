@@ -183,7 +183,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   const g = await e.semantic_index({ guide: true });
   assert.ok(Array.isArray(g.workflow) && g.workflow.length >= 4, 'workflow steps present');
   assert.ok(Array.isArray(g.routing_triggers) && g.routing_triggers.every((t) => t.if && t.do), 'IF/DO routing triggers present');
-  assert.ok(g.tasks && Array.isArray(g.tasks.metric_types) && g.tasks.metric_types.some((r) => r.id === 'conversion_metric_window'), 'per-family recipe listing present');
+  assert.ok(g.tasks && Array.isArray(g.tasks.metric_types) && g.tasks.metric_types.some((r) => r.id === 'ratio_metric') && g.tasks.pipeline.some((r) => r.id === 'conversion_metric_window'), 'per-family recipe listing present');
   // narrow to one family.
   const gt = await e.semantic_index({ guide: 'metric_types' });
   assert.equal(gt.task, 'metric_types');

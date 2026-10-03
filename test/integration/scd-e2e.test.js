@@ -104,16 +104,14 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
     metrics: [
       { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
       { name: 'players', type: 'simple', measure: { name: 'player_count' } },
-      // built on the dropped measure through another metric, and a conversion that reads it itself
+      // built on the dropped measure through another metric
       { name: 'revenue_per_player', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'player_count' } },
-      { name: 'buyer_to_player', type: 'conversion', base_measure: { name: 'revenue' }, conversion_measure: { name: 'player_count' }, entity: 'user', window: '7 day' },
     ],
   });
   assert.equal(created.parse.ok, true, `parse must still succeed after dropping the SCD measure: ${JSON.stringify(created.parse)}`);
   assert.ok((created.warnings || []).some((w) => /join-only/i.test(w) && /player_count/.test(w)), `expected a drop warning naming player_count, got ${JSON.stringify(created.warnings)}`);
   assert.ok(!created.metrics.includes('scd_drop_players'), 'the metric depending on the dropped measure is gone');
   assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a ratio over it goes with it');
-  assert.ok(!created.metrics.includes('scd_drop_buyer_to_player'), 'a conversion reading it goes with it');
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
   // and the surviving metric still queries to the point-in-time total
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_revenue'], materialize: true });

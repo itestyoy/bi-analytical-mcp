@@ -38,6 +38,7 @@ import { dbtFailure } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
+import { lookbackDays, shiftDay } from './metric-graph.js';
 import { CatalogSearch } from './search.js';
 import { featureToolDefinitions } from './features.js';
 import { toolRegistry } from './tools/define.js';
@@ -261,14 +262,19 @@ export class Engine {
    * when the context's measures come from one source: a where applies to every metric of a query,
    * and a dimension of one source is not reachable from the measures of another.
    */
-  _semanticPartitionWhere(ctx, bounds) {
+  _semanticPartitionWhere(ctx, bounds, metrics = []) {
     if (!bounds || !(bounds.start || bounds.end || bounds.endExclusive)) return [];
     const sources = this._measureSources(ctx);
     if (sources.length !== 1) return [];
     const m = this.catalog.getModel(sources[0]);
     const pe = this.catalog.primaryEntityName(sources[0]);
     if (!pe || (m.dimensions || {})[PARTITION_DIM]) return [];
-    return partitionConditions(m, { start: bounds.start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
+    // a cumulative metric's value on the window's first day sums the days before it: MetricFlow widens
+    // its own time constraint for that, and a filter here — applied to the rows before they accumulate
+    // — must reach back as far, or the window is cut at the start of the range
+    const back = lookbackDays(metrics, ctx.state.metrics || []);
+    const start = back === Infinity ? null : bounds.start && back ? shiftDay(bounds.start, -back) : bounds.start;
+    return partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
       .map((cnd) => renderPredicate({ field: { kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }, op: cnd.op, value: cnd.value }));
   }
 

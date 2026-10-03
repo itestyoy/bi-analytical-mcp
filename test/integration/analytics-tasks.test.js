@@ -167,45 +167,40 @@ test('TASK funnel_from_event_property_steps: tutorial step_id drop-off 8 -> 5 ->
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'funnel_from_event_property_steps');
   const steps = await q(ctx, { metrics: ['tut_funnel_step1', 'tut_funnel_step2', 'tut_funnel_step3'] });
-  const c12 = await q(ctx, { metrics: ['tut_funnel_conv_1_2'] });
-  const c23 = await q(ctx, { metrics: ['tut_funnel_conv_2_3'] });
-  for (const r of [steps, c12, c23]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
+  const rates = await q(ctx, { metrics: ['tut_funnel_conv_1_2', 'tut_funnel_conv_2_3'] });
+  for (const r of [steps, rates]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const row = steps.rows[0];
   assert.equal(num(row.tut_funnel_step1), 8);                           // step_1 distinct users
   assert.equal(num(row.tut_funnel_step2), 5);                           // step_2
   assert.equal(num(row.tut_funnel_step3), 3);                           // step_3
   assert.ok(num(row.tut_funnel_step1) >= num(row.tut_funnel_step2) && num(row.tut_funnel_step2) >= num(row.tut_funnel_step3)); // monotonic
-  const v12 = num(c12.rows[0].tut_funnel_conv_1_2);
-  const v23 = num(c23.rows[0].tut_funnel_conv_2_3);
-  assert.ok(v12 > 0 && v12 <= 1.0001, `conv12 ${v12}`);                 // rate in (0,1]
-  assert.ok(v23 > 0 && v23 <= 1.0001, `conv23 ${v23}`);
-  assert.ok(Math.abs(v12 - 5 / 8) < 0.06, `conv12≈0.625 got ${v12}`);
+  // the step-to-step share: who reached the next step over who reached this one
+  assert.ok(Math.abs(num(rates.rows[0].tut_funnel_conv_1_2) - 5 / 8) < 1e-9);
+  assert.ok(Math.abs(num(rates.rows[0].tut_funnel_conv_2_3) - 3 / 5) < 1e-9);
 });
 
-// ── 4. metric_types: conversion_metric_window ────────────────────────────────
-test('TASK conversion_metric_window: D1/D7 return-within-window conversion rates', opts, async (t) => {
+// ── 4. pipeline: conversion_metric_window ───────────────────────────────────
+// A conversion within a window is a pipeline (the semantic layer declares no conversion metric): one
+// row per player from the first first_launch, the seconds to the next new_session of a later session, a
+// conditional count per horizon. Proven against the same reading of the events written by hand.
+test('TASK conversion_metric_window: a return (a second session) within 48h / 7×24h of the first launch', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'conversion_metric_window');
-  const d1 = await q(ctx, { metrics: ['retention_d1'] });
-  const d7 = await q(ctx, { metrics: ['retention_d7'] });
-  const d1ByDay = await q(ctx, { metrics: ['retention_d1'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  const d7ByDay = await q(ctx, { metrics: ['retention_d7'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  for (const r of [d1, d7, d1ByDay, d7ByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  const r1 = num(d1.rows[0].retention_d1);
-  const r7 = num(d7.rows[0].retention_d7);
-  // cohort=first_launch, returned=new_session are DIFFERENT events, so the rate
-  // reflects data (not the old tautological 1.0 from identical measures). The
-  // AGGREGATE rate is a true conversion rate in [0,1].
-  assert.ok(r1 >= 0 && r1 <= 1, `D1 ${r1}`);                            // aggregate rate in [0,1]
-  assert.ok(r7 >= 0 && r7 <= 1, `D7 ${r7}`);
-  assert.ok(r7 >= r1 - 1e-9, `D7(${r7}) >= D1(${r1})`);                 // wider window retains >=
-  assert.ok(d1ByDay.row_count > 0 && d7ByDay.row_count > 0);
-  // Per-day grouping of a conversion metric is NOT bounded by 1: returns are
-  // attributed within the window across day boundaries, so a single day's
-  // numerator can exceed that day's cohort. Assert only the valid invariant —
-  // finite per-day rates are non-negative — and that real values are present.
-  assert.ok(d7ByDay.rows.every((r) => { const v = num(r.retention_d7); return !Number.isFinite(v) || v >= 0; }));
-  assert.ok(d7ByDay.rows.some((r) => Number.isFinite(num(r.retention_d7)) && num(r.retention_d7) > 0));
+  const out = await engine._buildPipeline(engine._recipe({ id: 'conversion_metric_window' }).pipeline_payload);
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  const { rows } = await wh.query(`
+    with base as (select player_id_of_internal as p, min(device_time) as t from fct_analytics_events where event_name = 'first_launch' group by 1),
+    back as (select base.p, min(epoch(e.device_time) - epoch(base.t)) as secs from base
+             join fct_analytics_events e on e.player_id_of_internal = base.p and e.event_name = 'new_session' and e.session_number >= 2 and e.device_time > base.t group by 1)
+    select (select count(*) from base) as cohort,
+           (select count(*) from back where secs <= 172800) as back_2d,
+           (select count(*) from back where secs <= 604800) as back_7d`);
+  const want = rows[0];
+  const got = out.rows[0];
+  // the horizons split the cohort: some return within 48h, more within a week, not everyone
+  assert.ok(num(want.back_2d) > 0 && num(want.back_7d) > num(want.back_2d) && num(want.cohort) > num(want.back_7d), JSON.stringify(want));
+  assert.deepEqual([num(got.cohort), num(got.back_2d), num(got.back_7d)], [num(want.cohort), num(want.back_2d), num(want.back_7d)]);
+  assert.ok(Math.abs(num(got.rate_2d) - num(want.back_2d) / num(want.cohort)) < 1e-9);
+  assert.ok(Math.abs(num(got.rate_7d) - num(want.back_7d) / num(want.cohort)) < 1e-9);
 });
 
 // ── 5. joins: cohort_grid_two_time_axes (install_date x activity) ────────────

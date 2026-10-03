@@ -144,13 +144,11 @@ function compileDimension(catalog, task, modelKey, decl) {
   fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
 }
 
-/** The measures a compiled metric reads itself: a simple or cumulative metric's measure, a conversion's
- *  base and conversion measures. */
+/** The measures a compiled metric reads itself: a simple or cumulative metric's measure. */
 function ownMeasures(metric) {
   const tp = metric?.type_params || {};
-  const ctp = tp.conversion_type_params || {};
   const name = (v) => (typeof v === 'string' ? v : v?.name);
-  return [tp.measure, ctp.base_measure, ctp.conversion_measure].map(name).filter(Boolean);
+  return [tp.measure].map(name).filter(Boolean);
 }
 
 /** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */
@@ -281,16 +279,6 @@ export function compileDeclaration(catalog, decl) {
       // `expr` (written with raw metric names) resolves correctly in MetricFlow.
       const inputs = md.metrics.map((x) => ({ name: NS(task, x.metric), alias: x.name || x.metric }));
       addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
-    } else if (md.type === 'conversion') {
-      const ctp = {
-        base_measure: { name: resolveMeasure(md.base_measure.name) },
-        conversion_measure: { name: resolveMeasure(md.conversion_measure.name) },
-        entity: md.entity || 'user',
-        window: md.window,
-        calculation: md.calculation || 'conversion_rate',
-      };
-      if (md.constant_properties) ctp.constant_properties = md.constant_properties;
-      addMetric({ name, type: 'conversion', type_params: { conversion_type_params: ctp } });
     } else {
       fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }

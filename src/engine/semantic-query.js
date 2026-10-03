@@ -134,7 +134,11 @@ export const semanticQueryMethods = {
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...(project ? { batch: { before: null } } : {}) }), { context_id: ctx.id });
+    // A query only compiled (explain / dry_run) runs nothing on the warehouse: it waits for the
+    // declaration it compiles, not behind the queries before it.
+    const compileOnly = !!(input.explain || input.dry_run);
+    const slot = project ? { batch: { before: null } } : compileOnly ? { batch: this.tasks.afterBuilds(ctx) } : {};
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...slot }), { context_id: ctx.id });
   },
 
   /** The tokens any metric query causes besides what it names: metric_time at every grain, and
@@ -319,13 +323,14 @@ export const semanticQueryMethods = {
     // (keyed by the dbt model dbt itself records each semantic model reads)
     const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
+    const conversionNotes = this._conversionNotes(layer, input.metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
     const paging = this._metricPaging(input);
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
     const explain = !!(input.dry_run || input.explain);
     const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(input.metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
     const respond = (raw) => {
       this.ctxs.touch(ctx.id);
-      const early = this._metricEarlyAnswer(raw, { explain, input, speak });
+      const early = this._metricEarlyAnswer(raw, { explain, input, speak, extra: conversionNotes.length ? { warnings: conversionNotes } : {} });
       if (early) return early;
       const columns = (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c));
       const { rows: pageRows, page } = paging.page((raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v]))));
@@ -336,7 +341,7 @@ export const semanticQueryMethods = {
         ok: true, columns, rows: pageRows, row_count: pageRows.length, page,
         ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
         provenance: { tier: 'project_metric', metrics: input.metrics, semantic_models: reads },
-        warnings: windowWarnings,
+        warnings: [...windowWarnings, ...conversionNotes],
         recommendations: recs,
       };
     };
@@ -385,6 +390,40 @@ export const semanticQueryMethods = {
     // Window honesty: warn when unbounded or when the window reaches into today (the trailing bucket
     // is incomplete) — so partial periods are never reported silently.
     return { bounds: resolveTimeRange(input.time_range) || {}, windowWarnings: timeRangeWarnings(input.time_range) };
+  },
+
+  /**
+   * What a query of the PROJECT's conversion metrics is told (a generated context declares none: a
+   * conversion is a pipeline there). MetricFlow filters only a conversion's base side
+   * (dbt-labs/metricflow#1199) — the query's where and its time window alike — so the conversion
+   * events are read from the whole source; and its window is counted on the base's time dimension at
+   * that dimension's granularity, so '1 day' at a day grain is the same calendar day.
+   */
+  _conversionNotes(layer, metrics, { where = false, window = false } = {}) {
+    const conv = [];
+    const seen = new Set();
+    const walk = (name) => {
+      if (seen.has(name)) return;
+      seen.add(name);
+      const d = layer.definition(name) || {};
+      if (layer.metrics.find((m) => m.name === name)?.type === 'conversion') conv.push({ name, ...d });
+      for (const i of [d.numerator, d.denominator, ...(d.inputs || []), d.input, d.base, d.conversion]) if (i?.metric) walk(i.metric);
+    };
+    metrics.forEach(walk);
+    if (!conv.length) return [];
+    const route = 'semantic_index({ request: { recipe: "conversion_metric_window" } })';
+    const notes = [];
+    const bare = conv.filter((m) => !(m.constant_properties || []).length);
+    if (where || window) notes.push(`Conversion metric${conv.length > 1 ? 's' : ''} ${conv.map((m) => m.name).join(', ')}: MetricFlow applies ${where && window ? 'the where and the time window' : where ? 'the where' : 'the time window'} to the BASE events only (dbt-labs/metricflow#1199) — the conversion events are read from the whole source${window ? ', every partition' : ''}${where ? ', whatever the filtered columns hold' : ''}, which is slow on a large table${where && bare.length ? ', and a conversion of the same entity under another value of a filtered column (another app, another environment) counts' : ''}. A pipeline counts the same conversion over one bounded scan with every filter on both sides: ${route}.`);
+    const order = ['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+    for (const m of conv) {
+      const base = m.base?.metric ? layer.definition(m.base.metric) || {} : m.base || {};
+      const sm = layer.semantic_models.find((x) => x.name === base.semantic_model);
+      const grain = sm?.dimensions?.find((x) => x.name === base.agg_time_dimension)?.grain;
+      const unit = /^\d+ (\w+?)s?$/.exec(String(m.window || ''))?.[1];
+      if (grain && unit && order.indexOf(unit) <= order.indexOf(grain)) notes.push(`${m.name}: its window '${m.window}' is compared on the base's time dimension at its ${grain} granularity, so it means the same ${grain} — not ${m.window} after the base event. A pipeline measures the window in seconds from the event: ${route}.`);
+    }
+    return notes;
   },
 
   /** Paging: the page asked for, and one row over it fetched so has_more means something. */
@@ -486,7 +525,8 @@ export const semanticQueryMethods = {
     const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k)).map((k) => `source ${k}`);
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
     const paging = this._metricPaging(input);
-    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
+    const partitionWhere = this._semanticPartitionWhere(ctx, bounds, input.metrics);
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...partitionWhere], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.

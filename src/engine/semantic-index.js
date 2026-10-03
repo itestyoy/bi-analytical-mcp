@@ -672,7 +672,7 @@ export const semanticIndexMethods = {
     // drill one with semantic_index({ request: { bundle } }) to see what carries data for that app.
     // Apps PER SOURCE — the same bundle id is a different row set in each source that carries it.
     ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
-    enums: { agg: [...MEASURE_AGGS], metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
+    enums: { agg: [...MEASURE_AGGS], metric_type: ['simple', 'ratio', 'cumulative', 'derived'], time_granularity: c.timeGranularities() },
     // Ready-made task templates, fetched in full via semantic_index({ request: { recipe: id } }).
     ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
     // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW

@@ -47,11 +47,11 @@
 |---|---|---|---|---|
 | 1 | `measure_over_metric_time` | DAU/WAU/MAU & events over time | simple, derived (ARPDAU) | `count_distinct(user_id)`, `count`, `sum(revenue)` |
 | 2 | `group_by_joined_attribute` | Segmentation by user property | simple, ratio | `count_distinct`, `count`, `sum` |
-| 3 | `funnel_from_event_property_steps` | Step / funnel conversion | conversion (2-step), derived (multi-step) | `count_distinct`, `count` |
-| 4 | `conversion_metric_window` | N-day / unbounded / rolling retention | conversion (N-day), cumulative (rolling) | `count_distinct(user_id)` |
-| 5 | `cohort_grid_two_time_axes` | Acquisition cohort × age grid | ratio/conversion + derived | `count_distinct(user_id)`, `sum(revenue)` |
+| 3 | `funnel_from_event_property_steps` | Step / funnel share | simple per step, ratio between steps | `count_distinct`, `count` |
+| 4 | `conversion_metric_window` | N-day / rolling retention | pipeline (match_recognize + conditional counts); cumulative (rolling) | `count` per horizon |
+| 5 | `cohort_grid_two_time_axes` | Acquisition cohort × age grid | ratio + derived | `count_distinct(user_id)`, `sum(revenue)` |
 | 6 | `boolean_condition_as_measure` | Did/didn't do event X | simple + metric-in-filter, ratio | `count_distinct`, `sum_boolean` |
-| 7 | `conversion_metric_window` | Visit→purchase conversion | conversion | `count_distinct`/`count` base & conversion |
+| 7 | `conversion_metric_window` | Visit→purchase conversion | pipeline (match_recognize) | `count` of completed matches |
 | 8 | `agg_chosen_per_question` | Win rate / attempts / churn per level | ratio, simple, derived | `count`, `count_distinct`, `average`, `sum_boolean` |
 | 9 | `ratio_metric` | ARPU/ARPPU/payer share/LTV/revenue mix | simple, ratio, derived, cumulative | `sum(revenue)`, `count_distinct`, `average` |
 | 10 | `same_measure_two_grains` | DAU/MAU stickiness & lifecycle states | derived (ratio of metrics), simple, conversion | `count_distinct(user_id)` |
@@ -126,16 +126,13 @@
   - Measures: `step_users = count_distinct(user_id)` per step (filtered by
     `event__event_name` and, for levels, `level` via `constant_properties`).
   - Dimensions: optional `metric_time` and user segments.
-  - Metric types: **`conversion`** for any single 2-step pair; **`derived`** to chain
-    multiple 2-step conversions into a multi-step funnel.
-- **MetricFlow mapping (honest):** MetricFlow has **no native N-step funnel**. A single
-  step pair maps cleanly to a `conversion` metric (`base_measure` = step-A users,
-  `conversion_measure` = step-B users, `entity: user`, a `window`, optional
-  `constant_properties` to hold `level`/`product_id` fixed). A 3+ step funnel is
-  approximated by defining each adjacent pair as its own `conversion` metric and
-  composing overall completion with a `derived` metric (product of stage rates) —
-  ordering/strict sequencing is not enforced beyond the conversion window, so it is an
-  approximation, not exact path analysis.
+  - Metric types: **`simple`** per step, **`ratio`** between adjacent steps (who reached
+    the next step over who reached this one).
+- **What it does not say:** the order of the steps or how soon the next one came. For
+  both, a `match_recognize` pipeline (`pipeline_ordered_sequence`, `conversion_metric_window`).
+  The semantic layer declares no `conversion` metric: MetricFlow applies a query's filters
+  and time window to its base side only (dbt-labs/metricflow#1199), so the conversion side
+  is read whole, and its window is compared at the time dimension's granularity.
 - **Data needs:** users who start but do not complete (so rate < 100%), users who
   complete within the window, multiple `level` values, and a tutorial sequence with
   several `step_id`s and drop-off.
@@ -149,20 +146,12 @@
 - **Required events:** `session_start` (the "active" signal) — also acceptable: any event.
 - **Required event_properties:** none.
 - **Required user attributes:** `install_date` (time @ day) as the cohort anchor.
-- **Semantic Layer constructs:**
-  - Measures: `installs = count_distinct(user_id)` (cohort base, anchored on
-    `user__install_date`), `returned_users = count_distinct(user_id)` from later activity.
-  - Dimensions: time `user__install_date__day` (cohort), `metric_time__day` (activity).
-  - Metric types: **`conversion`** with `window: "1 day"`/`"7 days"`/`"30 days"` for
-    N-day "returned within"; **`cumulative`** with a window for rolling / unbounded
-    retained-active counts; **`ratio`** to express retained ÷ cohort.
-- **MetricFlow mapping (honest):** Exact "active *exactly* on day N" is **not a native
-  primitive**. The supported approximation is a `conversion` metric (install event →
-  any activity event, `entity: user`, `window: "N days"`), which yields "returned within
-  N days" (cumulative-style retention), not the classic point-in-time D-N curve. True
-  rolling/unbounded retention uses a `cumulative` measure + the time spine. Building the
-  full D0/D1/.../DN curve requires one conversion metric per N (or post-query pivoting),
-  not a single MetricFlow object.
+- **How it is computed — a pipeline:** `match_recognize` over [the cohort event, a later
+  activity event] per user, `avg_seconds_between` from one to the other, then an aggregate
+  with one conditional count per horizon (`where secs <= N`) and a `div` for the rate. The
+  horizon is measured in seconds from the event; every filter holds for both steps; the scan
+  is the pipeline's `time_range` — [start, end + the horizon], the cohort kept to [start, end]
+  by a `where` on `first_seen_at`. Rolling retained-active counts stay a `cumulative` metric.
 - **Data needs:** multiple `install_date` cohorts (several days/weeks), users with
   activity on later days (and some who never return), enough span to populate D1/D7/D30.
 
@@ -231,17 +220,9 @@
 - **Required event_properties:** `product_id` (string) for `constant_properties`;
   `revenue` (numeric) if also reporting converted value.
 - **Required user attributes:** none (optional segmentation by `user__country`, etc.).
-- **Semantic Layer constructs:**
-  - Measures: `visits = count_distinct(user_id)` filtered to `session_start`;
-    `purchases = count_distinct(user_id)` filtered to `purchase`.
-  - Dimensions: `metric_time` grain; optional user segments.
-  - Metric types: **`conversion`** (`calculation: conversion_rate` default, or
-    `conversion` for raw count).
-- **MetricFlow mapping:** This is the canonical native fit — a `conversion` metric with
-  `base_measure: visits`, `conversion_measure: purchases`, `entity: user`,
-  `window: "7 days"`, and optional `constant_properties: [{base_property: product_id,
-  conversion_property: product_id}]` to require same-product conversion. Requires the
-  materialized time spine.
+- **How it is computed — a pipeline:** the same shape as §4, the steps [visit, purchase];
+  a property that must match on both sides (the same `product_id`) is a `partition_by` column
+  next to the user.
 - **Data needs:** visitors who never purchase, visitors who purchase inside the window
   and outside it (to exercise window cutoff), multiple `product_id`s for constant-property tests.
 

@@ -199,6 +199,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   an `event_data` property value (e.g. event_name=tutorial AND step_id=step_1).
   A funnel runs over ONE source (a row-pattern match scans one table); measures from
   different sources can still be compared side by side over `metric_time`.
+  A CONVERSION (B within a window of A: retention, start-to-complete) is a pipeline too —
+  match_recognize + the seconds between the steps (recipe `conversion_metric_window`); a
+  generated context declares no conversion metric, since MetricFlow filters only its base
+  side (dbt-labs/metricflow#1199) and compares its window at the time dimension's grain. The
+  project's own conversion metrics are queried with that said in the answer.
 - Segmentation/joins use user attributes on `dim_users` and experiment assignments
   on the experiments source, joined to events by the user entity — from ANY events
   source that carries the user entity.
@@ -325,7 +330,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   pipeline materialize) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order). A query tool also takes a
+  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — explain / dry_run — which waits for the context's build alone). A query tool also takes a
   BATCH — `{ context_id, queries: [...] }`, of any size — which checks EVERY query before
   any starts (one mistake refuses the batch), starts one task per query and returns ONLY
   `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process

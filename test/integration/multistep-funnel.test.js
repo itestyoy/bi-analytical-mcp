@@ -1,7 +1,7 @@
 // Multi-step funnels where each STEP = event + property value.
 // Two real shapes:
 //   A) tutorial onboarding: event_name=tutorial, step keyed by event_data step_id
-//      (step_1 -> step_2 -> step_3), with step-to-step conversion.
+//      (step_1 -> step_2 -> step_3), with the step-to-step share (a ratio metric).
 //   B) level funnel: event_name=level_started, step keyed by level_id (1 -> 2 -> 3).
 // Exact numbers from test/integration/fixtures/SEED_DATA.md.
 
@@ -64,7 +64,9 @@ before(async () => {
       { name: 's1', type: 'simple', measure: { name: 'l1' } },
       { name: 's2', type: 'simple', measure: { name: 'l2' } },
       { name: 's3', type: 'simple', measure: { name: 'l3' } },
-      { name: 'conv_1_2', type: 'conversion', base_measure: { name: 'u1' }, conversion_measure: { name: 'u2' }, entity: 'user', window: '30 day' },
+      { name: 'p1', type: 'simple', measure: { name: 'u1' } },
+      { name: 'p2', type: 'simple', measure: { name: 'u2' } },
+      { name: 'conv_1_2', type: 'ratio', numerator: { name: 'u2' }, denominator: { name: 'u1' } },
     ],
   });
 }, opts);
@@ -87,19 +89,12 @@ test('tutorial funnel: distinct users per step = 8 / 5 / 3 (event + step_id prop
   assert.ok(num(row.tut_funnel_step2) >= num(row.tut_funnel_step3));
 });
 
-test('tutorial funnel: step-to-step conversion rates in (0,1] and reflect drop-off', opts, async (t) => {
+test('tutorial funnel: the step-to-step share is who reached the next step over who reached this one (5/8, 3/5)', opts, async (t) => {
   if (skip(t)) return;
-  const c12 = await q('tut_funnel', { metrics: ['tut_funnel_conv_1_2'] });
-  const c23 = await q('tut_funnel', { metrics: ['tut_funnel_conv_2_3'] });
-  assert.equal(c12.ok, true, JSON.stringify(c12.error));
-  assert.equal(c23.ok, true, JSON.stringify(c23.error));
-  const v12 = num(c12.rows[0].tut_funnel_conv_1_2);
-  const v23 = num(c23.rows[0].tut_funnel_conv_2_3);
-  // step_2 ⊆ step_1 (5/8), step_3 ⊆ step_2 (3/5)
-  assert.ok(v12 > 0 && v12 <= 1.0001, `conv_1_2=${v12}`);
-  assert.ok(v23 > 0 && v23 <= 1.0001, `conv_2_3=${v23}`);
-  assert.ok(Math.abs(v12 - 5 / 8) < 0.06, `conv_1_2≈0.625 got ${v12}`);
-  assert.ok(Math.abs(v23 - 3 / 5) < 0.06, `conv_2_3≈0.6 got ${v23}`);
+  const r = await q('tut_funnel', { metrics: ['tut_funnel_conv_1_2', 'tut_funnel_conv_2_3'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(Math.abs(num(r.rows[0].tut_funnel_conv_1_2) - 5 / 8) < 1e-9);
+  assert.ok(Math.abs(num(r.rows[0].tut_funnel_conv_2_3) - 3 / 5) < 1e-9);
 });
 
 // ── Scenario B: level funnel (event + level_id) ──
@@ -115,10 +110,12 @@ test('level funnel: level_started counts by level_id = 12 / 6 / 3 (monotonic)', 
   assert.ok(num(row.lvlf_s1) >= num(row.lvlf_s2) && num(row.lvlf_s2) >= num(row.lvlf_s3));
 });
 
-test('level funnel: L1->L2 user conversion in (0,1]', opts, async (t) => {
+test('level funnel: the L1->L2 share of players is the L2 players over the L1 players, in (0,1)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('lvlf', { metrics: ['lvlf_conv_1_2'] });
+  const r = await q('lvlf', { metrics: ['lvlf_p1', 'lvlf_p2', 'lvlf_conv_1_2'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const v = num(r.rows[0].lvlf_conv_1_2);
-  assert.ok(v > 0 && v <= 1.0001, `conv_1_2=${v}`);
+  const row = r.rows[0];
+  const v = num(row.lvlf_conv_1_2);
+  assert.ok(num(row.lvlf_p2) > 0 && num(row.lvlf_p2) < num(row.lvlf_p1), JSON.stringify(row));
+  assert.ok(Math.abs(v - num(row.lvlf_p2) / num(row.lvlf_p1)) < 1e-9, `conv_1_2=${v}`);
 });

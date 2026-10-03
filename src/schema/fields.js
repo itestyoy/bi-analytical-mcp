@@ -216,24 +216,17 @@ export function metricSchema(catalog) {
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
     expr: { type: 'string', description: 'Arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
     metrics: { type: 'array', minItems: 1, description: 'The input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['metric'], properties: { metric: { type: 'string', pattern: NAME, description: 'An input metric of this task, by its name.' }, name: { type: 'string', pattern: NAME, description: 'The name `expr` uses for it (default: the metric\'s own name).' } } } },
-    base_measure: { ...measureRef, description: 'The starting population (must be count_distinct of an entity), e.g. users who launched.' },
-    conversion_measure: { ...measureRef, description: 'The converted population (count_distinct of the same entity), e.g. users who purchased.' },
-    window: { type: 'string', pattern: WINDOW, description: 'Time window in which the conversion must occur after the base event, e.g. "1 day", "7 day", "1 week".' },
-    entity: { enum: [...new Set(catalog.modelKeys().flatMap((k) => Object.keys(catalog.entitiesOf(k))))], description: 'The entity linking base and conversion events (default "user").' },
-    calculation: { enum: ['conversion_rate', 'conversion'], description: 'Return the rate (converted/base, default) or the raw converted count.' },
-    constant_properties: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.scalarEventPropEnum()), description: 'Properties that must match between the base and conversion events (e.g. same product_id).' },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
   const kind = (type, title, required, optional, own = {}) => form({ title, tag: ['type', type], required: ['name', ...required], properties: { ...pick(fields, ['name', 'label', ...required, ...optional]), ...own } });
   return {
     type: 'object',
-    description: 'A metric: the queryable quantity. simple wraps one measure; ratio = numerator/denominator; cumulative accumulates a measure over time; derived computes an expression over other metrics; conversion = share of a base population that later did a conversion event within a window.',
+    description: 'A metric: the queryable quantity. simple wraps one measure; ratio = numerator/denominator; cumulative accumulates a measure over time; derived computes an expression over other metrics. A conversion — the share of a base population that did B within a window of A — is not a metric here: it is a pipeline (semantic_index({ request: { recipe: "conversion_metric_window" } })), which scans one bounded window, filters both sides and measures the window in seconds.',
     anyOf: [
       kind('simple', 'simple: one measure', ['measure'], ['fill_nulls_with']),
       kind('ratio', 'ratio: numerator / denominator', ['numerator', 'denominator'], []),
       kind('cumulative', 'cumulative: a measure accumulated over time', ['measure'], ['grain_to_date', 'period_agg'], { window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days") instead of all history.' } }),
       kind('derived', 'derived: an expression over other metrics', ['expr', 'metrics'], []),
-      kind('conversion', 'conversion: the share of a base population that converted within a window', ['base_measure', 'conversion_measure', 'window'], ['entity', 'calculation', 'constant_properties']),
     ],
   };
 }

@@ -94,7 +94,7 @@ before(async () => {
     ],
   });
 
-  // Visit -> purchase conversion (native conversion metric), 1-hop join for splits.
+  // Visitors and buyers as governed counts (the conversion itself is a pipeline, below).
   await create({
     name: 'conv', use_base_models: ['users'],
     semantic_models: [{ from: 'events', measures: [
@@ -104,7 +104,6 @@ before(async () => {
     metrics: [
       { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
       { name: 'buyers', type: 'simple', measure: { name: 'buyers' } },
-      { name: 'conversion', type: 'conversion', base_measure: { name: 'visitors' }, conversion_measure: { name: 'buyers' }, entity: 'user', window: '30 day' },
     ],
   });
 
@@ -337,21 +336,29 @@ test('conversion: 12 visitors, 7 buyers', opts, async (t) => {
   assert.equal(num(r.rows[0].conv_buyers), 7);
 });
 
-test('conversion: visit->purchase rate in [0,1] ~ payers/visitors = 7/12', opts, async (t) => {
+// A conversion is a PIPELINE: one row per visitor from the first session, whether a purchase followed —
+// the semantic layer declares no conversion metric (MetricFlow would filter its base side only).
+const CONVERSION = [
+  { stage: 'match_recognize', partition_by: [{ entity: 'user' }], mode: 'ordered', steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
+];
+// users is slowly changing: the country a visitor had at the first visit, not every version of it
+const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
+const converted = { name: 'buyers', agg: 'count', where: [{ column: 'completed', op: 'eq', value: true }] };
+
+test('conversion: visit->purchase — 7 of the 12 visitors bought after a session', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('conv', { metrics: ['conv_conversion'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const v = num(r.rows[0].conv_conversion);
-  assert.ok(v >= 0 && v <= 1.0000001, `conversion=${v}`);
-  assert.ok(Math.abs(v - 7 / 12) < 0.06, `conversion≈0.583 got ${v}`);
+  const out = await engine._buildPipeline({ name: 'conv_all', pipeline: { source: 'events', stages: [...CONVERSION, { stage: 'aggregate', measures: [{ name: 'visitors', agg: 'count' }, converted] }] } });
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  assert.deepEqual([num(out.rows[0].visitors), num(out.rows[0].buyers)], [12, 7]);
 });
 
-test('conversion by users.country: every rate in [0,1]', opts, async (t) => {
+test('conversion by users.country: the countries add up to the whole, each a share of its own visitors', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('conv', { metrics: ['conv_conversion'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(r.row_count > 0);
-  for (const row of r.rows) { const v = num(row.conv_conversion); if (Number.isFinite(v)) assert.ok(v >= 0 && v <= 1.0000001, `rate ${v}`); }
+  const out = await engine._buildPipeline({ name: 'conv_country', pipeline: { source: 'events', stages: [...CONVERSION, BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'visitors', agg: 'count' }, converted] }] } });
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  assert.ok(out.rows.length > 1, 'more than one country');
+  assert.deepEqual([out.rows.reduce((a, r) => a + num(r.visitors), 0), out.rows.reduce((a, r) => a + num(r.buyers), 0)], [12, 7]);
+  for (const r of out.rows) assert.ok(num(r.buyers) <= num(r.visitors), JSON.stringify(r));
 });
 
 // ───────────────── Behavioral cohort (did / didn't purchase, Metric() filter) ─────────────────

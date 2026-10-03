@@ -199,6 +199,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   an `event_data` property value (e.g. event_name=tutorial AND step_id=step_1).
   A funnel runs over ONE source (a row-pattern match scans one table); measures from
   different sources can still be compared side by side over `metric_time`.
+  A CONVERSION (B within a window of A: retention, start-to-complete) is a pipeline too —
+  match_recognize + the seconds between the steps (recipe `conversion_metric_window`); a
+  generated context declares no conversion metric, since MetricFlow filters only its base
+  side (dbt-labs/metricflow#1199) and compares its window at the time dimension's grain. The
+  project's own conversion metrics are queried with that said in the answer.
 - Segmentation/joins use user attributes on `dim_users` and experiment assignments
   on the experiments source, joined to events by the user entity — from ANY events
   source that carries the user entity.

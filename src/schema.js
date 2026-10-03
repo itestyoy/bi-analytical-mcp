@@ -191,7 +191,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
       materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ request: { task_ids, offset, limit } }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ request: { action: "start", from_task } })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled SQL WITHOUT executing it — it waits for the context\'s build, not for the queries running on it.' },
-      explain: { type: 'boolean', description: 'dry_run plus MetricFlow\'s dataflow plan (how the metrics compile) — long (thousands of tokens); for the SQL alone use dry_run.' },
+      explain: { type: 'boolean', description: 'The same as dry_run: the compiled SQL, nothing executed. Add include_plan for MetricFlow\'s dataflow plan.' },
+      include_plan: { type: 'boolean', description: 'With explain or dry_run: also MetricFlow\'s dataflow plan (how the metrics compile) — long, thousands of tokens; the SQL alone is usually what is wanted.' },
   };
   const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where.`);
   const query = {

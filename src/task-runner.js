@@ -100,7 +100,10 @@ export class TaskRunner {
     this.progress.set(id, progress);
     const keep = (out) => {
       if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
-      this.keep(id, { tool, input, out });
+      // how long it waited behind earlier work on its context, and how long it ran — said with its result
+      const now = Date.now(); const began = progress.started ?? now;
+      const secs = (ms) => Math.round(ms / 100) / 10;
+      this.keep(id, { tool, input, out, timing: { queued_seconds: secs(began - progress.queued), run_seconds: secs(now - began) } });
       if (isPlainObject(out) && out.ok === false) {
         this.jobs.fail(id, out.error?.message || `the ${tool} task failed`);
         if (out.error?.stage !== 'cancelled') this.onFailure(id, tool, ctx, input, out.error);
@@ -266,7 +269,8 @@ export class TaskRunner {
    */
   status(id, waited = 0) {
     const job = this.jobs.get(id);
-    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}) };
+    const timing = this.results.get(id)?.timing;
+    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}), ...(timing ? { timing } : {}) };
     if (job.status === 'running') {
       if (!this.jobs.isLive(id)) return { head, pending: { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } } };
       return { head, pending: { ok: true, ...head, status: 'running', waited_seconds: waited, ...this.progressOf(id, job), next: `still running — call ${this.readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` } };

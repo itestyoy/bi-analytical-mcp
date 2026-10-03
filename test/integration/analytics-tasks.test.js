@@ -111,14 +111,17 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(byDay.rows.every((r) => num(r.active_users_dau) <= mau));    // DAU <= MAU
   assert.equal(num(events.rows[0].active_users_events), 184);           // 184 seeded events
 
-  // explain: return the query PLAN + rendered SQL WITHOUT executing (feature/
+  // explain: the rendered SQL WITHOUT executing; the dataflow plan only with include_plan (feature/
   // lifecycle check — we assert the plan/SQL are PRESENT, not their content).
   const ex = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], explain: true });
   assert.equal(ex.ok, true, JSON.stringify(ex.error || ex));
   assert.equal(ex.explain, true);
   assert.ok(typeof ex.sql === 'string' && ex.sql.length > 0);            // rendered SQL returned
-  assert.ok(ex.plan && typeof ex.plan === 'object');                     // plan object returned
-  assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
+  assert.equal(ex.plan, undefined, 'no plan unless asked for');
+  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], explain: true, include_plan: true });
+  assert.ok(planned.plan && typeof planned.plan === 'object');           // plan object returned
+  assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0); // dataflow plan present
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include_plan: true }), /include_plan goes with explain/);
 
   // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
   // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.

@@ -628,7 +628,7 @@ test('a query is addressed by what and where, and nothing handed back spells Met
   const ownColumn = { context_id: ACQ, metrics: ['project_impressions'], group_by: [{ semantic_model: [ACQ], dimension: 'campaign' }], time_range: WINDOW };
   for (const input of [project, task, ownColumn]) {
     const rows = rowsOf(await engine.query_semantic_model(input));
-    const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, explain: true })).task_id);
+    const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, explain: true, include_plan: true })).task_id);
     assert.equal(explained.ok, true, JSON.stringify(explained.error));
     noInternal(explained, 'the explained query');
     // the SQL as shown is the query: run it, and it gives the same rows under the same column names

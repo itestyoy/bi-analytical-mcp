@@ -326,7 +326,7 @@ export const semanticQueryMethods = {
     const conversionNotes = this._conversionNotes(layer, input.metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
     const paging = this._metricPaging(input);
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
-    const explain = !!(input.dry_run || input.explain);
+    const explain = this._compileOnly(input);
     const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(input.metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
     const respond = (raw) => {
       this.ctxs.touch(ctx.id);
@@ -434,11 +434,18 @@ export const semanticQueryMethods = {
     return { limit, offset, fetch: limit + offset + 1, page: (rows) => { const page = rows.slice(offset, offset + limit); return { rows: page, page: pageBlock({ offset, limit, returned: page.length, has_more: rows.length > offset + limit, ordered }) }; } };
   },
 
+  /** Whether a query is only compiled (explain / dry_run); a plan is asked for only with one of them. */
+  _compileOnly(input) {
+    const only = !!(input.dry_run || input.explain);
+    if (input.include_plan && !only) throw new ToolError('include_plan goes with explain (or dry_run): the dataflow plan is how a query compiles, and a query that runs returns its rows instead', { stage: 'validate', field: 'include_plan' });
+    return only;
+  },
+
   /** The answer to a query that failed, or was only explained — null for one that ran. */
   _metricEarlyAnswer(res, { explain, input, speak, extra = {} }) {
     if (!res.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
     if (!explain) return null;
-    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: speak(res.plan) } : {}) };
+    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true } : {}), ...(input.include_plan ? { plan: speak(res.plan) } : {}) };
   },
 
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
@@ -447,7 +454,7 @@ export const semanticQueryMethods = {
     return async (id) => {
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
       if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id, speak);
-      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
+      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.include_plan }));
     };
   },
 
@@ -527,7 +534,7 @@ export const semanticQueryMethods = {
     const paging = this._metricPaging(input);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, input.metrics);
     const qopts = { metrics: input.metrics, groupBy, where: [...where, ...partitionWhere], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
-    const explain = !!(input.dry_run || input.explain);
+    const explain = this._compileOnly(input);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
     // …and the partition filter this query adds for its window, named as the caller would name it

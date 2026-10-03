@@ -65,13 +65,19 @@ test('a query only compiled waits for the build of its context, not for the quer
   runner.start(ctx, 'build_semantic_model', () => build.then(() => { order.push('build'); return { ok: true }; }));
   runner.start(ctx, 'query_semantic_model', () => slow.then(() => { order.push('query'); return { ok: true }; }));
   const compiled = runner.start(ctx, 'query_semantic_model', async () => { order.push('compiled'); return { ok: true }; }, { batch: runner.afterBuilds(ctx) });
+  const behind = runner.start(ctx, 'query_semantic_model', async () => { order.push('behind'); return { ok: true }; });
   await new Promise((r) => setTimeout(r, 20));
   assert.deepEqual(order, [], 'nothing runs before the build');
   finishBuild();
   await runner.runs.get(compiled);
   assert.deepEqual(order, ['build', 'compiled'], 'the compiled query does not wait for the running one');
+  await new Promise((r) => setTimeout(r, 400));
   finishQuery();
-  await new Promise((r) => setTimeout(r, 20));
-  assert.deepEqual(order, ['build', 'compiled', 'query']);
+  await runner.runs.get(behind);
+  assert.deepEqual(order, ['build', 'compiled', 'query', 'behind']);
+  // each finished task says how long it waited in the queue: the compiled one only for the build, the
+  // query behind the running one for all of it
+  const waited = (id) => runner.status(id).head.timing.queued_seconds;
+  assert.ok(waited(compiled) < 0.2 && waited(behind) >= 0.4, JSON.stringify([runner.status(compiled).head.timing, runner.status(behind).head.timing]));
   jobs.close();
 });

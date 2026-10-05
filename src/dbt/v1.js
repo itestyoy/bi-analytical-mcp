@@ -3,14 +3,37 @@
 // Each context runs in its own overlay project dir, so target/ is naturally isolated. NOT
 // `dbt sl query` (that is dbt platform/remote and incompatible with local per-context isolation).
 
-import { existsSync, readFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inIsolatedTarget } from '../request-context.js';
 import { runProcess, runWithInput } from './process.js';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
+import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
+
+/**
+ * The one correction a semantic manifest parsed from the LATEST spec needs: a percentile is written
+ * as approximate, its fraction rounded to float32 (0.9 → 0.8999999761581421), whatever the YAML said.
+ * A metric's `config.meta.mcp_percentile` records what was asked (src/semantic-latest.js) and is put
+ * back, so a percentile answers the same whichever dbt parsed it. Nothing to do without that meta.
+ */
+function restorePercentiles(file) {
+  if (!existsSync(file)) return;
+  try {
+    const manifest = JSON.parse(readFileSync(file, 'utf8'));
+    let changed = false;
+    for (const m of manifest.metrics || []) {
+      const asked = m.config?.meta?.mcp_percentile;
+      const params = m.type_params?.metric_aggregation_params?.agg_params;
+      if (!asked || !params) continue;
+      Object.assign(params, { percentile: asked.percentile, use_discrete_percentile: !!asked.discrete, use_approximate_percentile: !!asked.approximate });
+      changed = true;
+    }
+    if (changed) writeFileSync(file, JSON.stringify(manifest));
+  } catch { /* an unreadable manifest is MetricFlow's to report */ }
+}
 
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
@@ -22,8 +45,12 @@ export class DbtV1 {
     this.major = 1;
   }
 
-  /** The semantic-layer YAML this dbt reads: 1.x (below 1.12) knows only the legacy spec. */
-  get semanticSpec() { return 'legacy'; }
+  /** The semantic-layer YAML this server writes for this dbt: the latest spec from dbt 1.12, which reads it
+   *  (one rendering with dbt v2's); the legacy spec before it, which is all an older 1.x knows. */
+  get semanticSpec() {
+    const [major, minor] = String(knownDbtVersion(this.dbtBin) || '').split('.').map(Number);
+    return major === 1 && minor >= 12 ? 'latest' : 'legacy';
+  }
 
   /** The config a SQL model needs when its SQL is written in a syntax dbt's own parser does not read
    *  (BigQuery's pipe syntax) — dbt 1.x parses no SQL, so none. */
@@ -68,7 +95,9 @@ export class DbtV1 {
 
   async parse(projectDir) {
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
-    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, ...SEMANTIC_MANIFEST)) };
+    const file = join(projectDir, ...SEMANTIC_MANIFEST);
+    if (r.ok && this.semanticSpec === 'latest') restorePercentiles(file);
+    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(file) };
   }
 
   /** The semantic manifest the last parse of `projectDir` wrote (what MetricFlow reads), or null. */

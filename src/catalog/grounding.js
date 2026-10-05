@@ -53,6 +53,7 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, l
   }
   for (const [key, why] of transient) log(`catalog grounding: '${key}' was NOT checked (dbt could not run: ${why}) — it stays as declared`);
   const out = catalog.groundToPhysical(phys);
-  catalog.typeToPhysical(types);
+  // the warehouse's type decides over the declared one: say which declarations it overruled
+  for (const [k, changes] of Object.entries(catalog.typeToPhysical(types))) log(`catalog grounding: '${k}' — typed as the warehouse has them, not as declared: ${changes.slice(0, 12).join('; ')}${changes.length > 12 ? '; …' : ''}`);
   return out;
 }

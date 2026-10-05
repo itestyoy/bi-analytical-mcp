@@ -148,9 +148,12 @@ export class DbtV1 {
   }
 
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */
-  async run(projectDir, select) {
+  /** `dbt run` of `select`; `{ empty: true }` runs it with every ref and source limited to zero rows
+   *  (`--empty`): the SQL is compiled and run by the warehouse, which reads no data. */
+  async run(projectDir, select, { empty = false } = {}) {
     const args = ['run'];
     if (select) args.push('--select', select);
+    if (empty) args.push('--empty');
     const r = await this._dbt(projectDir, args);
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.cancelled ? { cancelled: true } : {}) };
   }

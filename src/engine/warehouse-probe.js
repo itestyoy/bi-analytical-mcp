@@ -87,7 +87,11 @@ export class WarehouseProbe {
       let set = null;
       try {
         const r = await this.runner.relationColumns(this.readDir(), this.catalog.getModel(source).dbt_model);
-        if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+        if (r.ok && Array.isArray(r.columns)) {
+          set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+          // …and each one's type as the warehouse has it: what a constant compared with it must be
+          set.types = new Map(r.columns.filter((c) => c.dtype).map((c) => [String(c.name).toLowerCase(), c.dtype]));
+        }
       } catch { /* introspection unavailable → grounding skipped */ }
       this.columnCache.set(source, { set, gen });
       return set;

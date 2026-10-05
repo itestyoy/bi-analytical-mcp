@@ -3,7 +3,7 @@
 // (its CLI, its output format, how metrics are queried) lives in its own implementation next to it.
 //
 //   parse(projectDir)                     → { ok, stdout, stderr, manifest }   (semantic manifest written?)
-//   run(projectDir, select)               → { ok, stdout, stderr, error?, cancelled? }
+//   run(projectDir, select, { empty })    → { ok, stdout, stderr, error?, cancelled? }  (empty: --empty, no data read)
 //   seed(projectDir)                      → { ok, stdout, stderr, error? }
 //   show(projectDir, sql, limit, timeout) → { ok, rows, columns, stdout?, stderr?, error? }
 //   relationColumns(projectDir, model)    → { ok, columns: [{ name, dtype }] }

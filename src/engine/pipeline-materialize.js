@@ -321,6 +321,9 @@ export const pipelineMaterializeMethods = {
     // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
+    // …nor an orphan an earlier version left: a model reading a checkpoint since retired would fail
+    // this build's compile ("depends on a node named … which was not found")
+    this.ctxs.pruneDanglingModels(ctx.id);
     for (const m of models) {
       if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table', { pipeline: true })}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }

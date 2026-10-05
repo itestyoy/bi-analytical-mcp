@@ -59,6 +59,7 @@
 
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
+import { physicalColumnType } from './catalog/column-types.js';
 import { rawUnknownColumns } from './pipeline/sql.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { STAGES, registerStage, stageDef, listSome, stageDefs, pipelineStageSchema } from './pipeline/stages.js';
@@ -95,6 +96,16 @@ function sourceColumns(catalog, key, physicalCols = null) {
   // reference what truly exists, so a phantom catalog column fails as a normal "unknown
   // column" here instead of as a raw warehouse error at commit. No set → declared as-is.
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
+  // …and, when the warehouse said what each is, the type it HAS — a declared type is only what the
+  // schema says, and a constant written for the wrong one fails in the warehouse (STRING = BOOL)
+  if (physicalCols?.types) {
+    for (const [name, c] of cols) {
+      const dtype = physicalCols.types.get(name.toLowerCase());
+      if (!dtype || c.type === 'json' || c.type === 'array') continue;
+      const physical = physicalColumnType(dtype);
+      if (physical !== 'unknown') cols.set(name, { ...c, type: physical, physical: true });
+    }
+  }
   return cols;
 }
 

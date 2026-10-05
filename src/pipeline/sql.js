@@ -78,6 +78,48 @@ export const sourceProp = (catalog, source, name) => (source
 // to the warehouse.
 export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
 
+/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept);
+ *  quoted names stay, so a column written `quoted` is still seen. */
+function codeOf(sql) {
+  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
+}
+
+/**
+ * The columns a RAW expression names in its TEXT — bare or quoted: a column is passed structured, in
+ * its `args`, never written into the SQL (the server would have to guess the name and its quoting).
+ * A function call (`if(`) and a field (`.x`) are not a column.
+ */
+export function rawNamedColumns(sql, cols) {
+  const code = codeOf(sql);
+  const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
+  const out = [];
+  for (const m of code.matchAll(/`([^`]+)`|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    const word = m[1] ?? m[2] ?? m[3]; const at = m.index; const end = at + m[0].length;
+    const col = names.get(word.toLowerCase());
+    if (!col || out.includes(col)) continue;
+    if (m[3] !== undefined && (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3)))) continue;
+    out.push(col);
+  }
+  return out;
+}
+
+/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
+ *  comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
+export function fillPlaceholders(sql, args) {
+  const src = String(sql); const code = codeOf(src);
+  const used = new Set();
+  let out = ''; let last = 0;
+  for (const m of code.matchAll(/\{(\d+)\}/g)) {
+    const n = Number(m[1]);
+    if (!(n >= 1 && n <= args.length)) throw new Error(`pipeline: a raw expression's {${n}} has no argument — it has ${args.length} (args: [${'{ column }'}, …], {1} the first)`);
+    used.add(n);
+    out += src.slice(last, m.index) + args[n - 1]; last = m.index + m[0].length;
+  }
+  const unused = args.map((_, i) => i + 1).filter((n) => !used.has(n));
+  if (unused.length) throw new Error(`pipeline: a raw expression's argument${unused.length > 1 ? 's' : ''} ${unused.map((n) => `{${n}}`).join(', ')} ${unused.length > 1 ? 'are' : 'is'} not used in its SQL`);
+  return out + src.slice(last);
+}
+
 /** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */
 export function unquotedSql(sql) {
   return String(sql)
@@ -110,7 +152,7 @@ export function condPred(d, cols, c, opts = {}) {
   // the left side: a column named outright, or an expression — with the type its constants are written in
   let left;
   if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left', opts);
-  else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null }; }
+  else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null, physical: !!cols.get(c.column)?.physical }; }
   else throw new Error('condition needs `column` or `left`');
   const name = c.column ?? c.left?.column ?? 'the left side';
   const right = c.right;
@@ -118,6 +160,10 @@ export function condPred(d, cols, c, opts = {}) {
   if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
+    // a TEXT column of the warehouse never equals a boolean: refused here, not as STRING = BOOL in the run
+    if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
+      throw new Error(`'${name}' is a text column in the warehouse: compare it with its text value (a string such as 'false' or '0' — semantic_index({ request: { source, property } }) lists the values it holds), not with the boolean ${JSON.stringify(value)}`);
+    }
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
   // an expression on the right (a column, now, a function): a plain comparison of the two

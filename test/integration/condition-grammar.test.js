@@ -176,3 +176,58 @@ test('a query over a built model computes a sample stddev and variance, as the w
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
 });
+
+test('a query over a built model reads columns named with reserved words (order, group): every name is quoted', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial'");
+  const { draft_id } = await pipe([
+    { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
+  ]);
+  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { where: [{ column: 'group', op: 'eq', value: 'tutorial' }], group_by: ['group'], aggregations: [{ agg: 'sum', column: 'order', name: 'select' }], order_by: [{ key: 'select', direction: 'desc' }] } });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
+});
+
+test('a text column of the warehouse compared with a boolean is refused as the step is added, not run as STRING = BOOL', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: false }] } }), /text column in the warehouse/);
+});
+
+test('a raw expression takes a reserved-word column in args and reads it: the server writes it quoted; named in the text it is refused', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
+  const { rows } = await pipe([
+    { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
+    { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }] },
+  ]);
+  assert.equal(num(rows[0].n), want);
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
+  for (const sql of ['order * 2', '"order" * 2']) {
+    await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } } }), /a column goes in `args`/, sql);
+  }
+  // a placeholder with no argument, and an argument no placeholder uses, are refused too
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);
+});
+
+test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+  ] });
+  const good = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  assert.equal(good.ok, true, JSON.stringify(good.error));
+  assert.equal(good.validated, true);
+  // a function the warehouse does not have: only the warehouse can say so
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } } });
+  const bad = await engine.raw.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
+  assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
+  assert.ok(!engine.ctxs.generatedFiles(s.draft_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
+});

@@ -47,11 +47,12 @@ export const taskResultMethods = {
   /** Run a (optionally projected) read over a materialized result table. */
   async _readTable(dir, table, limit, transform, extra = {}, offset = 0, sample = false, samplePercent = 10) {
     const ref = `{{ ref('${table}') }}`;
-    const base = transform ? buildProjection(ref, transform) : `select * from ${ref}`;
+    const quote = (x) => getDialect(this.catalog.dialect).quoteIdent(x);
+    const base = transform ? buildProjection(ref, transform, quote) : `select * from ${ref}`;
     if (sample) {
       // A REPRESENTATIVE random subset rather than the first rows by physical order, the
       // dialect's way (src/dialects). Paging doesn't apply.
-      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform) : `select * from ${rel}`));
+      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform, quote) : `select * from ${rel}`));
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
       return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
@@ -231,8 +232,10 @@ export const taskResultMethods = {
       const page = await this._readTable(this.ctxs.dir(job.contextId), job.table, limit ?? pageSize ?? 1000, undefined, {}, offset ?? 0);
       return { ...head, ...page, status: page.ok === false ? 'error' : 'done', ...(page.ok === false ? {} : this._showHint(id, page)) };
     }
+    // a task that FAILED answers with its failure — paged or not: it has no rows to page, and telling
+    // the caller to build again hides why the build did not stand
+    if (job.status === 'error') return { ok: false, ...head, status: 'error', error: { stage: 'task', message: job.error, see: `explore_errors({ request: { task_id: '${id}' } }) — the failure in full: what it ran and what the warehouse said` } };
     if (paging) throw new ToolError(`offset/limit page a stored table or a result still held in memory, and this task has neither — ${this._pageHint(job)}`, { stage: 'validate', field: offset != null ? 'offset' : 'limit' });
-    if (job.status === 'error') return { ok: false, ...head, status: 'error', error: { stage: 'task', message: job.error } };
     return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: 'this task\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run it again; materialize:true keeps a query\'s result as a table that survives restarts.' } };
   },
 

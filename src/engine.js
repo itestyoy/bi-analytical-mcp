@@ -448,7 +448,10 @@ export class Engine {
     const needle = typeof search === 'string' && search.trim() ? search.trim().toLowerCase() : null;
     const all = this.ctxs.list()
       .map((entry) => {
-        const brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief;
+        // one context a feature cannot describe (state an earlier version stored) is listed with
+        // why — it never takes the list of every other context down with it
+        let brief = null;
+        try { brief = this._featureContext(this.ctxs.get(entry.context_id))?.brief; } catch (e) { return { ...entry, unreadable: e?.message || String(e) }; }
         return brief ? { ...entry, ...brief } : entry;
       })
       .filter((entry) => !needle || JSON.stringify(entry).toLowerCase().includes(needle))

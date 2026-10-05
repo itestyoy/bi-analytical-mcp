@@ -12,8 +12,16 @@ const CASTS = { int: 'INTEGER', integer: 'INTEGER', bigint: 'BIGINT', numeric: '
 /** A JSON path to one key: `$."key"` (the key is a validated identifier). */
 const keyPath = (key) => `'$."${key}"'`;
 
+const DUCKDB_RESERVED = new Set(('ALL ANALYSE ANALYZE AND ANY ARRAY AS ASC ASYMMETRIC BOTH CASE CAST CHECK COLLATE COLUMN CONSTRAINT CREATE '
+  + 'DEFAULT DEFERRABLE DESC DESCRIBE DISTINCT DO ELSE END EXCEPT FALSE FETCH FOR FOREIGN FROM GRANT GROUP HAVING IN INITIALLY INTERSECT '
+  + 'INTO LATERAL LEADING LIMIT NOT NULL OFFSET ON ONLY OR ORDER PIVOT PIVOT_LONGER PIVOT_WIDER PLACING PRIMARY QUALIFY REFERENCES '
+  + 'RETURNING SELECT SHOW SOME SUMMARIZE SYMMETRIC TABLE THEN TO TRAILING TRUE UNION UNIQUE UNPIVOT USING VARIADIC WHEN WHERE WINDOW WITH').split(' '));
+
 export class DuckDBDialect extends Dialect {
   get name() { return 'duckdb'; }
+
+  /** DuckDB's reserved keywords (duckdb_keywords() where category = 'reserved'): a column named with one must be quoted. */
+  get reservedWords() { return DUCKDB_RESERVED; }
 
   /** A pipeline is lowered to chained CTEs: plain SQL any parser reads. */
   get writesPipeSyntax() { return false; }

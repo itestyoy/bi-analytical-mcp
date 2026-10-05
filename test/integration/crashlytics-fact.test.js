@@ -329,14 +329,16 @@ test('columns named like keywords (group, order) flow through the stages as colu
   assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
 });
 
-// A raw expression runs as written, over the columns the steps before it made: one naming a column
-// that is not there is refused when it is added, not by the warehouse minutes later.
-test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {
+// A raw expression takes its columns STRUCTURED — each an item of args, {n} in the SQL where it goes:
+// a name in its text is refused when it is added (a column, or one that does not exist at that step),
+// not by the warehouse minutes later.
+test('a raw expression naming a column in its text is refused when it is added; its columns come in args', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', expr: { fn: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
-  // one over real columns — with functions, keywords, strings and an alias of its own — is taken
-  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end" } } });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } } })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
+  // its columns in args — with functions, keywords and strings in the text — is taken
+  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } } });
   assert.equal(ok.step_index, 1);
 });
 

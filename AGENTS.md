@@ -308,7 +308,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
   is added there once, its schema form and its SQL beside each other; a window function takes `over`,
-  `raw` stays the escape hatch). A caller who brings another tool's spelling
+  `raw` stays the escape hatch — its columns STRUCTURED, items of its `args` with `{1}`, `{2}`, … in its SQL
+  where each goes, written quoted by the server; a column named in its text is refused). Every column
+  name the server writes into SQL is quoted by the warehouse's dialect, in every stage and every read. A caller who brings another tool's spelling
   (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
   the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python

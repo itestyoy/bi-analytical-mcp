@@ -6,6 +6,12 @@ import { Dialect } from './base.js';
 
 const CASTS = { int: 'INT64', integer: 'INT64', bigint: 'INT64', numeric: 'NUMERIC', float: 'FLOAT64', double: 'FLOAT64' };
 
+const BIGQUERY_RESERVED = new Set(('ALL AND ANY ARRAY AS ASC ASSERT_ROWS_MODIFIED AT BETWEEN BY CASE CAST COLLATE CONTAINS CREATE CROSS CUBE '
+  + 'CURRENT DEFAULT DEFINE DESC DISTINCT ELSE END ENUM ESCAPE EXCEPT EXCLUDE EXISTS EXTRACT FALSE FETCH FOLLOWING FOR FROM FULL GROUP '
+  + 'GROUPING GROUPS HASH HAVING IF IGNORE IN INNER INTERSECT INTERVAL INTO IS JOIN LATERAL LEFT LIKE LIMIT LOOKUP MERGE NATURAL NEW NO '
+  + 'NOT NULL NULLS OF ON OR ORDER OUTER OVER PARTITION PRECEDING PROTO QUALIFY RANGE RECURSIVE RESPECT RIGHT ROLLUP ROWS SELECT SET '
+  + 'SOME STRUCT TABLESAMPLE THEN TO TREAT TRUE UNBOUNDED UNION UNNEST USING WHEN WHERE WINDOW WITH WITHIN').split(' '));
+
 export class BigQueryDialect extends Dialect {
   /** BigQuery quotes an identifier in backticks. */
   quoteIdent(name) {
@@ -13,6 +19,9 @@ export class BigQueryDialect extends Dialect {
   }
 
   get name() { return 'bigquery'; }
+
+  /** BigQuery's reserved keywords (GoogleSQL lexical structure): a column named with one must be quoted. */
+  get reservedWords() { return BIGQUERY_RESERVED; }
 
   /** A pipeline is lowered to BigQuery's pipe syntax (FROM … |> …), which dbt's own SQL parser (dbt v2) does not read. */
   get writesPipeSyntax() { return true; }

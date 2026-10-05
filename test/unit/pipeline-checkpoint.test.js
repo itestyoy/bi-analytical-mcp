@@ -82,10 +82,12 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
   assert.deepEqual(deep.checkpoints_dropped.map((d) => d.at), [2]);
   assert.equal(deep.from_checkpoint, undefined);
   assert.deepEqual(draftOf(e, draft_id).checkpoints, []);
-  // …and THAT one is not the registered result, so its own files go — without taking the
-  // registered model's with them, although it is the base name every later build extends.
-  assert.ok(!e.ctxs.hasPipelineModel(draft_id, c1.model), 'the retired prefix nobody reads is cleaned up');
+  // …and THAT one is not the registered result — but the registered result was built ON it (it reads
+  // c1 through a ref), so its definition stays: without it the registered model has a ref nothing
+  // defines, and dbt compiles every model of the project before any build runs.
+  assert.ok(e.ctxs.hasPipelineModel(draft_id, c1.model), 'a retired prefix the registered result reads is kept');
   assert.ok(e.ctxs.hasPipelineModel(draft_id, c2.model), 'the registered result is untouched');
+  assert.deepEqual(e.ctxs.pruneDanglingModels(draft_id), [], 'and nothing in the context dangles');
 });
 
 test('truncate retires the checkpoints past the kept prefix; add_step never retires one', async () => {

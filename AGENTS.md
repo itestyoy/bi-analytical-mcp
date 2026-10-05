@@ -561,11 +561,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
-  shape) and, for a dbt whose `semanticSpec` is 'latest' (v2), converted by `src/semantic-latest.js`
+  shape) and, for a dbt whose `semanticSpec` is 'latest' (v2, and 1.x from 1.12), converted by `src/semantic-latest.js`
   — the semantic model joins its dbt model's entry (merged with the project's own entry by
   `ContextManager.writeSemanticYaml`), keeping OUR semantic-model names so paths and metric names
-  do not change. What v2 writes differently into the manifest is corrected in its client (a
-  percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
+  do not change. What the latest spec's parse writes differently into the manifest is corrected in
+  the client's parse (a percentile is always approximate there: `config.meta.mcp_percentile` puts the
+  request back).
   Metric queries go through MetricFlow's `mf` on either version.
 - THE PROJECT'S OWN SEMANTIC LAYER IS READ AT START, NEVER BUILT (`src/project-semantics.js`): the
   semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file names and

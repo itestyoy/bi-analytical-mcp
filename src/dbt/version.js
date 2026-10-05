@@ -14,3 +14,11 @@ export function dbtVersion(dbtBin) {
     return null;
   }
 }
+
+/** The version of the dbt CLI at `dbtBin`, asked once per binary (it does not change while the server runs). */
+const known = new Map();
+export function knownDbtVersion(dbtBin) {
+  if (!dbtBin) return null;
+  if (!known.has(dbtBin)) known.set(dbtBin, dbtVersion(dbtBin));
+  return known.get(dbtBin);
+}

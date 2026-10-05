@@ -53,15 +53,19 @@ test('on a single-writer warehouse the client runs one process at a time; elsewh
   assert.deepEqual(order().slice(0, 2), ['start', 'start'], 'both running at once');
 });
 
-test('the client is chosen by the dbt major version: 1.x reads the legacy semantic YAML, v2 the latest; others are refused', () => {
+test('the client is chosen by the dbt major version: 1.x before 1.12 reads the legacy semantic YAML, 1.12 and v2 the latest; others are refused', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ver-'));
   const v1 = bin(dir, 'echo "Core:"; echo "  - installed: 1.11.11"');
+  const v112 = join(mkdtempSync(join(tmpdir(), 'ver112-')), 'dbt');
+  writeFileSync(v112, '#!/bin/sh\necho "Core:"; echo "  - installed: 1.12.5"\n', { mode: 0o755 });
   const v2 = bin(dir, 'echo "dbt 2.0.6"');
   assert.equal(detectDbtMajor(v1), 1);
   assert.equal(detectDbtMajor(v2), 2);
   const c1 = createDbt({ version: 'auto', dbtBin: v1 });
   const c2 = createDbt({ version: 'auto', dbtBin: v2 });
   assert.deepEqual([c1.major, c1.semanticSpec, c1.pythonModelsOn('duckdb')], [1, 'legacy', true]);
+  const c112 = createDbt({ version: 'auto', dbtBin: v112 });
+  assert.deepEqual([c112.major, c112.semanticSpec, c112.pythonModelsOn('duckdb')], [1, 'latest', true]);
   assert.deepEqual([c2.major, c2.semanticSpec, c2.pythonModelsOn('duckdb'), c2.pythonModelsOn('bigquery')], [2, 'latest', false, true]);
   assert.throws(() => createDbt({ version: 3 }), /dbt 3\.x is not supported/);
 });

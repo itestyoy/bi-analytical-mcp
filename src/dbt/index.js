@@ -22,7 +22,8 @@
 // stops its process (src/request-context.js), and a warehouse that takes one process at a time is
 // given one (src/dbt/process.js).
 //
-// Implemented: dbt 1.x (src/dbt/v1.js) and dbt v2 (src/dbt/v2.js, the latest semantic YAML spec).
+// Implemented: dbt 1.x (src/dbt/v1.js — the latest semantic YAML spec from 1.12, the legacy one
+// before it) and dbt v2 (src/dbt/v2.js, the latest spec).
 
 import { DbtV1 } from './v1.js';
 import { DbtV2 } from './v2.js';
@@ -32,7 +33,7 @@ export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV, DEFAULT_MF_
 
 export { formatDbtError, dbtFailure, parseShowJson, parseCsv } from './output.js';
 export { dbtVersion } from './version.js';
-import { dbtVersion } from './version.js';
+import { knownDbtVersion } from './version.js';
 
 const IMPLEMENTATIONS = { 1: DbtV1, 2: DbtV2 };
 
@@ -47,7 +48,7 @@ export function detectDbtMajor(dbtBin) {
 }
 
 function askVersion(dbtBin) {
-  const version = dbtVersion(dbtBin);
+  const version = knownDbtVersion(dbtBin);
   return version ? Number(version.split('.')[0]) : null;
 }
 

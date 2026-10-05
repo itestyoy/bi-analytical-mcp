@@ -121,6 +121,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
     index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the stage BEFORE this position (count+1 appends).' },
     after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
+    validate: { type: 'boolean', description: 'preview only: check the draft\'s SQL against the warehouse without reading data (dbt run --empty) — a task, read with query_pipeline_model. Worth it before an expensive materialize.' },
     include_columns: { type: 'boolean', description: 'Also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
     include_steps: { type: 'boolean', description: 'Also return the FULL steps array. Off by default — add_step is append-only, so it echoes just the applied `step` + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
   };
@@ -141,7 +142,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
       step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),
       step('fork', 'fork the draft', 'fork: branch a new draft from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; name defaults to the source draft\'s, description overrides the parent\'s.', [], ['name', 'description', 'after']),
-      step(['preview', 'materialize', 'discard'], 'preview, materialize or discard', 'preview shows the steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', []),
+      step('preview', 'preview the draft', 'preview: the steps + the SQL that would actually run (from a materialized prefix when there is one). With validate: true it starts a task instead (read with query_pipeline_model): the draft\'s SQL is run against the warehouse with every input limited to zero rows (dbt run --empty) — what the warehouse refuses (a type mismatch, an unknown name, a syntax error) is said in seconds, with no data read and nothing built.', [], ['validate']),
+      step(['materialize', 'discard'], 'materialize or discard', 'materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', []),
     ],
   };
 

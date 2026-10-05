@@ -28,7 +28,7 @@ export const pipelineDraftMethods = {
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
     if (input.action === 'truncate') return this._draftTruncate(ctx, draft, input.after, input.include_columns);
-    if (input.action === 'preview') return this._draftPreview(ctx, draft);
+    if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
   },
@@ -489,6 +489,44 @@ export const pipelineDraftMethods = {
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
+  },
+
+  /**
+   * THE DRAFT CHECKED BY THE WAREHOUSE, READING NO DATA — preview with validate: a task (read with
+   * query_pipeline_model) that writes the SQL a materialize would build, under names of its own, and
+   * runs it with `dbt run --empty`: every ref and source limited to zero rows, so the warehouse
+   * compiles and plans the very SQL (a type mismatch, an unknown name, a syntax error is refused as
+   * it would be) and reads nothing. The models are removed afterwards whatever the outcome — a
+   * failing one left in the project would fail every later build of the context. A python model is
+   * not run empty: the check covers the SQL models before the first one.
+   */
+  async _draftValidate(ctx, draft) {
+    if (!draft.stages.length) throw new ToolError('draft has no stages to validate — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    if (!this.runner?.run) throw new ToolError('no warehouse runner configured — nothing to validate against', { stage: 'validate' });
+    const physSet = await this.probe.physicalColumns(draft.source);
+    const plan = this._renderPlan(draft);
+    if (plan.checkpoint && !plan.stages.length) throw new ToolError(`nothing to validate: every step is already materialized as ${plan.checkpoint.model}`, { stage: 'validate', field: 'draft_id' });
+    // names of its own (pipe_…_chk): the check never writes over a table a build made or reads
+    const modelName = `${this._nextPipelineModel(ctx, draft.name)}_chk`;
+    const rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });
+    const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
+    const firstPython = models.findIndex((m) => m.kind === 'python');
+    const sql = firstPython === -1 ? models : models.slice(0, firstPython);
+    const taskId = this._startTask(ctx, 'build_pipeline_model', async () => {
+      if (!sql.length) return { ok: true, validated: false, draft_id: ctx.id, note: 'the draft begins with a python stage, which is not run empty — its SQL is checked by the build itself' };
+      try {
+        for (const m of sql) this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine('table', { pipeline: true })}\n${m.sql}\n`);
+        const r = await this.runner.run(this.ctxs.dir(ctx.id), sql.map((m) => m.model).join(' '), { empty: true });
+        if (!r.ok) return { ok: false, draft_id: ctx.id, error: { stage: 'validate', message: this._sqlRunMessage(r.stdout, r.stderr), note: 'the warehouse refused the draft\'s SQL with no data read (dbt run --empty) — fix the step it names, then validate or materialize' } };
+        return {
+          ok: true, validated: true, draft_id: ctx.id, checked: sql.map((m) => m.model.replace(/_chk/, '')),
+          note: `the warehouse compiled and ran the draft's SQL with every input limited to zero rows (dbt run --empty): nothing was read and nothing kept${firstPython !== -1 ? `; the python model(s) from step ${firstPython + 1} on are checked by the build itself` : ''} — materialize builds it`,
+        };
+      } finally {
+        this.ctxs.removePipelineFiles(ctx.id, modelName);
+      }
+    }, { input: { action: 'preview', validate: true, draft_id: ctx.id, name: draft.name, source: draft.source, stages: draft.stages } });
+    return this._taskStarted(taskId, { context_id: ctx.id });
   },
 
   async _draftPreview(ctx, draft) {

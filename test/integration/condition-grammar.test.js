@@ -213,3 +213,21 @@ test('a raw expression takes a reserved-word column in args and reads it: the se
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);
 });
+
+test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+  ] });
+  const good = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  assert.equal(good.ok, true, JSON.stringify(good.error));
+  assert.equal(good.validated, true);
+  // a function the warehouse does not have: only the warehouse can say so
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } } });
+  const bad = await engine.raw.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
+  assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
+  assert.ok(!engine.ctxs.generatedFiles(s.draft_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
+});

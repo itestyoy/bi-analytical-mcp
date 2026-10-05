@@ -95,6 +95,9 @@ function pipelineFamilyMatcher(model) {
  *  never a path, and never with a leading `_` (reserved for internal contexts). */
 export const CONTEXT_ID = '^[a-z0-9][a-z0-9_]{2,63}$';
 
+/** The internal context the warehouse is read through (ContextManager.warehouseDir). */
+export const WAREHOUSE_COPY = '_warehouse';
+
 /** The dbt model a materialized query result is stored as: `<prefix><task_id>` (Engine._materialize). */
 export const RESULT_MODEL_PREFIX = 'qr_';
 
@@ -574,6 +577,27 @@ export class ContextManager {
       }
     }
     return out;
+  }
+
+  /**
+   * THE COPY OF THE PROJECT THE WAREHOUSE IS READ THROUGH — the value index, the catalog's grounding,
+   * a source's freshness and columns: `dbt show` / `dbt run` / a relation's columns, over the project's
+   * own models. Never the project itself: dbt parses a project before it runs anything in it, and a
+   * project with a semantic layer and no time spine does not parse on dbt 1.12 ("requires a time spine
+   * model…") — the server writes nothing into the project it is given. So it is a copy of its own,
+   * made once per start like any context's (the project's semantic layer left out, a time spine
+   * ensured), internal and pinned: never listed, addressed or reclaimed. null without a project.
+   */
+  warehouseDir() {
+    if (!this.baseProjectDir) return null;
+    if (!this._warehouseCopy) {
+      if (this.has(WAREHOUSE_COPY)) this.drop(WAREHOUSE_COPY);
+      const ctx = this.create(WAREHOUSE_COPY);
+      ctx.state = { ...ctx.state, engine: 'warehouse-read', pinned: true, internal: true };
+      this._persist();
+      this._warehouseCopy = true;
+    }
+    return this.dir(WAREHOUSE_COPY);
   }
 
   /** Tear down a whole context (waits on no in-flight leases). */

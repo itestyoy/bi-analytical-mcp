@@ -24,6 +24,11 @@ export class WarehouseProbe {
     this.freshnessCache = new Map(); // source → { value, gen }
   }
 
+  /** Where dbt reads the warehouse: the server's own copy of the project (ContextManager.warehouseDir) — never the project itself. */
+  readDir() {
+    return this.ctxs.warehouseDir ? this.ctxs.warehouseDir() : this.ctxs.baseProjectDir;
+  }
+
   /**
    * A BEST-EFFORT WAREHOUSE READ INSIDE AN INTERACTIVE CALL — WITH A DEADLINE OF OUR OWN.
    *
@@ -72,7 +77,7 @@ export class WarehouseProbe {
    * is skipped).
    */
   async physicalColumns(source) {
-    if (!this.runner || !this.ctxs.baseProjectDir) return null;
+    if (!this.runner || !this.readDir()) return null;
     // a known set is kept; a lookup that could not know (the relation not built yet, the warehouse
     // unreachable) is kept only until the next index scan, so grounding comes back once it can
     const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
@@ -81,7 +86,7 @@ export class WarehouseProbe {
     return this.bestEffort(`columns:${source}:${gen}`, async () => {
       let set = null;
       try {
-        const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
+        const r = await this.runner.relationColumns(this.readDir(), this.catalog.getModel(source).dbt_model);
         if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
       } catch { /* introspection unavailable → grounding skipped */ }
       this.columnCache.set(source, { set, gen });
@@ -104,7 +109,7 @@ export class WarehouseProbe {
    * it is slower than the interactive grace (bestEffort) — the next call reads the primed cache.
    */
   async dataFreshness(sourceKey) {
-    const base = this.ctxs.baseProjectDir;
+    const base = this.readDir();
     const m = this.catalog.getModel(sourceKey);
     const tcol = m.time?.column;
     if (!this.runner || !base || !tcol) return null;
@@ -134,7 +139,7 @@ export class WarehouseProbe {
    * runner / base project, the count fails, or it is slower than the interactive grace.
    */
   async estimateSourceRows(sourceKey, tr) {
-    const base = this.ctxs.baseProjectDir;
+    const base = this.readDir();
     if (!this.runner || !base) return null;
     const m = this.catalog.getModel(sourceKey);
     let where = '';

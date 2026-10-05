@@ -99,13 +99,13 @@ export async function builtShape(engine, name, es, ctx) {
 export function shapeBefore(es, k) {
   const cp = es.checkpoint;
   if (cp && k === cp.upto + 1) return cp.shape;
-  if (k === 1) return es.base.shape;
-  return es.steps[k - 2]?.shape || null;
+  if (k === 1) return es.base?.shape ?? null;
+  return es.steps?.[k - 2]?.shape || null;
 }
 
 /** The shape at the end of the draft. */
 export function shapeAtEnd(es) {
-  return shapeBefore(es, es.steps.length + 1);
+  return shapeBefore(es, (es.steps || []).length + 1);
 }
 
 /** One step in the library's own form: `path` as the library's path column, a reshaped parameter
@@ -257,8 +257,9 @@ export function preview(ctx, name, es) {
   const upto = es.checkpoint?.upto || 0;
   return {
     ok: true, context_id: ctx.id, eventstream: name, action: 'preview',
-    base: { model: es.base.model, ...(es.base.summary ? { events: es.base.summary.events, users: es.base.summary.users } : { building: es.base.task_id }) },
-    steps: es.steps.map((s, i) => ({ index: i + 1, step: s.step, library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
+    // (an eventstream a former version of the server stored may carry no base: said, not thrown)
+    base: es.base ? { model: es.base.model, ...(es.base.summary ? { events: es.base.summary.events, users: es.base.summary.users } : { building: es.base.task_id }) } : { missing: 'this eventstream was stored without its base table — start it again' },
+    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: s.step, library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
     materialized_through: upto,
     ...(es.checkpoint ? { table: es.checkpoint.model } : {}),
     shape: describeShape(shapeAtEnd(es)),

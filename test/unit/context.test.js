@@ -83,3 +83,35 @@ test('mergeCompiled accumulates additions and dedups metrics', () => {
   assert.deepEqual(state.usedModels.sort(), ['events', 'users']);
   assert.deepEqual(state.tasks, ['t1', 't2']);
 });
+
+test('a context a feature cannot describe is listed with why, and the list of the others still comes back', async () => {
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { Engine } = await import('../../src/engine.js');
+  const catalog = loadCatalog(new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname, {});
+  const cm = new ContextManager({ workspaceRoot: tmpRoot() });
+  const engine = new Engine({ catalog, contextManager: cm });
+  const broken = cm.create(); const fine = cm.create();
+  broken.state.feature_state = true;
+  // a feature whose describeContext throws on the one context (state an earlier version stored)
+  engine.features = [{ describeContext: (_e, ctx) => { if (ctx.state.feature_state) throw new TypeError("Cannot read properties of undefined (reading 'model')"); return null; } }];
+  const listed = engine._listContexts();
+  assert.equal(listed.total, 2);
+  assert.ok(listed.contexts.find((c) => c.context_id === broken.id).unreadable);
+  assert.ok(!listed.contexts.find((c) => c.context_id === fine.id).unreadable);
+  engine.close?.();
+});
+
+test('a model reading a server-made model the overlay no longer has is pruned, with what reads it; a checkpoint still read is found as read', () => {
+  const cm = new ContextManager({ workspaceRoot: tmpRoot() });
+  const ctx = cm.create();
+  const ref = (m) => `select * from {{ ref('${m}') }}\n`;
+  cm.writeModel(ctx.id, 'pipe_a_x1', ref('fct_analytics_events'));
+  cm.writeModel(ctx.id, 'pipe_a_x1_c2', ref('pipe_a_x1'));
+  cm.writeModel(ctx.id, 'pipe_a_x1_c3', ref('pipe_a_x1_c2'));
+  cm.writeModel(ctx.id, 'qr_t1', ref('some_project_model')); // a ref outside the server's own models is left alone
+  assert.deepEqual(cm.readersOf(ctx.id, 'pipe_a_x1'), ['pipe_a_x1_c2'], 'the checkpoint is read by the later build');
+  assert.deepEqual(cm.pruneDanglingModels(ctx.id), [], 'nothing dangles while every ref resolves');
+  cm.removePipelineModelFiles(ctx.id, 'pipe_a_x1');
+  assert.deepEqual(cm.pruneDanglingModels(ctx.id).sort(), ['pipe_a_x1_c2.sql', 'pipe_a_x1_c3.sql']);
+  assert.deepEqual(cm.generatedFiles(ctx.id).filter((f) => /(pipe|qr)_.*\.sql$/.test(f)).map((f) => f.split('/').pop()).sort(), ['qr_t1.sql']);
+});

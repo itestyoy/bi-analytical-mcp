@@ -10,7 +10,7 @@ import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { rawUnknownColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
+import { rawUnknownColumns, rawReservedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
 import { conditionsSql, eachCondition } from '../conditions.js';
 import { form, SCALAR } from '../schema-kit.js';
 
@@ -142,12 +142,14 @@ export const FNS = {
   // escape hatch: verbatim dialect SQL — over columns that exist at this point
   raw: {
     args: 0, needs: ['sql'], may: ['type'],
-    sql: ({ cols, p, opts }) => {
+    sql: ({ d, cols, p, opts }) => {
       // a raw window is still a window: where SQL takes none, it is refused as the structured one is
       if (opts.windows === false && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and a where cannot compare one — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column');
       if (opts.inWindow && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and it cannot be an argument of another window function — compute it into a column first (a compute stage), then use that column');
       const unknown = rawUnknownColumns(p.sql, cols);
       if (unknown.length) throw new Error(`pipeline: a raw expression names ${unknown.map((n) => `'${n}'`).join(', ')}, not ${unknown.length === 1 ? 'a column' : 'columns'} at this stage (available: ${[...cols.keys()].join(', ')}) — a raw expression reads the columns the steps before it produced`);
+      const reserved = rawReservedColumns(p.sql, cols, d.reservedWords);
+      if (reserved.length) throw new Error(`pipeline: a raw expression names ${reserved.map((n) => `'${n}'`).join(', ')} bare, and ${reserved.length === 1 ? 'that is a reserved word' : 'those are reserved words'} of ${d.name} SQL — it would be read as a keyword and the run fails. Quote ${reserved.length === 1 ? 'it' : 'them'} in the raw SQL: ${reserved.map((n) => d.quoteIdent(n)).join(', ')} (every other stage quotes a column itself)`);
       return { expr: `(${p.sql})`, type: p.type || 'string' };
     },
   },

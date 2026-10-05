@@ -166,6 +166,10 @@ export const pipelineDraftMethods = {
       // result unreadable for good.
       if (cp.task_id && this.jobs.isLive?.(cp.task_id) && this.jobs.get(cp.task_id)?.status === 'running') continue;
       if ((ctx.state.checkpoint_consumers?.[cp.model] || []).some((id) => this.ctxs.has(id))) continue;
+      // Nor one a model of this very context still reads (an earlier build that continued from it —
+      // the registered result, say): removing it would leave that model with a ref nothing defines,
+      // and dbt compiles every model of the project before it runs any.
+      if (this.ctxs.readersOf(ctx.id, cp.model).length) continue;
       this.ctxs.removePipelineModelFiles(ctx.id, cp.model); // this model only: later builds share its base name
 
     }

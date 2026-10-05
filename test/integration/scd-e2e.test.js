@@ -113,6 +113,8 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.ok(!created.metrics.includes('scd_drop_players'), 'the metric depending on the dropped measure is gone');
   assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a ratio over it goes with it');
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
+  // a dropped metric is refused when it is asked for, before any task starts — not by MetricFlow later
+  await assert.rejects(engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_players'] }), /not in its semantic layer/);
   // and the surviving metric still queries to the point-in-time total
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_revenue'], materialize: true });
   const r = await readTable(engine, created.context_id, m.table, { transform: { aggregations: [{ agg: 'sum', column: 'scd_drop_revenue', name: 't' }] } });

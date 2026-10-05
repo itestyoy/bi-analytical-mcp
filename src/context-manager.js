@@ -98,6 +98,9 @@ export const CONTEXT_ID = '^[a-z0-9][a-z0-9_]{2,63}$';
 /** The internal context the warehouse is read through (ContextManager.warehouseDir). */
 export const WAREHOUSE_COPY = '_warehouse';
 
+/** A ref in a generated model's code: `{{ ref('<model>') }}` / dbt.ref("<model>"). */
+const GENERATED_REF = /\bref\(\s*['"]([A-Za-z0-9_]+)['"]\s*\)/g;
+
 /** The dbt model a materialized query result is stored as: `<prefix><task_id>` (Engine._materialize). */
 export const RESULT_MODEL_PREFIX = 'qr_';
 
@@ -424,6 +427,43 @@ export class ContextManager {
     const gone = readdirSync(d).filter(pred);
     for (const f of gone) rmSync(join(d, f), { force: true });
     return gone;
+  }
+
+  /** The models each generated model file refs: [{ file, model, refs }] (a .sql or a python model's .py). */
+  _generatedRefs(id) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    return readdirSync(d).filter((f) => /\.(sql|py)$/.test(f)).map((f) => ({
+      file: f,
+      model: f.replace(/\.(sql|py)$/, ''),
+      refs: [...readFileSync(join(d, f), 'utf8').matchAll(GENERATED_REF)].map((m) => m[1]),
+    }));
+  }
+
+  /** The generated models of this overlay that read `model` through a ref (its own chain left out). */
+  readersOf(id, model) {
+    const own = pipelineModelMatcher(model);
+    return this._generatedRefs(id).filter((g) => !own(g.file) && g.refs.includes(model)).map((g) => g.model);
+  }
+
+  /**
+   * Remove the generated models that read a SERVER-MADE model (a pipeline's `pipe_…`, a stored
+   * result's `qr_…`) this overlay no longer has — and what reads them, in turn. dbt compiles every
+   * model of a project before it runs any, so one such orphan (a build that read a checkpoint whose
+   * definition was since retired) fails every later build of the context with "depends on a node
+   * named … which was not found". A ref to anything else (the project's own models, a package's) is
+   * not this server's to judge and is left alone. → the files removed.
+   */
+  pruneDanglingModels(id) {
+    const gone = [];
+    for (;;) {
+      const all = this._generatedRefs(id);
+      const have = new Set(all.map((g) => g.model));
+      const ours = (name) => name.startsWith('pipe_') || name.startsWith(RESULT_MODEL_PREFIX);
+      const orphans = all.filter((g) => g.refs.some((r) => ours(r) && !have.has(r)));
+      if (!orphans.length) return gone;
+      for (const g of orphans) gone.push(...this.removeGeneratedWhere(id, (f) => f === g.file || f === `${g.model}.yml`));
+    }
   }
 
   /**

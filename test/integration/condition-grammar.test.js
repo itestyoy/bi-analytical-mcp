@@ -176,3 +176,35 @@ test('a query over a built model computes a sample stddev and variance, as the w
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
 });
+
+test('a query over a built model reads columns named with reserved words (order, group): every name is quoted', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial'");
+  const { draft_id } = await pipe([
+    { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
+  ]);
+  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { where: [{ column: 'group', op: 'eq', value: 'tutorial' }], group_by: ['group'], aggregations: [{ agg: 'sum', column: 'order', name: 'select' }], order_by: [{ key: 'select', direction: 'desc' }] } });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
+});
+
+test('a text column of the warehouse compared with a boolean is refused as the step is added, not run as STRING = BOOL', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: false }] } }), /text column in the warehouse/);
+});
+
+test('a raw expression naming a reserved-word column bare is refused with the quoted spelling; quoted, it reads the column', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: 'order * 2', type: 'int' } } }), /reserved word/);
+  const { rows } = await pipe([
+    { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
+    { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '"order" * 2', type: 'int' } },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }] },
+  ]);
+  assert.equal(num(rows[0].n), want);
+});

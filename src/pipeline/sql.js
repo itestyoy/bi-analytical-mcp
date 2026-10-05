@@ -78,6 +78,27 @@ export const sourceProp = (catalog, source, name) => (source
 // to the warehouse.
 export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
 
+/**
+ * The columns a RAW expression names bare whose names are reserved words of the warehouse (`new`,
+ * `rows`, `group` — a pivot's values become such columns): SQL reads them as keywords, so the
+ * expression fails in the warehouse. A quoted name, a function call (`if(`) and a field (`.new`)
+ * are not such a use.
+ */
+export function rawReservedColumns(sql, cols, reserved) {
+  if (!reserved?.size) return [];
+  const text = unquotedSql(sql);
+  const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
+  const out = [];
+  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const word = m[0]; const at = m.index; const end = at + word.length;
+    const col = names.get(word.toLowerCase());
+    if (!col || !reserved.has(word.toUpperCase()) || out.includes(col)) continue;
+    if (/[.@:$]\s*$/.test(text.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(text.slice(end, end + 3))) continue;
+    out.push(col);
+  }
+  return out;
+}
+
 /** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */
 export function unquotedSql(sql) {
   return String(sql)
@@ -110,7 +131,7 @@ export function condPred(d, cols, c, opts = {}) {
   // the left side: a column named outright, or an expression — with the type its constants are written in
   let left;
   if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left', opts);
-  else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null }; }
+  else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null, physical: !!cols.get(c.column)?.physical }; }
   else throw new Error('condition needs `column` or `left`');
   const name = c.column ?? c.left?.column ?? 'the left side';
   const right = c.right;
@@ -118,6 +139,10 @@ export function condPred(d, cols, c, opts = {}) {
   if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
+    // a TEXT column of the warehouse never equals a boolean: refused here, not as STRING = BOOL in the run
+    if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
+      throw new Error(`'${name}' is a text column in the warehouse: compare it with its text value (a string such as 'false' or '0' — semantic_index({ request: { source, property } }) lists the values it holds), not with the boolean ${JSON.stringify(value)}`);
+    }
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
   // an expression on the right (a column, now, a function): a plain comparison of the two

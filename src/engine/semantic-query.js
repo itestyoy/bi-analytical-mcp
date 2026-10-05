@@ -6,7 +6,7 @@
 
 import { ToolError } from '../validate.js';
 import { measureRefs } from '../compile.js';
-import { PARTITION_DIM } from '../yaml-render.js';
+import { PARTITION_DIM, renderContext } from '../yaml-render.js';
 import { renderWhereClauses, wherePredicates } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
@@ -467,6 +467,11 @@ export const semanticQueryMethods = {
     const known = new Set(ctx.state.metrics.map((m) => m.name));
     if (!input.metrics?.length) throw new ToolError(`metrics is required for a metric query. This context defines: ${[...known].join(', ') || '(none — create metrics first)'}`, { stage: 'validate', field: 'metrics' });
     for (const m of input.metrics) if (!known.has(m)) throw new ToolError(`unknown metric in context: '${m}'. Available: ${[...known].join(', ') || '(none)'}`, { stage: 'validate', field: m });
+    // a metric the context declares but its layer could not carry (a measure on a slowly-changing
+    // model is dropped from what dbt parses) is refused HERE, not by MetricFlow minutes later
+    const emitted = new Set(renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() }).metricNames);
+    const dropped = input.metrics.filter((m) => !emitted.has(m));
+    if (dropped.length) throw new ToolError(`metric${dropped.length > 1 ? 's' : ''} ${dropped.map((m) => `'${m}'`).join(', ')} ${dropped.length > 1 ? 'are' : 'is'} declared in this context but not in its semantic layer: ${dropped.length > 1 ? 'they read' : 'it reads'} a measure on a slowly-changing model, where MetricFlow allows no measure (it is a join target only). Count on an events source instead (count_distinct of the user key), and group by that model's attributes. Queryable here: ${[...emitted].join(', ') || '(none)'}`, { stage: 'validate', field: 'metrics' });
 
     // what a reference reaches is _normalizeRef's one judgement: it resolves the reference or
     // refuses it, saying what is reachable (_reachableHint)

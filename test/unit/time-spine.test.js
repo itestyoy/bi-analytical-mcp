@@ -54,3 +54,20 @@ test('a properly CONFIGURED time spine in base → overlay adds nothing', () => 
   assert.ok(!files.includes('_mcp_time_spine.yml') && !files.includes('metricflow_time_spine.sql'), 'no duplicate time spine');
   assert.equal(generatedSpine, false, 'nothing generated → nothing to build');
 });
+
+test('the warehouse is read through a copy of the project of its own: a time spine there, the project\'s semantic layer left out, the project itself untouched', async () => {
+  const { readFileSync } = await import('node:fs');
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
+  // a project with a semantic layer and no time spine: dbt 1.12 does not parse it as it is
+  writeFileSync(join(base, 'models', 'metrics.yml'), 'metrics:\n  - name: m\n    type: simple\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'duckdb' });
+  const dir = cm.warehouseDir();
+  assert.notEqual(dir, base, 'not the project itself');
+  assert.equal(cm.warehouseDir(), dir, 'one copy per start');
+  assert.ok(readdirSync(join(dir, 'models', 'generated')).includes('_mcp_time_spine.yml'), 'a time spine in the copy');
+  assert.equal(readFileSync(join(dir, 'models', 'metrics.yml'), 'utf8').trim(), '', 'the project\'s semantic layer left out of the copy');
+  assert.deepEqual(readdirSync(join(base, 'models')).sort(), ['metrics.yml'], 'nothing written into the project');
+  assert.ok(!cm.list().some((c) => c.context_id === '_warehouse'), 'internal: not listed');
+});

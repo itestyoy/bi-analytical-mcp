@@ -23,7 +23,7 @@ export const ENVIRONMENT_SPECS = {
   'dbt-v1': {
     role: 'dbt',
     description: 'dbt 1.x — the Python dbt-core with the DuckDB and BigQuery adapters, plus pandas + pyarrow, with which dbt-duckdb runs dbt Python models locally (the python stage; dbt v2 runs none on DuckDB).',
-    packages: ['dbt-core==1.11.11', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.11.3', 'pandas==3.0.6', 'pyarrow==25.0.1'],
+    packages: ['dbt-core==1.12.5', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.12.1', 'pandas==3.0.6', 'pyarrow==25.0.1'],
   },
   // The retentioneering feature's own dbt (src/retentioneering/): dbt 1.x runs its analysis as a dbt
   // Python model — in-process on DuckDB, submitted to the warehouse runtime (Colab Enterprise via
@@ -33,12 +33,12 @@ export const ENVIRONMENT_SPECS = {
   retentioneering: {
     role: 'dbt',
     description: 'dbt 1.x with the DuckDB and BigQuery adapters and retentioneering 5.2.3 (Apache-2.0) — the retentioneering feature runs its path analyses in it as dbt Python models (MCP_RETENTIONEERING=on).',
-    packages: ['dbt-core==1.11.11', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.11.3', 'pandas==3.0.6', 'pyarrow==25.0.1', 'retentioneering==5.2.3', 'numpy==2.4.6', 'scipy==1.17.1', 'scikit-learn==1.9.1', 'gensim==4.4.0', 'duckdb==1.5.5'],
+    packages: ['dbt-core==1.12.5', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.12.1', 'pandas==3.0.6', 'pyarrow==25.0.1', 'retentioneering==5.2.3', 'numpy==2.4.6', 'scipy==1.17.1', 'scikit-learn==1.9.1', 'gensim==4.4.0', 'duckdb==1.5.5'],
   },
   metricflow: {
     role: 'metricflow',
-    description: "MetricFlow's `mf` and the Python dbt-core + the DuckDB and BigQuery adapters it queries the warehouse with. Every dbt environment queries metrics through it (dbt's docs, without the dbt platform: \"install MetricFlow separately\"). dbt-metricflow 0.13.0 pins metricflow 0.211.0 and caps dbt-core below 1.12.",
-    packages: ['dbt-metricflow==0.13.0', 'dbt-core==1.11.11', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.11.3'],
+    description: "MetricFlow's `mf` and the Python dbt-core + the DuckDB and BigQuery adapters it queries the warehouse with. Every dbt environment queries metrics through it (dbt's docs, without the dbt platform: \"install MetricFlow separately\"). dbt-metricflow 0.15.0 pins metricflow 0.213.0 (the one dbt-core 1.12.5 itself requires) and caps dbt-core below 1.13.",
+    packages: ['dbt-metricflow==0.15.0', 'dbt-core==1.12.5', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.12.1'],
   },
 };
 

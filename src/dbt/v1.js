@@ -22,7 +22,7 @@ export class DbtV1 {
     this.major = 1;
   }
 
-  /** The semantic-layer YAML this dbt reads: 1.x (below 1.12) knows only the legacy spec. */
+  /** The semantic-layer YAML this server writes for dbt 1.x: the legacy spec (1.12 reads the latest one too, and still the legacy one). */
   get semanticSpec() { return 'legacy'; }
 
   /** The config a SQL model needs when its SQL is written in a syntax dbt's own parser does not read

@@ -78,25 +78,46 @@ export const sourceProp = (catalog, source, name) => (source
 // to the warehouse.
 export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
 
+/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept);
+ *  quoted names stay, so a column written `quoted` is still seen. */
+function codeOf(sql) {
+  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
+}
+
 /**
- * The columns a RAW expression names bare whose names are reserved words of the warehouse (`new`,
- * `rows`, `group` — a pivot's values become such columns): SQL reads them as keywords, so the
- * expression fails in the warehouse. A quoted name, a function call (`if(`) and a field (`.new`)
- * are not such a use.
+ * The columns a RAW expression names in its TEXT — bare or quoted: a column is passed structured, in
+ * its `args`, never written into the SQL (the server would have to guess the name and its quoting).
+ * A function call (`if(`) and a field (`.x`) are not a column.
  */
-export function rawReservedColumns(sql, cols, reserved) {
-  if (!reserved?.size) return [];
-  const text = unquotedSql(sql);
+export function rawNamedColumns(sql, cols) {
+  const code = codeOf(sql);
   const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
   const out = [];
-  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
-    const word = m[0]; const at = m.index; const end = at + word.length;
+  for (const m of code.matchAll(/`([^`]+)`|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    const word = m[1] ?? m[2] ?? m[3]; const at = m.index; const end = at + m[0].length;
     const col = names.get(word.toLowerCase());
-    if (!col || !reserved.has(word.toUpperCase()) || out.includes(col)) continue;
-    if (/[.@:$]\s*$/.test(text.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(text.slice(end, end + 3))) continue;
+    if (!col || out.includes(col)) continue;
+    if (m[3] !== undefined && (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3)))) continue;
     out.push(col);
   }
   return out;
+}
+
+/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
+ *  comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
+export function fillPlaceholders(sql, args) {
+  const src = String(sql); const code = codeOf(src);
+  const used = new Set();
+  let out = ''; let last = 0;
+  for (const m of code.matchAll(/\{(\d+)\}/g)) {
+    const n = Number(m[1]);
+    if (!(n >= 1 && n <= args.length)) throw new Error(`pipeline: a raw expression's {${n}} has no argument — it has ${args.length} (args: [${'{ column }'}, …], {1} the first)`);
+    used.add(n);
+    out += src.slice(last, m.index) + args[n - 1]; last = m.index + m[0].length;
+  }
+  const unused = args.map((_, i) => i + 1).filter((n) => !used.has(n));
+  if (unused.length) throw new Error(`pipeline: a raw expression's argument${unused.length > 1 ? 's' : ''} ${unused.map((n) => `{${n}}`).join(', ')} ${unused.length > 1 ? 'are' : 'is'} not used in its SQL`);
+  return out + src.slice(last);
 }
 
 /** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */

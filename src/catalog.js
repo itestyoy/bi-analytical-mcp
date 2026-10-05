@@ -14,7 +14,7 @@ import { isNumericType } from './dialects/base.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
-import { isBooleanType } from './catalog/column-types.js';
+import { physicalColumnType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
@@ -110,18 +110,54 @@ export class Catalog {
   }
 
   /**
-   * What the warehouse says a column IS, where the declaration could not: a column with no
-   * `data_type` in the YAML is typed 'string' for a pipeline, and a BOOL among them then takes a
-   * constant as a string — which the warehouse refuses (BOOL = STRING). The physical type of each
-   * boolean column is carried onto the pipeline's column. → the columns retyped, by model.
+   * THE WAREHOUSE'S TYPE DECIDES (grounding): a column's type as the warehouse reports it replaces
+   * the one the model YAML declares — the declaration is what someone wrote, the warehouse is what a
+   * query meets (a `data_type: string` over a BOOL column compares as text and fails as STRING = BOOL).
+   * Applied to every place a type is read: a column's pipeline type, the data type the semantic layer
+   * reads a time column by, a scalar property's type, an amount's type, and a dimension's time /
+   * categorical kind where it was read off the data_type (a stated type, a validity bound and the
+   * declared time axis stand).
+   * An array or a JSON payload keeps its declared encoding. → { <model>: ['col: from → to', …] }
    */
   typeToPhysical(typesByModel = {}) {
     const retyped = {};
     for (const [key, types] of Object.entries(typesByModel)) {
       const m = this.models[key];
       if (!m || !(types instanceof Map)) continue;
+      const physical = (name) => {
+        const dtype = types.get(String(name).toLowerCase());
+        const type = dtype ? physicalColumnType(dtype) : 'unknown';
+        return type === 'unknown' ? null : { dtype, type };
+      };
+      const note = (what, from, to) => { if (from !== to) (retyped[key] ||= []).push(`${what}: ${from ?? '—'} → ${to}`); };
+      const scalar = (t) => t !== 'json' && t !== 'array';
       for (const c of m.columns || []) {
-        if (c.type !== 'boolean' && isBooleanType(types.get(String(c.name).toLowerCase()))) { c.type = 'boolean'; (retyped[key] ||= []).push(c.name); }
+        const p = physical(c.name);
+        // the declared time axis (meta.mcp.is_time) is a statement of role, like a validity bound
+        if (!p || !scalar(c.type) || !scalar(p.type) || c.name === m.time?.column) continue;
+        note(c.name, c.type, p.type); c.type = p.type;
+        // the semantic layer reads a time column by the warehouse's data type (TIMESTAMP vs DATETIME)
+        (m.data_types ||= {})[c.name] = p.dtype;
+      }
+      for (const [name, prop] of Object.entries(m.properties || {})) {
+        const p = prop?.column && (prop.type === 'numeric' || prop.type === 'string') ? physical(prop.column) : null;
+        if (!p || !scalar(p.type)) continue;
+        const to = p.type === 'numeric' ? 'numeric' : 'string';
+        note(`property ${name}`, prop.type, to); prop.type = to;
+      }
+      for (const [name, a] of Object.entries(m.aggregatable || {})) {
+        const p = a?.column && a.type ? physical(a.column) : null;
+        if (!p || !scalar(p.type)) continue;
+        note(`amount ${name}`, a.type, p.type); a.type = p.type;
+      }
+      for (const [name, d] of Object.entries(m.dimensions || {})) {
+        const p = d?.typedByData ? physical(name) : null;
+        if (!p) continue;
+        const kind = p.type === 'time' ? 'time' : 'categorical';
+        if (kind === d.type) continue;
+        note(`dimension ${name}`, d.type, kind);
+        d.type = kind;
+        if (kind === 'time') d.granularity ||= 'day'; else delete d.granularity;
       }
     }
     return retyped;

@@ -242,6 +242,9 @@ export function dbtSchemaToCatalog(doc) {
         const validity = explicit.validity === 'start' || explicit.validity === 'end' ? explicit.validity : null;
         const type = validity ? 'time' : (explicit.type || dimTypeFromDataType(col.data_type));
         const d = { type };
+        // a type read off the declared data_type (not stated, not a validity bound) is what the
+        // warehouse's own type replaces at grounding (Catalog.typeToPhysical) — kept off the wire
+        if (!validity && !explicit.type) Object.defineProperty(d, 'typedByData', { value: true, enumerable: false, writable: true });
         if (type === 'time') d.granularity = explicit.granularity || cm.granularity || 'day';
         if (validity) { d.validity = validity; m.scd = true; }
         // meta.mcp.index: false keeps a column out of the VALUE index (an id or a free-text

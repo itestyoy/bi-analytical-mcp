@@ -118,7 +118,7 @@ test('pipeline raw: a verbatim SQL expression is evaluated', opts, async (t) => 
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-    { stage: 'compute', name: 'ev', expr: { fn: 'raw', sql: 'upper(event_name)' } },
+    { stage: 'compute', name: 'ev', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } },
     { stage: 'aggregate', group_by: ['ev'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));

@@ -70,55 +70,29 @@ export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
-// A RAW expression is the caller's own SQL, run as written — but a column it names has to exist at
-// this point, or the warehouse refuses the whole model ("Unrecognized name") minutes later. What is
-// surely a column reference is checked here: a name with an underscore (a SQL keyword that is not a
-// function call rarely has one — those that do are listed), outside strings and quoted names, not a
-// function (followed by "("), not a field of something (".x" / "x."), not an alias the expression
-// declares itself (AS x, a lambda's x ->). Anything else — a bare word, a date part, a type — is left
-// to the warehouse.
-export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
-
-/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept);
- *  quoted names stay, so a column written `quoted` is still seen. */
+/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept). */
 function codeOf(sql) {
   return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
 }
 
-// Words a raw SQL text uses as SQL itself — a date part, a type. A column of that name written there
-// is left as written: the warehouse reads it as the column where a column goes and as the word where
-// the word goes (DATE_DIFF(a, b, DAY)), which is exactly what the text means; quoting would make it a
-// column everywhere.
-const RAW_SQL_WORDS = new Set(['day', 'dayofweek', 'dayofyear', 'hour', 'minute', 'second', 'millisecond', 'microsecond', 'week', 'isoweek', 'month', 'quarter', 'year', 'isoyear', 'date', 'time', 'datetime', 'timestamp', 'string', 'int64', 'float64', 'numeric', 'bool', 'boolean', 'json', 'bytes', 'integer', 'bigint', 'double', 'varchar', 'text', 'epoch']);
-
 /**
- * A raw expression's text with every column it names written QUOTED by the server — where the name
- * can only be that column. A date part or a type is left as written (above); a RESERVED word of the
- * warehouse is never a column unquoted, and written bare it could be either — returned in
- * `ambiguous`, untouched: that one goes in `args`.
+ * A RAW expression's text with EVERY column it names written quoted by the server: each word spelled
+ * exactly as a column at this step is named, wherever it stands — except where the syntax says it is
+ * not a column (a function call `name(`, a field `.name`). What is quoted already (a string, a quoted
+ * name) and the comments are left as written.
  */
 export function quoteRawColumns(sql, cols, d) {
-  const src = String(sql); const code = codeOf(src);
-  const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
-  const reserved = d.reservedWords || new Set();
-  const identQuote = d.quoteIdent('x')[0];
-  const ambiguous = [];
+  const src = String(sql);
+  // comments, strings and quoted names blanked, positions kept: what is left is the code's own words
+  const code = src.replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, (m) => ' '.repeat(m.length));
   let out = ''; let last = 0;
-  for (const m of code.matchAll(/`([^`]+)`|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)/g)) {
-    const word = m[1] ?? m[2] ?? m[3]; const at = m.index; const end = at + m[0].length;
-    const col = names.get(word.toLowerCase());
-    if (!col) continue;
-    // a quoted name is a column only in the warehouse's own identifier quotes (BigQuery's "x" is a string)
-    if (m[3] === undefined && m[0][0] !== identQuote) continue;
-    if (m[3] !== undefined && (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3)))) continue;
-    if (m[3] !== undefined && RAW_SQL_WORDS.has(col.toLowerCase())) continue;
-    if (m[3] !== undefined && reserved.has(col.toUpperCase())) {
-      if (!ambiguous.includes(col)) ambiguous.push(col);
-      continue;
-    }
-    out += src.slice(last, at) + d.quoteIdent(col); last = end;
+  for (const m of code.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const word = m[0]; const at = m.index; const end = at + word.length;
+    if (!cols.has(word) || /[0-9]/.test(code[at - 1] || '')) continue;
+    if (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3))) continue;
+    out += src.slice(last, at) + d.quoteIdent(word); last = end;
   }
-  return { sql: out + src.slice(last), ambiguous };
+  return out + src.slice(last);
 }
 
 /** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
@@ -143,20 +117,6 @@ export function unquotedSql(sql) {
   return String(sql)
     .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
     .replace(/'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, ' ');
-}
-
-export function rawUnknownColumns(sql, cols) {
-  const text = unquotedSql(sql);
-  const known = new Set([...cols.keys()].map((c) => c.toLowerCase()));
-  for (const m of text.matchAll(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*->/gi)) known.add((m[1] || m[2]).toLowerCase());
-  const unknown = [];
-  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
-    const name = m[0]; const at = m.index; const end = at + name.length;
-    if (!name.includes('_') || /[0-9]/.test(text[at - 1] || '') || RAW_KEYWORDS.has(name.toLowerCase()) || known.has(name.toLowerCase())) continue;
-    if (/[.@:$]\s*$/.test(text.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(text.slice(end, end + 3))) continue;
-    if (!unknown.includes(name)) unknown.push(name);
-  }
-  return unknown;
 }
 
 

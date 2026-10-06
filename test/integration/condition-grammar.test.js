@@ -206,22 +206,20 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
 });
 
-test('a raw expression takes a reserved-word column in args and reads it: the server writes it quoted; named in the text it is quoted too, unless the name is SQL as well', opts, async (t) => {
+test('a raw expression reads a column passed in args and one written in its text alike: the server writes each quoted, a reserved word too', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
   const { rows } = await pipe([
     { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
     { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
-    // a column written by name — plainly, or quoted — is quoted by the server and read the same
+    // a column written by name — a plain one, a reserved word — is quoted by the server and read the same
     { stage: 'compute', name: 'twice_named', expr: { fn: 'raw', sql: 'session_number * 2', type: 'int' } },
-    { stage: 'compute', name: 'twice_quoted', expr: { fn: 'raw', sql: '"order" * 2', type: 'int' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }, { name: 'n_named', agg: 'sum', column: 'twice_named' }, { name: 'n_quoted', agg: 'sum', column: 'twice_quoted' }] },
+    { stage: 'compute', name: 'twice_order', expr: { fn: 'raw', sql: 'order * 2', type: 'int' } },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }, { name: 'n_named', agg: 'sum', column: 'twice_named' }, { name: 'n_order', agg: 'sum', column: 'twice_order' }] },
   ]);
-  assert.deepEqual([num(rows[0].n), num(rows[0].n_named), num(rows[0].n_quoted)], [want, want, want]);
+  assert.deepEqual([num(rows[0].n), num(rows[0].n_named), num(rows[0].n_order)], [want, want, want]);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
-  // `order` bare in the text could be the keyword or the column: it goes in args
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: 'order * 2', type: 'int' } } }), /goes in `args`/);
   // a placeholder with no argument, and an argument no placeholder uses, are refused too
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);

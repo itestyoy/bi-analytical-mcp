@@ -331,11 +331,13 @@ test('columns named like keywords (group, order) flow through the stages as colu
 
 // A raw expression takes its columns POSITIONALLY — each an item of args, {n} in the SQL where it
 // goes, written quoted by the server; the rest of its text (functions, keywords, strings) goes to the
-// warehouse as written.
-test('a raw expression takes its columns in args, with functions, keywords and strings around them in its text', opts, async (t) => {
+// warehouse as written. A column written by name in the text is refused when the step is added.
+test('a raw expression takes its columns in args, with functions, keywords and strings around them in its text; named in the text it is refused', opts, async (t) => {
   if (skip(t)) return;
   const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
+  // the same column written by name in the text is refused when the step is added
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } } })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
   await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
     { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ column: 'fatal_flag', op: 'eq', value: 'fatal_x' }] }] },

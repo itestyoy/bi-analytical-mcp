@@ -206,7 +206,7 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
 });
 
-test('a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too', opts, async (t) => {
+test('a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too; a column named in its text is refused', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
   const { rows } = await pipe([
@@ -217,6 +217,10 @@ test('a raw expression takes its columns positionally, in args: the server write
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
+  // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
+  for (const sql of ['order * 2', '"order" * 2']) {
+    await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } } }), /a column goes in `args`/, sql);
+  }
   // a placeholder with no argument, and an argument no placeholder uses, are refused
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);

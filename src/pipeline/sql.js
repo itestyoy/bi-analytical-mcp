@@ -87,6 +87,34 @@ export function fillPlaceholders(sql, args) {
   return out + src.slice(last);
 }
 
+/**
+ * The columns a RAW expression writes by name in its TEXT — each word spelled exactly as a column at
+ * this step is named (case included, so a keyword in upper case is not a lower-case column), outside
+ * strings and comments, and each name in the warehouse's own identifier quotes (`identQuote`). A
+ * function call (`name(`) and a field (`.name`) are not a column. A column reaches raw SQL only as an
+ * item of its `args`: one found here is refused, so the positional form holds by construction.
+ */
+export function rawNamedColumns(sql, cols, identQuote) {
+  const src = String(sql);
+  const named = [];
+  const add = (c) => { if (!named.includes(c)) named.push(c); };
+  // a quoted name: the identifier quotes of this warehouse, read with the comments blanked first
+  const uncommented = src.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+  for (const m of uncommented.matchAll(/'(?:[^'\\]|\\.|'')*'|"((?:[^"\\]|\\.|"")*)"|`([^`]*)`/g)) {
+    const inner = m[0][0] === '"' ? m[1] : m[0][0] === '`' ? m[2] : null;
+    if (inner != null && m[0][0] === identQuote && cols.has(inner)) add(inner);
+  }
+  // a bare word of the code
+  const code = unquotedSql(src);
+  for (const m of code.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const word = m[0]; const at = m.index; const end = at + word.length;
+    if (!cols.has(word) || /[0-9]/.test(code[at - 1] || '')) continue;
+    if (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3))) continue;
+    add(word);
+  }
+  return named;
+}
+
 /** Raw SQL with its comments, strings ('…', "…") and quoted names (`…`) blanked to spaces of the same
  *  length: what is left is its code, at the positions it holds in the text — the one reading of raw
  *  text, for its placeholders and its OVER alike. */

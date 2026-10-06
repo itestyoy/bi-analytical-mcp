@@ -206,21 +206,18 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
 });
 
-test('a raw expression reads a column passed in args and one written in its text alike: the server writes each quoted, a reserved word too', opts, async (t) => {
+test('a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
   const { rows } = await pipe([
     { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
     { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
-    // a column written by name — a plain one, a reserved word — is quoted by the server and read the same
-    { stage: 'compute', name: 'twice_named', expr: { fn: 'raw', sql: 'session_number * 2', type: 'int' } },
-    { stage: 'compute', name: 'twice_order', expr: { fn: 'raw', sql: 'order * 2', type: 'int' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }, { name: 'n_named', agg: 'sum', column: 'twice_named' }, { name: 'n_order', agg: 'sum', column: 'twice_order' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }] },
   ]);
-  assert.deepEqual([num(rows[0].n), num(rows[0].n_named), num(rows[0].n_order)], [want, want, want]);
+  assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
-  // a placeholder with no argument, and an argument no placeholder uses, are refused too
+  // a placeholder with no argument, and an argument no placeholder uses, are refused
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);
 });

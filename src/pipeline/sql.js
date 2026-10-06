@@ -75,26 +75,6 @@ function codeOf(sql) {
   return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
 }
 
-/**
- * A RAW expression's text with EVERY column it names written quoted by the server: each word spelled
- * exactly as a column at this step is named, wherever it stands — except where the syntax says it is
- * not a column (a function call `name(`, a field `.name`). What is quoted already (a string, a quoted
- * name) and the comments are left as written.
- */
-export function quoteRawColumns(sql, cols, d) {
-  const src = String(sql);
-  // comments, strings and quoted names blanked, positions kept: what is left is the code's own words
-  const code = src.replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, (m) => ' '.repeat(m.length));
-  let out = ''; let last = 0;
-  for (const m of code.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
-    const word = m[0]; const at = m.index; const end = at + word.length;
-    if (!cols.has(word) || /[0-9]/.test(code[at - 1] || '')) continue;
-    if (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3))) continue;
-    out += src.slice(last, at) + d.quoteIdent(word); last = end;
-  }
-  return out + src.slice(last);
-}
-
 /** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
  *  comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
 export function fillPlaceholders(sql, args) {

@@ -10,7 +10,7 @@ import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { quoteRawColumns, fillPlaceholders, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
+import { fillPlaceholders, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
 import { conditionsSql, eachCondition } from '../conditions.js';
 import { form, SCALAR } from '../schema-kit.js';
 
@@ -42,7 +42,7 @@ const params = () => ({
   grain: { enum: GRAINS, description: 'The time bucket to truncate to.' },
   part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract.' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
-  sql: { type: 'string', description: 'Raw dialect SQL — the escape hatch when no function fits (a dialect function, array indexing). Not portable across dialects. A column (or any expression) is an item of `args`, and `{1}`, `{2}`, … in the SQL stand where the first, second, … goes — the server writes each quoted, so a column named like a keyword (new, rows, day) needs no thought. A column written by name in the text is quoted by the server too — every word spelled exactly as a column is named (not a function call `name(` or a field `.name`); write SQL keywords in upper case (DATE_DIFF({1}, {2}, DAY)), so a column named `day` is not taken for one. E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
+  sql: { type: 'string', description: 'Raw dialect SQL — the escape hatch when no function fits (a dialect function, array indexing). Not portable across dialects. Columns are POSITIONAL: each column (or any expression) is an item of `args`, and `{1}`, `{2}`, … in the SQL stand where the first, second, … goes — the server writes each quoted, so a column named like a keyword (new, rows, day) needs no thought. The rest of the text is passed to the warehouse as written; the server reads no names in it. E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: EXPR } } },
   else: { ...EXPR, description: 'The value when no branch holds (default NULL).' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
@@ -140,16 +140,14 @@ export const FNS = {
     },
   },
   // escape hatch: dialect SQL whose columns come STRUCTURED — each an item of args, `{n}` in the SQL
-  // where the n-th goes, written quoted by the server; every column named in the text is quoted in place
+  // where the n-th goes, written quoted by the server; the rest of its text is passed as written
   raw: {
     args: { min: 0 }, needs: ['sql'], may: ['type'], title: '[the expressions {1}, {2}, … stand for in sql]',
-    sql: ({ d, cols, p, opts, a }) => {
+    sql: ({ p, opts, a }) => {
       // a raw window is still a window: where SQL takes none, it is refused as the structured one is
       if (opts.windows === false && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and a where cannot compare one — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column');
       if (opts.inWindow && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and it cannot be an argument of another window function — compute it into a column first (a compute stage), then use that column');
-      // every column its text names is written quoted by the server
-      const sql = quoteRawColumns(p.sql, cols, d);
-      return { expr: `(${fillPlaceholders(sql, a)})`, type: p.type || 'string' };
+      return { expr: `(${fillPlaceholders(p.sql, a)})`, type: p.type || 'string' };
     },
   },
   // window functions: each over its `over` — the rank of a row, the value of a neighbour, an aggregate of a frame

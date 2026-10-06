@@ -214,7 +214,8 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_ids })`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
-  if (!renders && cardField && input[cardField] !== undefined) {
+  // (only a card ASKED for: `false` asks for none, which every client already gets)
+  if (!renders && cardField && input[cardField] !== undefined && input[cardField] !== false) {
     logLine(name, `✗ ${cardField} from a client without the Apps extension`);
     failed(name, `${cardField} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate', field: cardField });
     return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };

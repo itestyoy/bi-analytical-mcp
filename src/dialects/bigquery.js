@@ -60,24 +60,26 @@ export class BigQueryDialect extends Dialect {
 
   arrayUnnest(_prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
     this.ident(alias);
+    // The element is bound under `<alias>_e` and read through its declared type — a JSON array's
+    // scalars come out as STRING, and `type` is what the stage promised the columns after it.
+    const e = `${alias}_e`;
     // Native ARRAY/REPEATED column → unnest directly.
     if (key == null && encoding === 'native') {
-      return { join: `CROSS JOIN UNNEST(${column}) AS ${alias}`, element: this._typed(alias, type) };
+      return { join: `CROSS JOIN UNNEST(${column}) AS ${e}`, element: this._typed(e, type) };
     }
     // Array-of-JSON elements: a key inside a json column (blob), or the flat STRING column
     // parsed as a JSON array (encoding 'json').
     const jarr = key != null ? (this.ident(key), `JSON_QUERY_ARRAY(${column}, '$.${key}')`) : `JSON_EXTRACT_ARRAY(${column}, '$')`;
     if (field) {
       this.ident(field);
-      const e = `${alias}_e`;
       return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this._typed(`JSON_VALUE(${e}, '$.${field}')`, type) };
     }
     if (type === 'json') { // bind the whole struct element as a JSON column
-      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${alias}`, element: alias };
+      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: e };
     }
     // scalar elements
     const sarr = key != null ? `JSON_VALUE_ARRAY(${column}, '$.${key}')` : `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
-    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${alias}`, element: this._typed(alias, type) };
+    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${e}`, element: this._typed(e, type) };
   }
 
   /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
@@ -169,6 +171,10 @@ export class BigQueryDialect extends Dialect {
 
   nowExpr() { return 'CURRENT_TIMESTAMP()'; }
 
+  // DATE, DATETIME and TIMESTAMP do not compare with each other here (DuckDB promotes them): both
+  // sides of a comparison of moments are read as TIMESTAMP — a date is its midnight, as DuckDB reads it
+  timeOperand(expr) { return `CAST(${expr} AS TIMESTAMP)`; }
+
   roundExpr(expr, places = 0) { return `ROUND(${expr}, ${Number(places)})`; }
 
   // SAFE cast only: a bad value yields NULL instead of failing the whole query (no unsafe CAST).
@@ -237,8 +243,8 @@ export class BigQueryDialect extends Dialect {
         return `|> EXTEND ${op.cols.map((c) => `(${c.expr}) AS ${this.quoteIdent(c.name)}`).join(', ')}`;
       case 'unnest': {
         const { join, element } = this.arrayUnnest(null, op.column, op.key, op.as, op.field, op.type, op.encoding);
-        // bind the element to `as` (already so for the scalar form)
-        return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.quoteIdent(op.as)}` : `|> ${join}`;
+        // bind the element, read as its declared type, to `as`; the bare element column goes
+        return `|> ${join}\n|> EXTEND ${element} AS ${this.quoteIdent(op.as)}\n|> DROP ${op.as}_e`;
       }
       case 'join': {
         // The RIGHT side is a subquery that projects exactly what the stage promised: the join key

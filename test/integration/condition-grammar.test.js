@@ -189,26 +189,39 @@ test('a query over a built model reads columns named with reserved words (order,
   assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
 });
 
-test('a text column of the warehouse compared with a boolean is refused as the step is added, not run as STRING = BOOL', opts, async (t) => {
+test('a text column of the warehouse compared with a boolean matches the ways text spells the flag, not run as STRING = BOOL', opts, async (t) => {
   if (skip(t)) return;
+  const all = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
+  const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
+  const { rows } = await pipe([
+    { stage: 'aggregate', measures: [
+      { name: 'yes', agg: 'count', where: [{ column: 'bundle_id', op: 'eq', value: true }] },
+      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'ne', value: true }] },
+    ] },
+  ]);
+  assert.ok(all > 0, 'the fixture has the column filled');
+  assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
+  // an order compares no flag: refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'eq', value: false }] } }), /text column in the warehouse/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
 });
 
-test('a raw expression takes a reserved-word column in args and reads it: the server writes it quoted; named in the text it is refused', opts, async (t) => {
+test('a raw expression takes a reserved-word column in args and reads it: the server writes it quoted; named in the text it is quoted too, unless the name is SQL as well', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
   const { rows } = await pipe([
     { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
     { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }] },
+    // a column written by name — plainly, or quoted — is quoted by the server and read the same
+    { stage: 'compute', name: 'twice_named', expr: { fn: 'raw', sql: 'session_number * 2', type: 'int' } },
+    { stage: 'compute', name: 'twice_quoted', expr: { fn: 'raw', sql: '"order" * 2', type: 'int' } },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }, { name: 'n_named', agg: 'sum', column: 'twice_named' }, { name: 'n_quoted', agg: 'sum', column: 'twice_quoted' }] },
   ]);
-  assert.equal(num(rows[0].n), want);
+  assert.deepEqual([num(rows[0].n), num(rows[0].n_named), num(rows[0].n_quoted)], [want, want, want]);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
-  for (const sql of ['order * 2', '"order" * 2']) {
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } } }), /a column goes in `args`/, sql);
-  }
+  // `order` bare in the text could be the keyword or the column: it goes in args
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: 'order * 2', type: 'int' } } }), /goes in `args`/);
   // a placeholder with no argument, and an argument no placeholder uses, are refused too
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);
@@ -230,4 +243,18 @@ test('preview with validate runs the draft\'s SQL against the warehouse with no 
   const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
   assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
   assert.ok(!engine.ctxs.generatedFiles(s.draft_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
+});
+
+test('a time column compared with an expression that yields a moment keeps the rows the warehouse keeps; with a number it is refused as the step is added', opts, async (t) => {
+  if (skip(t)) return;
+  const want = await truth("select count(*) as n from fct_analytics_events where device_time >= TIMESTAMP '2026-01-03 00:00:00'");
+  const all = await truth('select count(*) as n from fct_analytics_events');
+  assert.ok(want > 0 && want < all, 'the bound keeps some rows, not all');
+  const { rows } = await pipe([
+    { stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'raw', sql: "DATE '2026-01-03'" } }] },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(num(rows[0].n), want);
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] } }), /is a moment/);
 });

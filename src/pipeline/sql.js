@@ -4,6 +4,7 @@
 // columns (add one, require one to exist, require an array).
 
 import { getDialect } from '../dialects/index.js';
+import { isNumericType, isTimeType } from '../dialects/base.js';
 import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
 import { form, conditionList, CONSTANT } from '../schema-kit.js';
 // (compute.js imports this module too: exprSql is read when a condition is written, never as the module loads)
@@ -84,23 +85,40 @@ function codeOf(sql) {
   return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
 }
 
+// Words a raw SQL text uses as SQL itself — a date part, a type. A column of that name written there
+// is left as written: the warehouse reads it as the column where a column goes and as the word where
+// the word goes (DATE_DIFF(a, b, DAY)), which is exactly what the text means; quoting would make it a
+// column everywhere.
+const RAW_SQL_WORDS = new Set(['day', 'dayofweek', 'dayofyear', 'hour', 'minute', 'second', 'millisecond', 'microsecond', 'week', 'isoweek', 'month', 'quarter', 'year', 'isoyear', 'date', 'time', 'datetime', 'timestamp', 'string', 'int64', 'float64', 'numeric', 'bool', 'boolean', 'json', 'bytes', 'integer', 'bigint', 'double', 'varchar', 'text', 'epoch']);
+
 /**
- * The columns a RAW expression names in its TEXT — bare or quoted: a column is passed structured, in
- * its `args`, never written into the SQL (the server would have to guess the name and its quoting).
- * A function call (`if(`) and a field (`.x`) are not a column.
+ * A raw expression's text with every column it names written QUOTED by the server — where the name
+ * can only be that column. A date part or a type is left as written (above); a RESERVED word of the
+ * warehouse is never a column unquoted, and written bare it could be either — returned in
+ * `ambiguous`, untouched: that one goes in `args`.
  */
-export function rawNamedColumns(sql, cols) {
-  const code = codeOf(sql);
+export function quoteRawColumns(sql, cols, d) {
+  const src = String(sql); const code = codeOf(src);
   const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
-  const out = [];
+  const reserved = d.reservedWords || new Set();
+  const identQuote = d.quoteIdent('x')[0];
+  const ambiguous = [];
+  let out = ''; let last = 0;
   for (const m of code.matchAll(/`([^`]+)`|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)/g)) {
     const word = m[1] ?? m[2] ?? m[3]; const at = m.index; const end = at + m[0].length;
     const col = names.get(word.toLowerCase());
-    if (!col || out.includes(col)) continue;
+    if (!col) continue;
+    // a quoted name is a column only in the warehouse's own identifier quotes (BigQuery's "x" is a string)
+    if (m[3] === undefined && m[0][0] !== identQuote) continue;
     if (m[3] !== undefined && (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3)))) continue;
-    out.push(col);
+    if (m[3] !== undefined && RAW_SQL_WORDS.has(col.toLowerCase())) continue;
+    if (m[3] !== undefined && reserved.has(col.toUpperCase())) {
+      if (!ambiguous.includes(col)) ambiguous.push(col);
+      continue;
+    }
+    out += src.slice(last, at) + d.quoteIdent(col); last = end;
   }
-  return out;
+  return { sql: out + src.slice(last), ambiguous };
 }
 
 /** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
@@ -142,6 +160,10 @@ export function rawUnknownColumns(sql, cols) {
 }
 
 
+// How a flag is spelled when a column stores it as text.
+const TEXT_TRUE = ['true', '1', 't'];
+const TEXT_FALSE = ['false', '0', 'f'];
+
 // One comparison. Each side may be a column, a constant (value), or now:
 //   { column, op, value }        — column vs constant (shorthand)
 //   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
@@ -160,9 +182,15 @@ export function condPred(d, cols, c, opts = {}) {
   if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
-    // a TEXT column of the warehouse never equals a boolean: refused here, not as STRING = BOOL in the run
+    // a TEXT column of the warehouse holding a flag: a boolean is compared with every way text spells
+    // it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at the spelling
     if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
-      throw new Error(`'${name}' is a text column in the warehouse: compare it with its text value (a string such as 'false' or '0' — semantic_index({ request: { source, property } }) lists the values it holds), not with the boolean ${JSON.stringify(value)}`);
+      const values = [].concat(value);
+      if (!['eq', 'ne', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
+        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / ne / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+      }
+      const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((s) => d.sqlLiteral(s));
+      return `LOWER(TRIM(${left.sql})) ${c.op === 'ne' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
     }
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
@@ -170,8 +198,18 @@ export function condPred(d, cols, c, opts = {}) {
   if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
   const r = exprSql(d, cols, right, 'right', opts);
   // a constant on the left compared with a column on the right is written in that column's type
-  const lhs = c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined ? typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`) : left.sql;
-  return `${lhs} ${OPSYM[c.op]} ${r.sql}`;
+  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) return `${typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  // a moment compared with an expression: a number or a boolean is never one — refused here, not as
+  // DATE >= INT64 in the run; anything else meets it as a timestamp on both sides, so a DATE column
+  // and a TIMESTAMP expression (a raw TIMESTAMP_SUB, now) compare as the warehouse cannot otherwise
+  if (isTimeType(left.type) || isTimeType(r.type)) {
+    const other = isTimeType(left.type) ? r.type : left.type;
+    if (isNumericType(other) || other === 'boolean') {
+      throw new Error(`${isTimeType(left.type) ? `'${name}'` : `'${right.column ?? 'the right side'}'`} is a moment (a date or a timestamp), and the other side is ${other}: compare it with a moment — { now: true }, a time column, a date_trunc, or a raw expression that yields a timestamp (e.g. { fn: "raw", sql: "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)" }) — or with a date string as \`value\``);
+    }
+    return `${d.timeOperand(left.sql)} ${OPSYM[c.op]} ${d.timeOperand(r.sql)}`;
+  }
+  return `${left.sql} ${OPSYM[c.op]} ${r.sql}`;
 }
 
 // Window frame clause, e.g. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or

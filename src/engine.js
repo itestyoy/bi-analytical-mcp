@@ -306,7 +306,15 @@ export class Engine {
     const job = this.jobs.get(input.from_task);
     if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
     if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
-    if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to start from — ${job.status === 'error' ? 'it failed' : job.tool === 'query_pipeline_model' ? 'a query over a pipeline model is not stored: start from the pipeline BUILD\'s task, or continue that draft' : 'only a query run with materialize:true, or a pipeline build, stores its result as a table'}`, { stage: 'validate', field: 'from_task' });
+    if (job.status !== 'ready' || !job.table) {
+      // a query over a pipeline model reads that model's table and stores nothing: the table it read
+      // is the one to start from, its transform said again as steps
+      const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
+      const why = job.status === 'error' ? 'it failed'
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") and say the query's where / group_by / aggregations again as steps (where, aggregate)` : ': start from the pipeline build\'s task, or continue that draft'}`
+          : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
+      throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
+    }
     if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) throw new ToolError(`the table of task ${job.id} (${job.table}) is gone — its context or model was deleted; run it again`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
     if (input.time_range) throw new ToolError('time_range bounds a catalog source — a task\'s table was computed under its own window already; filter it with a where step instead', { stage: 'validate', field: 'time_range' });
     const kept = this.tasks.held(job.id);

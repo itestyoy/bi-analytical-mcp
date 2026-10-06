@@ -309,7 +309,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
   is added there once, its schema form and its SQL beside each other; a window function takes `over`,
   `raw` stays the escape hatch — its columns STRUCTURED, items of its `args` with `{1}`, `{2}`, … in its SQL
-  where each goes, written quoted by the server; a column named in its text is refused). Every column
+  where each goes, written quoted by the server; a column named in its text is quoted in place — a date
+  part or a type is left as written, a reserved word written bare is refused as either). Every column
   name the server writes into SQL is quoted by the warehouse's dialect, in every stage and every read. A caller who brings another tool's spelling
   (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
   the LIBRARY's own grammars (its facts sheet), not this one.
@@ -377,8 +378,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
   NOT MIXED WITH display: it is statistics over numbers the caller brings — no task, no task_id —
   returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
-  only when asked with `card: true` on analyze (a field offered to an Apps client alone, refused from
-  any other). A stored result is
+  only when asked with `card: true` on analyze (a card offered to an Apps client alone: `card: true`
+  from any other is refused, `false` — no card — is what it gets anyway). A stored result is
   built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
   })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment

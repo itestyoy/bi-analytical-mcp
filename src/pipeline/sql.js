@@ -4,6 +4,7 @@
 // columns (add one, require one to exist, require an array).
 
 import { getDialect } from '../dialects/index.js';
+import { isNumericType, isTimeType } from '../dialects/base.js';
 import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
 import { form, conditionList, CONSTANT } from '../schema-kit.js';
 // (compute.js imports this module too: exprSql is read when a condition is written, never as the module loads)
@@ -69,44 +70,10 @@ export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
-// A RAW expression is the caller's own SQL, run as written — but a column it names has to exist at
-// this point, or the warehouse refuses the whole model ("Unrecognized name") minutes later. What is
-// surely a column reference is checked here: a name with an underscore (a SQL keyword that is not a
-// function call rarely has one — those that do are listed), outside strings and quoted names, not a
-// function (followed by "("), not a field of something (".x" / "x."), not an alias the expression
-// declares itself (AS x, a lambda's x ->). Anything else — a bare word, a date part, a type — is left
-// to the warehouse.
-export const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
-
-/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept);
- *  quoted names stay, so a column written `quoted` is still seen. */
-function codeOf(sql) {
-  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
-}
-
-/**
- * The columns a RAW expression names in its TEXT — bare or quoted: a column is passed structured, in
- * its `args`, never written into the SQL (the server would have to guess the name and its quoting).
- * A function call (`if(`) and a field (`.x`) are not a column.
- */
-export function rawNamedColumns(sql, cols) {
-  const code = codeOf(sql);
-  const names = new Map([...cols.keys()].map((c) => [c.toLowerCase(), c]));
-  const out = [];
-  for (const m of code.matchAll(/`([^`]+)`|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*)/g)) {
-    const word = m[1] ?? m[2] ?? m[3]; const at = m.index; const end = at + m[0].length;
-    const col = names.get(word.toLowerCase());
-    if (!col || out.includes(col)) continue;
-    if (m[3] !== undefined && (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3)))) continue;
-    out.push(col);
-  }
-  return out;
-}
-
-/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
- *  comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
+/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside strings, quoted
+ *  names and comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
 export function fillPlaceholders(sql, args) {
-  const src = String(sql); const code = codeOf(src);
+  const src = String(sql); const code = unquotedSql(src);
   const used = new Set();
   let out = ''; let last = 0;
   for (const m of code.matchAll(/\{(\d+)\}/g)) {
@@ -120,27 +87,45 @@ export function fillPlaceholders(sql, args) {
   return out + src.slice(last);
 }
 
-/** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */
-export function unquotedSql(sql) {
-  return String(sql)
-    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, ' ');
-}
-
-export function rawUnknownColumns(sql, cols) {
-  const text = unquotedSql(sql);
-  const known = new Set([...cols.keys()].map((c) => c.toLowerCase()));
-  for (const m of text.matchAll(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*->/gi)) known.add((m[1] || m[2]).toLowerCase());
-  const unknown = [];
-  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
-    const name = m[0]; const at = m.index; const end = at + name.length;
-    if (!name.includes('_') || /[0-9]/.test(text[at - 1] || '') || RAW_KEYWORDS.has(name.toLowerCase()) || known.has(name.toLowerCase())) continue;
-    if (/[.@:$]\s*$/.test(text.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(text.slice(end, end + 3))) continue;
-    if (!unknown.includes(name)) unknown.push(name);
+/**
+ * The columns a RAW expression writes by name in its TEXT — each word spelled exactly as a column at
+ * this step is named (case included, so a keyword in upper case is not a lower-case column), outside
+ * strings and comments, and each name in the warehouse's own identifier quotes (`identQuote`). A
+ * function call (`name(`) and a field (`.name`) are not a column. A column reaches raw SQL only as an
+ * item of its `args`: one found here is refused, so the positional form holds by construction.
+ */
+export function rawNamedColumns(sql, cols, identQuote) {
+  const src = String(sql);
+  const named = [];
+  const add = (c) => { if (!named.includes(c)) named.push(c); };
+  // a quoted name: the identifier quotes of this warehouse, read with the comments blanked first
+  const uncommented = src.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+  for (const m of uncommented.matchAll(/'(?:[^'\\]|\\.|'')*'|"((?:[^"\\]|\\.|"")*)"|`([^`]*)`/g)) {
+    const inner = m[0][0] === '"' ? m[1] : m[0][0] === '`' ? m[2] : null;
+    if (inner != null && m[0][0] === identQuote && cols.has(inner)) add(inner);
   }
-  return unknown;
+  // a bare word of the code
+  const code = unquotedSql(src);
+  for (const m of code.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const word = m[0]; const at = m.index; const end = at + word.length;
+    if (!cols.has(word) || /[0-9]/.test(code[at - 1] || '')) continue;
+    if (/[.@:$]\s*$/.test(code.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(code.slice(end, end + 3))) continue;
+    add(word);
+  }
+  return named;
 }
 
+/** Raw SQL with its comments, strings ('…', "…") and quoted names (`…`) blanked to spaces of the same
+ *  length: what is left is its code, at the positions it holds in the text — the one reading of raw
+ *  text, for its placeholders and its OVER alike. */
+export function unquotedSql(sql) {
+  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, (m) => ' '.repeat(m.length));
+}
+
+
+// How a flag is spelled when a column stores it as text.
+const TEXT_TRUE = ['true', '1', 't'];
+const TEXT_FALSE = ['false', '0', 'f'];
 
 // One comparison. Each side may be a column, a constant (value), or now:
 //   { column, op, value }        — column vs constant (shorthand)
@@ -160,9 +145,15 @@ export function condPred(d, cols, c, opts = {}) {
   if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
-    // a TEXT column of the warehouse never equals a boolean: refused here, not as STRING = BOOL in the run
+    // a TEXT column of the warehouse holding a flag: a boolean is compared with every way text spells
+    // it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at the spelling
     if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
-      throw new Error(`'${name}' is a text column in the warehouse: compare it with its text value (a string such as 'false' or '0' — semantic_index({ request: { source, property } }) lists the values it holds), not with the boolean ${JSON.stringify(value)}`);
+      const values = [].concat(value);
+      if (!['eq', 'ne', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
+        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / ne / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+      }
+      const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((s) => d.sqlLiteral(s));
+      return `LOWER(TRIM(${left.sql})) ${c.op === 'ne' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
     }
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
@@ -170,8 +161,18 @@ export function condPred(d, cols, c, opts = {}) {
   if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
   const r = exprSql(d, cols, right, 'right', opts);
   // a constant on the left compared with a column on the right is written in that column's type
-  const lhs = c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined ? typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`) : left.sql;
-  return `${lhs} ${OPSYM[c.op]} ${r.sql}`;
+  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) return `${typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  // a moment compared with an expression: a number or a boolean is never one — refused here, not as
+  // DATE >= INT64 in the run; anything else meets it as a timestamp on both sides, so a DATE column
+  // and a TIMESTAMP expression (a raw TIMESTAMP_SUB, now) compare as the warehouse cannot otherwise
+  if (isTimeType(left.type) || isTimeType(r.type)) {
+    const other = isTimeType(left.type) ? r.type : left.type;
+    if (isNumericType(other) || other === 'boolean') {
+      throw new Error(`${isTimeType(left.type) ? `'${name}'` : `'${right.column ?? 'the right side'}'`} is a moment (a date or a timestamp), and the other side is ${other}: compare it with a moment — { now: true }, a time column, a date_trunc, or a raw expression that yields a timestamp (e.g. { fn: "raw", sql: "TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)" }) — or with a date string as \`value\``);
+    }
+    return `${d.timeOperand(left.sql)} ${OPSYM[c.op]} ${d.timeOperand(r.sql)}`;
+  }
+  return `${left.sql} ${OPSYM[c.op]} ${r.sql}`;
 }
 
 // Window frame clause, e.g. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or

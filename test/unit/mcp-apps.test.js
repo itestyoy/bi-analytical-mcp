@@ -69,6 +69,9 @@ test('a client that does not declare MCP Apps sees the same tools and page, but 
     const card = await c.callTool({ name: 'experiment', arguments: { request: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } } });
     assert.equal(card.isError, true, `${label}: card is refused`);
     assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
+    // card: false asks for no card — what this client gets anyway — so it is not refused
+    const none = await c.callTool({ name: 'experiment', arguments: { request: { action: 'analyze', metric: 'proportion', control: { label: 'a', n: 1000, conversions: 100 }, variants: [{ label: 'b', n: 1000, conversions: 130 }], card: false } } });
+    assert.notEqual(none.isError, true, `${label}: card: false is accepted — ${none.content[0].text.slice(0, 200)}`);
   }
 });
 

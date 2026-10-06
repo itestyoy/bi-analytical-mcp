@@ -329,17 +329,23 @@ test('columns named like keywords (group, order) flow through the stages as colu
   assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
 });
 
-// A raw expression takes its columns STRUCTURED — each an item of args, {n} in the SQL where it goes:
-// a name in its text is refused when it is added (a column, or one that does not exist at that step),
-// not by the warehouse minutes later.
-test('a raw expression naming a column in its text is refused when it is added; its columns come in args', opts, async (t) => {
+// A raw expression takes its columns POSITIONALLY — each an item of args, {n} in the SQL where it
+// goes, written quoted by the server; the rest of its text (functions, keywords, strings) goes to the
+// warehouse as written. A column written by name in the text is refused when the step is added.
+test('a raw expression takes its columns in args, with functions, keywords and strings around them in its text; named in the text it is refused', opts, async (t) => {
   if (skip(t)) return;
+  const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', expr: { fn: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
+  // the same column written by name in the text is refused when the step is added
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } } })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
-  // its columns in args — with functions, keywords and strings in the text — is taken
-  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } } });
-  assert.equal(ok.step_index, 1);
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
+    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ column: 'fatal_flag', op: 'eq', value: 'fatal_x' }] }] },
+  ] });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.ok(num(want.n) > 0, 'the fixture has fatal crashes');
+  assert.equal(num(c.rows[0].n), num(want.n));
 });
 
 // A GOVERNED measure — one the SCHEMA declares with a fixed aggregation (meta.mcp.measures with

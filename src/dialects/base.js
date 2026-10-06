@@ -170,6 +170,8 @@ export class Dialect {
   datePart(_part, _expr) { throw new Error('abstract datePart'); }
   /** Current timestamp. */
   nowExpr() { throw new Error('abstract nowExpr'); }
+  /** A moment as compared with another expression: one where a date and a timestamp do not meet as they are. */
+  timeOperand(expr) { return expr; }
   /** Round expr to `places` decimals. */
   roundExpr(_expr, _places) { throw new Error('abstract roundExpr'); }
   /** Cast expr to a logical type. */

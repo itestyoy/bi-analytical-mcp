@@ -194,7 +194,16 @@ export const pipelineDraftMethods = {
   _draftColumns(draft, physSet) {
     if (!draft.stages.length) return draft.base ? draft.base.columns.map((c) => ({ ...c })) : this._groundedDeclared(draft.source, physSet).cols;
     const plan = this._renderPlan(draft);
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from });
+    let columns;
+    try {
+      ({ columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from }));
+    } catch (e) {
+      // the steps the draft HOLDS no longer build (written before a rule changed): refused as an added
+      // step is — at compile, naming the step — with how to mend it
+      const at = this._failingStepIndex(draft.source, plan.stages, physSet, plan.from);
+      const step = at != null ? plan.stepOf(at) : null;
+      throw new ToolError(`${step ? `step ${step}: ` : ''}${e.message} — a step this draft already holds; fix it with edit_step${step ? ` (index: ${step})` : ''}`, { stage: 'compile', field: 'stages' });
+    }
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   },
 
@@ -382,7 +391,9 @@ export const pipelineDraftMethods = {
     }
     this.ctxs.touch(ctx.id);
     const physSet = await this.probe.physicalColumns(ctx.state.draft.source);
-    const cols = this._draftColumns(ctx.state.draft, physSet);
+    // a fork of steps that no longer build is made all the same — the fork is where they are mended
+    let cols = []; let broken = null;
+    try { cols = this._draftColumns(ctx.state.draft, physSet); } catch (e) { broken = e.message; }
     const resp = {
       draft_id: ctx.id, action: 'fork', forked_from: input.draft_id, name, source: ctx.state.draft.source,
       materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
@@ -391,6 +402,7 @@ export const pipelineDraftMethods = {
       next: 'Continue editing this NEW draft (add_step / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
+        ...(broken ? [`The copied steps do not build as they are: ${broken}`] : []),
         ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — delete_context on it is refused unless forced.`] : []),
         `Materialize with build_pipeline_model({ request: { action: "materialize", draft_id: "${ctx.id}" } }).`,
       ],
@@ -418,7 +430,10 @@ export const pipelineDraftMethods = {
    */
   async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null, dropFrom = null } = {}) {
     const physSet = await this.probe.physicalColumns(draft.source);
-    const before = this._draftColumns(draft, physSet); // columns BEFORE the change
+    // columns BEFORE the change — none known when the steps held no longer build: the change is what
+    // mends them, and the render below validates the whole of it
+    let before;
+    try { before = this._draftColumns(draft, physSet); } catch { before = []; }
     // Validate what will actually be built: from the last live checkpoint when there is one (the
     // steps it baked are a TABLE now, not stages to re-validate), else from the source with the
     // draft's time_range as the leading where materialize will add. An edit at step i first

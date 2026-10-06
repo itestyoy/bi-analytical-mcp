@@ -60,10 +60,9 @@
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
 import { physicalColumnType } from './catalog/column-types.js';
-import { rawUnknownColumns } from './pipeline/sql.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { STAGES, registerStage, stageDef, listSome, stageDefs, pipelineStageSchema } from './pipeline/stages.js';
-export { registerStage, stageDef, listSome, stageDefs, pipelineStageSchema, rawUnknownColumns };
+export { registerStage, stageDef, listSome, stageDefs, pipelineStageSchema };
 
 /**
  * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is

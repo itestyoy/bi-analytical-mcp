@@ -70,15 +70,10 @@ export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
-/** Raw SQL with comments and string literals blanked to spaces of the same length (positions kept). */
-function codeOf(sql) {
-  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'/g, (m) => ' '.repeat(m.length));
-}
-
-/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside literals and
- *  comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
+/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside strings, quoted
+ *  names and comments); a placeholder with no argument, or an argument no placeholder uses, is refused. */
 export function fillPlaceholders(sql, args) {
-  const src = String(sql); const code = codeOf(src);
+  const src = String(sql); const code = unquotedSql(src);
   const used = new Set();
   let out = ''; let last = 0;
   for (const m of code.matchAll(/\{(\d+)\}/g)) {
@@ -92,11 +87,11 @@ export function fillPlaceholders(sql, args) {
   return out + src.slice(last);
 }
 
-/** Raw SQL with its comments, string literals and quoted names blanked: what is left is its code. */
+/** Raw SQL with its comments, strings ('…', "…") and quoted names (`…`) blanked to spaces of the same
+ *  length: what is left is its code, at the positions it holds in the text — the one reading of raw
+ *  text, for its placeholders and its OVER alike. */
 export function unquotedSql(sql) {
-  return String(sql)
-    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, ' ');
+  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, (m) => ' '.repeat(m.length));
 }
 
 

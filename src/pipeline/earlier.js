@@ -36,6 +36,8 @@ function computeExpr(st) {
   if (op === 'json_field') return fn(op, [col()], ['field', 'type']);
   if (op === 'element_at') return fn(op, [col()], ['index', 'type']);
   if (op === 'array_last') return fn(op, [col()], ['type']);
+  // the earlier raw named its columns in its text, which went to the warehouse as written — as the
+  // text of a raw goes now; nothing is read out of it to move into args
   if (op === 'raw') return fn(op, null, ['sql', 'type']);
   if (op === 'date_diff') return fn(op, [st.from, st.to], ['unit']);
   if (op === 'date_trunc') return fn(op, [col()], ['granularity']);

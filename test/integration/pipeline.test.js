@@ -41,12 +41,12 @@ const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_ti
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-// where -> derive -> join -> aggregate(group_by)
+// where -> compute (an event property) -> join -> aggregate(group_by)
 test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
   ]);
@@ -148,7 +148,7 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
     { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
@@ -165,7 +165,7 @@ test('pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'aggregate', group_by: [], measures: [
       { name: 'n', agg: 'count' },
       { name: 'med', agg: 'median', column: 'price' },
@@ -212,7 +212,7 @@ test('pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)'
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'double_price', expr: { fn: 'mul', args: [{ column: 'price' }, { value: 2 }] } },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'd', agg: 'sum', column: 'double_price' }, { name: 's', agg: 'sum', column: 'price' }] },
   ]);
@@ -239,7 +239,7 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'tier', expr: { fn: 'case', cases: [{ when: [{ column: 'price', op: 'lt', value: 10 }], then: { value: 'low' } }], else: { value: 'high' } } },
     { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
@@ -274,7 +274,7 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
 test('pipeline where operands: price>=10 (operand const) and device_time<now → 5 rows summing 70', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'where', conditions: [
       { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' },
       { left: { column: 'price' }, op: 'gte', right: { value: 10 } }, // column vs constant operand
@@ -292,7 +292,7 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'day', expr: { fn: 'unix_date', args: [{ column: 'device_time' }] } },
     { stage: 'compute', name: 'roll', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } } } },
     { stage: 'order_by', keys: [{ key: 'day', direction: 'asc' }] },
@@ -321,7 +321,7 @@ test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum =
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
+    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
     { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', agg: 'hll_init', column: 'player_id_of_internal' }, { name: 'n', agg: 'count_distinct', column: 'player_id_of_internal' }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', agg: 'hll_merge', column: 'sk' }, { name: 'naive', agg: 'sum', column: 'n' }] },
   ]);
@@ -335,7 +335,7 @@ test('pipeline HLL hll_merge_partial→hll_extract: staged merge then extract = 
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
+    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
     { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', agg: 'hll_init', column: 'player_id_of_internal' }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', agg: 'hll_merge_partial', column: 'sk' }] },
     { stage: 'compute', name: 'total', expr: { fn: 'hll_extract', args: [{ column: 'merged' }] } },
@@ -382,7 +382,7 @@ test('pipeline compute string/const: concat + upper labels group correctly (P1=3
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
+    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
     { stage: 'compute', name: 'label', expr: { fn: 'concat', args: [{ column: 'pid' }, { value: '_iap' }] } },
     { stage: 'compute', name: 'up', expr: { fn: 'upper', args: [{ column: 'label' }] } },
     { stage: 'aggregate', group_by: ['up'], measures: [{ name: 'n', agg: 'count' }] },
@@ -428,7 +428,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_as: 'metric', value_as: 'value' },
@@ -455,7 +455,7 @@ test('a table-wide statistic is ONE row, and its numbers scale the rows as liter
   if (skip(t)) return;
   const perPlayer = [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
   ];
 

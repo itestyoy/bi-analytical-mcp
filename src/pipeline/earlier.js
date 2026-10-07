@@ -2,9 +2,9 @@
 // are rendered again on every edit; what an earlier version spelled another way is translated to this
 // version's spelling here, once, before a stage is built — the renames from the ONE table that also
 // tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
-// avg → average, as → name), a computed column written as { op, …fields } to its expression, and a
-// python function body written as nested arrays of lines (a nested array the block under the line
-// before it) to its text.
+// avg → average, as → name), a computed column written as { op, …fields } to its expression, a derive
+// stage to the compute stage reading the same event property, and a python function body written as
+// nested arrays of lines (a nested array the block under the line before it) to its text.
 // A step in the current spelling passes through unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
@@ -63,9 +63,23 @@ function bodyText(items, depth = 0) {
   return items.flatMap((x) => (Array.isArray(x) ? bodyText(x, depth + 1) : [`${'    '.repeat(depth)}${x}`]));
 }
 
+/** A derive stage (one column read from an event property) as the compute stage that reads it now. */
+function deriveExpr(st) {
+  const type = st.type !== undefined ? { type: st.type } : {};
+  if (st.op === 'extract') return { fn: 'event_property', property: st.source, ...type };
+  if (st.op === 'struct_field') return { fn: 'event_property', property: st.source, field: st.field, ...type };
+  if (st.op === 'array_length') return { fn: 'array_length', property: st.source };
+  if (st.op === 'contains') return { fn: 'array_contains', property: st.source, item: st.value };
+  return null;
+}
+
 /** The stage in this version's spelling (the same object when it already is). */
 export function currentSpelling(st) {
   if (!st || typeof st !== 'object') return st;
+  if (st.stage === 'derive') {
+    const expr = deriveExpr(st);
+    return expr ? { stage: 'compute', name: st.name, expr } : st;
+  }
   if (st.stage === 'compute' && st.op !== undefined && st.expr === undefined) {
     const expr = computeExpr(st);
     return expr ? { stage: 'compute', name: st.name, expr } : st;

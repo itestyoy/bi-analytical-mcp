@@ -3,9 +3,9 @@
 // `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
 // themselves (src/match-recognize.js, src/python-model.js).
 
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, propEnum, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
 import { exprSchema, exprSql } from './compute.js';
-import { form, pick, strEnum, SCALAR } from '../schema-kit.js';
+import { form, strEnum } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
@@ -20,89 +20,24 @@ export const STAGES = {
         conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
       },
     }),
-    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c, { windows: false })) }, cols }),
-  },
-
-  derive: {
-    keepsSourceRows: true,
-    schema: (catalog) => {
-      const fields = {
-        stage: { enum: ['derive'] },
-        name: { type: 'string', pattern: NAME },
-        source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
-        value: { ...SCALAR, description: 'The value to look for in the array.' },
-        field: { type: 'string', description: 'The struct field to read.' },
-        type: { enum: ['int', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
-      };
-      // one form per op, each with the fields that op reads
-      const op = (value, title, needs, may = []) => form({ title, tag: ['op', value], required: ['stage', 'name', 'source', ...needs], properties: pick(fields, ['stage', 'name', 'source', ...needs, ...may]) });
-      return {
-        type: 'object',
-        description: 'Add ONE scalar column from an event property — `extract` a scalar value, or `array_length`/`contains`/`struct_field` for array/struct properties. Surfaces a payload field so it can be filtered, grouped, or aggregated. For math/time/CASE/window over EXISTING columns, use `compute`.',
-        anyOf: [
-          op('extract', 'op: extract — a scalar value', [], ['type']),
-          op('array_length', 'op: array_length — how many elements an array holds', []),
-          op('contains', 'op: contains — whether an array holds `value`', ['value']),
-          op('struct_field', 'op: struct_field — one field of a struct', ['field'], ['type']),
-        ],
-      };
-    },
-    build: ({ d, catalog, cols, source }, p) => {
-      // The RAW payload blob. Only a BLOB property is ever read through it; a flattened payload
-      // column carries its value itself and is referenced directly below — which is what makes
-      // these ops work on a fully flattened fact (a crash report exploded into real columns),
-      // where there is no blob at all.
-      const blob = catalog.eventDataColumn(source);
-      const found = sourceProp(catalog, source, p.source);
-      const spec = found?.spec;
-      const key = found?.name || p.source; // the PHYSICAL payload key (qualifier stripped)
-      // A payload read depends on a REAL column of the row (the flattened one, or the blob). After a
-      // stage that changed the grain — or on top of a materialized prefix built from one — it is
-      // gone, and the expression would reference a column the relation does not have.
-      requireCol(cols, spec?.column || blob);
-      // A FLATTENED payload column carries the array/object itself; `encoding` says whether it
-      // is a native ARRAY or a STRING holding JSON, which decides how to read it.
-      const flat = spec?.column || null;
-      const native = flat && (spec.encoding || 'native') === 'native';
-      // An array op on a property that is not an array builds SQL the warehouse will reject
-      // (array_length over text). Say so here, naming what the property actually is.
-      if ((p.op === 'array_length' || p.op === 'contains') && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
-        throw new Error(`derive ${p.op}: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.op} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). For a JSON OBJECT use op=struct_field, or a compute json_field.`);
-      }
-      let expr; let type;
-      if (p.op === 'extract') {
-        // the catalog's one rule for reading a scalar property (flat column or JSON extract)
-        expr = spec ? catalog.propertyExpr(source, key, d.name, { type: p.type }) : d.jsonExtract(blob, key, p.type || 'string');
-        type = p.type || spec?.type || 'string';
-      } else if (p.op === 'array_length') {
-        expr = flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key);
-        type = 'int';
-      } else if (p.op === 'contains') {
-        expr = flat ? (native ? d.arrayContains(flat, p.value) : d.jsonColumnArrayContains(flat, p.value)) : d.jsonArrayContains(blob, key, p.value);
-        type = 'boolean';
-      } else if (p.op === 'struct_field') {
-        expr = flat ? d.jsonColumnStructField(flat, p.field, p.type) : d.jsonStructField(blob, key, p.field, p.type);
-        type = p.type || 'string';
-      } else throw new Error(`derive: bad op ${p.op}`);
-      return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
-    },
+    build: ({ d, catalog, cols, source }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c, { windows: false, catalog, source })) }, cols }),
   },
 
   compute: {
     keepsSourceRows: true,
     // the expression grammar, once: every stage that takes an operand references it
-    defs: () => ({ expr: exprSchema() }),
+    defs: (catalog) => ({ expr: exprSchema(catalog) }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
-      description: 'Add a column computed from existing columns and constants: `expr` is one expression — arithmetic, rounding, coalesce, cast, text functions, dates (date_diff / date_trunc / date_part / unix_date / elapsed_days), a CASE (fn: "case"), a window function (row_number / rank / lag / lead / running and rolling sum / average / count / min / max, over a window) — its arguments expressions themselves, so a whole formula is one stage.',
+      description: 'Add a column computed from existing columns, event properties and constants: `expr` is one expression — an event property (event_property / array_length / array_contains), arithmetic, rounding, coalesce, cast, text functions, dates (date_diff / date_trunc / date_part / unix_date / elapsed_days), a CASE (fn: "case"), a window function (row_number / rank / lag / lead / running and rolling sum / average / count / min / max, over a window) — its arguments expressions themselves, so a whole formula is one stage.',
       properties: {
         stage: { enum: ['compute'] },
         name: { type: 'string', pattern: NAME, description: 'The name of the column it adds.' },
         expr: EXPR,
       },
     }),
-    build: ({ d, cols }, p) => {
-      const { sql, type } = exprSql(d, cols, p.expr, `compute '${p.name}'`);
+    build: ({ d, catalog, cols, source }, p) => {
+      const { sql, type } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source });
       return { op: { op: 'extend', cols: [{ name: p.name, expr: sql }] }, cols: addCol(cols, p.name, type) };
     },
   },
@@ -135,7 +70,7 @@ export const STAGES = {
       } else {
         throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
       }
-      // The column it explodes must still be HERE, exactly as `derive`'s read must: after a stage
+      // The column it explodes must still be HERE, exactly as an event_property read's must: after a stage
       // that changed the grain (or on top of a materialized prefix built from one) the payload is
       // gone, and the unnest would reference a column the relation does not have.
       requireCol(cols, column);
@@ -305,13 +240,13 @@ export const STAGES = {
         measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/average/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
       },
     }),
-    build: ({ d, cols }, p) => {
+    build: ({ d, catalog, cols, source }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
       const aggs = p.measures.map((m) => {
         if (m.column) requireCol(cols, m.column);
         // a measure's own where: it folds only the rows those conditions hold for (the grammar of a where stage)
-        const cond = m.where?.length ? conditionsSql(m.where, (c) => condPred(d, cols, c, { windows: false })).map((x) => `(${x})`).join(' AND ') : null;
+        const cond = m.where?.length ? conditionsSql(m.where, (c) => condPred(d, cols, c, { windows: false, catalog, source })).map((x) => `(${x})`).join(' AND ') : null;
         return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile, cond) };
       });
       let out = new Map();
@@ -435,7 +370,7 @@ export function listSome(columns, n = 6) {
  */
 export function stageDefs(catalog) {
   return {
-    ...Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs() : {}))),
+    ...Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs(catalog) : {}))),
     // THE STAGE UNION ITSELF, once. A tool that takes both one stage and a list of them embedded
     // the whole union TWICE — with this catalog that was ~49 KB of schema repeated verbatim, half
     // of everything the client is handed before it reads a single word. Both sites now point here.

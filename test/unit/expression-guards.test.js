@@ -72,6 +72,13 @@ test('a step stored by an earlier version is built in this version\'s spelling â
     [{ stage: 'pivot', on: 'event_name', fn: 'avg', value_column: 'session_number', values: ['tutorial'] }, { stage: 'pivot', on: 'event_name', agg: 'average', value_column: 'session_number', values: ['tutorial'] }],
     [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', as: 'c' }] }, { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'c' }] }],
   ]) assert.deepEqual(columns([earlier]), columns([today]), earlier.stage);
+  // a derive stage is the compute stage reading the same event property â€” a column of its own, or a key of the payload
+  const withPayload = (stages) => [...renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: new Set([...COLS, 'event_data', 'price_in_usd_of_event_data']) }).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
+  for (const [earlier, today] of [
+    [{ stage: 'derive', name: 'p', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' }, { stage: 'compute', name: 'p', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }],
+    [{ stage: 'derive', name: 'n', op: 'array_length', source: 'words_collected' }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', property: 'words_collected' } }],
+    [{ stage: 'derive', name: 'c', op: 'contains', source: 'words_collected', value: 'cat' }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }],
+  ]) assert.deepEqual(withPayload([earlier]), withPayload([today]), earlier.op);
 });
 
 test('a value picked from several is typed as its arguments are, and compared in that type', () => {

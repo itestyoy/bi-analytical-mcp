@@ -353,12 +353,12 @@ test('funnel prefilter time_range (wide) keeps all data: 12 / 8', opts, async (t
   assert.equal(reached(out.rows, 'tut1'), 8);
 });
 
-test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 1 = 3', opts, async (t) => {
+test('funnel + prepare compute (array_length): agg_at_step avg(n_words) at level 1 = 3', opts, async (t) => {
   if (skip(t)) return;
-  // A derive stage runs BEFORE match_recognize; its column is referenceable in
+  // A compute stage runs BEFORE match_recognize; its column is referenceable in
   // step where / agg_at_step.
   const out = await pipe([
-    { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' },
+    { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
       metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'average', property: 'n_words', step: 'lvl1' }] },
@@ -369,10 +369,10 @@ test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 
   assert.ok(Math.abs(avg - 3) < 1e-9, `avg n_words=${avg}`);
 });
 
-test('funnel + prepare derive (contains): step filtered by derived boolean reaches 12', opts, async (t) => {
+test('funnel + prepare compute (array_contains): step filtered by derived boolean reaches 12', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([
-    { stage: 'derive', name: 'has_cat', op: 'contains', source: 'words_collected', value: 'cat' },
+    { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ property: 'has_cat', op: 'eq', value: true }] }] },
   ]);
@@ -383,7 +383,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   if (skip(t)) return;
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
   ]);
@@ -395,7 +395,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
   if (skip(t)) return;
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
     { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);

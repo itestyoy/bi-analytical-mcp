@@ -116,7 +116,7 @@ test('a stage needing the source columns is refused after a checkpoint that drop
   );
   // a payload read is refused for the same reason — the column it reads is not there.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: a.draft_id, stage: { stage: 'derive', name: 'lvl', op: 'extract', source: 'level_id_of_event_data' } }),
+    () => e.build_pipeline_model({ action: 'add_step', draft_id: a.draft_id, stage: { stage: 'compute', name: 'lvl', expr: { fn: 'event_property', property: 'level_id_of_event_data' } } }),
     /unknown column/,
   );
 

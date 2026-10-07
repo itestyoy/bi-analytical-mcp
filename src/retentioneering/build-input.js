@@ -139,7 +139,7 @@ export function validateTaskBuild(input, base) {
   if (new Set([...path, event, time]).size < path.length + 2) throw new ToolError('columns.path, columns.event and columns.time name different columns', { stage: 'validate', field: 'columns' });
   const t = String(typeOf.get(time) || 'unknown');
   if (!['time', 'timestamp', 'date', 'datetime', 'unknown'].includes(t)) throw new ToolError(`columns.time '${time}' is a ${t} column — the paths are ordered by a time (a timestamp or a date)`, { stage: 'validate', field: 'columns.time' });
-  const noCatalog = (what, field) => { throw new ToolError(`${what} — a task's table carries no catalog meaning: bring it in as a column in the pipeline that made the table (a derive of the property, a join of the attribute), then name that column here`, { stage: 'validate', field }); };
+  const noCatalog = (what, field) => { throw new ToolError(`${what} — a task's table carries no catalog meaning: bring it in as a column in the pipeline that made the table (a compute reading the property, a join of the attribute), then name that column here`, { stage: 'validate', field }); };
   (input.events?.split || []).forEach((rule, i) => {
     if (rule.by?.property !== undefined) noCatalog(`events.split.${i}.by names the event property '${rule.by.property}'`, `events.split.${i}.by`);
     if (rule.by) known(rule.by.column, `events.split.${i}.by`);

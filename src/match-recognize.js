@@ -59,7 +59,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
     if (catalog.isComplexEventProp(c.property, source)) {
-      throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
+      throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (compute / unnest), not directly`);
     }
     // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
     // payload column — unqualified, like every other clause here
@@ -141,7 +141,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   }
   const m = catalog.getModel(source);
   // Partition key is FLEXIBLE: the caller chooses any column(s) available at this point in the
-  // pipeline (event columns, or ones added by upstream derive/compute/join), or names a
+  // pipeline (event columns, or ones added by upstream compute/join), or names a
   // RELATIONSHIP the source declares — { entity: 'user' } — and its key column is used. A
   // relationship is named, never spelled as a bare magic word: nothing in here knows what any
   // particular relationship is called.
@@ -217,7 +217,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
       else {
         const p = (m.properties || {})[mt.property];
         if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
-        if (catalog.isComplexEventProp(mt.property, source)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; derive a scalar via a prepare stage first`);
+        if (catalog.isComplexEventProp(mt.property, source)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; compute a scalar from it in a prepare stage first`);
         type = p.type;
       }
       out.capId = `pv_${mt.name}`;
@@ -407,7 +407,7 @@ function matchRecognizeSchema(catalog) {
         // A catalog whose sources declare no relationship offers only the column form — the
         // { entity } branch is left out rather than carrying an empty vocabulary.
         items: anyOfOr([
-          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
+          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream compute/join added).' },
           ...(relationshipNames(catalog).length ? [{
             title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
             description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',

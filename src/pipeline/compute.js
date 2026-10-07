@@ -10,7 +10,7 @@ import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { fillPlaceholders, rawNamedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS } from './sql.js';
+import { fillPlaceholders, rawNamedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS, propEnum, sourceProp } from './sql.js';
 import { conditionsSql, eachCondition } from '../conditions.js';
 import { form, SCALAR } from '../schema-kit.js';
 
@@ -29,14 +29,16 @@ const FRAME = {
 };
 
 // the parameters a function may take, by name — each function's form picks its own
-const params = () => ({
+const params = (catalog) => ({
+  property: propEnum(catalog?.eventPropEnum ? catalog.eventPropEnum() : [], 'An event property of the pipeline\'s source — a scalar, an array or a JSON object, read where it is stored (its own column, or the event_data payload).'),
+  item: { ...SCALAR, description: 'The value to look for among the array\'s elements.' },
   places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
   type: { enum: ['int', 'numeric', 'float', 'string'], description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read or a raw expression yields, a CASE result.' },
   start: { type: 'integer', minimum: 1, description: '1-based start position.' },
   len: { type: 'integer', minimum: 0, description: 'Length in characters (optional).' },
   search: { type: 'string', description: 'Substring to find.' },
   replacement: { type: 'string', description: 'What replaces it.' },
-  field: { type: 'string', description: 'The field of a JSON OBJECT to read — an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
+  field: { type: 'string', description: 'The field of a JSON OBJECT to read: of the argument (json_field) or of the property (event_property).' },
   index: { type: 'integer', minimum: 1, description: '1-based index.' },
   unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference.' },
   grain: { enum: GRAINS, description: 'The time bucket to truncate to.' },
@@ -86,6 +88,32 @@ function overSql(d, cols, over = {}, { frame = false } = {}) {
 }
 
 /**
+ * An event property of the pipeline's source, read where it is stored: its flattened column (a native
+ * ARRAY, or text holding JSON) or a key of the source's event_data blob. `kind` is what is read: its
+ * value (one field of it with `field`), an array's length, or whether an array holds `item`. The
+ * column it reads must still be in the row — after a stage that changed the grain it is gone.
+ */
+function propertyRead(kind, { d, cols, p, opts }) {
+  const { catalog, source } = opts;
+  if (!catalog || !source) throw new Error(`${p.fn}: an event property is read in a pipeline over a source`);
+  const blob = catalog.eventDataColumn(source);
+  const found = sourceProp(catalog, source, p.property);
+  const spec = found?.spec;
+  const key = found?.name || p.property; // the PHYSICAL payload key (qualifier stripped)
+  requireCol(cols, spec?.column || blob);
+  const flat = spec?.column || null;
+  const native = flat && (spec.encoding || 'native') === 'native';
+  if (kind !== 'value' && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
+    throw new Error(`${p.fn}: '${p.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.fn} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). A field of a JSON object is { fn: "event_property", property, field }.`);
+  }
+  if (kind === 'length') return { expr: flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key), type: 'int' };
+  if (kind === 'contains') return { expr: flat ? (native ? d.arrayContains(flat, p.item) : d.jsonColumnArrayContains(flat, p.item)) : d.jsonArrayContains(blob, key, p.item), type: 'boolean' };
+  if (p.field !== undefined) return { expr: flat ? d.jsonColumnStructField(flat, p.field, p.type) : d.jsonStructField(blob, key, p.field, p.type), type: p.type || 'string' };
+  // the catalog's one rule for reading a scalar property (flat column or JSON extract)
+  return { expr: spec ? catalog.propertyExpr(source, key, d.name, { type: p.type }) : d.jsonExtract(blob, key, p.type || 'string'), type: p.type || spec?.type || 'string' };
+}
+
+/**
  * Every function, by name: how many `args` it takes (a number, or { min } for a list), the
  * parameters it requires (`needs`) and may take (`may`), and its SQL over the rendered arguments `a`
  * (with their types `t`) → { expr, type } (type 'numeric' when it is not said). `title` says what
@@ -117,6 +145,12 @@ export const FNS = {
   // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
   // TEXT and has to be parsed first, or the json operators do not apply to it.
   json_field: { args: 1, needs: ['field'], may: ['type'], sql: ({ d, a, t, p }) => ({ expr: t[0] === 'json' ? d.jsonColumnField(a[0], p.field, p.type) : d.jsonColumnStructField(a[0], p.field, p.type), type: p.type || 'string' }) },
+  // an EVENT PROPERTY read where it is stored — its own (flattened) column, or a key of the event_data
+  // payload: a scalar (or one field of a JSON object), how many elements an array holds, whether it
+  // holds one value
+  event_property: { args: 0, needs: ['property'], may: ['field', 'type'], sql: (x) => propertyRead('value', x) },
+  array_length: { args: 0, needs: ['property'], sql: (x) => propertyRead('length', x) },
+  array_contains: { args: 0, needs: ['property', 'item'], sql: (x) => propertyRead('contains', x) },
   element_at: { args: 1, needs: ['index'], may: ['type'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: p.type || 'string' }; } },
   array_last: { args: 1, may: ['type'], sql: ({ d, a, t, p }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: p.type || 'string' }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: p.unit === 'day' ? 'int' : 'numeric' }) },
@@ -227,8 +261,8 @@ export function conditionCalls(list, out = []) {
  * form per function SHAPE (the functions that take the same arguments and parameters share a form,
  * tagged by all of them), each with exactly its own fields.
  */
-export function exprSchema() {
-  const PARAMS = params();
+export function exprSchema(catalog) {
+  const PARAMS = params(catalog);
   const byShape = new Map();
   for (const [fn, s] of Object.entries(FNS)) {
     const shape = { args: s.args, title: s.title || null, needs: s.needs || [], may: s.may || [] };

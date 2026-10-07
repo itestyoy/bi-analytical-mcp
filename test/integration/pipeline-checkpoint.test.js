@@ -45,7 +45,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 // carries no event columns — exactly the case worth proving.
 const STEPS = [
   { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-  { stage: 'derive', name: 'score', op: 'extract', source: 'daily_level_score_of_event_data', type: 'numeric' },
+  { stage: 'compute', name: 'score', expr: { fn: 'event_property', property: 'daily_level_score_of_event_data', type: 'numeric' } },
   { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', agg: 'count' }, { name: 'total_score', agg: 'sum', column: 'score' }] },
   { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] },
 ];
@@ -142,7 +142,7 @@ test('a funnel and a payload read run on top of a materialized event slice, with
   assert.ok(Object.keys(tally(whole.result)).length > 0, 'the funnel returns rows at all');
   assert.deepEqual(tally(split.result), tally(whole.result));
 
-  // The payload column survived the slice too, so a derive on top of the prefix reads it.
+  // The payload column survived the slice too, so an event_property read on top of the prefix reads it.
   const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }]);
   const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }], [1]);
   assert.equal(splitScore.result.from_checkpoint.at, 1);

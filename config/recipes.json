@@ -1590,11 +1590,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -1725,11 +1727,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -2382,11 +2386,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -2463,11 +2469,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -2812,11 +2820,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -3029,11 +3039,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3117,11 +3129,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -3219,11 +3233,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "level_id",
-              "op": "extract",
-              "source": "level_id_of_event_data",
-              "type": "int"
+              "expr": {
+                "fn": "event_property",
+                "property": "level_id_of_event_data",
+                "type": "int"
+              }
             },
             {
               "stage": "python",
@@ -3278,11 +3294,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3449,11 +3467,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3539,11 +3559,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "level_id",
-              "op": "extract",
-              "source": "level_id_of_event_data",
-              "type": "int"
+              "expr": {
+                "fn": "event_property",
+                "property": "level_id_of_event_data",
+                "type": "int"
+              }
             },
             {
               "stage": "aggregate",
@@ -3615,11 +3637,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3693,11 +3717,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3805,11 +3831,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -3934,11 +3962,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -4032,11 +4062,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -4163,11 +4195,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -4287,11 +4321,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -4398,11 +4434,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "join",
@@ -4563,11 +4601,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "compute",
@@ -4649,11 +4689,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -4734,11 +4776,13 @@
           "source": "events",
           "stages": [
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "aggregate",
@@ -5427,11 +5471,13 @@
               ]
             },
             {
-              "stage": "derive",
+              "stage": "compute",
               "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "expr": {
+                "fn": "event_property",
+                "property": "price_in_usd_of_event_data",
+                "type": "numeric"
+              }
             },
             {
               "stage": "join",

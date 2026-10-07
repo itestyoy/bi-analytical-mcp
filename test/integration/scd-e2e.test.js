@@ -128,7 +128,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
   const r = await engine.build_pipeline_model({
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+      { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
       { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
@@ -152,7 +152,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
   await engine.build_pipeline_model({
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+      { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }] },
       { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],

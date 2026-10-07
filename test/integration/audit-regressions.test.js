@@ -495,7 +495,7 @@ test('40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8
 test('41. pipeline: the same property extracted → the same 10 / 8 / 6', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows('events', [
-    { stage: 'derive', name: 'ad_type', op: 'extract', source: 'ad_type_of_event_data' },
+    { stage: 'compute', name: 'ad_type', expr: { fn: 'event_property', property: 'ad_type_of_event_data' } },
     { stage: 'where', conditions: [{ column: 'ad_type', op: 'is_not_null' }] },
     { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
@@ -516,7 +516,7 @@ test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 
   assert.equal(num(r.rows[0].arev_rev), 85); assert.equal(num(r.rows[0].arev_n), 8);
   const rows = await pipeRows('events', [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].rev), 85); assert.equal(num(rows[0].n), 8);

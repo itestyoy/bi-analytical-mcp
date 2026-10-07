@@ -88,10 +88,10 @@ test('1. unnest a JSON string array: 20 breadcrumbs, level_start 4 / net_retry 4
 // 2. The same array read WITHOUT exploding: its length per report, on the flattened column.
 //    This is the path that used to build SQL against a payload blob the crash table has not
 //    got — the row count stays 13 because the grain is untouched.
-test('2. derive array_length on the flattened array: 13 rows, 20 elements, longest 3', opts, async (t) => {
+test('2. array_length on the flattened array: 13 rows, 20 elements, longest 3', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'derive', name: 'n_crumbs', op: 'array_length', source: 'breadcrumbs_of_event_data' },
+    { stage: 'compute', name: 'n_crumbs', expr: { fn: 'array_length', property: 'breadcrumbs_of_event_data' } },
     { stage: 'project', columns: ['crash_id', 'n_crumbs'] },
   );
   assert.equal(rows.length, 13, 'array_length does not change the grain');
@@ -102,10 +102,10 @@ test('2. derive array_length on the flattened array: 13 rows, 20 elements, longe
 
 // 3. Membership: `contains` answers "which REPORTS have this breadcrumb", which is not the same
 //    number as how many times it occurs.
-test('3. derive contains: 3 reports carry net_retry (though it occurs 4 times)', opts, async (t) => {
+test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'derive', name: 'retried', op: 'contains', source: 'breadcrumbs_of_event_data', value: 'net_retry' },
+    { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
     { stage: 'aggregate', group_by: ['retried'], measures: [{ name: 'n', agg: 'count' }] },
   );
   const by = mapCol(rows, 'retried', 'n');
@@ -113,7 +113,7 @@ test('3. derive contains: 3 reports carry net_retry (though it occurs 4 times)',
   assert.equal(by.false, 10);
   // …and filtering on it keeps exactly those reports.
   const only = await pipeRows(
-    { stage: 'derive', name: 'retried', op: 'contains', source: 'breadcrumbs_of_event_data', value: 'net_retry' },
+    { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
     { stage: 'where', conditions: [{ column: 'retried', op: 'eq', value: true }] },
     { stage: 'project', columns: ['crash_id'] },
   );
@@ -179,7 +179,7 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
 test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read NULL', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'derive', name: 'depth', op: 'array_length', source: 'stack_frames_of_event_data' },
+    { stage: 'compute', name: 'depth', expr: { fn: 'array_length', property: 'stack_frames_of_event_data' } },
     { stage: 'project', columns: ['crash_id', 'event_name', 'depth'] },
   );
   assert.equal(rows.length, 13, 'every report is still here');
@@ -203,7 +203,7 @@ test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', 
   assert.equal(num(exploded[0].n), 16);
   assert.equal(num(exploded[0].crashes), 10, 'k11..k13 have no stack, so they are simply not there');
   const kept = await pipeRows(
-    { stage: 'derive', name: 'depth', op: 'array_length', source: 'stack_frames_of_event_data' },
+    { stage: 'compute', name: 'depth', expr: { fn: 'array_length', property: 'stack_frames_of_event_data' } },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'with_stack', agg: 'count', column: 'depth' }] },
   );
   assert.equal(num(kept[0].n), 13);
@@ -213,10 +213,10 @@ test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', 
 // ═══════════ C. a JSON object (not an array) ═══════════
 
 // 8. Custom keys are an OBJECT: one field read out of it becomes a groupable attribute.
-test('8. derive struct_field on a JSON object: wifi 8 / cellular 5', opts, async (t) => {
+test('8. event_property with a field of a JSON object: wifi 8 / cellular 5', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'derive', name: 'network', op: 'struct_field', source: 'custom_keys_of_event_data', field: 'network' },
+    { stage: 'compute', name: 'network', expr: { fn: 'event_property', property: 'custom_keys_of_event_data', field: 'network' } },
     { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', agg: 'count' }] },
   );
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 8, cellular: 5 });
@@ -313,7 +313,7 @@ test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', o
 test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellular 7', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'derive', name: 'network', op: 'struct_field', source: 'custom_keys_of_event_data', field: 'network' },
+    { stage: 'compute', name: 'network', expr: { fn: 'event_property', property: 'custom_keys_of_event_data', field: 'network' } },
     { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
     { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
@@ -333,14 +333,14 @@ test('14. complex ops on a scalar column are refused with what it actually is', 
     /unnest: 'issue_title_of_event_data' is declared as string, not an array/,
   );
   await assert.rejects(
-    () => step({ stage: 'derive', name: 'x', op: 'array_length', source: 'issue_title_of_event_data' }),
+    () => step({ stage: 'compute', name: 'x', expr: { fn: 'array_length', property: 'issue_title_of_event_data' } }),
     /array_length: 'issue_title_of_event_data' is declared as string, not an array/,
   );
   // the custom-keys column holds a JSON OBJECT, so an array op is wrong there too — and the
-  // message points at the op that IS right for an object.
+  // message points at the read that IS right for an object.
   await assert.rejects(
-    () => step({ stage: 'derive', name: 'x', op: 'contains', source: 'custom_keys_of_event_data', value: 'wifi' }),
-    /contains: 'custom_keys_of_event_data'.*not an array.*op=struct_field.*compute json_field/s,
+    () => step({ stage: 'compute', name: 'x', expr: { fn: 'array_contains', property: 'custom_keys_of_event_data', item: 'wifi' } }),
+    /array_contains: 'custom_keys_of_event_data'.*not an array.*fn: "event_property", property, field/s,
   );
   // element_at needs a native array, not the raw JSON string.
   await assert.rejects(

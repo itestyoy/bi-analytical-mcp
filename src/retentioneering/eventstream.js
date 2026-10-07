@@ -58,9 +58,9 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
   if (ev.include?.length) stages.push({ stage: 'where', conditions: [{ column: eventCol, op: 'in', value: ev.include }] });
   if (ev.exclude?.length) stages.push({ stage: 'where', conditions: [{ column: eventCol, op: 'not_in', value: ev.exclude }] });
   // the source's own columns and event properties are read before any join: a filter on them scopes
-  // the rows the joins then carry, and a property is surfaced by the pipeline's own `derive` stage
+  // the rows the joins then carry, and a property is surfaced by the pipeline's own `compute` stage
   const segNames = new Set((spec.segments || []).map((seg) => seg.name));
-  // a condition on the source (a column, a property surfaced by a derive) is applied before the joins;
+  // a condition on the source (a column, a property surfaced by a compute) is applied before the joins;
   // one on a segment — and a group holding one — once the segments are there
   const early = [];
   const late = [];
@@ -70,7 +70,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     const cond = (column) => ({ column, op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) });
     if (c.property === undefined) return cond(c.column);
     const col = `es_w${derived++}`;
-    stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
+    stages.push({ stage: 'compute', name: col, expr: { fn: 'event_property', property: c.property } });
     return cond(col);
   });
   for (const item of spec.where || []) (onSegment([item]) ? late : early).push(...resolved([item]));
@@ -86,7 +86,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
       if (ref.column !== undefined) return ref.column;
       if (!read.has(ref.property)) {
         const col = `es_p${read.size}`;
-        stages.push({ stage: 'derive', name: col, op: 'extract', source: ref.property, type: 'string' });
+        stages.push({ stage: 'compute', name: col, expr: { fn: 'event_property', property: ref.property, type: 'string' } });
         read.set(ref.property, col);
       }
       return read.get(ref.property);
@@ -120,7 +120,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     const partCols = parts.map((ref, i) => {
       if (ref.column !== undefined) return ref.column;
       const col = `es_k${i}`;
-      stages.push({ stage: 'derive', name: col, op: 'extract', source: ref.property, type: 'string' });
+      stages.push({ stage: 'compute', name: col, expr: { fn: 'event_property', property: ref.property, type: 'string' } });
       return col;
     });
     stages.push({ stage: 'where', conditions: partCols.map((column) => ({ column, op: 'is_not_null' })) });
@@ -141,7 +141,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     if (seg.column !== undefined) { segments.push({ name, expr: seg.column }); continue; }
     if (seg.property !== undefined) {
       const col = `es_s_${name}`;
-      stages.push({ stage: 'derive', name: col, op: 'extract', source: seg.property });
+      stages.push({ stage: 'compute', name: col, expr: { fn: 'event_property', property: seg.property } });
       segments.push({ name, expr: col });
       continue;
     }

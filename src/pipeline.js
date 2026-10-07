@@ -22,10 +22,9 @@
 //
 //   where      |> WHERE      filter rows by column conditions.
 //                            Solves: scope to an event / segment / time window.
-//   derive     |> EXTEND     add ONE scalar column FROM an event_data JSON property
-//                            (extract a scalar; array_length / contains / struct_field
-//                            for complex props). Solves: surface a payload field as a column.
-//   compute    |> EXTEND     add ONE column FROM existing columns + literals:
+//   compute    |> EXTEND     add ONE column FROM existing columns, event properties + literals:
+//                            event_property (a scalar, or one field of a JSON object) /
+//                            array_length / array_contains — a payload field as a column;
 //                            const (literal number/string/bool), arithmetic (+ - * /),
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
@@ -115,8 +114,11 @@ function sourceColumns(catalog, key, physicalCols = null) {
 function buildOps(catalog, d, baseColumns, stages, source) {
   let cols = new Map(baseColumns);
   const ops = [];
-  for (const st of stages) {
-    const def = STAGES[st.stage];
+  for (const stored of stages) {
+    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
+    // its stage too, which an earlier version may have named otherwise
+    const st = currentSpelling(stored);
+    const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never
       // arrived. Say that, because the usual cause is on the way in (a large payload cut short by
@@ -127,8 +129,7 @@ function buildOps(catalog, d, baseColumns, stages, source) {
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js)
-    const res = def.build({ d, catalog, cols, source }, currentSpelling(st));
+    const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
   }
@@ -156,7 +157,7 @@ function boundPartitions(m, stages, cols) {
   const out = [];
   let leading = true;
   for (const st of stages) {
-    if (leading && !STAGES[st.stage]?.keepsSourceRows) leading = false;
+    if (leading && !stageDef(currentSpelling(st)?.stage)?.keepsSourceRows) leading = false;
     if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
     const extra = [];
     for (const c of st.conditions || []) {

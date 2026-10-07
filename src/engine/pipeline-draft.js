@@ -249,7 +249,7 @@ export const pipelineDraftMethods = {
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first stage can reference (include_columns:true lists them); nothing before it is recomputed.`
           : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { model: '${source}' } }).`,
-        `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
+        `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/compute then aggregate.`,
         `When the steps look right, materialize with build_pipeline_model({ request: { action: "materialize", draft_id } }).`,
       ],
     };
@@ -303,7 +303,7 @@ export const pipelineDraftMethods = {
       column_count: after.length,
       next: 'Review step_effects (each stage\'s column delta + notes), then add the NEXT logical chunk or materialize.',
       recommendations: [
-        'STRONGLY recommended: add stages in small LOGICAL chunks (e.g. scope+derive, THEN the funnel, THEN aggregate) rather than the whole pipeline at once — you see how each chunk changes the data and catch a mistake before it compounds across later steps.',
+        'STRONGLY recommended: add stages in small LOGICAL chunks (e.g. scope+compute, THEN the funnel, THEN aggregate) rather than the whole pipeline at once — you see how each chunk changes the data and catch a mistake before it compounds across later steps.',
       ],
     };
     if (includeColumns) resp.available_columns = after;

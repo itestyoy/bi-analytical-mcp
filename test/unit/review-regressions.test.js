@@ -514,7 +514,7 @@ models:
 });
 
 // ── unnest read a payload column without checking it is still there ─────────────────────────
-// `derive` gained that check; `unnest` did not, so after a stage that changed the grain it emitted
+// an event-property read gained that check; `unnest` did not, so after a stage that changed the grain it emitted
 // a lateral join over a column the relation no longer has — a raw warehouse error at materialize
 // instead of a stage-time refusal at add_step.
 test('unnest is refused when the payload column it explodes is gone', async () => {

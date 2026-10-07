@@ -169,7 +169,7 @@ const BUDGET = { properties: 5000, depth: 10, enumValues: 1000, chars: 120000, b
 /** Instance nesting: only properties/items add a level; a union branch is an alternative, not a level. */
 const depthOf = (n, d = 0) => {
   if (!n || typeof n !== 'object') return d;
-  if (n.$ref) return d + 1; // a recursive $ref (py_block) counts one level, then repeats
+  if (n.$ref) return d + 1; // a $ref counts one level
   let max = d;
   for (const b of [...(n.anyOf || []), ...(n.oneOf || []), ...(n.allOf || [])]) max = Math.max(max, depthOf(b, d));
   if (n.then) max = Math.max(max, depthOf(n.then, d));

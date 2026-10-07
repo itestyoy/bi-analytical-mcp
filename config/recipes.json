@@ -3070,11 +3070,7 @@
                     "mapping",
                     "as_"
                   ],
-                  "body": [
-                    "lookup = bpd.DataFrame({key: list(mapping.keys()), as_: list(mapping.values())})",
-                    "df = df.merge(lookup, on=key, how=\"left\")",
-                    "return df"
-                  ]
+                  "body": "lookup = bpd.DataFrame({key: list(mapping.keys()), as_: list(mapping.values())})\ndf = df.merge(lookup, on=key, how=\"left\")\nreturn df"
                 }
               ],
               "steps": [
@@ -3167,12 +3163,7 @@
                     "total_as",
                     "share_as"
                   ],
-                  "body": [
-                    "totals = df.groupby(key, as_index=False)[value].sum().rename(columns={value: total_as})",
-                    "df = df.merge(totals, on=key, how=\"left\")",
-                    "df[share_as] = df[value] / df[total_as]",
-                    "return df"
-                  ]
+                  "body": "totals = df.groupby(key, as_index=False)[value].sum().rename(columns={value: total_as})\ndf = df.merge(totals, on=key, how=\"left\")\ndf[share_as] = df[value] / df[total_as]\nreturn df"
                 }
               ],
               "steps": [
@@ -3244,11 +3235,7 @@
                     "df",
                     "keys"
                   ],
-                  "body": [
-                    "out = df.groupby(keys, as_index=False).size()",
-                    "out = out.drop(columns=\"size\")",
-                    "return out"
-                  ]
+                  "body": "out = df.groupby(keys, as_index=False).size()\nout = out.drop(columns=\"size\")\nreturn out"
                 }
               ],
               "steps": [
@@ -3325,10 +3312,7 @@
                     "column",
                     "n"
                   ],
-                  "body": [
-                    "out = df.sort_values(column, ascending=False).head(n)",
-                    "return out"
-                  ]
+                  "body": "out = df.sort_values(column, ascending=False).head(n)\nreturn out"
                 }
               ],
               "steps": [
@@ -3419,12 +3403,7 @@
                     "mean_as",
                     "delta_as"
                   ],
-                  "body": [
-                    "df = df.sort_values(order_key)",
-                    "df[mean_as] = df[column].rolling(window=window).mean()",
-                    "df[delta_as] = df[column].diff()",
-                    "return df"
-                  ]
+                  "body": "df = df.sort_values(order_key)\ndf[mean_as] = df[column].rolling(window=window).mean()\ndf[delta_as] = df[column].diff()\nreturn df"
                 }
               ],
               "steps": [
@@ -3505,11 +3484,7 @@
                     "z_as",
                     "share_as"
                   ],
-                  "body": [
-                    "df[z_as] = (df[column] - df[column].mean()) / df[column].std()",
-                    "df[share_as] = df[column] / df[column].sum()",
-                    "return df"
-                  ]
+                  "body": "df[z_as] = (df[column] - df[column].mean()) / df[column].std()\ndf[share_as] = df[column] / df[column].sum()\nreturn df"
                 }
               ],
               "steps": [
@@ -3595,12 +3570,7 @@
                     "threshold_as",
                     "flag_as"
                   ],
-                  "body": [
-                    "cut = df[column].quantile(q)",
-                    "df[threshold_as] = cut",
-                    "df[flag_as] = df[column] >= cut",
-                    "return df"
-                  ]
+                  "body": "cut = df[column].quantile(q)\ndf[threshold_as] = cut\ndf[flag_as] = df[column] >= cut\nreturn df"
                 }
               ],
               "steps": [
@@ -3680,13 +3650,7 @@
                     "threshold",
                     "value"
                   ],
-                  "body": [
-                    "picked = df.groupby(key, as_index=False)[value].sum()",
-                    "picked = picked[picked[value] >= threshold]",
-                    "picked = picked.drop(columns=[value])",
-                    "df = df.merge(picked, on=key, how=\"inner\")",
-                    "return df"
-                  ]
+                  "body": "picked = df.groupby(key, as_index=False)[value].sum()\npicked = picked[picked[value] >= threshold]\npicked = picked.drop(columns=[value])\ndf = df.merge(picked, on=key, how=\"inner\")\nreturn df"
                 }
               ],
               "steps": [
@@ -3778,13 +3742,7 @@
                     "features",
                     "k"
                   ],
-                  "body": [
-                    "scaled = StandardScaler().fit_transform(df[features])",
-                    "model = KMeans(n_clusters=k)",
-                    "model.fit(scaled)",
-                    "out = model.predict(df)",
-                    "return out"
-                  ]
+                  "body": "scaled = StandardScaler().fit_transform(df[features])\nmodel = KMeans(n_clusters=k)\nmodel.fit(scaled)\nout = model.predict(df)\nreturn out"
                 }
               ],
               "steps": [
@@ -3903,13 +3861,7 @@
                     "features",
                     "k"
                   ],
-                  "body": [
-                    "steps = [(\"scale\", StandardScaler()), (\"model\", KMeans(n_clusters=k))]",
-                    "pipe = Pipeline(steps)",
-                    "pipe.fit(df[features])",
-                    "out = pipe.predict(df)",
-                    "return out"
-                  ]
+                  "body": "steps = [(\"scale\", StandardScaler()), (\"model\", KMeans(n_clusters=k))]\npipe = Pipeline(steps)\npipe.fit(df[features])\nout = pipe.predict(df)\nreturn out"
                 }
               ],
               "steps": [
@@ -4034,12 +3986,7 @@
                     "value_column",
                     "horizon"
                   ],
-                  "body": [
-                    "model = ARIMAPlus()",
-                    "model.fit(df[[time_column]], df[[value_column]])",
-                    "out = model.predict(horizon=horizon)",
-                    "return out"
-                  ]
+                  "body": "model = ARIMAPlus()\nmodel.fit(df[[time_column]], df[[value_column]])\nout = model.predict(horizon=horizon)\nreturn out"
                 }
               ],
               "steps": [
@@ -4152,13 +4099,7 @@
                     "features",
                     "label"
                   ],
-                  "body": [
-                    "model = LogisticRegression()",
-                    "model.fit(df[features], df[[label]])",
-                    "feats = df.drop(columns=[label])",
-                    "out = model.predict(feats)",
-                    "return out"
-                  ]
+                  "body": "model = LogisticRegression()\nmodel.fit(df[features], df[[label]])\nfeats = df.drop(columns=[label])\nout = model.predict(feats)\nreturn out"
                 }
               ],
               "steps": [
@@ -4297,15 +4238,7 @@
                     "label",
                     "test_size"
                   ],
-                  "body": [
-                    "X = df[features]",
-                    "y = df[[label]]",
-                    "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)",
-                    "model = LogisticRegression()",
-                    "model.fit(X_train, y_train)",
-                    "out = model.score(X_test, y_test)",
-                    "return out"
-                  ]
+                  "body": "X = df[features]\ny = df[[label]]\nX_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)\nmodel = LogisticRegression()\nmodel.fit(X_train, y_train)\nout = model.score(X_test, y_test)\nreturn out"
                 }
               ],
               "steps": [
@@ -4401,12 +4334,7 @@
                     "features",
                     "k"
                   ],
-                  "body": [
-                    "model = PCA(n_components=k)",
-                    "model.fit(df[features])",
-                    "out = model.predict(df[features])",
-                    "return out"
-                  ]
+                  "body": "model = PCA(n_components=k)\nmodel.fit(df[features])\nout = model.predict(df[features])\nreturn out"
                 }
               ],
               "steps": [
@@ -4571,13 +4499,7 @@
                     "categorical",
                     "label"
                   ],
-                  "body": [
-                    "prep = ColumnTransformer([(\"num\", StandardScaler(), numeric), (\"cat\", OneHotEncoder(), categorical)])",
-                    "pipe = Pipeline([(\"prep\", prep), (\"model\", LogisticRegression())])",
-                    "pipe.fit(df[numeric + categorical], df[[label]])",
-                    "out = pipe.predict(df.drop(columns=[label]))",
-                    "return out"
-                  ]
+                  "body": "prep = ColumnTransformer([(\"num\", StandardScaler(), numeric), (\"cat\", OneHotEncoder(), categorical)])\npipe = Pipeline([(\"prep\", prep), (\"model\", LogisticRegression())])\npipe.fit(df[numeric + categorical], df[[label]])\nout = pipe.predict(df.drop(columns=[label]))\nreturn out"
                 }
               ],
               "steps": [
@@ -4685,13 +4607,7 @@
                     "key",
                     "value"
                   ],
-                  "body": [
-                    "per_day = df.groupby(key, as_index=False)[value].sum()",
-                    "per_day.cache()",
-                    "per_day = per_day.sort_values(value, ascending=False)",
-                    "per_day[\"share\"] = per_day[value] / per_day[value].sum()",
-                    "return per_day"
-                  ]
+                  "body": "per_day = df.groupby(key, as_index=False)[value].sum()\nper_day.cache()\nper_day = per_day.sort_values(value, ascending=False)\nper_day[\"share\"] = per_day[value] / per_day[value].sum()\nreturn per_day"
                 }
               ],
               "steps": [
@@ -4774,10 +4690,7 @@
                     "b",
                     "as_"
                   ],
-                  "body": [
-                    "df[as_] = bbq.sql_scalar(\"LEAST({0}, {1})\", columns=[df[a], df[b]])",
-                    "return df"
-                  ]
+                  "body": "df[as_] = bbq.sql_scalar(\"LEAST({0}, {1})\", columns=[df[a], df[b]])\nreturn df"
                 }
               ],
               "steps": [
@@ -4861,12 +4774,7 @@
                     "key",
                     "value"
                   ],
-                  "body": [
-                    "small = df.groupby(key, as_index=False)[value].sum()",
-                    "pdf = small.to_pandas()",
-                    "pdf[\"rank\"] = pdf[value].rank(ascending=False)",
-                    "return bpd.read_pandas(pdf)"
-                  ]
+                  "body": "small = df.groupby(key, as_index=False)[value].sum()\npdf = small.to_pandas()\npdf[\"rank\"] = pdf[value].rank(ascending=False)\nreturn bpd.read_pandas(pdf)"
                 }
               ],
               "steps": [

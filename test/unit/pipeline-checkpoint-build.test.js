@@ -32,7 +32,7 @@ const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures:
 const PY_STAGE = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
-  functions: [{ name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] }],
+  functions: [{ name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" }],
   steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }],
   output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] },
 };

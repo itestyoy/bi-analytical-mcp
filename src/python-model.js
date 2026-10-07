@@ -19,6 +19,7 @@ import { runWithInput } from './dbt/process.js';
 import { assetPath, missingAssetMessage } from './runtime-assets.js';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
+import { currentSpelling } from './pipeline/earlier.js';
 import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
 import { inertText } from './jinja-inert.js';
 
@@ -145,43 +146,21 @@ export function pyLiteral(v) {
 const fail = (message) => { throw new Error(`python stage: ${message}`); };
 
 /**
- * A function body is STRUCTURED, not a text blob: an array whose items are either one line of
- * code (a string, no leading whitespace, no newline) or a nested array — the block indented one
- * level under the line before it. Indentation is therefore expressed by nesting, exactly as
- * Python's grammar requires, and never by counting spaces inside strings:
- *   ["if k > 1:", ["df['segment'] = km.fit_predict(df[features])"], "else:", ["df['segment'] = 0"], "return df"]
- * Rules a Python parser would enforce later are enforced here, with the item's position:
- * a nested block must follow a header line (one ending with ':'), a header must be followed by a
- * nested block, a block is never empty. Returns the rendered lines (4 spaces per level).
+ * A function body is TEXT — ordinary Python, the lines under the `def` the server writes, separated by
+ * newlines and indented with spaces as Python reads them:
+ *   "if k > 1:\n    df['segment'] = km.fit_predict(df[features])\nelse:\n    df['segment'] = 0\nreturn df"
+ * A margin every line shares is taken off (a body pasted indented under its def reads the same), and
+ * the blank lines at its end — the lines keep their numbers, so a refusal's line is the caller's.
+ * Whether the text is Python is Python's word: the static gate (python/ast_gate.py) parses it as the
+ * stage is added and names the line of a syntax error. Returns the lines, from the body's left edge.
  */
 export function renderBody(body, at = 'body') {
-  if (!Array.isArray(body) || !body.length) fail(`${at}: a function body is a non-empty array of lines and nested blocks`);
-  const out = [];
-  const walk = (items, depth, path) => {
-    items.forEach((item, i) => {
-      const here = `${path}[${i}]`;
-      const prev = items[i - 1];
-      if (Array.isArray(item)) {
-        if (!item.length) fail(`${here}: an empty block — a nested array must hold at least one line`);
-        if (typeof prev !== 'string' || !isHeader(prev)) fail(`${here}: a nested block must follow a line that opens it (ending with ':' — if/for/while/with/def/try/else…); the line before is ${prev === undefined ? 'missing' : JSON.stringify(prev)}`);
-        walk(item, depth + 1, here);
-        return;
-      }
-      if (typeof item !== 'string') fail(`${here}: a body item is a line of code (string) or a nested block (array)`);
-      if (/[\r\n]/.test(item)) fail(`${here}: a line must not contain a newline — one array item per line`);
-      if (/^\s/.test(item)) fail(`${here}: a line must not start with whitespace — indentation is expressed by nesting, not by spaces`);
-      if (!item.trim()) fail(`${here}: an empty line — drop it`);
-      if (isHeader(item) && !Array.isArray(items[i + 1])) fail(`${here}: ${JSON.stringify(item)} opens a block, so the next item must be a nested array with its body`);
-      out.push(`${'    '.repeat(depth)}${item}`);
-    });
-  };
-  walk(body, 0, at);
-  return out;
-}
-
-/** Does this line open a block (ends with ':' before an optional trailing comment)? */
-function isHeader(line) {
-  return /:\s*(#.*)?$/.test(line) && !/^\s*#/.test(line);
+  if (typeof body !== 'string' || !body.trim()) fail(`${at}: a function body is the text of the function — Python lines under the def, separated by newlines`);
+  const lines = body.replace(/\r\n?/g, '\n').split('\n').map((l) => l.replace(/\s+$/, ''));
+  while (lines.length && !lines[lines.length - 1]) lines.pop();
+  const margins = lines.filter(Boolean).map((l) => l.match(/^[ \t]*/)[0]);
+  const shared = margins.reduce((m, x) => { let i = 0; while (i < m.length && i < x.length && m[i] === x[i]) i += 1; return m.slice(0, i); }, margins[0] || '');
+  return lines.map((l) => l.slice(shared.length));
 }
 
 /**
@@ -218,6 +197,7 @@ function importLine(spec, i, allow) {
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
 export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, ymlConfig = {}, pipeline = null, profile = frameProfile(null), submission = null }) {
+  stage = currentSpelling(stage); // a stage a draft kept from an earlier version, in this version's form
   const importLines = [];
   const packages = new Set();
   const bound = new Set();
@@ -364,27 +344,10 @@ export function pythonStageColumns(cols, stage) {
   return new Map(out.map((c) => [c, cols.get(c) || { type: 'unknown' }]));
 }
 
-/**
- * The structured body in the tool schema: ONE recursive definition — a block is an array whose
- * items are a line (string) or another block — referenced as `#/$defs/py_block`. The definition
- * itself lives at the ROOT of every tool schema that embeds a pipeline stage (schema.js hoists
- * `stageDefs()` there), because `$ref` resolves against the root of the document it sits in.
- * Recursion means no depth limit and no unrolled copies.
- */
-const PY_LINE = { type: 'string', minLength: 1, maxLength: 500, pattern: '^\\S.*$', description: 'ONE line of Python — no leading whitespace and no newline; indentation comes from nesting.' };
-export function pythonStageDefs() {
-  return {
-    py_block: {
-      type: 'array', minItems: 1, maxItems: 400,
-      description: 'A block of Python: an array where a string is one line of code and a nested array is the block indented one level under the line before it (which must end with ":").',
-      items: { anyOf: [PY_LINE, { $ref: '#/$defs/py_block' }] },
-    },
-  };
-}
 function bodySchema(profile = frameProfile(null)) {
   return {
-    $ref: '#/$defs/py_block',
-    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}The RULES for this runtime — and the right form for each task — are on the stage description above; they apply to every line here. Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. A body may name only its own parameters and locals, what \`imports\` bound and the other declared functions, and may touch only public attributes — checked before anything runs, so an import inside, dbt/session, or a private/dunder attribute is refused with the line.`,
+    type: 'string', minLength: 1, maxLength: 40000,
+    description: `The function body as TEXT — ordinary Python, the lines under the def (which the server writes from name and params), separated by newlines and indented with spaces as Python reads them. Example: "if k > 1:\\n    df['seg'] = 1\\nelse:\\n    df['seg'] = 0\\nreturn df". It is parsed as the stage is added: a syntax error comes back with its line. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}The RULES for this runtime — and the right form for each task — are on the stage description above; they apply to every line here. Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. A body may name only its own parameters and locals, what \`imports\` bound and the other declared functions, and may touch only public attributes — checked before anything runs, so an import inside, dbt/session, or a private/dunder attribute is refused with the line.`,
   };
 }
 
@@ -401,7 +364,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   // included), interpolated below. Restating any of it here is how the two start to disagree.
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed anywhere in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read its table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as this warehouse returns it: ${profile.native}. Write the functions against that API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ request: { recipe: "${profile.mlReference}" } })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The last step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed anywhere in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read its table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as this warehouse returns it: ${profile.native}. Write the functions against that API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ request: { recipe: "${profile.mlReference}" } })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The last step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 40,000 characters of body each, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
     properties: {
       stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
@@ -448,7 +411,6 @@ registerStage('python', {
   // The DESCRIPTION also names this deployment's worked recipes for a python stage (the engine
   // puts their ids on the catalog): the caller must know they exist before writing a function.
   schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile({ ...rt, recipes: catalog?.pythonRecipes || [] }, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
-  defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
   // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.
   available: (catalog) => catalog?.pythonRuntime?.available !== false,

@@ -119,7 +119,7 @@ test('a pipeline build never holds its call: even a lone python model returns a 
   }));
   const py = {
     stage: 'python',
-    functions: [{ name: 'tag', params: ['df'], body: ['df["tag"] = 1', 'return df'] }],
+    functions: [{ name: 'tag', params: ['df'], body: "df[\"tag\"] = 1\nreturn df" }],
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
@@ -299,7 +299,7 @@ test('the resolved submission method is written into the model, not just reporte
   assert.equal(rt.method_declared, false, 'the profile never declared it — which is why it must be written down');
 
   const profile = frameProfile(rt, rt.config || {});
-  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] };
+  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] };
   const compiled = compilePythonStage(stage, {
     modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile),
     config: rt.config || {}, profile, submission: rt.method,
@@ -376,7 +376,7 @@ test('the submission is read from dbt_project.yml first, and its source is repor
   const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
   const profile = frameProfile(declared, {});
   const compiled = compilePythonStage(
-    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] },
+    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] },
     { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile), config: {}, profile, submission: declared.method },
   );
   assert.equal(compiled.config.submission_method, 'serverless');

@@ -2,7 +2,9 @@
 // are rendered again on every edit; what an earlier version spelled another way is translated to this
 // version's spelling here, once, before a stage is built — the renames from the ONE table that also
 // tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
-// avg → average, as → name), and a computed column written as { op, …fields } to its expression.
+// avg → average, as → name), a computed column written as { op, …fields } to its expression, and a
+// python function body written as nested arrays of lines (a nested array the block under the line
+// before it) to its text.
 // A step in the current spelling passes through unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
@@ -55,6 +57,12 @@ function computeExpr(st) {
   return null; // an op this version never had: left for the stage's own refusal
 }
 
+/** A python body of the earlier form — a line is a string, a nested array the block indented under
+ *  the line before it — as the text it stood for, four spaces a level. */
+function bodyText(items, depth = 0) {
+  return items.flatMap((x) => (Array.isArray(x) ? bodyText(x, depth + 1) : [`${'    '.repeat(depth)}${x}`]));
+}
+
 /** The stage in this version's spelling (the same object when it already is). */
 export function currentSpelling(st) {
   if (!st || typeof st !== 'object') return st;
@@ -66,5 +74,6 @@ export function currentSpelling(st) {
   if (st.stage === 'pivot' && st.fn !== undefined) return respelled(st, ['fn']);
   if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return { ...st, attrs: st.attrs.map((a) => (a && typeof a === 'object' ? respelled(a, ['as']) : a)) };
   if (st.stage === 'unnest' && st.as !== undefined) return respelled(st, ['as']);
+  if (st.stage === 'python' && (st.functions || []).some((f) => Array.isArray(f?.body))) return { ...st, functions: st.functions.map((f) => (Array.isArray(f?.body) ? { ...f, body: bodyText(f.body).join('\n') } : f)) };
   return st;
 }

@@ -265,7 +265,7 @@ test('the tool list stays within its size budget on the production catalog', () 
   assert.ok(total < 260000, `the tool list is ${total} characters — it was ~206k with every form folded and the catalog's names closed per model; something is being dumped into every request again`);
 });
 
-test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
+test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', async () => {
   const validators = makeValidators(schemas);
   const check = (display) => validateInput(validators.display_model_result, { task_id: 'abc123abc123', display });
   for (const ok of [
@@ -281,7 +281,6 @@ test('the card declaration (display) is structural: each kind is a closed branch
   ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
   for (const [bad, why] of [
     [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
-    [{ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, 'a split with two value columns'],
     [{ kind: 'bar', x: 'c', y: 'revenue' }, 'y is always a list'],
     [{ kind: 'funnel', label_column: 'step', value_column: 'users' }, 'the row form lives under steps'],
     [{ kind: 'funnel', steps: [{ column: 'only_one' }] }, 'a funnel of one step'],
@@ -292,6 +291,9 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
     [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
   ]) assert.equal(check(bad).ok, false, why);
+  // a split names ONE value column — refused at the call, by the rule, with the result's columns at hand
+  const { displayProblems } = await import('../../src/display-check.js');
+  assert.match(displayProblems({ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, ['d', 'a', 'b', 'c']).join(' | '), /declare a single y/, 'a split with two value columns');
   // the declaration lives on display_model_result alone: no other tool takes one
   assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);

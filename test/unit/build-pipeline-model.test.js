@@ -367,14 +367,14 @@ test('build_pipeline_model: one_per_match funnel warns to filter completed', asy
 
 // P4: limit + transform.limit both cap rows — together they'd emit two LIMITs (SQL error).
 // The guard rejects the ambiguity; either source alone reads fine.
-test('drill_result reads only a drawn task, and its row cap is given once (no transform.limit)', async () => {
+test('drill_result reads only a drawn task, by the path and level of its card — never a projection of the caller\'s', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const runner = { show: async () => ({ ok: true, rows: [{ a: 1 }], columns: [{ name: 'a' }] }) };
   const e = settle(new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/gqr', workspaceRoot: mkdtempSync(join(tmpdir(), 'gqr-')) }) }));
-  // the row cap is `limit`; a second one inside the transform would emit two LIMITs
-  await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, transform: { limit: 3 } }), /limit|additional/);
+  // the card names the path and the level; the view is the server's, made from the card as drawn
+  await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, transform: { limit: 3 } }), /unexpected property 'transform'/);
   // a task that was never drawn is not a card's to read
   const task_id = e.jobs.create({ tool: 'query_semantic_model' });
   e.jobs.ready(task_id);
-  await assert.rejects(() => e.drill_result({ task_id, transform: {} }), /not drawn/);
+  await assert.rejects(() => e.drill_result({ task_id }), /not drawn/);
 });

@@ -10,7 +10,7 @@ import { formatDbtError } from '../dbt/index.js';
 import { buildProjection, projectionProblems } from '../projection.js';
 import { getDialect } from '../dialects/index.js';
 import { sqlConfigHeader } from '../sql-header.js';
-import { DRILL_ROWS, buildViewModel } from '../apps/result-view-model.js';
+import { DRILL_ROWS, PIVOT_LEVEL_ROWS, buildViewModel, drillView, pivotTransform } from '../apps/result-view-model.js';
 import { resultColumns, displayProblems, drillFirstRead } from '../display-check.js';
 import { isPlainObject, samplingNote, pageBlock } from './helpers.js';
 import { READ_PAGE } from '../schema/fields.js';
@@ -302,7 +302,7 @@ export const taskResultMethods = {
       drawn = true;
       return { ...out, drawn: true };
     } finally {
-      if (drawn) { this._displayed.set(id, 'drawn'); this.jobs.markDrawn(id); }
+      if (drawn) { this._displayed.set(id, 'drawn'); this.jobs.markDrawn(id, input.display || null); }
       else this._displayed.delete(id);
     }
   },
@@ -323,7 +323,30 @@ export const taskResultMethods = {
       return { ok: false, task_id: job.id, status: 'error', error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone)` } };
     }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-    const out = await this._readTable(this.ctxs.dir(job.contextId), job.table, input.limit ?? DRILL_ROWS, input.transform);
+    const out = await this._readTable(this.ctxs.dir(job.contextId), job.table, input.limit ?? (job.display?.kind === 'pivot' ? PIVOT_LEVEL_ROWS : DRILL_ROWS), drillRead(job, input));
     return { task_id: job.id, ...out };
   },
 };
+
+/**
+ * The read of one view of a drawn card: the path taken and the level opened, made into the view by the
+ * view model's one definition of it (pivotTransform / drillView) over the display the card was DRAWN
+ * with — so a card reads only the views of what it drew, along the levels it declared.
+ */
+function drillRead(job, input) {
+  const d = job.display;
+  const path = input.path || [];
+  if (!d) throw new ToolError(`task ${job.id} was drawn before its card's display was kept — draw a new query to drill into it`, { stage: 'validate', field: 'task_id' });
+  if (d.kind === 'pivot') {
+    if (input.level !== undefined || input.mode !== undefined) throw new ToolError('a pivot opens the next level of the row taken: give its path alone', { stage: 'validate', field: 'level' });
+    if (path.length >= d.levels.length) throw new ToolError(`the pivot has ${d.levels.length} level(s): a path of ${path.length} opens none`, { stage: 'validate', field: 'path' });
+    path.forEach((p, i) => { if (p.column !== d.levels[i].column) throw new ToolError(`path[${i}]: the pivot's level ${i + 1} is '${d.levels[i].column}', not '${p.column}'`, { stage: 'validate', field: 'path' }); });
+    return pivotTransform(d, path.map((p) => p.value));
+  }
+  const levels = (d.drill?.levels || []).map((l) => l.column);
+  if (!levels.length) throw new ToolError(`task ${job.id}'s card was drawn without a drill-down`, { stage: 'validate', field: 'task_id' });
+  const along = new Set([d.x, d.series_column, d.label_column, ...levels].filter(Boolean));
+  for (const p of path) if (!along.has(p.column)) throw new ToolError(`path: '${p.column}' is not a column this card was drawn or drills along (${[...along].join(', ')})`, { stage: 'validate', field: 'path' });
+  if (input.level !== undefined && !levels.includes(input.level)) throw new ToolError(`level: '${input.level}' is not one of the card's drill levels (${levels.join(', ')})`, { stage: 'validate', field: 'level' });
+  return drillView(d, path, input.level !== undefined ? { level: { column: input.level }, mode: input.mode || 'breakdown' } : null).transform;
+}

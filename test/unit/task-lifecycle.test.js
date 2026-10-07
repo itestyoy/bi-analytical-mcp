@@ -234,11 +234,11 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   e1.close();
   // the server restarts; the card is still open in the conversation
   const e2 = make(runner);
-  const level = await e2.drill_result({ task_id: build.task_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }] } });
+  const level = await e2.drill_result({ task_id: build.task_id, path: [] });
   assert.notEqual(level.ok, false, JSON.stringify(level.error));
   await assert.rejects(() => e2.display_model_result({ task_id: build.task_id, display }), /shown already/, 'and it is still drawn once');
   // a host proxying the card's read without the Apps envelope is still served (the proof is the drawn task)
-  const proxied = await runTool(e2, 'drill_result', { request: { task_id: build.task_id, transform: { group_by: ['event_name'] } } }, { renders: false });
+  const proxied = await runTool(e2, 'drill_result', { request: { task_id: build.task_id, path: [] } }, { renders: false });
   assert.equal(proxied.result.isError, undefined, proxied.result.content[0].text);
   // …while display_model_result itself is still refused to such a client
   assert.equal((await runTool(e2, 'display_model_result', { request: { task_id: build.task_id } }, { renders: false })).result.isError, true);

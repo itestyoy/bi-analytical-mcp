@@ -111,11 +111,11 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   // exactly one tools/call site: drill_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'drill_result', arguments: { request: args } }");
-  // …reached for the card's OWN task only: its stored table's next view when a drill-down steps
-  // down (a pivot row, a chart mark — each read built by the view model)
+  // …reached for the card's OWN task only: the path taken and the level opened (a pivot row, a chart
+  // mark) — the view itself is made by the server from the card as it was drawn
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
-    '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
-    '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
+    '{ ...d.source, path, level: step.level.column, mode: step.mode, limit: DRILL_ROWS }',
+    '{ ...model.source, path, limit: PIVOT_LEVEL_ROWS }',
   ]);
 });
 

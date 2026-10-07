@@ -327,10 +327,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   every tool is `visibility: ["model"]` except `drill_result` (`["model", "app"]` — hosts refused a
   card's call to an app-only tool; the server answers it only for a DRAWN task), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
   server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
-  row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its task's stored
-  table, filtered to the path taken and grouped by the dimension chosen, each read built by the view
-  model's one definition of a view (no other tools/call, resource, model message, link or network)
-  — a test holds its sources to that; the server serves it only for a task that was drawn.
+  row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): the card sends the
+  path taken and the level chosen ({ task_id, path, level?, mode? }), and the SERVER makes the read —
+  its task's stored table filtered to the path and grouped by the level — by the view model's one
+  definition of a view over the display the card was DRAWN with (kept with the task), so a card reads
+  only the views of what it drew (no other tools/call, resource, model message, link or network) — a
+  test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
 - BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
   tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /

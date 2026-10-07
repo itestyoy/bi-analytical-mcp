@@ -18,17 +18,11 @@ export const valueColumns = (what) => ({ type: 'array', minItems: 1, maxItems: 6
 export const seriesColumn = (what) => ({ ...resultColumn, description: `Split the ONE y column into a ${what} per value of this column (e.g. users_platform).` });
 
 /**
- * A chart that may be split by a column, as its two forms: value columns side by side, or ONE value
- * column split into a series per value of `series_column` — a split names one value column, and the
- * schema says so by the form, not by a sentence.
+ * A chart that may be split by a column: value columns side by side, or ONE value column split into a
+ * series per value of `series_column` — one form; a split with several value columns is refused at
+ * the call, naming the rule (src/display-check.js).
  */
-export const splittable = (kind, title, description, properties, required) => {
-  const { series_column: series, ...rest } = properties;
-  return [
-    form(kind, title, description, rest, required),
-    form(kind, `${title}, split by a column`, `${description} Split: ONE value column, a series per value of series_column.`, { ...rest, y: { ...rest.y, maxItems: 1 }, series_column: series }, [...required, 'series_column']),
-  ];
-};
+export const splittable = (kind, title, description, properties, required) => [form(kind, title, `${description} With series_column: ONE value column, a series per value of that column.`, properties, required)];
 
 export const axis = { ...resultColumn, description: 'The axis column: time is put in time order, any other column keeps the row order.' };
 

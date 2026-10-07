@@ -17,7 +17,7 @@ import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, p
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
-import { form, pick, conditionList, ISO_TIME, TIMEZONE } from './schema-kit.js';
+import { form, pick, conditionList, ISO_TIME, TIMEZONE, SCALAR } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
 import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
@@ -264,12 +264,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       },
     },
     drill_result: {
-      type: 'object', additionalProperties: false, required: ['task_id', 'transform'],
-      description: 'One view of a drawn drill-down card, read from its task\'s stored table (the card calls this; the model does not).',
+      type: 'object', additionalProperties: false, required: ['task_id'],
+      description: 'One view of a drawn drill-down card — the card calls this, the model does not: the path taken so far and the level to open, read from the task\'s stored table as the card was drawn.',
       properties: {
-        task_id: { type: 'string', pattern: TASK_ID, description: 'The task the card was drawn from.' },
-        limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS, description: 'Rows of the view.' },
-        transform: projection,
+        task_id: { type: 'string', pattern: TASK_ID },
+        path: { type: 'array', maxItems: 8, items: { type: 'object', additionalProperties: false, required: ['column', 'value'], properties: { column: { type: 'string' }, value: SCALAR } } },
+        level: { type: 'string' },
+        mode: { enum: ['trend', 'breakdown'] },
+        limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS },
       },
     },
     // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's

@@ -80,7 +80,7 @@ export class MemoryTool {
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
    * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
-   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
+   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links), or several (notes)
    *   action:'forget' → delete one note by id
    * (the notes are read with semantic_index: { search }, { notes, about? } — see list() below)
    */
@@ -89,23 +89,13 @@ export class MemoryTool {
     const action = input.action;
 
     if (action === 'record') {
-      const note = String(input.note ?? '').trim();
-      if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
-      const question = input.question ? String(input.question).trim() : null;
-      const resolved = (input.targets || []).map((t) => this.resolveTarget(t));
-      const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
-      const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.store.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
-      return {
-        saved: true,
-        id: entry.id,
-        note: entry.note,
-        ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
-        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
-        aliases, links,
-        next: 'Saved. This finding now surfaces in semantic_index on the linked entities, via semantic_index({ request: { search } }) — including the aliases/words above — and in semantic_index({ request: { notes: true } }).',
-      };
+      const next = 'Saved. A finding surfaces in semantic_index on the entities it is linked to, via semantic_index({ request: { search } }) — including its aliases — and in semantic_index({ request: { notes: true } }).';
+      if (input.notes) {
+        // every note is checked before any is saved: a batch is saved whole or not at all
+        const findings = input.notes.map((n, i) => this._finding(n, `notes[${i}]`));
+        return { saved: true, notes: findings.map((f) => this._save(f)), next };
+      }
+      return { saved: true, ...this._save(this._finding(input)), next };
     }
 
     if (action === 'forget') {
@@ -114,6 +104,34 @@ export class MemoryTool {
     }
 
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
+  }
+
+  /** A finding as given, its targets resolved — refused before anything is saved. */
+  _finding(n, at = null) {
+    const note = String(n.note ?? '').trim();
+    if (!note) throw new ToolError(`${at ? `${at}: ` : ''}note is required and must be a non-empty finding`, { stage: 'validate', field: at ? `${at}.note` : 'note' });
+    const resolved = (n.targets || []).map((t) => {
+      try { return this.resolveTarget(t); } catch (e) { throw at ? new ToolError(`${at}: ${e.message}`, { stage: 'validate', field: `${at}.targets` }) : e; }
+    });
+    return {
+      note, question: n.question ? String(n.question).trim() : null, resolved,
+      aliases: [...new Set((n.aliases || []).map((a) => String(a).trim()).filter(Boolean))],
+      links: (n.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) })),
+    };
+  }
+
+  /** Store one checked finding; what the answer says about it. */
+  _save({ note, question, resolved, aliases, links }) {
+    const entry = this.store.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
+    const terms = resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term);
+    return {
+      id: entry.id,
+      note: entry.note,
+      ...(question ? { question } : {}),
+      linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
+      ...(terms.length ? { unresolved_terms: terms } : {}),
+      aliases, links,
+    };
   }
 
   /** The notes, newest first — every one, or those about one entity: semantic_index({ request: { notes: true, about? } }). */

@@ -47,8 +47,9 @@ export function memorySchema(catalog) {
     targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself. A name is never written on its own: the source says which entity it is. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { anyOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
-    id: { type: 'string', description: 'Id of the note to delete (as returned by record / list / search).' },
+    id: { type: 'string', description: 'Id of the note to delete (as record returned it, or semantic_index({ notes: true }) lists it).' },
   };
+  const finding = { note: F.note, question: F.question, targets: F.targets, aliases: F.aliases, links: F.links };
 
   // One strict, self-contained form per action: ONLY its fields, closed, its required set — the AI
   // sees exactly what to pass for the chosen action, and a field of another action is refused.
@@ -58,8 +59,12 @@ export function memorySchema(catalog) {
     type: 'object',
     description: 'Write the analyst memory: record a finding, or forget one by id. Notes are read with semantic_index — { search }, { notes: true }, and on the views of the entities they are about.',
     anyOf: [
-      branch('record', { note: F.note, question: F.question, targets: F.targets, aliases: F.aliases, links: F.links }, ['note'],
+      branch('record', finding, ['note'],
         'Save a finding. Required: note (one atomic fact). Optional: question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
+      // what one study turned up is several atomic notes: saved in one call, all or none
+      branch('record', {
+        notes: { type: 'array', minItems: 2, maxItems: 10, description: 'Several findings at once — what one study turned up, each its own atomic note. All are checked before any is saved.', items: { type: 'object', additionalProperties: false, required: ['note'], properties: finding } },
+      }, ['notes'], 'Save several findings at once (2–10): each item is what a single record takes.'),
       branch('forget', { id: F.id }, ['id'],
         'Delete one note. Required: id (from record / list / search).'),
     ],

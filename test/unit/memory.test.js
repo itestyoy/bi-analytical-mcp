@@ -238,6 +238,24 @@ test('memory strict input validation', async () => {
   await assert.rejects(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
 });
 
+test('memory record of several notes saves them all, or none when one is wrong', async () => {
+  const e = engine();
+  await assert.rejects(
+    () => e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166', targets: [{ source: 'users', name: 'country' }] }, { note: 'bad', targets: [{ source: 'nope' }] }] }),
+    /invalid input|notes\[1\]/,
+  );
+  assert.equal((await e.semantic_index({ notes: true })).total, 0, 'nothing was saved from the refused batch');
+  const two = await e.memory({ action: 'record', notes: [
+    { note: 'country is ISO-3166 alpha-2', targets: [{ source: 'users', name: 'country' }] },
+    { note: 'ad_type carries the ad format', targets: [{ source: 'events', name: 'ad_type_of_event_data' }], aliases: ['ad format'] },
+  ] });
+  assert.equal(two.notes.length, 2);
+  const listed = await e.semantic_index({ notes: true });
+  assert.equal(listed.total, 2);
+  assert.deepEqual(listed.notes.map((n) => n.id).sort(), two.notes.map((n) => n.id).sort());
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', notes: [{ note: 'y' }, { note: 'z' }] }), /invalid input/, 'one note or several, not both');
+});
+
 // An entity is ALWAYS { source, name }; a phrase is { term }. Neither a bare name nor the glued
 // '<source>.<name>' spelling exists, so a finding is never linked by a string that has to be taken
 // apart — or silently kept as a free phrase, which would link it to nothing.

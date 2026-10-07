@@ -75,9 +75,10 @@ export const OUTPUTS = {
     note: str,
   }),
 
-  // record: saved + id; forget: forgotten + id
-  memory: shape('The note saved (record: `saved`, `id`), or the note removed (forget: `forgotten`, `id`).', [], {
+  // record: saved + id (or notes, one each); forget: forgotten + id
+  memory: shape('The note saved (record: `saved`, `id`; several: `notes`, each with its `id`), or the note removed (forget: `forgotten`, `id`).', [], {
     saved: bool,
+    notes: list(obj),
     forgotten: bool,
     id: str,
     note: str,

@@ -7,6 +7,7 @@ import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, measureS
 import { exprSchema, exprSql } from './compute.js';
 import { form, strEnum } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
+import { physicalColumnType } from '../catalog/column-types.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -131,7 +132,7 @@ export const STAGES = {
         anyOf: forms,
       };
     },
-    build: ({ catalog, cols, source }, p) => {
+    build: ({ catalog, cols, source, physical }, p) => {
       const m = catalog.getModel(p.with);
       if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);
       let on = []; let onKeys;
@@ -157,8 +158,20 @@ export const STAGES = {
       // What the joined model REALLY has (declared, and already grounded to the physical table at
       // catalog load), with each column's type — so a joined amount stays numeric downstream
       // instead of arriving as an untyped string. A fact's raw payload blob is a column too.
-      const joined = new Map(catalog.modelColumns(p.with).map((c) => [c.name, c.type || 'string']));
-      if (m.event_data_column && !joined.has(m.event_data_column)) joined.set(m.event_data_column, 'json');
+      const joined = new Map(catalog.modelColumns(p.with).map((c) => [c.name, { type: c.type || 'string' }]));
+      if (m.event_data_column && !joined.has(m.event_data_column)) joined.set(m.event_data_column, { type: 'json' });
+      // …grounded, when the warehouse was asked, as the source's own columns are: a column the table
+      // lacks is not offered, and each arrives in the type it HAS — a flag stored as text stays text
+      // under its new name, so a boolean compared with it is spelled as text, not run as STRING = BOOL
+      const phys = physical?.joined?.get(p.with);
+      if (phys) {
+        for (const [name, c] of joined) {
+          if (c.type === 'json') continue;
+          if (!phys.has(name.toLowerCase())) { joined.delete(name); continue; }
+          const t = c.type === 'array' ? 'unknown' : physicalColumnType(phys.types?.get(name.toLowerCase()) || '');
+          if (t !== 'unknown') joined.set(name, { type: t, physical: true });
+        }
+      }
       const known = joined.size ? joined : null; // no column info -> accept what the caller names
       const avail = () => [...joined.keys()].join(', ');
       // `attrs` IS the contract: exactly what is listed arrives, nothing implicit. A join that
@@ -191,7 +204,7 @@ export const STAGES = {
       }
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
-      for (const a of attrs) out = addCol(out, a.as, joined.get(a.column) || 'string');
+      for (const a of attrs) { out = addCol(out, a.as, joined.get(a.column)?.type || 'string'); if (joined.get(a.column)?.physical) out.get(a.as).physical = true; }
       let between;
       if (p.between) {
         // `value` is a column on THIS side (validated against the live column set); `from`/`to`

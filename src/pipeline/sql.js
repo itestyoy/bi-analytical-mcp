@@ -176,11 +176,11 @@ export function condPred(d, cols, c, opts = {}) {
     // it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at the spelling
     if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
       const values = [].concat(value);
-      if (!['eq', 'ne', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
-        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / ne / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+      if (!['eq', 'neq', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
+        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
       }
       const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((s) => d.sqlLiteral(s));
-      return `LOWER(TRIM(${left.sql})) ${c.op === 'ne' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
+      return `LOWER(TRIM(${left.sql})) ${c.op === 'neq' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
     }
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }

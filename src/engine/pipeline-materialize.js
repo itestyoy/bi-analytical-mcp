@@ -158,7 +158,7 @@ export const pipelineMaterializeMethods = {
     draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null };
     let columns;
     try {
-      columns = this._draftColumns(draft, await this.probe.physicalColumns(draft.source));
+      columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages));
     } catch (e) { delete draft.building; throw e; }
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
     const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {
@@ -257,7 +257,7 @@ export const pipelineMaterializeMethods = {
     // pipeline actually runs on, never a mix. Grounded to the physical relation so a
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
-    const physSet = await this.probe.physicalColumns(source);
+    const physSet = await this.probe.grounding(source, stages);
     // Sampling is a property of the WHOLE declaration, not of the slice this build renders: a
     // `sample` baked into the materialized prefix still makes every number downstream approximate,
     // and dropping the flag would hand back a 1%-sampled figure as if it were exact.

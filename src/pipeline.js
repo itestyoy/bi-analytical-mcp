@@ -111,7 +111,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
 // silently mix one fact's payload into another fact's pipeline.
-function buildOps(catalog, d, baseColumns, stages, source) {
+function buildOps(catalog, d, baseColumns, stages, source, physical = null) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const stored of stages) {
@@ -129,7 +129,7 @@ function buildOps(catalog, d, baseColumns, stages, source) {
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    const res = def.build({ d, catalog, cols, source }, st);
+    const res = def.build({ d, catalog, cols, source, physical }, st);
     ops.push(res.op);
     cols = res.cols;
   }
@@ -211,7 +211,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     seg.input = input;
     const baseRelation = `{{ ref('${input}') }}`;
     if (seg.kind === 'sql') {
-      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source, physicalCols);
       // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
       // CTEs on DuckDB — whether it reads the source or the model a python stage produced.
       seg.sql = d.renderPipeline(baseRelation, ops);

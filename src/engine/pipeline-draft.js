@@ -239,7 +239,7 @@ export const pipelineDraftMethods = {
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
     // guard) — never offered, never buildable, not called out. Only real columns exist.
-    const physSet = await this.probe.physicalColumns(source);
+    const physSet = await this.probe.grounding(source);
     const cols = base ? base.columns : this._groundedDeclared(source, physSet).cols;
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
@@ -300,7 +300,7 @@ export const pipelineDraftMethods = {
       draft.stages = snapshot; this.ctxs.touch(ctx.id);
       throw new ToolError(`${e.message} — NO steps applied (add_steps is atomic; fix that stage and retry, ideally in a smaller chunk)`, { stage: 'compile', field: 'stages' });
     }
-    const physSet = await this.probe.physicalColumns(draft.source);
+    const physSet = await this.probe.grounding(draft.source, draft.stages);
     const after = this._draftColumns(draft, physSet);
     // the steps just added — the caller has the earlier ones; the whole list with include_steps or preview
     const all = this._draftSteps(draft);
@@ -400,7 +400,7 @@ export const pipelineDraftMethods = {
       inherited.push({ at: cp.at, model: cp.model, owner });
     }
     this.ctxs.touch(ctx.id);
-    const physSet = await this.probe.physicalColumns(ctx.state.draft.source);
+    const physSet = await this.probe.grounding(ctx.state.draft.source, ctx.state.draft.stages);
     // a fork of steps that no longer build is made all the same — the fork is where they are mended
     let cols = []; let broken = null;
     try { cols = this._draftColumns(ctx.state.draft, physSet); } catch (e) { broken = e.message; }
@@ -439,7 +439,7 @@ export const pipelineDraftMethods = {
    * funnel warnings.
    */
   async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null, dropFrom = null } = {}) {
-    const physSet = await this.probe.physicalColumns(draft.source);
+    const physSet = await this.probe.grounding(draft.source, [...draft.stages, ...newStages]);
     // columns BEFORE the change — none known when the steps held no longer build: the change is what
     // mends them, and the render below validates the whole of it
     let before;
@@ -528,7 +528,7 @@ export const pipelineDraftMethods = {
   async _draftValidate(ctx, draft) {
     if (!draft.stages.length) throw new ToolError('draft has no stages to validate — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
     if (!this.runner?.run) throw new ToolError('no warehouse runner configured — nothing to validate against', { stage: 'validate' });
-    const physSet = await this.probe.physicalColumns(draft.source);
+    const physSet = await this.probe.grounding(draft.source, draft.stages);
     const plan = this._renderPlan(draft);
     if (plan.checkpoint && !plan.stages.length) throw new ToolError(`nothing to validate: every step is already materialized as ${plan.checkpoint.model}`, { stage: 'validate', field: 'draft_id' });
     // names of its own (pipe_…_chk): the check never writes over a table a build made or reads
@@ -556,7 +556,7 @@ export const pipelineDraftMethods = {
 
   async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
-    const physSet = await this.probe.physicalColumns(draft.source);
+    const physSet = await this.probe.grounding(draft.source, draft.stages);
     const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_step first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is

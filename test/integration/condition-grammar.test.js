@@ -200,7 +200,7 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   const { rows } = await pipe([
     { stage: 'aggregate', measures: [
       { name: 'yes', agg: 'count', where: [{ column: 'bundle_id', op: 'eq', value: true }] },
-      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'ne', value: true }] },
+      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
     ] },
   ]);
   assert.ok(all > 0, 'the fixture has the column filled');
@@ -208,6 +208,22 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   // an order compares no flag: refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
+});
+
+test('a joined text column, under the name the join gave it, is compared with a boolean as text too', opts, async (t) => {
+  if (skip(t)) return;
+  const joined = 'from fct_analytics_events e left join dim_users u on e.player_id_of_internal = u.player_id_of_internal';
+  const all = await truth(`select count(*) as n ${joined} where u.country is not null`);
+  const truthy = await truth(`select count(*) as n ${joined} where lower(trim(u.country)) in ('true', '1', 't')`);
+  const { rows } = await pipe([
+    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'activity_test' }] },
+    { stage: 'aggregate', measures: [
+      { name: 'yes', agg: 'count', where: [{ column: 'activity_test', op: 'eq', value: true }] },
+      { name: 'no', agg: 'count', where: [{ column: 'activity_test', op: 'neq', value: true }] },
+    ] },
+  ]);
+  assert.ok(all > 0, 'the fixture joins users to events');
+  assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
 });
 
 test('a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too; a column named in its text is refused', opts, async (t) => {

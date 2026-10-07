@@ -76,6 +76,23 @@ export class WarehouseProbe {
    * the grace), in which case the catalog's declared columns are used as-is (grounding
    * is skipped).
    */
+  /**
+   * What the warehouse says about a pipeline's columns: the source's physical columns (with their
+   * types), and those of every model its joins bring in — a joined column is compared in the type it
+   * HAS, as the source's own are (a flag stored as text, renamed by the join, is still text). A fresh
+   * set each call: the cached ones are never written on. Null when the source could not be asked.
+   */
+  async grounding(source, stages = []) {
+    const own = await this.physicalColumns(source);
+    if (!own) return null; // the warehouse could not be asked: the declared columns stand
+    const models = [...new Set((stages || []).filter((st) => st?.stage === 'join' && st.with && this.catalog.models[st.with]).map((st) => st.with))];
+    const g = new Set(own);
+    if (own.types) g.types = own.types;
+    g.joined = new Map();
+    for (const k of models) { const set = await this.physicalColumns(k); if (set) g.joined.set(k, set); }
+    return g;
+  }
+
   async physicalColumns(source) {
     if (!this.runner || !this.readDir()) return null;
     // a known set is kept; a lookup that could not know (the relation not built yet, the warehouse

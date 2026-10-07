@@ -400,21 +400,29 @@
                   ],
                   "where": [
                     {
-                      "property": "session_number",
+                      "column": "session_number",
                       "op": "gte",
                       "value": 2
                     }
                   ]
                 }
-              ],
-              "metrics": [
-                {
-                  "name": "to_back",
-                  "type": "avg_seconds_between",
-                  "from": "base",
-                  "to": "back"
-                }
               ]
+            },
+            {
+              "stage": "compute",
+              "name": "secs_to_back",
+              "expr": {
+                "fn": "date_diff",
+                "args": [
+                  {
+                    "column": "at_base"
+                  },
+                  {
+                    "column": "at_back"
+                  }
+                ],
+                "unit": "second"
+              }
             },
             {
               "stage": "aggregate",
@@ -480,8 +488,8 @@
           ]
         }
       },
-      "notes": "One row per entity from its FIRST base event (rows: one_per_partition), secs_to_back = seconds from it to the next conversion event (NULL when there is none), so the window is measured from the event itself, in seconds — 172800 is 48 hours, not 'two calendar days'. A RETURN is a later session, not the one the launch opens: the conversion step carries a condition (here session_number >= 2) — without it nearly everyone 'returns' minutes after the launch. Every filter (an app, an environment) is a where or a filter before the match and holds for BOTH steps. For a window of dates: scan [start, end + the window] (the pipeline's time_range) and keep the base events of [start, end] with a where on first_seen_at after the match — otherwise the conversions after `end` are cut off and the last days read low. To count from ANY base event rather than the first, use rows: \"one_per_match\" and count the distinct entities that converted. Entities whose window has not elapsed yet drag the rate down: end the base range a window before the data ends. Group by a cohort (date_trunc of first_seen_at) or a joined attribute by adding it to the aggregate's group_by.",
-      "hack": "match_recognize over [A, B] per entity + avg_seconds_between(A, B) gives the seconds to the conversion; an aggregate with a conditional count per horizon (where secs <= N) gives every horizon in one pass, and a div the rate. Change the events, or put a condition on a step, for any A→B question (level_started → level_completed within 86400). This is not a semantic metric: MetricFlow's conversion metric filters only the base side and scans the conversion side whole."
+      "notes": "One row per entity from its FIRST base event (rows: one_per_partition), secs_to_back = seconds from it to the next conversion event (NULL when there is none), so the window is measured from the event itself, in seconds — 172800 is 48 hours, not 'two calendar days'. A RETURN is a later session, not the one the launch opens: the conversion step carries a condition (here session_number >= 2) — without it nearly everyone 'returns' minutes after the launch. Every filter (an app, an environment) is a where before the match and holds for BOTH steps. For a window of dates: scan [start, end + the window] (the pipeline's time_range) and keep the base events of [start, end] with a where on first_seen_at after the match — otherwise the conversions after `end` are cut off and the last days read low. To count from ANY base event rather than the first, use rows: \"one_per_match\" and count the distinct entities that converted. Entities whose window has not elapsed yet drag the rate down: end the base range a window before the data ends. Group by a cohort (date_trunc of first_seen_at) or a joined attribute by adding it to the aggregate's group_by.",
+      "hack": "match_recognize over [A, B] per entity gives the time of each step (at_A, at_B), and a compute date_diff of the two the seconds to the conversion; an aggregate with a conditional count per horizon (where secs <= N) gives every horizon in one pass, and a div the rate. Change the events, or put a condition on a step, for any A→B question (level_started → level_completed within 86400). This is not a semantic metric: MetricFlow's conversion metric filters only the base side and scans the conversion side whole."
     },
     {
       "id": "cohort_grid_two_time_axes",
@@ -5345,7 +5353,7 @@
                   ],
                   "where": [
                     {
-                      "property": "element_of_event_data",
+                      "column": "element_of_event_data",
                       "op": "eq",
                       "value": "step_1"
                     }
@@ -5358,7 +5366,7 @@
                   ],
                   "where": [
                     {
-                      "property": "element_of_event_data",
+                      "column": "element_of_event_data",
                       "op": "eq",
                       "value": "step_2"
                     }
@@ -5371,7 +5379,7 @@
                   ],
                   "where": [
                     {
-                      "property": "element_of_event_data",
+                      "column": "element_of_event_data",
                       "op": "eq",
                       "value": "step_3"
                     }
@@ -5383,7 +5391,7 @@
         }
       },
       "notes": "One row per entity (or per match with rows: \"one_per_match\"), with a reached flag and a timestamp per step, so the drop-off between steps and the time spent in each are both readable from the same result. A step is an event plus a payload condition — the same definition the metric funnel uses, here with the ORDER enforced. It scans ONE source: a sequence cannot span two facts.",
-      "hack": "mode: \"ordered\" + partition_by the entity + a step list = the row-pattern scan. Count the flags for a funnel that respects order, diff the timestamps for time-between-steps, add an avg_seconds_between metric and a where on its secs_<name> column for \"inside N minutes\". Extrapolate: any ordered path (onboarding, checkout, an ad funnel, a support escalation)."
+      "hack": "mode: \"ordered\" + partition_by the entity + a step list = the row-pattern scan. Count the reached_<step> flags for a funnel that respects order; a compute date_diff of two at_<step> columns gives the time between steps, and a where on it \"inside N minutes\". Extrapolate: any ordered path (onboarding, checkout, an ad funnel, a support escalation)."
     },
     {
       "required_events": [],

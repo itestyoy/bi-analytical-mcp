@@ -284,7 +284,7 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
       mode: 'ordered',
       steps: [
         { name: 'launch', event_name: ['first_launch'] },
-        { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+        { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
       ] },
     // after the funnel the per-event time is gone; `first_seen_at` (the funnel's first event) is
     // the instant to attribute the player by.

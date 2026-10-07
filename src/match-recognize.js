@@ -1,26 +1,24 @@
 // Sequenced-funnel / path engine: we generate the query OURSELVES from the
-// declared ordered steps + metrics (MetricFlow can't express row-pattern
-// sequences). Target = BigQuery MATCH_RECOGNIZE (per docs); a DuckDB
-// equivalent is also emitted purely so funnel NUMBERS can be asserted on data.
+// declared ordered steps (MetricFlow can't express row-pattern sequences).
+// Target = BigQuery MATCH_RECOGNIZE (per docs); a DuckDB equivalent is also
+// emitted purely so funnel NUMBERS can be asserted on data.
 //
-// Output is a SINGLE ROW of the declared metrics (same shape for both dialects).
-// Supported metric types (computed over each user's matched sequence):
-//   reached            { step }                  distinct users reaching a step
-//   completed          {}                          users reaching the last step
-//   conversion         { from, to }                reached(to) / reached(from)
-//   avg_seconds_between{ from, to }                avg seconds between two steps
-//   agg_at_step        { agg, property, step }     sum/average/min/max of a property at a step
+// One row per partition (or per match) with, for every step, whether it was
+// reached (reached_<step>) and when (at_<step>), and each `capture` — the value
+// a column held at a step. What is computed FROM them — a conversion, the time
+// between two steps — is the stages after it (compute date_diff, aggregate).
+// A step is an event + conditions in the one condition grammar every where takes.
 //
-// BigQuery specifics honored: JSON_VALUE, one-row-per-match (no ONE ROW PER
-// MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
-// any non-step row, CLASSIFIER/aggregates in MEASURES.
+// BigQuery specifics honored: one-row-per-match (no ONE ROW PER MATCH / AFTER
+// MATCH SKIP keywords), nested PATTERN enforces step order, GAP = any non-step
+// row, CLASSIFIER/aggregates in MEASURES.
 
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
-import { OPS, comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
-import { anyOfOr, strEnum, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from './schema-kit.js';
-import { sqlAgg } from './pipeline/sql.js';
+import { comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
+import { anyOfOr, strEnum } from './schema-kit.js';
+import { condPred, CONDITIONS } from './pipeline/sql.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -39,38 +37,22 @@ const factEventNames = (catalog, source, names) => (names || []).map((n) => cata
 
 export function stepPredicate(catalog, step, dialect, prepCols = new Map(), source) {
   const m = catalog.getModel(source);
-  const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
+  const d = getDialect(dialect);
   // Unqualified, for the same reason buildPrefilter is: the predicate applies to the single
-  // relation the pattern scans, and a payload property is rendered by catalog.propertyExpr, which
-  // carries no qualifier — so half of a qualified predicate would silently stay unqualified.
-  const evCol = m.event_name.column;
+  // relation the pattern scans.
+  const evCol = d.quoteIdent(m.event_name.column);
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
-  const props = conditionsSql(step.where, (c) => {
-    // a prepare-derived column is referenced directly (it's a real column now)
-    if (prepCols.has(c.property)) {
-      return comparePred(c.property, c.op, c.value, prepCols.get(c.property)?.type || null);
-    }
-    const p = (m.properties || {})[c.property];
-    if (!p) {
-      // a physical model column (envelope/dimension column like bundle_id) → compare it
-      // directly, so a step filter can use model columns without a separate where stage.
-      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
-      throw new Error(`unknown event property or column in step: ${c.property}`);
-    }
-    if (catalog.isComplexEventProp(c.property, source)) {
-      throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (compute / unnest), not directly`);
-    }
-    // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
-    // payload column — unqualified, like every other clause here
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
-  });
+  // the one condition grammar of every where: a column of the rows here, or an expression (an event
+  // property read with event_property) — compared in its own type
+  const props = conditionsSql(step.where, (c) => condPred(d, prepCols, c, { windows: false, catalog, source }));
   return [ev, ...props].join(' AND ');
 }
 
 /**
- * WHERE clause applied to the events BEFORE the row-pattern match, to slice the
- * data scanned (speed). Returns '' when no `filter` is declared. Narrows the
+ * A DRAFT KEPT FROM AN EARLIER VERSION may carry `filter` — a where applied to the events BEFORE the
+ * row-pattern match; it is built as it was (this version writes a where stage before the funnel).
+ * Returns '' when no `filter` is declared. Narrows the
  * population only — it does NOT redefine steps. Event-level filters: time window,
  * event_name allowlist, event_data property conditions. To filter by USER
  * attributes, add a `join` (users) + `where` stage before match_recognize.
@@ -117,12 +99,12 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
   want(m.event_name?.column, 'the event name');
   want(spec.order_by || m.time?.column, 'the sequence order');
-  const tested = [];
-  for (const list of [spec.filter?.where, ...(spec.steps || []).map((st) => st.where)]) eachCondition(list, (c) => tested.push(c));
-  for (const c of tested) {
-    if (availableCols.has(c.property)) continue; // already a real column here (upstream stage / prepare)
+  // (a step's own conditions name columns of the rows here, checked as they are written; a kept
+  // draft's prefilter names properties, whose backing column must be here)
+  eachCondition(spec.filter?.where, (c) => {
+    if (availableCols.has(c.property)) return;
     if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
-  }
+  });
   const missing = [...need].filter(([col]) => !availableCols.has(col));
   if (!missing.length) return;
   throw new Error(
@@ -194,24 +176,27 @@ function resolve(catalog, spec, dialect, availableCols, source) {
     return s.idx;
   };
 
-  const metrics = (spec.metrics && spec.metrics.length)
-    ? spec.metrics
-    : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
-
-  // Real columns referenceable in step `where` / agg_at_step (vs event_data properties): the
-  // columns the stages before this one produced.
+  // Real columns referenceable in a step's conditions and a capture: the columns the stages before
+  // this one produced.
   const prepCols = availableCols;
 
-  // resolve metrics + collect which property values must be captured per step
-  const propCaptures = []; // { id, idx, property, type, isColumn }
-  const resolved = metrics.map((mt) => {
-    const out = { name: mt.name, type: mt.type };
-    if (mt.type === 'reached') out.idx = stepIdx(mt.step);
-    else if (mt.type === 'completed') out.idx = steps.length;
-    else if (mt.type === 'conversion') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
-    else if (mt.type === 'avg_seconds_between') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
+  // each capture: the value a column holds at a step, as a column of its own
+  const propCaptures = []; // { id, idx, column, type, isColumn }
+  const names = new Set(steps.flatMap((s) => [`reached_${s.name}`, `at_${s.name}`]));
+  for (const c of spec.capture || []) {
+    if (names.has(c.name)) throw new Error(`capture '${c.name}': the funnel already outputs a column of that name — name it otherwise`);
+    names.add(c.name);
+    if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage (event_property)`);
+    propCaptures.push({ id: c.name, idx: stepIdx(c.step), property: c.column, type: prepCols.get(c.column)?.type || 'unknown', isColumn: true });
+  }
+  // A DRAFT KEPT FROM AN EARLIER VERSION may carry `metrics`: it builds the columns it built then —
+  // secs_<name> for a time between two steps, pv_<name> for a property's value at a step (the other
+  // metric types added no column of their own)
+  const metrics = [];
+  for (const mt of spec.metrics || []) {
+    if (mt.type === 'avg_seconds_between') metrics.push({ name: mt.name, type: mt.type, from: stepIdx(mt.from), to: stepIdx(mt.to) });
     else if (mt.type === 'agg_at_step') {
-      out.idx = stepIdx(mt.step); out.agg = sqlAgg(mt.agg || 'sum').toUpperCase();
+      const idx = stepIdx(mt.step);
       let type; const isColumn = prepCols.has(mt.property);
       if (isColumn) type = prepCols.get(mt.property).type;
       else {
@@ -220,17 +205,15 @@ function resolve(catalog, spec, dialect, availableCols, source) {
         if (catalog.isComplexEventProp(mt.property, source)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; compute a scalar from it in a prepare stage first`);
         type = p.type;
       }
-      out.capId = `pv_${mt.name}`;
-      propCaptures.push({ id: out.capId, idx: out.idx, property: mt.property, type, isColumn });
-    } else throw new Error(`unknown sequence metric type: ${mt.type}`);
-    return out;
-  });
+      propCaptures.push({ id: `pv_${mt.name}`, idx, property: mt.property, type, isColumn });
+    } else if (!['reached', 'completed', 'conversion'].includes(mt.type)) throw new Error(`unknown sequence metric type: ${mt.type}`);
+  }
 
   const stepPreds = (d) => spec.steps.map((s) => stepPredicate(catalog, s, d, prepCols, source));
   const rows = spec.rows || 'one_per_partition';
   // the source's day partition column, when the rows here still carry it: the prefilter's window bounds it too
   const partitionCol = m.partition_column && m.partition_column !== timeCol && (!availableCols || availableCols.has(m.partition_column)) ? m.partition_column : null;
-  return { m, fact: source, partCols, timeCol, partitionCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
+  return { m, fact: source, partCols, timeCol, partitionCol, mode, betweenSteps, steps, rows, metrics, propCaptures, prepCols, stepPreds };
 }
 
 // gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
@@ -273,7 +256,7 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
   const preds = r.stepPreds(dialectName);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, dialectName, { type: c.type })}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? d.quoteIdent(c.property) : catalog.propertyExpr(r.fact, c.property, dialectName, { type: c.type })}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
@@ -313,6 +296,7 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(j.t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
+    ...r.steps.map((s) => `j.t${s.idx} AS at_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`j.t${m.from}`, `j.t${m.to}`)} AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `j.${c.id}`),
   ];
@@ -334,7 +318,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${d.quoteIdent(c.property)}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);
@@ -346,12 +330,14 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(t${s.idx} IS NOT NULL) AS reached_${s.name}`),
+    ...r.steps.map((s) => `t${s.idx} AS at_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`t${m.from}`, `t${m.to}`)} AS secs_${m.name}`),
   ];
   const outCols = [
     ...r.partCols,
     'first_seen_at', 'furthest_step_name', 'completed',
     ...r.steps.map((s) => `reached_${s.name}`),
+    ...r.steps.map((s) => `at_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => c.id),
   ];
@@ -382,6 +368,7 @@ function matchOutputColumns(r) {
   const cols = new Map([['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
   for (const c of r.partCols) cols.set(c, { type: 'string' });
   for (const s of r.steps) cols.set(`reached_${s.name}`, { type: 'boolean' });
+  for (const s of r.steps) cols.set(`at_${s.name}`, { type: 'time' });
   for (const m of r.metrics.filter((x) => x.type === 'avg_seconds_between')) cols.set(`secs_${m.name}`, { type: 'numeric' });
   for (const c of r.propCaptures) cols.set(c.id, { type: c.type });
   return cols;
@@ -392,14 +379,28 @@ function relationshipNames(catalog) {
   return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
 }
 
-/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
+/** JSON-Schema for the match_recognize stage: ordered steps, and the values to capture at them. */
 function matchRecognizeSchema(catalog) {
-  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: OPS }, value: { ...CONSTANT, description: 'The constant (an array for in/not_in, [low, high] for between, a string for the text operators, none for is_null/is_not_null).' } } };
-  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: conditionList(stepWhere, 'Extra conditions narrowing the step: all of them hold (an item may be { or: [...] }).') } };
-  const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'average', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
+  const step = {
+    type: 'object', additionalProperties: false, required: ['event_name'],
+    description: 'One funnel step: an event, and optionally conditions the row must meet.',
+    properties: {
+      name: { type: 'string', pattern: NAME, description: 'Step name — its output columns are reached_<name> and at_<name> (default s1, s2, …).' },
+      event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, of the pipeline\'s own source (a funnel scans one table).' },
+      where: CONDITIONS('Conditions the step\'s row meets as well — on columns here, or an event property ({ left: { fn: "event_property", property }, op, value }).'),
+    },
+  };
+  const capture = {
+    type: 'object', additionalProperties: false, required: ['name', 'step', 'column'],
+    properties: {
+      name: { type: 'string', pattern: NAME, description: 'The output column it becomes.' },
+      step: { type: 'string', pattern: NAME, description: 'The step whose row it is read from.' },
+      column: { type: 'string', pattern: NAME, description: 'A column here (an event property is read into one by a compute stage before).' },
+    },
+  };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). OUTPUT COLUMNS (all available to downstream join/where/aggregate stages): the `partition_by` column(s) are CARRIED THROUGH unchanged (e.g. the user key, so you can join dim_users after); plus first_seen_at, furthest_step_name, completed, one reached_<step> boolean per step, secs_<metric> for each avg_seconds_between metric, and one column per captured property. For funnels, conversion, and time-between-steps.',
+    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (aggregate count_if-style measures with `where`, compute date_diff). Filter the events before it with a where stage.',
     properties: {
       stage: { enum: ['match_recognize'] },
       partition_by: {
@@ -407,37 +408,29 @@ function matchRecognizeSchema(catalog) {
         // A catalog whose sources declare no relationship offers only the column form — the
         // { entity } branch is left out rather than carrying an empty vocabulary.
         items: anyOfOr([
-          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream compute/join added).' },
+          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available here.' },
           ...(relationshipNames(catalog).length ? [{
             title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
-            description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
-            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ request: { model } }) lists them).') },
+            description: 'A relationship the source declares — its key column is used.',
+            properties: { entity: strEnum(relationshipNames(catalog)) },
           }] : []),
         ]),
         minItems: 1,
-        description: 'What defines ONE independent sequence — per the task. Either column(s) available at this point, e.g. ["level_id"], or a declared relationship as { entity: "<name>" } whose key column is used, or a composite like [{ entity: "user" }, "level_id"] for one sequence per user-per-level. Defaults to the relationship this source declares toward the users model.',
+        description: 'What one sequence is: column(s), a declared relationship { entity }, or both (one sequence per user per level). Default: the source\'s relationship toward the users model.',
       },
-      order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
-      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
-      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition (default) = one row per partition (e.g. per user), from its FIRST match — counts "players"; one_per_match = one row per occurrence of the sequence start (the first step) — counts "situations" (a partition can yield several; matches may overlap — a new match can start on the next row).' },
-      between_steps: { enum: ['any', 'gap'], description: 'What may appear BETWEEN consecutive steps (ordered mode). "any" = the NEXT LATER occurrence of the next step — repeats of step events in between do NOT break the match (e.g. a second currency_outcome before the reward still matches). "gap" = only NON-step events may appear between steps; a repeat of any step event breaks it. Omit for the per-dialect historical default (set it explicitly for identical results across BigQuery and the local engine).' },
-      filter: {
-        type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
-        properties: {
-          time_range: { type: 'object', additionalProperties: false, properties: { start: { ...ISO_TIME }, end: { ...ISO_TIME }, timezone: { ...TIMEZONE, description: 'IANA timezone the bounds are wall-clock times in (default: as stored).' } }, description: 'Event-time window (ISO); a date-only end includes that whole day.' },
-          event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
-          where: conditionList(stepWhere, 'event_data/column conditions across the scan: all of them hold (an item may be { or: [...] }).'),
-        },
-      },
-      steps: { type: 'array', minItems: 2, items: step, description: 'The ordered funnel steps (>= 2).' },
-      metrics: { type: 'array', items: metric, description: 'Metrics per match; defaults to a reached flag per step.' },
+      order_by: { type: 'string', pattern: NAME, description: 'The sequence axis (default: the event time).' },
+      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = other events may occur between steps; strict = each step is the immediately next event.' },
+      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition = the first match per partition (counts players); one_per_match = one row per occurrence of the first step (counts situations; matches may overlap).' },
+      between_steps: { enum: ['any', 'gap'], description: '"any" = the next later occurrence of the next step, repeats in between allowed; "gap" = only non-step events between steps. Set it for identical results on every warehouse.' },
+      steps: { type: 'array', minItems: 2, items: step, description: 'The ordered steps (≥ 2).' },
+      capture: { type: 'array', items: capture, description: 'Values to carry out of the match: the value a column holds at a step.' },
     },
   };
 }
 
 registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
-  recommend: () => ["The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country)."],
+  recommend: () => ["The funnel columns (reached_<step>, at_<step>, completed, furthest_step_name, the captures) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country)."],
   build: ({ d, catalog, cols, source }, p) => {
     const spec = p;
     const r = resolve(catalog, spec, d.name, cols, source);

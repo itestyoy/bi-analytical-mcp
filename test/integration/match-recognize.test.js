@@ -38,9 +38,9 @@ async function pipe(stages, name) {
 // The canonical 4-step activation funnel as a single match_recognize stage.
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
 
@@ -97,24 +97,10 @@ test('time_range with a timezone keeps the events on the other UTC day of a part
   assert.deepEqual(byDay, { '2026-01-01': 9, '2026-01-02': 30 });
 });
 
-// A funnel's own window follows the pipeline's one rule for a window: a timezone's wall-clock day, the
-// whole of a date-only end — the players it keeps are those of the same window given to the pipeline.
-test('a funnel filter window in a timezone keeps the players of the same window on the pipeline', opts, async (t) => {
-  if (skip(t)) return;
-  const tr = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
-  const own = await pipe([matchActivation({ filter: { time_range: tr }, steps: activationSteps.slice(0, 2) })]);
-  const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: tr, stages: [matchActivation({ steps: activationSteps.slice(0, 2) })] } });
-  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
-  ctxId = out.context_id;
-  const rows = (o) => o.rows.map((r) => JSON.stringify(r)).sort();
-  assert.ok(own.rows.length > 0, 'the window keeps players');
-  assert.deepEqual(rows(own), rows(out));
-});
-
 // The partition bound is a pruning aid, never a filter of its own: whatever bounds the time axis —
-// a where the caller wrote, a funnel's own window — the rows are exactly the ones the source gives
+// a where the caller wrote, before a funnel or not — the rows are exactly the ones the source gives
 // when it declares no partition column at all.
-test('a where on the time axis and a funnel window read the same rows with the partition column declared as without it', opts, async (t) => {
+test('a where on the time axis, alone or before a funnel, reads the same rows with the partition column declared as without it', opts, async (t) => {
   if (skip(t)) return;
   const model = engine.catalog.getModel('events');
   const declared = model.partition_column;
@@ -124,7 +110,7 @@ test('a where on the time axis and a funnel window read the same rows with the p
     { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
     { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
   ];
-  const funnel = [matchActivation({ filter: { time_range: { start: '2026-01-01 09:30:00', end: '2026-01-02' } }, steps: activationSteps.slice(0, 2) })];
+  const funnel = [{ stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 09:30:00' }, { column: 'device_time', op: 'lt', value: '2026-01-03' }] }, matchActivation({ steps: activationSteps.slice(0, 2) })];
   const pruned = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
   let plain;
   try {
@@ -133,7 +119,7 @@ test('a where on the time axis and a funnel window read the same rows with the p
   } finally { model.partition_column = declared; }
   assert.deepEqual(pruned, plain);
   assert.equal(pruned.byDay.length, 2, 'the window spans two UTC days');
-  assert.ok(pruned.funnel.length > 0, 'the funnel window keeps players');
+  assert.ok(pruned.funnel.length > 0, 'the window before the funnel keeps players');
   // the bound is real: read without the late days, the 5 events of 01-01 10:00 that arrived three
   // days late (filed under 01-04) fall outside the partitions the window reads
   const late = model.partition_late_days;
@@ -233,23 +219,16 @@ test('build_pipeline_model add_step rejects an invalid stage without mutating th
   assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
 });
 
-// #4a: a model column (session_number — a physical column, NOT an event_data property)
-// is usable directly inside match_recognize's filter.where AND a step.where, with no
-// separate where stage. We prove the filter.where path equals the separate-where workaround.
-test('match_recognize accepts model columns in filter/step where (no separate where needed)', opts, async (t) => {
+// #4a: a column of the rows (session_number — a physical column, not a payload property) is
+// usable in a step's where, the grammar of every where.
+test('match_recognize takes a column in a step condition', opts, async (t) => {
   if (skip(t)) return;
-  const cond = { property: 'session_number', op: 'gte', value: 1 };
-  const colCond = { column: 'session_number', op: 'gte', value: 1 };
-  // model-column condition INSIDE match_recognize.filter.where …
-  const viaFilter = await pipe([matchActivation({ filter: { where: [cond] } })]);
-  // … equals expressing it as a separate leading where stage (the old workaround).
-  const viaWhere = await pipe([{ stage: 'where', conditions: [colCond] }, matchActivation()]);
-  assert.equal(reached(viaFilter.rows, 'launch'), reached(viaWhere.rows, 'launch'));
-  assert.equal(reached(viaFilter.rows, 'tut3'), reached(viaWhere.rows, 'tut3'));
-  // and a model column works in a STEP's where too (builds + runs; pipe asserts build.ok).
+  const colCond = { column: 'session_number', op: 'gte', value: 2 };
   const base = await pipe([matchActivation()]);
-  const stepFiltered = await pipe([matchActivation({ steps: [{ ...activationSteps[0], where: [cond] }, ...activationSteps.slice(1)] })]);
-  assert.ok(reached(stepFiltered.rows, 'launch') <= reached(base.rows, 'launch'), 'step model-column filter applied (≤ baseline)');
+  const stepFiltered = await pipe([matchActivation({ steps: [{ ...activationSteps[0], where: [colCond] }, ...activationSteps.slice(1)] })]);
+  const truth = (await wh.query("select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'first_launch' and session_number >= 2")).rows[0];
+  assert.equal(reached(stepFiltered.rows, 'launch'), num(truth.n));
+  assert.ok(reached(stepFiltered.rows, 'launch') <= reached(base.rows, 'launch'));
 });
 
 // #5: rows option — one_per_partition (players) vs one_per_match (situations).
@@ -346,25 +325,25 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   assert.ok(reached(out.rows, 'tut1') <= 4);
 });
 
-test('funnel prefilter time_range (wide) keeps all data: 12 / 8', opts, async (t) => {
+test('a wide where before the funnel keeps all data: 12 / 8', opts, async (t) => {
   if (skip(t)) return;
-  const out = await pipe([matchActivation({ filter: { time_range: { start: '2000-01-01', end: '2100-01-01' } }, steps: activationSteps.slice(0, 2) })]);
+  const out = await pipe([{ stage: 'where', conditions: [{ column: 'device_time', op: 'between', value: ['2000-01-01', '2100-01-01'] }] }, matchActivation({ steps: activationSteps.slice(0, 2) })]);
   assert.equal(reached(out.rows, 'launch'), 12);
   assert.equal(reached(out.rows, 'tut1'), 8);
 });
 
-test('funnel + prepare compute (array_length): agg_at_step avg(n_words) at level 1 = 3', opts, async (t) => {
+test('funnel + prepare compute (array_length): n_words captured at level 1 averages 3', opts, async (t) => {
   if (skip(t)) return;
-  // A compute stage runs BEFORE match_recognize; its column is referenceable in
-  // step where / agg_at_step.
+  // A compute stage runs BEFORE match_recognize; its column is referenceable in a step's
+  // where and in a capture.
   const out = await pipe([
     { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
-      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
-      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'average', property: 'n_words', step: 'lvl1' }] },
+      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
+      capture: [{ name: 'words', step: 'lvl1', column: 'n_words' }] },
   ]);
   assert.equal(reached(out.rows, 'lvl1'), 12);
-  const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.pv_avg_words));
+  const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.words));
   const avg = vals.reduce((s, v) => s + v, 0) / vals.length;
   assert.ok(Math.abs(avg - 3) < 1e-9, `avg n_words=${avg}`);
 });
@@ -374,7 +353,7 @@ test('funnel + prepare compute (array_contains): step filtered by derived boolea
   const out = await pipe([
     { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
-      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ property: 'has_cat', op: 'eq', value: true }] }] },
+      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ column: 'has_cat', op: 'eq', value: true }] }] },
   ]);
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'
 });

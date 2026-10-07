@@ -3,8 +3,10 @@
 // version's spelling here, once, before a stage is built — the renames from the ONE table that also
 // tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
 // avg → average, as → name), a computed column written as { op, …fields } to its expression, a derive
-// stage to the compute stage reading the same event property, and a python function body written as
-// nested arrays of lines (a nested array the block under the line before it) to its text.
+// stage to the compute stage reading the same event property, a funnel step's condition on `property`
+// to the condition every where writes, and a python function body written as nested arrays of lines
+// (a nested array the block under the line before it) to its text. A funnel's `filter` and `metrics`
+// have no spelling here: such a kept draft builds as it did (src/match-recognize.js).
 // A step in the current spelling passes through unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
@@ -73,8 +75,22 @@ function deriveExpr(st) {
   return null;
 }
 
-/** The stage in this version's spelling (the same object when it already is). */
-export function currentSpelling(st) {
+/** A list of conditions with each one rewritten by `f` — inside { or } and { and } groups too. */
+function mapConditions(list, f) {
+  return (list || []).map((c) => (c && c.or ? { or: mapConditions(c.or, f) } : c && c.and ? { and: mapConditions(c.and, f) } : f(c)));
+}
+
+/** A funnel step's condition on `property` — a column of the rows when there is one, else the event
+ *  property it named — as the condition every where writes, resolved as the earlier build resolved it. */
+function stepCondition(c, cols) {
+  if (!c || c.property === undefined) return c;
+  const { property, ...rest } = c;
+  return cols?.has(property) ? { column: property, ...rest } : { left: { fn: 'event_property', property }, ...rest };
+}
+
+/** The stage in this version's spelling (the same object when it already is). `ctx.cols` — the
+ *  columns before it — settles what an earlier spelling left to the build to resolve. */
+export function currentSpelling(st, ctx = {}) {
   if (!st || typeof st !== 'object') return st;
   if (st.stage === 'derive') {
     const expr = deriveExpr(st);
@@ -88,6 +104,9 @@ export function currentSpelling(st) {
   if (st.stage === 'pivot' && st.fn !== undefined) return respelled(st, ['fn']);
   if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return { ...st, attrs: st.attrs.map((a) => (a && typeof a === 'object' ? respelled(a, ['as']) : a)) };
   if (st.stage === 'unnest' && st.as !== undefined) return respelled(st, ['as']);
+  if (st.stage === 'match_recognize' && (st.steps || []).some((x) => JSON.stringify(x?.where || []).includes('"property"'))) {
+    return { ...st, steps: st.steps.map((x) => (x?.where ? { ...x, where: mapConditions(x.where, (c) => stepCondition(c, ctx.cols)) } : x)) };
+  }
   if (st.stage === 'python' && (st.functions || []).some((f) => Array.isArray(f?.body))) return { ...st, functions: st.functions.map((f) => (Array.isArray(f?.body) ? { ...f, body: bodyText(f.body).join('\n') } : f)) };
   return st;
 }

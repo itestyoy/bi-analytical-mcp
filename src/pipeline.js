@@ -117,7 +117,7 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   for (const stored of stages) {
     // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
     // its stage too, which an earlier version may have named otherwise
-    const st = currentSpelling(stored);
+    const st = currentSpelling(stored, { cols });
     const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never

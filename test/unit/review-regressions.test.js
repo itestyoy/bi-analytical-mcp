@@ -174,10 +174,9 @@ models:
     stage: 'match_recognize',
     partition_by: [{ entity: 'user' }],
     steps: [
-      { name: 's1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
-      { name: 's2', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_2' }] },
+      { name: 's1', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_1' }] },
+      { name: 's2', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_2' }] },
     ],
-    metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
   };
   const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));

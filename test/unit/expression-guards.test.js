@@ -79,6 +79,10 @@ test('a step stored by an earlier version is built in this version\'s spelling â
     [{ stage: 'derive', name: 'n', op: 'array_length', source: 'words_collected' }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', property: 'words_collected' } }],
     [{ stage: 'derive', name: 'c', op: 'contains', source: 'words_collected', value: 'cat' }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }],
   ]) assert.deepEqual(withPayload([earlier]), withPayload([today]), earlier.op);
+  // a funnel kept with a step condition on `property`, a `filter` and `metrics` builds the columns it built
+  const kept = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where: [{ property: 'session_number', op: 'gte', value: 1 }] }], filter: { event_name: ['first_launch', 'tutorial'] }, metrics: [{ name: 'gap', type: 'avg_seconds_between', from: 'a', to: 'b' }, { name: 'n', type: 'agg_at_step', step: 'b', property: 'session_number' }] };
+  const out = withPayload([kept]);
+  for (const c of ['reached_b:boolean', 'at_b:time', 'secs_gap:numeric', 'pv_n:numeric']) assert.ok(out.includes(c), `${c} in ${out.join(', ')}`);
 });
 
 test('a value picked from several is typed as its arguments are, and compared in that type', () => {

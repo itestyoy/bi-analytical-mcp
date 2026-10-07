@@ -18,6 +18,13 @@ import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js'
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
 import { settle } from '../helpers/settle.js';
 
+/** An import form's `package` field — folded into $defs when the two forms share it, so followed there. */
+const packageField = (root, py) => {
+  const node = py.properties.imports.items.anyOf[0].properties.package;
+  return node.$ref ? { ...root.$defs[node.$ref.split('/').pop()], ...node } : node;
+};
+const packageEnum = (root, py) => packageField(root, py).enum;
+
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
 // hidden. Force it on for these tests, exactly as an operator does when the submission is set per
@@ -121,9 +128,10 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = stageBranch(e.contracts['build_pipeline_model.pipeline'], 'python', 'stages');
-  assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
-  assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
+  const root = e.contracts['build_pipeline_model.pipeline'];
+  const items = stageBranch(root, 'python', 'stages');
+  assert.deepEqual(packageEnum(root, items), [...importAllowlist().keys()], 'the enum IS the allowlist');
+  assert.ok(packageEnum(root, items).includes('sklearn'));
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
   // a bare string is no longer an import declaration
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
@@ -194,8 +202,8 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
-  const pkgEnum = () => stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
-    .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
+  const pkgEnum = () => packageEnum(e.contracts['build_pipeline_model.pipeline'], stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
+    .find((x) => x.properties?.stage?.enum?.[0] === 'python'));
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
   const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
@@ -351,7 +359,7 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice/);
-    assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
+    assert.ok(packageEnum(e.schemas.build_pipeline_model, py).includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
 
@@ -389,7 +397,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
     assert.match(py.description, /Rules for bigframes/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
     assert.match(py.properties.functions.items.properties.body.description, /converts itself with df\.to_pandas\(\)/);
-    assert.match(py.properties.imports.items.properties.package.description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
+    assert.match(packageField(e.schemas.build_pipeline_model, py).description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
     assert.ok(!py.description.includes('PYSPARK') && !py.description.includes('SNOWPARK'), 'only this platform\'s rules');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });

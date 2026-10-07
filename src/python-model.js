@@ -22,6 +22,7 @@ import { registerStage } from './pipeline.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
 import { inertText } from './jinja-inert.js';
+import { form } from './schema-kit.js';
 
 // the gate script is a non-JS runtime asset — see src/runtime-assets.js for why it is resolved there
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -362,6 +363,10 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   // in a python stage at all, what this runtime's frame raises and the worked forms per move come
   // from ONE place, `profile.guide` (the compact rendering of the cookbook, recipe index
   // included), interpolated below. Restating any of it here is how the two start to disagree.
+  const importPath = {
+    package: { enum: [...allow.keys()], description: `The ONLY packages a function may use. Shipped by the runtime: ${preinstalled.join(', ')}.${installed.length ? ` Installed by dbt on demand: ${installed.join(', ')}.` : ''}${profile.packagesNote ? ` ${profile.packagesNote}` : ''} The operator extends this list with MCP_PYTHON_PACKAGES.` },
+    submodule: { type: 'string', pattern: MOD, description: 'Optional dotted path inside the package: { package: "sklearn", submodule: "cluster" } → import sklearn.cluster.' },
+  };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
     description: `PYTHON stage — a dbt PYTHON model of its own, allowed anywhere in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read its table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as this warehouse returns it: ${profile.native}. Write the functions against that API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ request: { recipe: "${profile.mlReference}" } })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The last step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 40,000 characters of body each, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
@@ -370,15 +375,11 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
       imports: {
         type: 'array', maxItems: 20,
-        items: {
-          type: 'object', additionalProperties: false, required: ['package'],
-          properties: {
-            package: { enum: [...allow.keys()], description: `The ONLY packages a function may use. Shipped by the runtime: ${preinstalled.join(', ')}.${installed.length ? ` Installed by dbt on demand: ${installed.join(', ')}.` : ''}${profile.packagesNote ? ` ${profile.packagesNote}` : ''} The operator extends this list with MCP_PYTHON_PACKAGES.` },
-            submodule: { type: 'string', pattern: MOD, description: 'Optional dotted path inside the package: { package: "sklearn", submodule: "cluster" } → import sklearn.cluster.' },
-            as: { type: 'string', pattern: ID, description: 'Alias: import … as <as>. Not together with `names`.' },
-            names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'from … import <names>. Not together with `as`.' },
-          },
-        },
+        // two closed forms — `import a.b as c` and `from a.b import x, y` — so an alias beside names cannot be written
+        items: { anyOf: [
+          form({ title: 'import package[.submodule] [as alias]', required: ['package'], properties: { ...importPath, as: { type: 'string', pattern: ID, description: 'Alias: import … as <as>.' } } }),
+          form({ title: 'from package[.submodule] import names', required: ['package', 'names'], properties: { ...importPath, names: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: ID }, description: 'from … import <names>.' } } }),
+        ] },
         description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist; the platform\'s own DataFrame package is in it). Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
       },
       functions: {

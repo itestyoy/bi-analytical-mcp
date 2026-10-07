@@ -67,7 +67,7 @@ export class MemoryTool {
     if (hiddenCount > 0) out.memory_more = hiddenCount;
     if (hiddenCount > 0 || truncatedAny) {
       (out.next_actions ||= []).push({
-        call: `memory({ request: { action: 'list', target: ${JSON.stringify(drillTarget)} } })`,
+        call: `semantic_index({ request: { notes: true, about: ${JSON.stringify(drillTarget)} } })`,
         why: hiddenCount > 0
           ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
@@ -105,21 +105,8 @@ export class MemoryTool {
         linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
         aliases, links,
-        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ request: { search } }) (and memory({ request: { action: "search" } })) — including the aliases/words above.',
+        next: 'Saved. This finding now surfaces in semantic_index on the linked entities, via semantic_index({ request: { search } }) — including the aliases/words above — and in semantic_index({ request: { notes: true } }).',
       };
-    }
-
-    if (action === 'list') {
-      if (input.target !== undefined) {
-        const r = this.resolveTarget(input.target);
-        return { target: r.addressable, kind: r.kind, notes: this.store.forTargets([targetKey(r.target)]).map(memoryView) };
-      }
-      return { total: this.store.counts().notes, notes: this.store.all({ limit: input.limit ?? 50 }).map(memoryView) };
-    }
-
-    if (action === 'search') {
-      const r = await this.store.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false });
-      return { query: input.query, semantic: r.semantic, ...(r.semantic_error ? { semantic_error: r.semantic_error } : {}), notes: r.notes.map(memoryView) };
     }
 
     if (action === 'forget') {
@@ -129,12 +116,21 @@ export class MemoryTool {
 
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
+
+  /** The notes, newest first — every one, or those about one entity: semantic_index({ request: { notes: true, about? } }). */
+  list({ limit = 50, about } = {}) {
+    if (about !== undefined) {
+      const r = this.resolveTarget(about);
+      return { about: r.addressable, kind: r.kind, notes: this.store.forTargets([targetKey(r.target)]).slice(0, limit).map(memoryView) };
+    }
+    return { total: this.store.counts().notes, notes: this.store.all({ limit }).map(memoryView) };
+  }
 }
 
 
 /**
  * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is
- * the same thing as the tool speaks it back — what you hand to memory({ request: { action: 'list', target } })
+ * the same thing as the tool speaks it back
  * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
  */
 function memoryTarget(kind, source, name = null) {

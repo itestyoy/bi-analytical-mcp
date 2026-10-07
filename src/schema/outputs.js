@@ -75,8 +75,8 @@ export const OUTPUTS = {
     note: str,
   }),
 
-  // record: saved + id; list / search: notes; forget: forgotten + id
-  memory: shape('The note saved (record: `saved`, `id`), the notes found (list, search: `notes`), or the note removed (forget: `forgotten`, `id`).', [], {
+  // record: saved + id; forget: forgotten + id
+  memory: shape('The note saved (record: `saved`, `id`), or the note removed (forget: `forgotten`, `id`).', [], {
     saved: bool,
     forgotten: bool,
     id: str,
@@ -86,10 +86,6 @@ export const OUTPUTS = {
     aliases: list(str),
     links: list(),
     next: str,
-    total: int,
-    query: str,
-    semantic: bool,
-    notes: list(obj),
   }),
 
   // a page of failures, or one in full

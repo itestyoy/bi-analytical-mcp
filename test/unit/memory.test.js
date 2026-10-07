@@ -41,6 +41,10 @@ function stubEmbedder() {
 }
 
 // The memory tool is advertised and dispatches its four actions.
+// The memory is READ through semantic_index: { search } (its memory_matches) and { notes }.
+const searchNotes = async (e, query, fuzzy) => { const r = await e.semantic_index({ search: query, ...(fuzzy === false ? { fuzzy: false } : {}) }); return { notes: r.memory_matches || [], semantic: r.memory_semantic ?? false, semantic_error: r.memory_semantic_error }; };
+const listNotes = (e, about) => e.semantic_index({ notes: true, ...(about ? { about } : {}) });
+
 test('memory tool is advertised with a real description', () => {
   const defs = buildToolDefs(engine());
   const m = defs.find((d) => d.name === 'memory');
@@ -111,32 +115,32 @@ test('memory linked to a users attribute surfaces on its property view', async (
   assert.ok(attr.memory?.some((m) => m.id === rec.id), 'attribute view carries the note');
 });
 
-// list (all + by target), search, forget — the lifecycle round-trips the stored data.
-test('memory list / search / forget round-trip', async () => {
+// read (all + about one entity, search) through semantic_index, forget through memory — the lifecycle round-trips the stored data.
+test('memory notes / search / forget round-trip', async () => {
   const e = engine();
   const a = await e.memory({ action: 'record', note: 'finding A about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }], aliases: ['ad format'] });
   const b = await e.memory({ action: 'record', note: 'finding B about country', targets: [{ source: 'users', name: 'country' }] });
 
-  const all = await e.memory({ action: 'list' });
+  const all = await listNotes(e);
   assert.equal(all.total, 2);
   assert.ok(all.notes.some((n) => n.id === a.id) && all.notes.some((n) => n.id === b.id));
 
-  const byTarget = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
+  const byTarget = await listNotes(e, { source: 'events', name: 'ad_type_of_event_data' });
   assert.equal(byTarget.notes.length, 1);
   assert.equal(byTarget.notes[0].id, a.id);
 
-  const found = await e.memory({ action: 'search', query: 'country' });
+  const found = await searchNotes(e, 'country');
   assert.equal(found.semantic, false, 'no embedder → fuzzy-only mode reported');
   assert.ok(found.notes.some((n) => n.id === b.id));
   // search also matches an alias.
-  assert.ok((await e.memory({ action: 'search', query: 'ad format' })).notes.some((n) => n.id === a.id));
+  assert.ok((await searchNotes(e, 'ad format')).notes.some((n) => n.id === a.id));
   // FUZZY: a mistyped query still finds the note (typo-tolerant via the Fuse subsystem).
-  assert.ok((await e.memory({ action: 'search', query: 'cuntry' })).notes.some((n) => n.id === b.id), 'typo "cuntry" still finds the country note');
+  assert.ok((await searchNotes(e, 'cuntry')).notes.some((n) => n.id === b.id), 'typo "cuntry" still finds the country note');
   // fuzzy:false makes the SAME typo miss (exact-substring only).
-  assert.ok(!(await e.memory({ action: 'search', query: 'cuntry', fuzzy: false })).notes.some((n) => n.id === b.id), 'fuzzy:false → typo no longer matches');
+  assert.ok(!(await searchNotes(e, 'cuntry', false)).notes.some((n) => n.id === b.id), 'fuzzy:false → typo no longer matches');
 
   assert.equal((await e.memory({ action: 'forget', id: a.id })).forgotten, true);
-  assert.equal((await e.memory({ action: 'list' })).total, 1, 'forgotten note is gone');
+  assert.equal((await listNotes(e)).total, 1, 'forgotten note is gone');
 });
 
 // The original business `question` is stored, echoed, surfaced — and embedded with the note.
@@ -147,7 +151,7 @@ test('memory records the business question and surfaces it', async () => {
   // it travels onto the views + listings.
   const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(prop.memory.find((m) => m.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
-  assert.equal((await e.memory({ action: 'list' })).notes.find((n) => n.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
+  assert.equal((await listNotes(e)).notes.find((n) => n.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
 });
 
 // SEMANTIC search (embedder configured): a query finds a same-meaning note with NO shared
@@ -158,7 +162,7 @@ test('semantic memory search finds a same-meaning note with no shared words', as
   const mon = await sem.memory({ action: 'record', note: 'use ad_type to split the metric', question: 'which ad format makes the most money?', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
   const tut = await sem.memory({ action: 'record', note: 'the onboarding tutorial has 5 steps', targets: [{ source: 'events', name: 'tutorial' }] });
 
-  const s = await sem.memory({ action: 'search', query: 'revenue problems' });
+  const s = await searchNotes(sem, 'revenue problems');
   assert.equal(s.semantic, true, 'embedder configured → semantic mode reported');
   assert.ok(s.notes.some((n) => n.id === mon.id), 'semantic search surfaces the note via its embedded business question (no shared words in the note text)');
   assert.ok(!s.notes.some((n) => n.id === tut.id), 'the unrelated tutorial note is below the similarity floor');
@@ -166,7 +170,7 @@ test('semantic memory search finds a same-meaning note with no shared words', as
   // Without an embedder, the same query (no lexical overlap) does NOT find it.
   const fuzzy = engine();
   await fuzzy.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
-  const f = await fuzzy.memory({ action: 'search', query: 'revenue problems' });
+  const f = await searchNotes(fuzzy, 'revenue problems');
   assert.ok(!f.notes.some((n) => n.note.includes('IAP purchases')), 'fuzzy-only misses the same-meaning note (proves semantic added the recall)');
 });
 
@@ -181,11 +185,11 @@ test('search finds a multi-word phrase from the note body (interleaved words)', 
     aliases: ['memory test'],
   });
   // the query words appear in the note but with "в record" interleaved — not a substring.
-  const r = await e.memory({ action: 'search', query: 'одиночный target невалиден' });
+  const r = await searchNotes(e, 'одиночный target невалиден');
   assert.equal(r.semantic, false, 'no embedder → semantic honestly reported false');
   assert.ok(r.notes.some((n) => n.id === rec.id), 'token-coverage finds the phrase from the note body');
   // a query whose words are NOT (mostly) in any note still returns nothing.
-  assert.equal((await e.memory({ action: 'search', query: 'completely unrelated zzz' })).notes.length, 0);
+  assert.equal((await searchNotes(e, 'completely unrelated zzz')).notes.length, 0);
 });
 
 // Honest semantic flag (test report #B): a configured-but-FAILING embedder must report
@@ -194,7 +198,7 @@ test('a failing embedder reports semantic:false + semantic_error (not a silent t
   const boom = { model: 'boom', embed: async () => { throw new Error('provider unreachable'); } };
   const e = engineWith(boom);
   const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: [{ source: 'users', name: 'country' }], aliases: ['geo'] });
-  const r = await e.memory({ action: 'search', query: 'geo' });
+  const r = await searchNotes(e, 'geo');
   assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
   assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');
   assert.ok(r.notes.some((n) => n.id === rec.id), 'lexical search still works despite the embedder failure');
@@ -209,8 +213,8 @@ test('a failing embedder reports semantic:false + semantic_error (not a silent t
 test('bilingual aliases bridge languages on the lexical path', async () => {
   const e = engine(); // no embedder → lexical only
   const rec = await e.memory({ action: 'record', note: 'media_source=organic means non-paid installs', aliases: ['organic traffic', 'органический трафик', 'органика'] });
-  assert.ok((await e.memory({ action: 'search', query: 'органика' })).notes.some((n) => n.id === rec.id), 'RU query finds the EN note via its RU alias');
-  assert.ok((await e.memory({ action: 'search', query: 'organic traffic' })).notes.some((n) => n.id === rec.id), 'EN query still finds it');
+  assert.ok((await searchNotes(e, 'органика')).notes.some((n) => n.id === rec.id), 'RU query finds the EN note via its RU alias');
+  assert.ok((await searchNotes(e, 'organic traffic')).notes.some((n) => n.id === rec.id), 'EN query still finds it');
 });
 
 // Overview reports the stored count once anything is saved.
@@ -227,10 +231,9 @@ test('memory strict input validation', async () => {
   const e = engine();
   await assert.rejects(() => e.memory({ action: 'record' }), /invalid input/, 'record needs a note');
   await assert.rejects(() => e.memory({ action: 'record', note: 'x', query: 'y' }), /invalid input/, 'record forbids query');
-  await assert.rejects(() => e.memory({ action: 'search' }), /invalid input/, 'search needs a query');
+  await assert.rejects(() => e.memory({ action: 'search', query: 'x' }), /invalid input/, 'reading is semantic_index\'s: memory has no search');
   await assert.rejects(() => e.memory({ action: 'forget' }), /invalid input/, 'forget needs an id');
-  await assert.rejects(() => e.memory({ action: 'list', note: 'x' }), /invalid input/, 'list forbids note');
-  await assert.rejects(() => e.memory({ action: 'list', fuzzy: true }), /invalid input/, 'fuzzy is search-only');
+  await assert.rejects(() => e.memory({ action: 'list' }), /invalid input/, 'reading is semantic_index\'s: memory has no list');
   await assert.rejects(() => e.memory({ action: 'bogus' }), /invalid input/, 'unknown action rejected by enum');
   await assert.rejects(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
 });
@@ -271,10 +274,10 @@ test('a memory target is stored structurally and read back without decoding', as
     { kind: 'term', term: 'совсем свободная фраза' },
   ], 'each target keeps its parts');
   // what comes back out is the same parts — on the note, and as the thing you can pass back in
-  const listed = await e.memory({ action: 'list' });
+  const listed = await listNotes(e);
   assert.deepEqual(listed.notes.find((n) => n.id === rec.id).about, stored);
-  const again = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
-  assert.deepEqual(again.target, { source: 'events', name: 'ad_type_of_event_data' });
+  const again = await listNotes(e, { source: 'events', name: 'ad_type_of_event_data' });
+  assert.deepEqual(again.about, { source: 'events', name: 'ad_type_of_event_data' });
   assert.ok(again.notes.some((n) => n.id === rec.id));
 });
 

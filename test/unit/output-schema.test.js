@@ -24,8 +24,6 @@ async function calls(engine) {
     ['context', { action: 'list' }],
     ['context', { action: 'describe', context_id: draft.draft_id }],
     ['memory', { action: 'record', note: 'a finding', targets: [{ term: 'ad format' }] }],
-    ['memory', { action: 'list' }],
-    ['memory', { action: 'search', query: 'finding' }],
     ['explore_errors', {}],
     ['build_semantic_model', { name: 'outputs_sem', semantic_models: [{ from: engine.catalog.facts[0], measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] }],
     ['delete_context', { context_id: draft.draft_id }],
@@ -46,7 +44,7 @@ test('every answer of a tool that declares its shape carries it as structuredCon
     seen.add(name);
   }
   // the forget of the note recorded above
-  const id = (await engine.memory({ action: 'list' })).notes[0].id;
+  const id = (await engine.semantic_index({ notes: true })).notes[0].id;
   const forgot = (await runTool(engine, 'memory', { request: { action: 'forget', id } })).result;
   assert.ok(ajv.compile(engine.tools.get('memory').output)(forgot.structuredContent));
   // one in full from the error log: a refused call is kept, then read by its id

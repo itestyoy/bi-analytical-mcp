@@ -3,6 +3,7 @@
 
 import { RESEARCH_DOMAINS } from '../research-guides.js';
 import { strEnum } from '../schema-kit.js';
+import { memoryTargetSchema } from './memory.js';
 
 /**
  * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
@@ -69,13 +70,17 @@ export function semanticIndexSchema(catalog) {
       fuzzy: field.fuzzy,
       limit: paging.limit,
     }),
+    view('{ notes }', 'VIEW { notes }: the analyst memory — the saved findings, newest first, each with its id (memory forgets one by id): every one, or those `about` one entity. A finding also surfaces on the views of what it is about, and in { search }.', ['notes'], {
+      notes: { const: true },
+      about: memoryTargetSchema(catalog, 'Only the notes about this one entity — { source, name }, { source }, or { term }.'),
+      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many notes (default 50).' },
+    }),
     view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
       status: field.status,
       recent: paging.recent,
     }),
     view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
       run: field.run,
-      recent: paging.recent,
     }),
     ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
       bundle: field.bundle,

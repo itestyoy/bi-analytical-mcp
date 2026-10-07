@@ -119,6 +119,7 @@ export const semanticIndexMethods = {
     if (input.property) return this._indexProperty(input);
     if (input.bundle !== undefined && input.bundle !== false) return this._indexBundle(input);
     if (input.search) return this._indexSearch(input);
+    if (input.notes) return this.notes.list({ limit: input.limit ?? 50, about: input.about });
 
     return this._indexOverview(input);
   },
@@ -546,6 +547,7 @@ export const semanticIndexMethods = {
     if (memHits.length) res.memory_matches = memHits;
     // Surface a semantic-search failure here too (don't hide it just because this path
     // also returns catalog hits) — otherwise a broken embedder looks like "no memory".
+    if (memHits.length || mem.semantic_error) res.memory_semantic = mem.semantic;
     if (mem.semantic_error) res.memory_semantic_error = mem.semantic_error;
     // Recall caveat: indexed VALUES are the top-N by frequency per property, so a search
     // for a RARE value can miss even though the value exists. Say so when nothing matched,
@@ -654,7 +656,7 @@ export const semanticIndexMethods = {
     groupable_attributes: c.reachableAttributes(),
     // Saved analyst findings (the memory tool): how many are stored + how to reach them.
     // They also surface inline on the entity views/{ search } they were linked to.
-    ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views and via { search }; list/manage with the memory tool.' } } : {}),
+    ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views, via { search } and { notes: true }; the memory tool records and forgets them.' } } : {}),
     // How attributes are REACHED: addressed by the model that carries them in metric queries
     // (the semantic layer resolves the declared key and joins), or an explicit join stage in
     // pipelines. The fact holds only per-event columns — user/experiment attributes

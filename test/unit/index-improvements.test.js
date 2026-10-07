@@ -68,7 +68,7 @@ test('memoryDbPath persists findings across engine instances', async () => {
   e1.close();
 
   const e2 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
-  const list = await e2.memory({ action: 'list' });
+  const list = await e2.semantic_index({ notes: true });
   assert.ok(list.notes.some((n) => n.id === rec.id && n.note === 'durable finding about ads'), 'finding persisted in the dedicated memory store');
   e2.close();
 });

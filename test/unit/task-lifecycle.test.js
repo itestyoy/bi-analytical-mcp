@@ -178,6 +178,20 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'sum', name: 's' }] } }), /column/);
 });
 
+test('a draft starts with its first steps, and adding steps may start its build in the same call', async () => {
+  const runner = heldBuilds();
+  const e = engine(runner);
+  const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', n: 5 }] });
+  assert.equal(e.ctxs.get(started.draft_id).state.draft.stages.length, 2, 'both steps are on the draft');
+  // a step that cannot compile leaves the draft started, with none of the batch
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }), /started, with no steps/);
+  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: started.draft_id, stages: [{ stage: 'limit', n: 3 }], materialize: true });
+  assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
+  await until(() => runner.held.length);
+  runner.held.shift()();
+  assert.equal((await taskResult(e, added.materialize.task_id)).status, 'done');
+});
+
 test('a protocol task refuses a read of the other side at once, instead of waiting out the build', async () => {
   const { runToCompletion } = await import('../../src/mcp-surface.js');
   const runner = heldBuilds();

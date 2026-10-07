@@ -22,8 +22,10 @@ export const pipelineDraftMethods = {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ request: { action: 'start', name } })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
-    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps);
-    if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns, input.include_steps);
+    // adding steps may build right after them: one call where two would go one after the other
+    const thenBuild = async (added) => (input.materialize ? { ...added, materialize: await this._draftMaterialize(ctx, draft) } : added);
+    if (input.action === 'add_step') return thenBuild(await this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps));
+    if (input.action === 'add_steps') return thenBuild(await this._draftAddSteps(ctx, draft, input.stages, input.include_columns, input.include_steps));
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
@@ -254,7 +256,15 @@ export const pipelineDraftMethods = {
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
-    return resp;
+    if (!input.stages?.length) return resp;
+    // a draft may start with its first chunk of steps: start + add_steps in one call
+    try {
+      const added = await this._draftAddSteps(ctx, ctx.state.draft, input.stages, input.include_columns, input.include_steps);
+      const { draft_id: _id, action: _a, ...rest } = added;
+      return { ...resp, ...rest, next: added.next || resp.next };
+    } catch (e) {
+      throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (draft_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: 'stages' });
+    }
   },
 
   async _draftAddStep(ctx, draft, stage, includeColumns = false, includeSteps = false) {

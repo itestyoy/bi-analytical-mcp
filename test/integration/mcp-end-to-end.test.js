@@ -309,11 +309,7 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
   if (skip(t)) return;
   const ctx = await mcpTask({
     name: 'e2e_mix',
-    semantic_models: [
-      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
-      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
-      { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count' }] }],
     metrics: [
       { name: 'cost', type: 'simple', measure: { name: 'cost' } },
       { name: 'evts', type: 'simple', measure: { name: 'evts' } },
@@ -433,9 +429,8 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const grown = await call('build_semantic_model', {
     action: 'update',
     context_id: ctx,
-    semantic_model: 'acquisition',
-    add_measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }],
-    add_metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }] }],
+    metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
   });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 

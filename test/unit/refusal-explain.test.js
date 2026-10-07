@@ -16,10 +16,10 @@ const refusal = (e, tool, input) => { try { e._validate(tool, input); return nul
 
 test('a mode left unnamed is refused as the mode the fields belong to, with the modes there are', () => {
   const e = engine();
-  const update = refusal(e, 'build_semantic_model', { context_id: 'abc123', semantic_model: 'events', remove_metrics: ['x'] });
+  const update = refusal(e, 'build_semantic_model', { context_id: 'abc123', remove: { metrics: ['x'] } });
   assert.match(update, /update the task in a context/);
   assert.match(update, /missing required property 'action'/);
-  assert.doesNotMatch(update, /unexpected property 'semantic_model'/);
+  assert.doesNotMatch(update, /unexpected property 'remove'/);
   const del = refusal(e, 'delete_context', { context_id: 'abc123', semantic_model: 'events' });
   assert.match(del, /one semantic model's additions/);
   assert.match(del, /missing required property 'what'/);

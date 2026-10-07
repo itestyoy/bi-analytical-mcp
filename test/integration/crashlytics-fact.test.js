@@ -52,17 +52,7 @@ before(async () => {
   const crash = await engine.build_semantic_model({
     name: 'stab',
     use_base_models: ['users'],
-    semantic_models: [
-      {
-        from: 'crashlytics',
-        event_scope: { event_name: ['fatal_crash'] },
-        dimensions: [{ source: 'event_property', property: 'issue_title_of_event_data' }],
-        measures: [
-          { name: 'fatal', agg: 'count', field: '*' },
-          { name: 'crashed_users', agg: 'count_distinct', field: 'player_id_of_internal' },
-        ],
-      },
-    ],
+    semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', agg: 'count' }, { name: 'crashed_users', agg: 'count_distinct', field: 'player_id_of_internal' }], where: [{ field: 'event_name', op: 'eq', value: 'fatal_crash' }] }],
     metrics: [
       { name: 'fatal', type: 'simple', measure: { name: 'fatal' } },
       { name: 'crashed_users', type: 'simple', measure: { name: 'crashed_users' } },
@@ -75,10 +65,7 @@ before(async () => {
   // fact, each scoped to its own vocabulary.
   const both = await engine.build_semantic_model({
     name: 'mix',
-    semantic_models: [
-      { from: 'events', event_scope: { event_name: ['first_launch'] }, measures: [{ name: 'launches', agg: 'count', field: '*' }] },
-      { from: 'crashlytics', event_scope: { event_name: ['fatal_crash'] }, measures: [{ name: 'fatal', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'launches', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { from: 'crashlytics', measures: [{ name: 'fatal', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'fatal_crash' }] }],
     metrics: [
       { name: 'launches', type: 'simple', measure: { name: 'launches' } },
       { name: 'fatal', type: 'simple', measure: { name: 'fatal' } },
@@ -135,15 +122,7 @@ test('a payload property scoped to ONE event: anr rows 3, seconds 26, avg 26/3',
   const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'anr',
-    semantic_models: [{
-      from: 'crashlytics',
-      event_scope: { event_name: ['anr'] },
-      measures: [
-        { name: 'events', agg: 'count', field: '*' },
-        { name: 'secs', agg: 'sum', field: 'anr_duration_of_event_data' },
-        { name: 'avg_secs', agg: 'average', field: 'anr_duration_of_event_data' },
-      ],
-    }],
+    semantic_models: [{ from: 'crashlytics', measures: [{ name: 'events', agg: 'count' }, { name: 'secs', agg: 'sum', field: 'anr_duration_of_event_data' }, { name: 'avg_secs', agg: 'average', field: 'anr_duration_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'anr' }] }],
     metrics: [
       { name: 'events', type: 'simple', measure: { name: 'events' } },
       { name: 'secs', type: 'simple', measure: { name: 'secs' } },
@@ -165,11 +144,7 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
   const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'ver',
-    semantic_models: [{
-      from: 'crashlytics',
-      dimensions: [{ source: 'model_column', column: 'app_version' }],
-      measures: [{ name: 'reports', agg: 'count', field: '*' }],
-    }],
+    semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'app_version' }], measures: [{ name: 'reports', agg: 'count' }] }],
     metrics: [{ name: 'reports', type: 'simple', measure: { name: 'reports' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -357,7 +332,7 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'gov',
-    semantic_models: [{ from: 'crashlytics', dimensions: [{ source: 'model_column', column: 'app_version' }] }],
+    semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'app_version' }] }],
     metrics: [{ name: 'anr_seconds', type: 'simple', measure: { name: 'anr_seconds' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));

@@ -53,13 +53,7 @@ before(async () => {
   // Scenario B: a level funnel keyed by level_id (event + property value)
   await create({
     name: 'lvlf',
-    semantic_models: [{ from: 'events', measures: [
-      { name: 'l1', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] },
-      { name: 'l2', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 2 }] },
-      { name: 'l3', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 3 }] },
-      { name: 'u1', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] },
-      { name: 'u2', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 2 }] },
-    ] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'l1', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'l2', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }, { name: 'l3', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 3 }] }, { name: 'u1', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'u2', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }] }],
     metrics: [
       { name: 's1', type: 'simple', measure: { name: 'l1' } },
       { name: 's2', type: 'simple', measure: { name: 'l2' } },

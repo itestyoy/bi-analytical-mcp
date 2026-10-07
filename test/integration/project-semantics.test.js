@@ -239,12 +239,12 @@ test('what the project does not define is refused in the call, naming what it do
   // an entity only the acquisition model carries is not one the events metric reaches
   await refused({ metrics: ['project_events_total'], group_by: [{ entity: 'media_source' }] }, /not one project_events_total can be grouped by.*player/);
   // the project's contexts are read as they are: not built on, not dropped
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.delete_context({ context_id: ACQ })), /nothing to drop/);
   // …not even as a dry run of a declaration over it
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, dry_run: true, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, dry_run: true, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
   // …by any tool that would write into it
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, semantic_model: 'events', remove_metrics: ['project_cost'] })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, remove: { metrics: ['project_cost'] } })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', draft_id: ACQ })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);
   // and it still serves its layer after them
@@ -254,7 +254,7 @@ test('what the project does not define is refused in the call, naming what it do
 test('a task of one\'s own over the same project is built and queried as before, next to the project\'s layer', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
-    name: 'own', semantic_models: [{ from: 'events', event_scope: { event_name: ['tutorial'] }, measures: [{ name: 'tutorials', agg: 'count', field: '*' }] }],
+    name: 'own', semantic_models: [{ from: 'events', measures: [{ name: 'tutorials', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }] }],
     metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -499,7 +499,7 @@ test('a context a task built is previewed and validated the same way: its defini
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'pvw', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['tutorial'] }, measures: [{ name: 'tutorials', agg: 'count', field: '*' }, { name: 'players', agg: 'count_distinct', field: 'player_id_of_internal' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'tutorials', agg: 'count' }, { name: 'players', agg: 'count_distinct', field: 'player_id_of_internal' }], where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }] }],
     metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }, { name: 'players', type: 'simple', measure: { name: 'players' } }, { name: 'per_player', type: 'ratio', numerator: { name: 'tutorials' }, denominator: { name: 'players' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -525,7 +525,7 @@ test('a context a task built is previewed and validated the same way: its defini
   assert.equal((await preview({ context_id: out.context_id })).status.building, undefined);
   await taskResult(engine.raw || engine, running.task_id);
   // a build that is running is
-  const rebuilding = await (engine.raw || engine).build_semantic_model({ action: 'update', context_id: out.context_id, semantic_model: 'events', add_measures: [{ name: 'more', agg: 'count', field: '*' }], add_metrics: [{ name: 'more', type: 'simple', measure: { name: 'more' } }] });
+  const rebuilding = await (engine.raw || engine).build_semantic_model({ action: 'update', context_id: out.context_id, semantic_models: [{ from: 'events', measures: [{ name: 'more', agg: 'count' }] }], metrics: [{ name: 'more', type: 'simple', measure: { name: 'more' } }] });
   assert.equal((await preview({ context_id: out.context_id })).status.building, true);
   await taskResult(engine.raw || engine, rebuilding.task_id);
   const started = await preview({ context_id: out.context_id, validate: true, time_range: WINDOW });
@@ -622,7 +622,7 @@ test('a query is addressed by what and where, and nothing handed back spells Met
   // the project's layer: by a dimension, a time dimension at a grain, and a where on a dimension
   const project = { context_id: EV, metrics: ['project_events_total'], group_by: [{ semantic_model: [EV], dimension: 'event_name' }, { semantic_model: [EV], dimension: 'event_at', grain: 'week' }], where: [{ field: { semantic_model: [EV], dimension: 'event_name' }, op: 'neq', value: 'x' }], time_range: WINDOW };
   // a task's context: an attribute through a join, metric_time, and a where through the join
-  const built = await engine.build_semantic_model({ name: 'spelled', use_base_models: ['users'], semantic_models: [{ from: 'events', event_scope: { event_name: ['tutorial'] }, measures: [{ name: 'tutorials', agg: 'count', field: '*' }] }], metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }] });
+  const built = await engine.build_semantic_model({ name: 'spelled', use_base_models: ['users'], semantic_models: [{ from: 'events', measures: [{ name: 'tutorials', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }] }], metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }] });
   const task = { context_id: built.context_id, metrics: ['spelled_tutorials'], group_by: [{ model: 'users', attribute: 'country' }, { time: 'metric_time', grain: 'week' }], where: [{ field: { model: 'users', attribute: 'platform' }, op: 'eq', value: 'ios' }], time_range: WINDOW };
   // a metric over the project's own `__` column, by a dimension of its model
   const ownColumn = { context_id: ACQ, metrics: ['project_impressions'], group_by: [{ semantic_model: [ACQ], dimension: 'campaign' }], time_range: WINDOW };

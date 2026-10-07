@@ -63,13 +63,7 @@ before(async () => {
   // to user attributes and a local product_id event-property dimension.
   await create({
     name: 'mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
-      dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
-      measures: [
-        { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
-        { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' },
-        { name: 'purchases', agg: 'count', field: '*' },
-      ] }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
     metrics: [
       { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
       { name: 'payers', type: 'simple', measure: { name: 'payers' } },
@@ -82,11 +76,7 @@ before(async () => {
   // Level progression: starts / completes per level_id (event-property dim).
   await create({
     name: 'prog',
-    semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level_id_of_event_data' }],
-      measures: [
-        { name: 'starts', agg: 'count', field: '*', event_name: ['level_started'] },
-        { name: 'completes', agg: 'count', field: '*', event_name: ['level_completed'] },
-      ] }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'level_id_of_event_data' }], measures: [{ name: 'starts', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }] }, { name: 'completes', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }] }],
     metrics: [
       { name: 'starts', type: 'simple', measure: { name: 'starts' } },
       { name: 'completes', type: 'simple', measure: { name: 'completes' } },
@@ -97,10 +87,7 @@ before(async () => {
   // Visitors and buyers as governed counts (the conversion itself is a pipeline, below).
   await create({
     name: 'conv', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [
-      { name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
-      { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['iap_purchase_completed'] },
-    ] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
     metrics: [
       { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
       { name: 'buyers', type: 'simple', measure: { name: 'buyers' } },
@@ -111,10 +98,7 @@ before(async () => {
   // in the warm backend --where.
   await create({
     name: 'beh',
-    semantic_models: [{ from: 'events', measures: [
-      { name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
-      { name: 'purch', agg: 'sum_boolean', event_name: ['iap_purchase_completed'] },
-    ] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'purch', agg: 'sum_boolean', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
     metrics: [
       { name: 'active', type: 'simple', measure: { name: 'active' } },
       { name: 'purch', type: 'simple', measure: { name: 'purch' } },
@@ -231,7 +215,7 @@ test('a metric window on a partitioned source: the numbers of the rows, the same
   if (skip(t)) return;
   const decl = (name) => ({
     name, use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count' }] }],
     metrics: [{ name: 'events', type: 'simple', measure: { name: 'events' } }],
   });
   const window = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };

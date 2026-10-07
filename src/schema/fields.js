@@ -6,6 +6,7 @@
 import { MEASURE_AGGS, GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
+import { measureSchema } from '../pipeline/sql.js';
 import { OPS } from '../conditions.js';
 import { CONTEXT_ID } from '../context-manager.js';
 
@@ -22,179 +23,80 @@ export const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s
 // Reusable property-description strings (kept consistent across tools).
 export const D = {
   context_id: 'ID of the isolated execution context to operate in. Omit on create to start a NEW, isolated context; pass an existing id to extend or query that same context. Each context is fully isolated, so parallel tasks never collide.',
-  measure_name: 'Unique measure name within the task (lowercase snake_case). Referenced by metrics; the final queryable name is prefixed with the task, e.g. task_<name>.',
-  agg: 'Aggregation applied to `field` to form the measure: count (rows), count_distinct (unique values of an entity key — required for conversion/funnel user counts), sum, average, median, min, max, percentile (needs `percentile`), sum_boolean (counts rows where a boolean/condition holds).',
-  percentile: 'Percentile in (0,1), e.g. 0.95 for p95. Required when agg=percentile.',
   label: 'Human-readable label shown in BI tools / metadata. Defaults to the name when omitted.',
-  event_name: 'Event scope for THIS measure: only rows whose event_name is in this list are aggregated. This is how a funnel/conversion step is pinned to a specific event. Overrides the semantic model\'s event_scope.',
-  where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
 };
 
-export function whereItemSchema(catalog, modelKey) {
-  return {
-    type: 'object', additionalProperties: false, required: ['property', 'op'],
-    description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
+// A SEMANTIC MODEL'S FIELDS — what a declaration names on its source: its columns, and on an events
+// source its scalar payload properties (the catalog reads either where it is stored) and the amounts
+// the schema marks aggregatable. One word for all of them, `field`, in a measure, a dimension and a
+// condition alike.
+
+/** The fields a condition of a semantic model compares: its columns and scalar properties. */
+const conditionFields = (catalog, modelKey) => [...new Set([...catalog.modelColumns(modelKey).map((c) => c.name), ...(catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : [])])].sort();
+
+/** A semantic model's conditions — the one condition grammar, its subject a `field` of the model. */
+function fieldConditions(catalog, modelKey, description) {
+  const fields = conditionFields(catalog, modelKey);
+  const leaf = {
+    type: 'object', additionalProperties: false, required: ['field', 'op'],
     properties: {
-      property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); scope the measure to those event_name(s) or it reads NULL.`),
-      op: { enum: OPS, description: 'Comparison operator.' },
-      value: { ...CONSTANT, description: 'Literal value(s) to compare against: a scalar; an array for in/not_in, [low, high] for between; a string for the text operators; none for is_null/is_not_null.' },
+      field: strEnum(fields),
+      op: { enum: OPS },
+      value: { ...CONSTANT, description: 'An array for in/not_in, [low, high] for between, none for is_null/is_not_null.' },
     },
   };
+  return conditionList(leaf, description);
 }
 
-/** A measure's conditions, in the one condition grammar: all hold, an item may be { or: [...] }. */
-export const measureWhere = (leaf) => conditionList(leaf, D.where_measure);
+/** What a measure may aggregate on a model: an entity key, any column, a scalar property, a declared amount. */
+const measureFields = (catalog, modelKey) => [...new Set([
+  ...catalog.entityKeyColumns(modelKey),
+  ...catalog.modelColumns(modelKey).map((c) => c.name),
+  ...(catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : []),
+  ...catalog.aggregatableFields(modelKey).map((a) => a.name),
+])].sort();
 
-export function measureFieldSchema(catalog, modelKey) {
-  const opts = [{ enum: ['*'], title: 'rows' }];
-  const keys = catalog.entityKeyColumns(modelKey);
-  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  if (catalog.isFact(modelKey)) {
-    const props = catalog.scalarEventProps(modelKey);
-    if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  }
-  // Amounts the schema marks aggregatable on this model. They carry NO aggregation of their
-  // own — pick the function that answers the question in `agg`.
-  const amounts = catalog.aggregatableFields(modelKey).map((a) => a.name);
-  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
-  // the kinds may share a name (a key column that is also an amount): any of them it is, the field is the same
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), an event_data property, or an AMOUNT the schema marks aggregatable on this source. An amount fixes no function — choose the one the question needs in `agg` (sum / average / max / median / percentile / …). A STRING field that holds numbers needs "cast":"numeric" to sum/average it.', anyOf: opts };
-}
-
-export function dimensionItemSchema(catalog, modelKey) {
-  const branches = [];
-  const cols = catalog.modelDimensionColumns(modelKey);
-  if (cols.length) {
-    branches.push({
-      title: 'model_column',
-      type: 'object',
-      additionalProperties: false,
-      required: ['source', 'column'],
-      description: 'A dimension taken directly from a physical column of the model.',
-      properties: {
-        source: { enum: ['model_column'], description: 'Use a physical table column as the dimension.' },
-        column: { type: 'string', enum: cols, description: 'Physical column name to expose as a dimension.' },
-        as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'Whether to treat the column as a categorical attribute or a time dimension (enables time grains).' },
-        grain: { enum: catalog.timeGranularities(), description: 'Time granularity when as_type=time (day/week/month/quarter/year).' },
-        label: { type: 'string', description: D.label },
-      },
-    });
-  }
-  if (catalog.isFact(modelKey)) {
-    branches.push({
-      title: 'event_property',
-      type: 'object',
-      additionalProperties: false,
-      required: ['source', 'property'],
-      description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
-      properties: {
-        source: { enum: ['event_property'], description: 'Take the dimension from an event_data property.' },
-        property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ request: { source: '${modelKey}', event } })); NULL on others.`),
-        as_type: { enum: ['categorical'], default: 'categorical', description: 'event_data dimensions are always categorical.' },
-        label: { type: 'string', description: D.label },
-      },
-    });
-  }
-  // A model with no groupable column and no payload has NO dimension to add: the field is left
-  // out of its branch rather than offered as a choice with no options.
-  return anyOfOr(branches, { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.' });
-}
-
-// Generic (model-agnostic) item schemas for `update`, where the target model is
-// already fixed by `semantic_model`. Field names are still catalog-constrained;
-// exact model/field coupling is re-checked in compile.
-export function genericMeasureField(catalog) {
-  const opts = [{ enum: ['*'], title: 'rows' }];
-  const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
-  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const props = catalog.scalarEventPropEnum();
-  if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  const amounts = catalog.aggregatableFieldNames();
-  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
-  return { description: 'What to aggregate: "*", an entity-key column, a numeric event_data property, or an AMOUNT the schema marks aggregatable — all of the target semantic model\'s own source. An amount fixes no function; choose it in `agg`.', anyOf: opts };
-}
-
-export function genericWhereItem(catalog) {
-  const item = whereItemSchema(catalog, catalog.facts[0]); // shape only — the enum is replaced below
-  item.properties.property = strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: each property is only populated on specific events; scope the measure to those event_name(s) or it reads NULL.');
-  return item;
-}
-
-export function genericMeasureItem(catalog) {
-  return byAgg('A measure to add to the target semantic model.', {
-    name: { type: 'string', pattern: NAME, description: D.measure_name },
-    field: genericMeasureField(catalog),
-    percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
-    cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
-    label: { type: 'string', description: D.label },
-    event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
-    where: measureWhere(genericWhereItem(catalog)),
+/** A measure of a semantic model: the measure every place aggregates with, over the model's fields. */
+function measureItemSchema(catalog, modelKey) {
+  return measureSchema({
+    aggs: [...MEASURE_AGGS],
+    key: 'field',
+    column: strEnum(measureFields(catalog, modelKey)),
+    pattern: NAME,
+    optional: ['count'],
+    none: ['sum_boolean'],
+    where: fieldConditions(catalog, modelKey, 'The rows this measure folds: all of them hold (with the model\'s own where). A funnel step is a measure whose where names the event and a property value.'),
+    extra: {
+      cast: { enum: ['numeric', 'int', 'float'], description: 'Read the field as a number first — for a text field that holds numbers.' },
+      label: { type: 'string', description: D.label },
+    },
   });
 }
 
-/**
- * A measure, in two forms told apart by its `agg`: a percentile, which takes the quantile it reads
- * (`percentile`, required), and every other aggregation, which takes none.
- */
-function byAgg(description, fields) {
-  const { percentile, ...rest } = fields;
-  const others = [...MEASURE_AGGS].filter((a) => a !== 'percentile');
+/** A dimension of a semantic model: a column (a time one takes a grain) or a scalar property. */
+function dimensionItemSchema(catalog, modelKey) {
+  const fields = [...new Set([...catalog.modelDimensionColumns(modelKey), ...(catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : [])])].sort();
+  if (!fields.length) return undefined;
   return {
-    type: 'object',
-    description,
-    anyOf: [
-      form({ title: 'an aggregation', tag: ['agg', others], tagDescription: D.agg, required: ['name'], properties: rest }),
-      form({ title: 'a percentile', tag: ['agg', 'percentile'], tagDescription: 'percentile: the value at the quantile `percentile` of `field`.', required: ['name', 'percentile'], properties: { ...rest, percentile } }),
-    ],
+    type: 'object', additionalProperties: false, required: ['field'],
+    properties: {
+      field: strEnum(fields),
+      as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'time makes a column a time dimension, read at `grain` (a payload property is always categorical).' },
+      grain: { enum: catalog.timeGranularities() },
+      label: { type: 'string', description: D.label },
+    },
   };
-}
-
-export function genericDimensionItem(catalog) {
-  const cols = [...new Set(catalog.modelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
-  return {
-    type: 'object',
-    description: 'A dimension to add to the target semantic model (a column or an event_data property).',
-    anyOf: [
-      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { enum: ['model_column'], description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { enum: ['event_property'], description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ request: { source, event } })); NULL on others.'), as_type: { enum: ['categorical'], description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
-    ],
-  };
-}
-
-export function measureItemSchema(catalog, modelKey) {
-  return byAgg('A measure: an aggregation over the model, optionally scoped to specific events / property values (the building block of funnel steps and metrics).', {
-    name: { type: 'string', pattern: NAME, description: D.measure_name },
-    field: measureFieldSchema(catalog, modelKey),
-    percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
-    cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
-    label: { type: 'string', description: D.label },
-    ...(catalog.isFact(modelKey)
-      ? {
-          event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
-          where: measureWhere(whereItemSchema(catalog, modelKey)),
-        }
-      : {}),
-  });
 }
 
 export function semanticModelBranch(catalog, modelKey) {
   const dimItem = dimensionItemSchema(catalog, modelKey);
   const props = withoutEmpty({
-    from: { enum: [modelKey], description: `Source model this semantic model is built from ("${modelKey}").` },
-    dimensions: dimItem && { type: 'array', items: dimItem, description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
-    measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
+    from: { const: modelKey },
+    where: fieldConditions(catalog, modelKey, 'Rows every measure of this semantic model folds: all of them hold (e.g. { field: "event_name", op: "in", value: [...] } when the task concerns some events).'),
+    dimensions: dimItem && { type: 'array', items: dimItem },
+    measures: { type: 'array', items: measureItemSchema(catalog, modelKey) },
   });
-  if (catalog.isFact(modelKey)) {
-    props.event_scope = {
-      type: 'object',
-      additionalProperties: false,
-      description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
-      properties: {
-        event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNames(modelKey)), description: 'Events that scope every measure here.' },
-      },
-    };
-  }
-  return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" model.`, properties: props };
+  return { type: 'object', additionalProperties: false, required: ['from'], title: modelKey, properties: props };
 }
 
 export function metricSchema(catalog) {

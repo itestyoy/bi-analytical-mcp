@@ -22,27 +22,31 @@ export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce
 
 export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
-/** The functions that fold NO column or may fold one: a count counts rows without it; a sketch reads one when given. */
-const COLUMN_OPTIONAL = new Set(['count', 'hll_init', 'hll_merge', 'hll_merge_partial']);
+/** The functions for which the column is optional: a count counts rows without it; a sketch reads one when given. */
+const COLUMN_OPTIONAL = ['count', 'hll_init', 'hll_merge', 'hll_merge_partial'];
 
 /**
- * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform:
- * { name, agg, column?, percentile?, where? }, in closed forms told apart by `agg` — the functions
- * that fold a column (column required), those for which it is optional (a count of rows), and the
- * percentile (column and percentile required). `aggs` is what the place can compute; `column` its
- * column schema; `where` the conditions a conditional aggregate folds only the rows of; `pattern`
- * what a produced name may be (a stored table's columns are named by whoever made it).
+ * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform, a
+ * semantic model: { name, agg, <key>?, percentile?, where? }, in closed forms told apart by `agg` —
+ * the functions that fold a column (it is required), those for which it is optional (a count of
+ * rows), those that take none, and the percentile (column and quantile required). `aggs` is what the
+ * place can compute; `key` what it calls what is aggregated (a table's `column`, a source's
+ * `field`) and `column` its schema; `where` the conditions a conditional measure folds the rows of;
+ * `pattern` what a produced name may be; `extra` the place's own optional fields.
  */
-export function measureSchema({ aggs, column, where, description, pattern = NAME }) {
+export function measureSchema({ aggs, column, where, description, pattern = NAME, key = 'column', optional = COLUMN_OPTIONAL, none = [], extra = {} }) {
   const name = { type: 'string', pattern, description: 'The name of the column it produces.' };
-  const needs = aggs.filter((a) => a !== 'percentile' && !COLUMN_OPTIONAL.has(a));
-  const optional = aggs.filter((a) => COLUMN_OPTIONAL.has(a));
+  const needs = aggs.filter((a) => a !== 'percentile' && !optional.includes(a) && !none.includes(a));
+  const opt = aggs.filter((a) => optional.includes(a));
+  const zero = aggs.filter((a) => none.includes(a));
+  const own = Object.fromEntries(Object.entries({ name, where, ...extra }).filter(([, v]) => v !== undefined));
   const forms = [
-    form({ title: `agg: ${needs.join(' | ')}`, tag: ['agg', needs], required: ['name', 'column'], properties: { name, column, where } }),
-    ...(optional.length ? [form({ title: `agg: ${optional.join(' | ')} (column optional)`, tag: ['agg', optional], required: ['name'], properties: { name, column, where } })] : []),
-    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: ['name', 'column', 'percentile'], properties: { name, column, where, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
+    form({ title: `agg: ${needs.join(' | ')}`, tag: ['agg', needs], required: ['name', key], properties: { ...own, [key]: column } }),
+    ...(opt.length ? [form({ title: `agg: ${opt.join(' | ')} (${key} optional)`, tag: ['agg', opt], required: ['name'], properties: { ...own, [key]: column } })] : []),
+    ...(zero.length ? [form({ title: `agg: ${zero.join(' | ')} (no ${key})`, tag: ['agg', zero], required: ['name'], properties: own })] : []),
+    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: ['name', key, 'percentile'], properties: { ...own, [key]: column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
   ];
-  return { type: 'object', description, anyOf: forms };
+  return { type: 'object', ...(description ? { description } : {}), anyOf: forms };
 }
 
 /**
@@ -243,11 +247,11 @@ export function addCol(cols, name, type) {
 
 export function requireCol(cols, name) {
   if (cols.has(name)) return;
-  // '*' is the GOVERNED path's spelling for "the rows themselves" (measures take field: '*').
+  // '*' is SQL's spelling for "the rows themselves"; here every measure counts rows by leaving its column out.
   // A stage counts rows by leaving `column` out entirely, so say that instead of listing every
   // column and leaving the caller to guess what a SQL habit translates to here.
   if (name === '*') {
-    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, agg: 'count' }); `field: '*'` is the governed path's spelling (build_semantic_model measures)");
+    throw new Error("pipeline: '*' is not a column — a measure counts ROWS by leaving `column` out ({ name, agg: 'count' })");
   }
   throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }

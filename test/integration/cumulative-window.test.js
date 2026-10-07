@@ -29,7 +29,7 @@ let wh;
 let engine;
 const TASK = {
   name: 'cum',
-  semantic_models: [{ from: 'events', measures: [{ name: 'events_n', agg: 'count', field: '*' }] }],
+  semantic_models: [{ from: 'events', measures: [{ name: 'events_n', agg: 'count' }] }],
   metrics: [
     { name: 'daily', type: 'simple', measure: { name: 'events_n' } },
     { name: 'two_day', type: 'cumulative', measure: { name: 'events_n' }, window: '2 days' },

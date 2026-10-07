@@ -23,14 +23,17 @@
                 "name": "active_users",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal",
-                "event_name": [
-                  "new_session"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "new_session"
+                  }
                 ]
               },
               {
                 "name": "event_volume",
-                "agg": "count",
-                "field": "*"
+                "agg": "count"
               }
             ]
           }
@@ -119,11 +122,6 @@
         "semantic_models": [
           {
             "from": "events",
-            "event_scope": {
-              "event_name": [
-                "iap_purchase_completed"
-              ]
-            },
             "measures": [
               {
                 "name": "revenue",
@@ -134,6 +132,13 @@
                 "name": "payers",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "iap_purchase_completed"
               }
             ]
           }
@@ -251,12 +256,14 @@
                 "name": "s1",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal",
-                "event_name": [
-                  "tutorial"
-                ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "tutorial"
+                  },
+                  {
+                    "field": "element_of_event_data",
                     "op": "eq",
                     "value": "step_1"
                   }
@@ -266,12 +273,14 @@
                 "name": "s2",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal",
-                "event_name": [
-                  "tutorial"
-                ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "tutorial"
+                  },
+                  {
+                    "field": "element_of_event_data",
                     "op": "eq",
                     "value": "step_2"
                   }
@@ -281,12 +290,14 @@
                 "name": "s3",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal",
-                "event_name": [
-                  "tutorial"
-                ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "tutorial"
+                  },
+                  {
+                    "field": "element_of_event_data",
                     "op": "eq",
                     "value": "step_3"
                   }
@@ -516,11 +527,6 @@
         "semantic_models": [
           {
             "from": "events",
-            "event_scope": {
-              "event_name": [
-                "iap_purchase_completed"
-              ]
-            },
             "measures": [
               {
                 "name": "revenue",
@@ -531,6 +537,13 @@
                 "name": "buyers",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "iap_purchase_completed"
               }
             ]
           }
@@ -606,16 +619,23 @@
               {
                 "name": "purchases",
                 "agg": "sum_boolean",
-                "event_name": [
-                  "iap_purchase_completed"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "iap_purchase_completed"
+                  }
                 ]
               },
               {
                 "name": "sessions",
                 "agg": "count",
-                "field": "*",
-                "event_name": [
-                  "new_session"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "new_session"
+                  }
                 ]
               }
             ]
@@ -685,33 +705,42 @@
             "from": "events",
             "dimensions": [
               {
-                "source": "event_property",
-                "property": "level_id_of_event_data"
+                "field": "level_id_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "starts",
                 "agg": "count",
-                "field": "*",
-                "event_name": [
-                  "level_started"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "level_started"
+                  }
                 ]
               },
               {
                 "name": "completes",
                 "agg": "count",
-                "field": "*",
-                "event_name": [
-                  "level_completed"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "level_completed"
+                  }
                 ]
               },
               {
                 "name": "avg_time",
                 "agg": "average",
                 "field": "daily_level_score_of_event_data",
-                "event_name": [
-                  "level_completed"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "level_completed"
+                  }
                 ]
               }
             ]
@@ -806,15 +835,9 @@
         "semantic_models": [
           {
             "from": "events",
-            "event_scope": {
-              "event_name": [
-                "iap_purchase_completed"
-              ]
-            },
             "dimensions": [
               {
-                "source": "event_property",
-                "property": "product_id_of_event_data"
+                "field": "product_id_of_event_data"
               }
             ],
             "measures": [
@@ -830,8 +853,14 @@
               },
               {
                 "name": "purchases",
-                "agg": "count",
-                "field": "*"
+                "agg": "count"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "iap_purchase_completed"
               }
             ]
           }
@@ -940,23 +969,15 @@
         "semantic_models": [
           {
             "from": "events",
-            "event_scope": {
-              "event_name": [
-                "ad_finished"
-              ]
-            },
             "dimensions": [
               {
-                "source": "event_property",
-                "property": "network_of_additional_info_of_event_data"
+                "field": "network_of_additional_info_of_event_data"
               },
               {
-                "source": "event_property",
-                "property": "placement_of_event_data"
+                "field": "placement_of_event_data"
               },
               {
-                "source": "event_property",
-                "property": "ad_type_of_event_data"
+                "field": "ad_type_of_event_data"
               }
             ],
             "measures": [
@@ -967,8 +988,14 @@
               },
               {
                 "name": "impressions",
-                "agg": "count",
-                "field": "*"
+                "agg": "count"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "ad_finished"
               }
             ]
           }
@@ -1063,8 +1090,7 @@
             "from": "events",
             "dimensions": [
               {
-                "source": "event_property",
-                "property": "source_type_of_event_data"
+                "field": "source_type_of_event_data"
               }
             ],
             "measures": [
@@ -1072,16 +1098,24 @@
                 "name": "coins_in",
                 "agg": "sum",
                 "field": "amount_of_event_data",
-                "event_name": [
-                  "currency_income"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "currency_income"
+                  }
                 ]
               },
               {
                 "name": "coins_out",
                 "agg": "sum",
                 "field": "amount_of_event_data",
-                "event_name": [
-                  "currency_outcome"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "currency_outcome"
+                  }
                 ]
               }
             ]
@@ -1173,8 +1207,12 @@
                 "name": "active_users",
                 "agg": "count_distinct",
                 "field": "player_id_of_internal",
-                "event_name": [
-                  "new_session"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "new_session"
+                  }
                 ]
               }
             ]
@@ -1385,8 +1423,12 @@
                 "name": "revenue",
                 "agg": "sum",
                 "field": "price_in_usd_of_event_data",
-                "event_name": [
-                  "iap_purchase_completed"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "iap_purchase_completed"
+                  }
                 ]
               }
             ]
@@ -1465,16 +1507,24 @@
                 "name": "iap_revenue",
                 "agg": "sum",
                 "field": "price_in_usd_of_event_data",
-                "event_name": [
-                  "iap_purchase_completed"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "iap_purchase_completed"
+                  }
                 ]
               },
               {
                 "name": "ad_revenue_cents",
                 "agg": "sum",
                 "field": "revenue_of_event_data",
-                "event_name": [
-                  "ad_finished"
+                "where": [
+                  {
+                    "field": "event_name",
+                    "op": "eq",
+                    "value": "ad_finished"
+                  }
                 ]
               }
             ]
@@ -5032,8 +5082,7 @@
             "from": "acquisition",
             "dimensions": [
               {
-                "source": "model_column",
-                "column": "media_source"
+                "field": "media_source"
               }
             ]
           }
@@ -5110,31 +5159,33 @@
         "semantic_models": [
           {
             "from": "events",
-            "event_scope": {
-              "event_name": [
-                "first_launch"
-              ]
-            },
             "measures": [
               {
                 "name": "launches",
-                "agg": "count",
-                "field": "*"
+                "agg": "count"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "first_launch"
               }
             ]
           },
           {
             "from": "crashlytics",
-            "event_scope": {
-              "event_name": [
-                "fatal_crash"
-              ]
-            },
             "measures": [
               {
                 "name": "fatal",
-                "agg": "count",
-                "field": "*"
+                "agg": "count"
+              }
+            ],
+            "where": [
+              {
+                "field": "event_name",
+                "op": "eq",
+                "value": "fatal_crash"
               }
             ]
           }

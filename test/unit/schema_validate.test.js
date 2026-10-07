@@ -19,7 +19,7 @@ test('create: accepts a valid declaration', () => {
   const someEvent = catalog.eventNames('events')[0];
   const r = v('build_semantic_model', {
     name: 'task_a',
-    semantic_models: [{ from: 'events', event_scope: { event_name: [someEvent] }, measures: [{ name: 'rev', agg: 'sum', field: numericField }] }],
+    semantic_models: [{ from: 'events', where: [{ field: 'event_name', op: 'eq', value: someEvent }], measures: [{ name: 'rev', agg: 'sum', field: numericField }] }],
     metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }],
   });
   assert.ok(r.ok, JSON.stringify(r.errors));
@@ -28,19 +28,19 @@ test('create: accepts a valid declaration', () => {
 test('create: rejects unknown event property in dimension (enum from catalog)', () => {
   const r = v('build_semantic_model', {
     name: 'task_a',
-    semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'not_a_real_prop' }] }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'not_a_real_prop' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }],
   });
   assert.equal(r.ok, false);
 });
 
-test('create: rejects unknown event_name in scope', () => {
-  const r = v('build_semantic_model', {
+test('create: an unknown event in a condition on the event name is refused when it is compiled', async () => {
+  const { compileDeclaration } = await import('../../src/compile.js');
+  assert.throws(() => compileDeclaration(catalog, {
     name: 'task_a',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['not_an_event'] } }],
-    metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }],
-  });
-  assert.equal(r.ok, false);
+    semantic_models: [{ from: 'events', where: [{ field: 'event_name', op: 'eq', value: 'not_an_event' }], measures: [{ name: 'n', agg: 'count' }] }],
+    metrics: [{ name: 'm', type: 'simple', measure: { name: 'n' } }],
+  }), /not_an_event/);
 });
 
 test('create: rejects percentile measure without percentile value', () => {
@@ -79,9 +79,9 @@ test('query: requires context_id and metrics', () => {
   assert.ok(v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'] }).ok);
 });
 
-test('update: semantic_model must be a known model key', () => {
-  assert.equal(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_model: 'ghost' }).ok, false);
-  assert.ok(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
+test('update: a semantic model it adds to must be a known model key', () => {
+  assert.equal(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_models: [{ from: 'ghost' }] }).ok, false);
+  assert.ok(v('build_semantic_model', { action: 'update', context_id: 'ctx123', semantic_models: [{ from: 'events', measures: [{ name: 'x', agg: 'count' }] }] }).ok);
 });
 
 // TWO MODES, ONE TOOL. Declaring a task and editing the task already in a context used to be two
@@ -109,15 +109,16 @@ test('build_semantic_model: the create mode and the update mode require their ow
   assert.match(bare.errors.join(' | '), /name/);
   assert.match(bare.errors.join(' | '), /metrics/);
 
-  // update mode: a context and the model being changed, and NOT name/metrics
+  // update mode: a context, and what it adds written as a declaration writes it — NOT name/metrics required
   assert.equal(check({
-    action: 'update', context_id: 'ctxabc123456', semantic_model: 'events',
-    add_measures: [{ name: 'purchases', agg: 'count', field: '*' }],
+    action: 'update', context_id: 'ctxabc123456',
+    semantic_models: [{ from: 'events', measures: [{ name: 'purchases', agg: 'count' }] }],
   }).ok, true);
-  const noModel = check({ action: 'update', context_id: 'ctxabc123456' });
-  assert.equal(noModel.ok, false);
-  assert.match(noModel.errors.join(' | '), /semantic_model/);
-  assert.ok(!/'name'/.test(noModel.errors.join(' | ')), 'the update mode is never asked for the create mode\'s fields');
-  // …and a model this catalog does not have is still refused by the schema
-  assert.equal(check({ action: 'update', context_id: 'ctxabc123456', semantic_model: 'no_such_model' }).ok, false);
+  const noContext = check({ action: 'update' });
+  assert.equal(noContext.ok, false);
+  assert.match(noContext.errors.join(' | '), /context_id/);
+  assert.ok(!/'name'/.test(noContext.errors.join(' | ')), 'the update mode is never asked for the create mode\'s fields');
+  // …the declaration's own fields are refused there, and a model this catalog does not have is refused by the schema
+  assert.equal(check({ action: 'update', context_id: 'ctxabc123456', add_measures: [] }).ok, false);
+  assert.equal(check({ action: 'update', context_id: 'ctxabc123456', semantic_models: [{ from: 'no_such_model' }] }).ok, false);
 });

@@ -234,7 +234,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   const out = await engine.build_semantic_model({
     name: 'gov',
     use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', dimensions: [{ source: 'model_column', column: 'media_source' }] }],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'media_source' }] }],
     metrics: [{ name: 'total_spend', type: 'simple', measure: { name: 'total_spend' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));

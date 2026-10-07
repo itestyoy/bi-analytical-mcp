@@ -79,7 +79,7 @@ test('a governed task keeps its description per task name', async () => {
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'rev_task', description: 'revenue + payers for the monetization readout',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   const described = await e.context({ action: 'describe', context_id: out.context_id });
@@ -88,14 +88,14 @@ test('a governed task keeps its description per task name', async () => {
   // a SECOND task in the same context keeps its own note, and neither overwrites the other
   await e.build_semantic_model({ action: 'update',
     context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['new_session'] }, measures: [{ name: 'sessions', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'sessions', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }],
     metrics: [{ name: 'sessions', type: 'simple', measure: { name: 'sessions' } }],
   }).catch(async (e2) => {
     // build_semantic_model action update may require the task to exist; creating a second task is the same path
     assert.match(String(e2.message), /./);
     await e.build_semantic_model({
       context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-      semantic_models: [{ from: 'events', event_scope: { event_name: ['new_session'] }, measures: [{ name: 'sessions', agg: 'count', field: '*' }] }],
+      semantic_models: [{ from: 'events', measures: [{ name: 'sessions', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }],
       metrics: [{ name: 'sessions', type: 'simple', measure: { name: 'sessions' } }],
     });
   });

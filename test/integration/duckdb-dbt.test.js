@@ -49,15 +49,7 @@ before(async () => {
   const out = await engine.build_semantic_model({
     name: 'mon',
     use_base_models: ['users'],
-    semantic_models: [{
-      from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
-      dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
-      measures: [
-        { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
-        { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' },
-        { name: 'purchases', agg: 'count', field: '*' },
-      ],
-    }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
     metrics: [
       { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
       { name: 'payers', type: 'simple', measure: { name: 'payers' } },

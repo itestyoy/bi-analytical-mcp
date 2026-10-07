@@ -119,7 +119,7 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   e.valueIndex.upsertProperty('users', 'country', { distinctCount: 2, totalCount: 20, values: [{ value: 'DE', freq: 12 }, { value: 'US', freq: 8 }] });
   const out = await e.build_semantic_model({
     name: 'vguard', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   await assert.rejects(

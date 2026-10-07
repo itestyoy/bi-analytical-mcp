@@ -90,8 +90,7 @@ test("a stage explains '*': count rows by omitting `column`", () => {
     () => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', column: '*' }] }], { physicalCols: new Set(cols.keys()) }),
     (e) => {
       assert.match(e.message, /'\*' is not a column/);
-      assert.match(e.message, /omitting `column`/);
-      assert.match(e.message, /governed path/);
+      assert.match(e.message, /leaving `column` out/);
       return true;
     },
   );

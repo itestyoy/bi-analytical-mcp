@@ -27,7 +27,7 @@ async function calls(engine) {
     ['memory', { action: 'list' }],
     ['memory', { action: 'search', query: 'finding' }],
     ['explore_errors', {}],
-    ['build_semantic_model', { name: 'outputs_sem', semantic_models: [{ from: engine.catalog.facts[0], measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] }],
+    ['build_semantic_model', { name: 'outputs_sem', semantic_models: [{ from: engine.catalog.facts[0], measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] }],
     ['delete_context', { context_id: draft.draft_id }],
   ];
 }

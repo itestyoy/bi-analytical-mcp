@@ -254,7 +254,7 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'e2e_mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -276,9 +276,9 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
 test('4b. build_semantic_model action update adds a payers metric; re-query = 7 distinct payers', opts, async (t) => {
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
-    context_id: S.semCtx, semantic_model: 'events',
-    add_measures: [{ name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['iap_purchase_completed'] }],
-    add_metrics: [{ name: 'payers', type: 'simple', measure: { name: 'payers' } }],
+    context_id: S.semCtx,
+    semantic_models: [{ from: 'events', measures: [{ name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
+    metrics: [{ name: 'payers', type: 'simple', measure: { name: 'payers' } }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
   assert.ok(upd.metrics.includes('e2e_mon_payers'), 'new metric registered');

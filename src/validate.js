@@ -142,7 +142,7 @@ function describe(e, ctx = {}) {
     case 'unionOfValues': return `${at} must be ${e.params.title || `one of: ${e.params.names.join(' | ')}`}`;
     case 'pattern':
       // SQL's count(*) habit: a row count is the count with no column
-      if (e.data === '*' && /column$/.test(e.instancePath)) return `${at}: '*' is not a column — leave \`column\` out to count rows`;
+      if (e.data === '*' && /(column|field)$/.test(e.instancePath)) { const key = /field$/.test(e.instancePath) ? 'field' : 'column'; return `${at}: '*' is not a ${key} — leave \`${key}\` out to count rows`; }
       return `${at} ${e.message}`;
     default: return `${at} ${e.message}`;
   }

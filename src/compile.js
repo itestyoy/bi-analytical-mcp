@@ -25,32 +25,39 @@ function factProp(catalog, modelKey, name, field) {
   try { return catalog.propertyFor(modelKey, name, { hint: HINT }); } catch (e) { return fail(e.message, field); }
 }
 
-/** SQL predicate for a list of event names on an events FACT, or null. */
-export function namesToScope(catalog, modelKey, names) {
-  if (!catalog.isFact(modelKey) || !names?.length) return null;
-  const col = catalog.getModel(modelKey).event_name.column;
-  const vals = names.map((n) => factName(catalog, modelKey, n, 'event_name'));
-  return vals.length === 1 ? comparison(col, 'eq', vals[0]) : comparison(col, 'in', vals);
-}
-
 /** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
 function propExpr(catalog, modelKey, name) {
   return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
-/** SQL for a single event_data property condition (used for funnel-step scoping). */
-function propCond(catalog, modelKey, cond) {
-  const found = factProp(catalog, modelKey, cond.property, 'where.property');
-  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'where.property');
-  const lhs = propExpr(catalog, modelKey, found.name);
-  try { return comparison(lhs, cond.op, cond.value); } catch (e) { return fail(e.message, 'where.op'); }
+/**
+ * SQL for one condition of a semantic model on a `field` — a column of the model (its event name
+ * spelled as the source stores it), or a scalar payload property read where it is stored.
+ */
+function fieldCond(catalog, modelKey, cond) {
+  const m = catalog.getModel(modelKey);
+  const columns = new Set(catalog.modelColumns(modelKey).map((c) => c.name));
+  let lhs; let value = cond.value;
+  if (catalog.isFact(modelKey) && cond.field === m.event_name?.column) {
+    lhs = cond.field;
+    // an event of the source, as it stores it — one that is not its own is refused, naming the owner
+    if (value !== undefined && value !== null) value = Array.isArray(value) ? value.map((v) => factName(catalog, modelKey, v, 'where.value')) : factName(catalog, modelKey, value, 'where.value');
+  } else if (catalog.isFact(modelKey) && catalog.scalarEventProps(modelKey).includes(cond.field)) {
+    const found = factProp(catalog, modelKey, cond.field, 'where.field');
+    lhs = propExpr(catalog, modelKey, found.name);
+  } else if (columns.has(cond.field)) lhs = cond.field;
+  else fail(`where: '${cond.field}' is not a column or scalar property of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists them`, 'where.field');
+  try { return comparison(lhs, cond.op, value); } catch (e) { return fail(e.message, 'where.op'); }
 }
 
-/** Combine event_name scope + property conditions into one boolean (or null). */
+/** A semantic model's conditions (its own, or a measure's) as one boolean (or null). */
+function conditionsOf(catalog, modelKey, list) {
+  return conditionsSql(list, (c) => fieldCond(catalog, modelKey, c)).join(' AND ') || null;
+}
+
+/** The rows a measure folds: the semantic model's `where` AND the measure's own. */
 function measureScope(catalog, modelKey, decl, smScope) {
-  const evScope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
-  const propParts = conditionsSql(decl.where, (c) => propCond(catalog, modelKey, c));
-  return [evScope, ...propParts].filter(Boolean).join(' AND ') || null;
+  return [smScope, conditionsOf(catalog, modelKey, decl.where)].filter(Boolean).join(' AND ') || null;
 }
 
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
@@ -63,8 +70,8 @@ function applyScope(valueExpr, scope) {
 /** Resolve a measure declaration to a dbt measure object (name, agg, expr, ...). */
 function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
-  // a per-measure event_name (+ optional property `where`) overrides the SM-level
-  // scope — this is how a funnel step is defined as "event + property value".
+  // the model's where AND the measure's own — a funnel step is a measure whose where names the
+  // event and a property value
   const scope = measureScope(catalog, modelKey, decl, smScope);
 
   // sum_boolean: sum a boolean per row (e.g. "did event X") — the scope IS the boolean.
@@ -77,10 +84,8 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   let found = null; // the event property, when `field` names one (resolved once)
 
   const field = decl.field;
-  if (field === '*' || field === undefined) {
-    if (decl.agg !== 'count' && decl.agg !== 'sum') {
-      fail(`measure '${decl.name}': field '*' is only valid with agg count/sum`, 'measures.field');
-    }
+  if (field === undefined) {
+    if (decl.agg !== 'count') fail(`measure '${decl.name}': ${decl.agg} needs a field to fold — only a count counts rows without one`, 'measures.field');
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
   } else if (catalog.isFact(modelKey) && (found = factProp(catalog, modelKey, field, 'measures.field'))) {
@@ -129,19 +134,20 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
  * identifier instead would mis-split the moment one task name is a prefix of another.
  */
 function compileDimension(catalog, task, modelKey, decl) {
-  if (decl.source === 'event_property') {
-    if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
-    const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'dimensions.property');
-    if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _attribute: found.name };
-  }
-  if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _attribute: decl.column };
+  // a `field` of the model: a column (a time dimension when asked), or a scalar payload property
+  const isColumn = catalog.modelDimensionColumns(modelKey).includes(decl.field);
+  const isProperty = catalog.isFact(modelKey) && catalog.scalarEventProps(modelKey).includes(decl.field);
+  if (isColumn && (decl.as_type === 'time' || !isProperty)) {
+    const dim = { name: NS(task, decl.field), type: decl.as_type || 'categorical', expr: decl.field, _attribute: decl.field };
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }
-  fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
+  if (isProperty) {
+    if (decl.as_type === 'time') fail(`dimension '${decl.field}': a payload property is categorical — a time dimension is a column`, 'dimensions.as_type');
+    const found = factProp(catalog, modelKey, decl.field, 'dimensions.field');
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _attribute: found.name };
+  }
+  fail(`dimension '${decl.field}' is not a groupable column or scalar property of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists them`, 'dimensions.field');
 }
 
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure. */
@@ -202,8 +208,8 @@ export function compileDeclaration(catalog, decl) {
     const modelKey = sm.from;
     if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
     usedModels.add(modelKey);
-    // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
-    const scope = namesToScope(catalog, modelKey, sm.event_scope?.event_name);
+    // Each semantic model scopes its OWN measures: its where is baked into every measure expr below.
+    const scope = conditionsOf(catalog, modelKey, sm.where);
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);

@@ -53,10 +53,7 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_rev', use_base_models: ['users'],
-    semantic_models: [
-      { from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -82,7 +79,7 @@ test('governed SCD join: metric_time series works (time spine auto-built), Jan m
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_ts', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -97,10 +94,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_drop', use_base_models: ['users'],
-    semantic_models: [
-      { from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] },
-      { from: 'users', measures: [{ name: 'player_count', agg: 'count_distinct', field: 'internal_player_id' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', measures: [{ name: 'player_count', agg: 'count_distinct', field: 'internal_player_id' }] }],
     metrics: [
       { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
       { name: 'players', type: 'simple', measure: { name: 'player_count' } },

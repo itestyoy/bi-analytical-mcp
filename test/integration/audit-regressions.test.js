@@ -78,7 +78,7 @@ function variant(mutate, extra = {}) {
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
 const evtsTask = (eng, name, more = {}) => eng.build_semantic_model({
-  name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+  name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
   metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }], ...more,
 });
 /** Run a pipeline of stages and return its rows. */
@@ -118,10 +118,7 @@ before(async () => {
   acqUsersCtx = acq.context_id;
   const both = await engine.build_semantic_model({
     name: 'aboth',
-    semantic_models: [
-      { from: 'events', event_scope: { event_name: ['first_launch'] }, measures: [{ name: 'launches', agg: 'count', field: '*' }] },
-      { from: 'crashlytics', measures: [{ name: 'reports', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'launches', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { from: 'crashlytics', measures: [{ name: 'reports', agg: 'count' }] }],
     metrics: [{ name: 'launches', type: 'simple', measure: { name: 'launches' } }, { name: 'reports', type: 'simple', measure: { name: 'reports' } }],
   });
   evCrashCtx = both.context_id;
@@ -138,7 +135,7 @@ before(async () => {
   }));
   const bt = await bothEngine.build_semantic_model({
     name: 'aclk',
-    semantic_models: [{ from: 'acquisition', dimensions: [{ source: 'model_column', column: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }, { name: 'click_total', type: 'simple', measure: { name: 'click_total' } }],
   });
   assert.equal(bt.parse.ok, true, JSON.stringify(bt.parse));
@@ -436,7 +433,7 @@ test('32. reset() over a fresh store leaves an empty index that the scan then fi
 test("33. an events source whose role is not called 'events' loads and counts 184", opts, async (t) => {
   if (skip(t)) return;
   assert.deepEqual([...renamedEngine.catalog.facts].sort(), ['analytics', 'crashlytics']);
-  const c = await renamedEngine.build_semantic_model({ name: 'aren', semantic_models: [{ from: 'analytics', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await renamedEngine.build_semantic_model({ name: 'aren', semantic_models: [{ from: 'analytics', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['aren_n'] }, renamedEngine);
   assert.equal(num(r.rows[0].aren_n), 184);
@@ -485,7 +482,7 @@ test('39. device_model is found on users AND on crashlytics; the crash copy coun
 
 test('40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8 / banner 6', opts, async (t) => {
   if (skip(t)) return;
-  const c = await engine.build_semantic_model({ name: 'aadt', semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'ad_type_of_event_data' }], measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await engine.build_semantic_model({ name: 'aadt', semantic_models: [{ from: 'events', dimensions: [{ field: 'ad_type_of_event_data' }], measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['aadt_n'], group_by: [{ model: 'events', attribute: 'ad_type_of_event_data' }] });
   const by = mapCol(r.rows, groupCol(r, 'aadt_n'), 'aadt_n');
@@ -511,7 +508,7 @@ test('42. the value index read the same property the same way: 10 / 8 / 6 with 2
 
 test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 purchases', opts, async (t) => {
   if (skip(t)) return;
-  const c = await engine.build_semantic_model({ name: 'arev', semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }, { name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await engine.build_semantic_model({ name: 'arev', semantic_models: [{ from: 'events', measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'n', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }], metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }, { name: 'n', type: 'simple', measure: { name: 'n' } }] });
   const r = await q(c.context_id, { metrics: ['arev_rev', 'arev_n'] });
   assert.equal(num(r.rows[0].arev_rev), 85); assert.equal(num(r.rows[0].arev_n), 8);
   const rows = await pipeRows('events', [

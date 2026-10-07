@@ -69,14 +69,7 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'castq',
-    semantic_models: [{
-      from: 'events',
-      event_scope: { event_name: ['level_completed'] },
-      measures: [
-        { name: 'sum_ct', agg: 'sum', field: 'complete_time_of_event_data', cast: 'numeric' },
-        { name: 'avg_ct', agg: 'average', field: 'complete_time_of_event_data', cast: 'numeric' },
-      ],
-    }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'sum_ct', agg: 'sum', field: 'complete_time_of_event_data', cast: 'numeric' }, { name: 'avg_ct', agg: 'average', field: 'complete_time_of_event_data', cast: 'numeric' }], where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }],
     metrics: [
       { name: 'sum_ct', type: 'simple', measure: { name: 'sum_ct' } },
       { name: 'avg_ct', type: 'simple', measure: { name: 'avg_ct' } },
@@ -90,7 +83,7 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
   // the same aggregation WITHOUT a cast is rejected (string is not numeric)
   await assert.rejects(engine.build_semantic_model({
     name: 'castbad',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['level_completed'] }, measures: [{ name: 'bad', agg: 'average', field: 'complete_time_of_event_data' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'bad', agg: 'average', field: 'complete_time_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }],
     metrics: [{ name: 'bad', type: 'simple', measure: { name: 'bad' } }],
   }), /not numeric|cast/i);
 });

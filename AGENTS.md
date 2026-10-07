@@ -303,8 +303,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   read with `task_ids`, and every `where` is ONE condition grammar — a list that all hold, an item a
   condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
   every condition taking the same operators (`OPS`, src/conditions.js, written by its one
-  `comparison`). Only what a condition compares differs by place: a column, an event property, or —
-  in a metric query — the field as group_by names it. A computed column is ONE expression —
+  `comparison`). Only what a condition compares differs by LEVEL: over a table's rows (a pipeline's
+  where, a funnel step, a read's where and having, a measure's where) a `column` or an expression; on
+  a semantic model's source a `field` (a column, a scalar payload property); in a metric query the
+  field reference as group_by names it. A MEASURE is ONE form wherever rows are aggregated — a
+  pipeline's aggregate stage, a read's transform, a semantic model — `{ name, agg, column|field?,
+  percentile?, where? }`, closed forms by `agg` (`measureSchema`, src/pipeline/sql.js): a count
+  without its column counts rows, events are scoped by a `where`. A computed column is ONE expression —
   `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
   is added there once, its schema form and its SQL beside each other; a window function takes `over`,

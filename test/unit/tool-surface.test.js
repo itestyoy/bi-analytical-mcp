@@ -210,7 +210,7 @@ test('a group-by path onto an unloaded FACT is refused with the use_base_models 
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   await assert.rejects(
@@ -279,17 +279,13 @@ test('a task dimension is reported under its declared attribute even when one ta
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [
-      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   const out = await e.build_semantic_model({ action: 'update',
     context_id: first.context_id,
-    semantic_model: 'users',
     task: 'ret_v2',
-    add_dimensions: [{ source: 'model_column', column: 'country' }],
+    semantic_models: [{ from: 'users', dimensions: [{ field: 'country' }] }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual([...(ctx.state.tasks || [])].sort(), ['ret', 'ret_v2'], JSON.stringify(ctx.state.tasks));

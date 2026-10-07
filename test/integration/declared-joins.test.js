@@ -99,7 +99,7 @@ before(async () => {
   const ev = await engine.build_semantic_model({
     name: 'jev',
     use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
   });
   assert.equal(ev.parse.ok, true, JSON.stringify(ev.parse));
@@ -160,7 +160,7 @@ before(async () => {
   const oc = await ownerEngine.build_semantic_model({
     name: 'jown',
     use_base_models: ['crashlytics'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
   });
   assert.equal(oc.parse.ok, true, JSON.stringify(oc.parse));
@@ -191,7 +191,7 @@ before(async () => {
   const evtsOn = async (engine, name) => {
     const r = await engine.build_semantic_model({
       name, use_base_models: ['crashlytics', 'users'],
-      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
       metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
     });
     assert.equal(r.parse.ok, true, JSON.stringify(r.parse));
@@ -504,7 +504,7 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   const sm = await phantomEngine.build_semantic_model({
     name: 'jphev',
     use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
@@ -974,10 +974,7 @@ test('40. governed: spend and events from two sources, sliced by the same instal
   const task = await engine.build_semantic_model({
     name: 'jmix',
     use_base_models: ['users'],
-    semantic_models: [
-      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
-      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
     metrics: [
       { name: 'cost', type: 'simple', measure: { name: 'cost' } },
       { name: 'evts', type: 'simple', measure: { name: 'evts' } },
@@ -1017,7 +1014,7 @@ test('41. a join path without its owning model is refused, and works once loaded
   if (skip(t)) return;
   const bare = await engine.build_semantic_model({
     name: 'jbare',
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
   });
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
@@ -1070,11 +1067,7 @@ test('43. three sources side by side on metric_time keep their own totals: 17.50
   if (skip(t)) return;
   const task = await engine.build_semantic_model({
     name: 'jtri',
-    semantic_models: [
-      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
-      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
-      { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count' }] }],
     metrics: [
       { name: 'cost', type: 'simple', measure: { name: 'cost' } },
       { name: 'evts', type: 'simple', measure: { name: 'evts' } },

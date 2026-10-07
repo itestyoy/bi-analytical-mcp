@@ -139,54 +139,54 @@ export const semanticBuildMethods = {
       next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
       recommendations: [
         `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
-        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_model, ... } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
+        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
   },
 
-  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }). */
+  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }) —
+   *  additions written as a declaration writes them, removals by the names they were added under. */
   async _updateSemanticModel(input) {
     const ctx = this._ctxToWrite(input.context_id);
-    const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.
     const state = input.dry_run ? clone(ctx.state) : ctx.state;
-    const add = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
+    const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
+    for (const k of models) state.additions[k] ||= { measures: [], dimensions: [] };
 
-    // synthesize a declaration fragment for the add_* parts and compile it
+    // the additions are a declaration fragment, compiled as a declaration is
     const task = input.task || state.tasks[0] || 'task';
-    const frag = { name: task, semantic_models: [{ from: modelKey, dimensions: input.add_dimensions || [], measures: input.add_measures || [] }], metrics: input.add_metrics || [] };
+    // (the context's sources come along, so metrics alone — or removals alone — compile against them)
+    const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
     const compiled = this._compile(frag);
 
-    // removals (with dependency checks for measures)
-    if (input.remove_metrics) state.metrics = state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
-    if (input.remove_measures) {
-      for (const rm of input.remove_measures) {
-        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(rm));
+    // removals (with dependency checks for measures), each by the name it was added under
+    const rm = input.remove || {};
+    if (rm.metrics) state.metrics = state.metrics.filter((m) => !rm.metrics.includes(m.name));
+    if (rm.measures) {
+      for (const name of rm.measures) {
+        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(name));
         if (dependents.length && !input.cascade) {
-          throw new ToolError(`cannot remove measure '${rm}'; metrics depend on it: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate', field: rm });
+          throw new ToolError(`cannot remove measure '${name}'; metrics read it: ${dependents.map((d) => d.name).join(', ')} (cascade removes them too)`, { stage: 'validate', field: 'remove.measures' });
         }
       }
-      add.measures = add.measures.filter((m) => !input.remove_measures.includes(m.name));
+      for (const add of Object.values(state.additions)) add.measures = add.measures.filter((m) => !rm.measures.includes(m.name));
     }
-    if (input.remove_dimensions) {
-      // A dimension is named by its ATTRIBUTE — the name `groupable` offers and `add_dimensions`
-      // takes. What is STORED is the task-namespaced copy ('ret_country'), a name the caller is
-      // never shown, so matching on it made every removal a silent no-op that still reported
-      // success. Match on the attribute the dimension declares, and refuse a name that matches
-      // nothing rather than pretending to have removed it.
-      for (const name of input.remove_dimensions) {
-        if (!add.dimensions.some((d) => d._attribute === name || d.name === name)) {
-          const have = [...new Set(add.dimensions.map((d) => d._attribute))];
-          throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
-        }
+    for (const d of rm.dimensions || []) {
+      // A dimension is named by its FIELD — the name `groupable` offers and a declaration takes. What
+      // is STORED is the task-namespaced copy ('ret_country'), a name the caller is never shown; a
+      // name that matches nothing is refused rather than reported removed.
+      const add = state.additions[d.from];
+      if (!add.dimensions.some((x) => x._attribute === d.field || x.name === d.field)) {
+        const have = [...new Set(add.dimensions.map((x) => x._attribute))];
+        throw new ToolError(`cannot remove dimension '${d.field}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
       }
-      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d._attribute) && !input.remove_dimensions.includes(d.name));
+      add.dimensions = add.dimensions.filter((x) => x._attribute !== d.field && x.name !== d.field);
     }
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
     if (input.dry_run) {
-      const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
+      const out = { context_id: ctx.id, semantic_models: models, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
@@ -194,7 +194,7 @@ export const semanticBuildMethods = {
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
       return {
-        context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
+        context_id: ctx.id, semantic_models: models, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
         next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
       };

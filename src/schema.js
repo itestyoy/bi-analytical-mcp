@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, genericMeasureItem, genericDimensionItem, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, CONTEXT_PAGE, terse, attributeRefForms, timeRef } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, CONTEXT_PAGE, terse, attributeRefForms, timeRef } from './schema/fields.js';
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
@@ -50,33 +50,38 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
     description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
     use_base_models: { type: 'array', uniqueItems: true, items: { type: 'string', enum: catalog.modelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
-    semantic_models: { type: 'array', items: { anyOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
+    semantic_models: { type: 'array', items: { anyOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One per source model: { from, where?, dimensions?, measures? }. Every name in it is a `field` of that model — a column, a scalar payload property, a declared amount. A measure is { name, agg, field?, percentile?, where?, cast?, label? }: count without field counts rows.' },
     metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above).' },
     dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
     include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
   };
-  // action: 'update' — the incremental path. Same vocabulary as a declaration (that is why the two are
-  // one tool: two schemas meant two copies of every enum in every listing).
+  // action: 'update' — the incremental path, in the SAME vocabulary as a declaration: what it adds is
+  // written exactly as a declaration writes it (the same items, so a listing carries them once), and
+  // what it removes is named the way it was added.
   const updateFields = {
     context_id: { type: 'string', pattern: CTX, description: 'The context whose task to change.' },
-    semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s semantic model to change.' },
-    add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'Dimensions to add.' },
-    remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'Dimensions to remove, by the ATTRIBUTE they declare (the name `groupable` shows).' },
-    add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'Measures to add.' },
-    remove_measures: { type: 'array', items: { type: 'string' }, description: 'Measures to remove; refused while a metric depends on one, unless cascade.' },
-    add_metrics: { type: 'array', items: metricSchema(catalog), description: 'Metrics to add.' },
-    remove_metrics: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Metrics to remove.' },
-    task: { type: 'string', description: 'The task the additions belong to (defaults to the context\'s first task).' },
-    cascade: { type: 'boolean', description: 'Also remove the metrics that depend on a removed measure.' },
+    task: { type: 'string', description: 'The task to change (default: the context\'s first).' },
+    semantic_models: { ...createFields.semantic_models, description: 'What to add to each semantic model: its dimensions, its measures (a `where` here is not applied to the measures already there).' },
+    metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'Metrics to add.' },
+    remove: {
+      type: 'object', additionalProperties: false,
+      description: 'What to remove: by the names it was added under.',
+      properties: {
+        dimensions: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['from', 'field'], properties: { from: { enum: modelKeys }, field: { type: 'string' } } } },
+        measures: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a metric reads one, unless cascade.' },
+        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } },
+      },
+    },
+    cascade: { type: 'boolean', description: 'Also remove the metrics that read a removed measure.' },
     dry_run: createFields.dry_run,
     include_yaml: createFields.include_yaml,
   };
   const create = {
     type: 'object',
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ request: { task_ids } }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" adds to the task already in a context in the same words (semantic_models, metrics) and removes by name (remove), without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ request: { task_ids } }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
     anyOf: [
-      form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, tagDescription: 'create (the default): declare a task — name + semantic_models + metrics.', required: ['name', 'metrics'], properties: createFields }),
-      form({ title: 'update the task in a context', tag: ['action', 'update'], tagDescription: 'update: change the task already in this context — the add_*/remove_* fields, on one `semantic_model`.', required: ['context_id', 'semantic_model'], properties: updateFields }),
+      form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, required: ['name', 'metrics'], properties: createFields }),
+      form({ title: 'update the task in a context', tag: ['action', 'update'], required: ['context_id'], properties: updateFields }),
     ],
   };
 

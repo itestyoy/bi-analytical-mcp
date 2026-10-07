@@ -97,7 +97,7 @@ test('a measure\'s where takes an { or }: the count is the rows either condition
   assert.ok(want > 0, 'the fixture has such rows');
   const built = await engine.build_semantic_model({
     name: 'cond_levels',
-    semantic_models: [{ from: 'events', measures: [{ name: 'picked', agg: 'count', field: '*', where: [{ or: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }, { property: 'level_id_of_event_data', op: 'gte', value: 3 }] }] }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'picked', agg: 'count', where: [{ or: [{ field: 'level_id_of_event_data', op: 'eq', value: 1 }, { field: 'level_id_of_event_data', op: 'gte', value: 3 }] }] }] }],
     metrics: [{ name: 'picked', type: 'simple', measure: { name: 'picked' } }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
@@ -111,7 +111,7 @@ test('a metric query\'s where names its field as group_by does, and takes the te
   const want = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
   const built = await engine.build_semantic_model({
     name: 'cond_where',
-    semantic_models: [{ from: 'events', dimensions: [{ source: 'model_column', column: 'event_name' }], measures: [{ name: 'rows', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name' }], measures: [{ name: 'rows', agg: 'count' }] }],
     metrics: [{ name: 'rows', type: 'simple', measure: { name: 'rows' } }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));

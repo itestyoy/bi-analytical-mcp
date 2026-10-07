@@ -26,7 +26,7 @@ const num = (v) => Number(v);
 let wh; let engine;
 const TASK = {
   name: 'mon', use_base_models: ['users'],
-  semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
+  semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
   metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
 };
 const byCountry = [{ model: 'users', attribute: 'country' }];

@@ -230,10 +230,7 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [
-      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   const ctx = e.ctxs.get(first.context_id);
@@ -241,10 +238,10 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'nope' }] } }),
     /cannot remove dimension 'nope'.*It has: country/s,
   );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it
@@ -261,7 +258,7 @@ test('groupable and the example only name models this context loaded', async () 
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   const loaded = new Set(out.joined_models);
@@ -466,7 +463,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   const out = await e.build_semantic_model({
     name: 'evonly',
     use_base_models: ['crashlytics', 'users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   await assert.rejects(

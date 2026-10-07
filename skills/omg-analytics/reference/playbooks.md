@@ -18,10 +18,10 @@ Governed metric path. Define once, query by time grain.
 ## 2. Progression funnel / conversion (events-only)
 Use a pipeline with a `match_recognize` stage.
 1. `build_pipeline_model { action: "start", name, source: "events" }`.
-2. `add_step` a `match_recognize` stage: `partition_by: ["<player key>"]`, ordered `steps`
+2. `add_steps` a `match_recognize` stage: `partition_by: ["<player key>"]`, ordered `steps`
    (each = event + an `event_data` value), e.g. `level_started → level_completed (result=win)`
    or a tutorial chain. Add `between_steps` if repeats may occur.
-3. (optional) `add_step` a downstream `join` (users) / `aggregate` to slice conversion by a
+3. (optional) `add_steps` a downstream `join` (users) / `aggregate` to slice conversion by a
    player attribute (country/platform).
 4. `materialize`, then `query_pipeline_model` ({ task_id }) — read `reached_*` / `completed` / `furthest_step_name`.
 - **Governed sibling:** *Game Completion Rate* = completed ÷ started ×100%

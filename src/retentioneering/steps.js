@@ -206,7 +206,6 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   let list = es.steps.slice();
   let from = null;
   let fieldOf = () => 'step';
-  if (action === 'add_step') { list.push({ step: input.step }); from = list.length; }
   if (action === 'add_steps') { from = n + 1; list.push(...input.steps.map((step) => ({ step }))); fieldOf = (i) => `steps[${i - from}]`; }
   if (action === 'edit_step') { inRange(input.index, n, 'index'); list[input.index - 1] = { step: input.step }; from = input.index; }
   if (action === 'insert_step') { inRange(input.index, n + 1, 'index'); list.splice(input.index - 1, 0, { step: input.step }); from = input.index; }
@@ -226,7 +225,7 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
     if (bad >= 0) {
       const i = from + bad;
       const which = `step ${i} (${checked[bad].step.type})`;
-      const own = action === 'add_step' || action === 'edit_step' || action === 'insert_step' ? i === from : action === 'add_steps';
+      const own = action === 'edit_step' || action === 'insert_step' ? i === from : action === 'add_steps';
       throw new ToolError(`${own ? `the library refuses ${which}` : `after this ${action}, the library refuses ${which}`}: ${checked[bad].problem} — nothing changed (the eventstream still has ${n} step${n === 1 ? '' : 's'}). Checked by the library itself on what the eventstream holds at that step; nothing ran.`, { stage: 'validate', field: fieldOf(i) });
     }
     checked.forEach((e, j) => { list[from - 1 + j] = e; });
@@ -286,7 +285,7 @@ export function fork(engine, ctx, input) {
     ok: true, context_id: ctx.id, eventstream: input.name, action: 'fork', forked_from: child.forked_from, steps: after,
     materialized_through: child.checkpoint?.upto || 0,
     shape: describeShape(shapeAtEnd(child)),
-    next: `shape '${input.name}' with its own steps (add_step, edit_step, …) — '${parentName}' is not touched`,
+    next: `shape '${input.name}' with its own steps (add_steps, edit_step, …) — '${parentName}' is not touched`,
   };
 }
 
@@ -296,7 +295,7 @@ export const ROLES_COL = 'es_roles';
 
 export async function materializeSteps(engine, feature, ctx, name, es) {
   const upto = es.checkpoint?.upto || 0;
-  if (!es.steps.length) throw new ToolError(`eventstream '${name}' has no steps — it is built already; add the library's steps with ${BUILD}({ request: { action: 'add_step', … } }), or run analyses on it as it is`, { stage: 'validate', field: 'eventstream' });
+  if (!es.steps.length) throw new ToolError(`eventstream '${name}' has no steps — it is built already; add the library's steps with ${BUILD}({ request: { action: 'add_steps', steps: [...], … } }), or run analyses on it as it is`, { stage: 'validate', field: 'eventstream' });
   if (upto === es.steps.length) throw new ToolError(`every step of eventstream '${name}' is materialized already (1..${upto}) — its table (${es.checkpoint.model}) is what the analyses read`, { stage: 'validate', field: 'eventstream' });
   if (es.building) throw new ToolError(`a materialize of eventstream '${name}' is already in flight (task ${es.building.task_id}) — read it with ${QUERY}({ request: { task_ids: ['${es.building.task_id}'] } })`, { stage: 'validate', field: 'eventstream' });
   const inputShape = shapeBefore(es, upto + 1) || await builtShape(engine, name, es, ctx);

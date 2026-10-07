@@ -411,7 +411,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   PIPELINE — `start` declares the eventstream, rendered in SQL through the pipeline's own stages (scope,
   the declared relationship for segments, point-in-time for a slowly-changing model), materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
-  (`add_step` / `add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
+  (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
   (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
   in one dbt Python model and stores the eventstream after them (its columns' roles and each event's

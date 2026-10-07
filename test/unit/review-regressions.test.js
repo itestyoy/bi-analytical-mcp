@@ -13,7 +13,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
-import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
+import { settle, isStartedTask, taskResult, stepEffect } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => settle(new Engine({
@@ -512,18 +512,18 @@ models:
 // ── unnest read a payload column without checking it is still there ─────────────────────────
 // an event-property read gained that check; `unnest` did not, so after a stage that changed the grain it emitted
 // a lateral join over a column the relation no longer has — a raw warehouse error at materialize
-// instead of a stage-time refusal at add_step.
+// instead of a stage-time refusal at add_steps.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } });
-  assert.equal(ok.step_index, 1);
+  const ok = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] });
+  assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: agg.draft_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } }),
+    () => e.build_pipeline_model({ action: 'add_steps', draft_id: agg.draft_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

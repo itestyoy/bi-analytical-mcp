@@ -93,16 +93,16 @@ test('an error carries what reproduces it: the draft a refused step was added to
   const source = engine.catalog.facts[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'repro', source });
   const col = engine.catalog.modelColumns(source)[0].name;
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: col, op: 'is_not_null' }] } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: col, op: 'is_not_null' }] }] });
   // a step naming a column that is not there is refused — and the draft it was added to is kept with it
-  const refused = await runTool(engine, 'build_pipeline_model', { request: { action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'no_such_col', op: 'is_null' }] } } });
+  const refused = await runTool(engine, 'build_pipeline_model', { request: { action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'no_such_col', op: 'is_null' }] }] } });
   assert.equal(refused.result.isError, true);
   const [row] = engine.explore_errors({ tool: 'build_pipeline_model' }).errors;
   const full = engine.explore_errors({ id: row.id }).error;
   assert.equal(full.context_id, s.draft_id);
   assert.deepEqual(full.context.state.draft.stages.map((st) => st.stage), ['where']);
   assert.equal(full.context.state.draft.source, source);
-  assert.equal(full.args.request.stage.conditions[0].column, 'no_such_col');
+  assert.equal(full.args.request.stages[0].conditions[0].column, 'no_such_col');
   assert.equal(full.runtime.node, process.version);
   assert.equal(full.runtime.dialect, engine.catalog.dialect);
   // a task that failed on a generated model keeps that model's code, as the message names it

@@ -124,7 +124,7 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null) {
       // arrived. Say that, because the usual cause is on the way in (a large payload cut short by
       // the client), and "unknown stage: undefined" sends the reader to the schema instead.
       if (st?.stage === undefined) {
-        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_step`);
+        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_steps`);
       }
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }

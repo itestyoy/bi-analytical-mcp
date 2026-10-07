@@ -389,8 +389,8 @@ export function pythonAuthoringGuide(profile, recipes = []) {
       },
     } : {}),
     read_next: index.length
-      ? `Read the recipes before you write: fetch every move your question involves (semantic_index({ request: { recipe: '${index[0].id}' } }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_pipeline_model({ request: { action: "add_step", stage: { stage: "python", imports, functions, steps, output } } }); the stage description lists the allowlisted packages.`
-      : 'Declare the stage with build_pipeline_model({ request: { action: "add_step", stage: { stage: "python", imports, functions, steps, output } } }); the stage description lists the allowlisted packages.',
+      ? `Read the recipes before you write: fetch every move your question involves (semantic_index({ request: { recipe: '${index[0].id}' } }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_pipeline_model({ request: { action: "add_steps", draft_id, stages: [{ stage: "python", imports, functions, steps, output }] } }); the stage description lists the allowlisted packages.`
+      : 'Declare the stage with build_pipeline_model({ request: { action: "add_steps", draft_id, stages: [{ stage: "python", imports, functions, steps, output }] } }); the stage description lists the allowlisted packages.',
   };
 }
 

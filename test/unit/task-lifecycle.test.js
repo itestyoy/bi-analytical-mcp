@@ -105,7 +105,7 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   const draft = await start(stored.task_id, { include_columns: true });
   assert.equal(draft.reads, done.table);
   assert.deepEqual(draft.available_columns.map((c) => c.name), ['task_cnt']);
-  const step = await e.build_pipeline_model({ action: 'add_step', draft_id: draft.draft_id, stage: { stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 1 }] } });
+  const step = await e.build_pipeline_model({ action: 'add_steps', draft_id: draft.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 1 }] }] });
   assert.equal(step.column_count, 1);
   // the table's owner cannot be dropped under the draft that reads it
   assert.throws(() => e._dropContext({ context_id: created.context_id }), /reads|READS|consumer|force/i);
@@ -152,7 +152,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   const runner = heldBuilds();
   const e = engine(runner);
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: WHERE_EVENT });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [WHERE_EVENT] });
   // nothing built and nothing building: refused
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id }), /no built pipeline model/);
   const first = await e.build_pipeline_model({ action: 'materialize', draft_id });
@@ -166,7 +166,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   const built1 = await taskResult(e, first.task_id);
   assert.equal((await taskResult(e, q1.task_id)).model, built1.model, 'the query read the build it was queued behind');
   // a second build starts; a query issued now reads the NEW table, not the one standing
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'limit', n: 5 } });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'limit', n: 5 }] });
   const second = await e.build_pipeline_model({ action: 'materialize', draft_id });
   const q2 = await e.query_pipeline_model({ context_id: draft_id });
   await until(() => runner.held.length);
@@ -197,7 +197,7 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
   const runner = heldBuilds();
   const e = engine(runner);
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: WHERE_EVENT });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [WHERE_EVENT] });
   const build = await e.build_pipeline_model({ action: 'materialize', draft_id });
   await until(() => runner.held.length);
   const t0 = Date.now();
@@ -240,7 +240,7 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
   const e1 = make(runner);
   const { draft_id } = await e1.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e1.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
+  await e1.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
   const build = await e1.build_pipeline_model({ action: 'materialize', draft_id });
   await taskResult(e1, build.task_id);
   const display = { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'n' }] };

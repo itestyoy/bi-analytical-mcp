@@ -110,7 +110,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   };
 
   // build_pipeline_model: compose a pipeline INCREMENTALLY, one stage at a time. A
-  // single stateful tool with an `action`; each add_step validates the stage and
+  // single stateful tool with an `action`; add_steps validates each stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
   // materialized until materialize).
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
@@ -122,14 +122,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     from_task: { type: 'string', pattern: TASK_ID, description: 'Begin FROM the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) WITHOUT recomputing it.' },
     source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
     time_range: trProp,
-    stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
-    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Stages to append IN ORDER — with start, the draft\'s first chunk; with add_steps, the next one. Applied atomically; the response reports each stage\'s effect on the data. Keep it to a LOGICAL chunk (scope, then the funnel, then the aggregate), not the whole pipeline at once.' },
+    stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage, placed at `index` (edit_step replaces it, insert_step goes before it), validated against the columns available at that point.' },
+    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Stages to append in order — one or several; with start, the draft\'s first ones. All or none; the response reports each stage\'s effect on the data. A logical chunk at a time (scope, then the funnel, then the aggregate) shows how each changes the data.' },
     materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects.' },
     index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the stage BEFORE this position (count+1 appends).' },
     after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
     validate: { type: 'boolean', description: 'preview only: check the draft\'s SQL against the warehouse without reading data (dbt run --empty) — a task, read with query_pipeline_model. Worth it before an expensive materialize.' },
     include_columns: { type: 'boolean', description: 'Also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
-    include_steps: { type: 'boolean', description: 'Also return the FULL steps array. Off by default — add_step is append-only, so it echoes just the applied `step` + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
+    include_steps: { type: 'boolean', description: 'Also return the FULL steps array. Off by default — add_steps is append-only, so it echoes just the added steps + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
   };
   const echo = ['include_columns', 'include_steps'];
   // One form per action, each with exactly the fields that action takes: a stray field is refused
@@ -138,12 +138,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const startOptional = ['draft_id', 'description', 'materialized', 'time_range', 'stages', ...echo];
   const buildModel = {
     type: 'object',
-    description: 'One form per `action`. Lifecycle: start (with `stages`, its first steps) → add_step / add_steps (with `materialize: true`, built right after) → optionally preview → materialize, then more steps and materialize again. A stage is checked against the columns before it and answers with the columns after it; every edit revalidates the whole pipeline and names the step it breaks. Materialize is not the end: the table it built stands for the steps so far, so later steps read it instead of recomputing an expensive prefix (an aggregate, a python model); editing a step at or before it retires it (each answer says from_checkpoint / steps_recomputed / checkpoints_dropped). Add a logical chunk at a time, so you see how each changes the data.',
+    description: 'One form per `action`. Lifecycle: start (with `stages`, its first steps) → add_steps (with `materialize: true`, built right after) → optionally preview → materialize, then more steps and materialize again. A stage is checked against the columns before it and answers with the columns after it; every edit revalidates the whole pipeline and names the step it breaks. Materialize is not the end: the table it built stands for the steps so far, so later steps read it instead of recomputing an expensive prefix (an aggregate, a python model); editing a step at or before it retires it (each answer says from_checkpoint / steps_recomputed / checkpoints_dropped). Add a logical chunk at a time, so you see how each changes the data.',
     anyOf: [
       form({ title: 'start from a source', tag: ['action', 'start'], tagDescription: 'start a new draft over a catalog source (returns a draft_id + the source columns); draft_id reuses a context.', required: ['name', 'source'], properties: pick(pipelineFields, ['name', 'source', ...startOptional]) }),
       form({ title: 'start from a task', tag: ['action', 'start'], tagDescription: 'start a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(pipelineFields, ['name', 'from_task', 'source', ...startOptional]) }),
-      step('add_step', 'add a step', 'add_step: append one stage; returns the columns available after it.', ['stage'], ['materialize']),
-      step('add_steps', 'add several steps', 'add_steps: append several stages at once (applied in order), atomic (all-or-nothing); returns a per-step breakdown of how each changed the data.', ['stages'], ['materialize']),
+      step('add_steps', 'add steps', 'add_steps: append stages — one or several, in order, all or none; returns what each did to the data.', ['stages'], ['materialize']),
       step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a stage before `index`.', ['index', 'stage']),
       step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
       step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),

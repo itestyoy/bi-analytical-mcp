@@ -22,7 +22,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
-const stage = (st) => ({ action: 'add_step', draft_id: 'ctxabc123456', stage: st });
+const stage = (st) => ({ action: 'add_steps', draft_id: 'ctxabc123456', stages: [st] });
 
 test("a pipeline stage refuses `avg` and says it is spelled `average` here", () => {
   const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'avg', column: 'price' }] }));

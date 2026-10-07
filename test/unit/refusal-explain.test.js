@@ -37,7 +37,7 @@ test('a deep where tree is refused in time that grows with its size', () => {
 
 test('a join stage says how rows match in one field, via — a top-level on is refused', () => {
   const e = engine();
-  const base = { action: 'add_step', draft_id: 'abc123' };
-  const both = refusal(e, 'build_pipeline_model', { ...base, stage: { stage: 'join', with: 'users', via: 'user', on: ['player_id'], attrs: [{ column: 'country' }] } });
+  const base = { action: 'add_steps', draft_id: 'abc123' };
+  const both = refusal(e, 'build_pipeline_model', { ...base, stages: [{ stage: 'join', with: 'users', via: 'user', on: ['player_id'], attrs: [{ column: 'country' }] }] });
   assert.match(both, /unexpected property 'on'/);
 });

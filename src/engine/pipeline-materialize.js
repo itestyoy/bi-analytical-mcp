@@ -130,7 +130,7 @@ export const pipelineMaterializeMethods = {
   },
 
   async _draftMaterialize(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_steps first', { stage: 'validate', field: 'draft_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
       throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'draft_id', code: RESULT_GONE });
     }
@@ -149,7 +149,7 @@ export const pipelineMaterializeMethods = {
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
-      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'draft_id' });
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_steps first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'draft_id' });
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
@@ -199,7 +199,7 @@ export const pipelineMaterializeMethods = {
         (result.warnings ||= []).push(`${modelName} is a VIEW, so the steps you add next re-run its SQL instead of reading a computed prefix — nothing is saved. Start the draft with materialized:'table' when the point of materializing is to stop recomputing.`);
       }
       (result.assumptions ||= []).push(
-        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_step continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from '${draft.source}'.`
+        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_steps continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from '${draft.source}'.`
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;

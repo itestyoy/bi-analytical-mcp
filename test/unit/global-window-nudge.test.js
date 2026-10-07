@@ -26,7 +26,7 @@ import { buildSchemas } from '../../src/schema.js';
 import { pipelineStageSchema } from '../../src/pipeline.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { getDialect } from '../../src/dialects/index.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (dialect) => {
@@ -41,13 +41,12 @@ const DERIVE = { stage: 'compute', name: 'price', expr: { fn: 'event_property', 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [DERIVE] });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [AGG] });
   const out = await e.build_pipeline_model({
-    action: 'add_step', draft_id,
-    stage: { stage: 'compute', name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }], over: {} } },
-  });
-  const said = [...(out.recommendations || []), ...(out.warnings || [])].join(' ');
+    action: 'add_steps', draft_id,
+    stages: [{ stage: 'compute', name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }], over: {} } }] });
+  const said = [...(stepNotes(out) || []), ...(out.warnings || [])].join(' ');
   assert.match(said, /Global analytic window/);
   assert.match(said, /Resources exceeded/, 'it says what the failure looks like');
   assert.match(said, /aggregate` stage with no group_by/, 'and the cheap form of the same question');
@@ -57,12 +56,11 @@ test('a window with no partition_by is named as a global window, with the aggreg
 test('the same window PER GROUP says nothing — a partition is what a window is for', async () => {
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [DERIVE] });
   const out = await e.build_pipeline_model({
-    action: 'add_step', draft_id,
-    stage: { stage: 'compute', name: 'running', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] } } },
-  });
-  const said = [...(out.recommendations || []), ...(out.warnings || [])];
+    action: 'add_steps', draft_id,
+    stages: [{ stage: 'compute', name: 'running', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] } } }] });
+  const said = [...(stepNotes(out) || []), ...(out.warnings || [])];
   assert.ok(!said.some((w) => /Global analytic window/.test(w)), said.join(' '));
 });
 
@@ -85,7 +83,7 @@ test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.
 test('least/greatest take their arguments as expressions — columns and literals alike — and say how many they need', () => {
   const validators = makeValidators(buildSchemas(loadCatalog(CATALOG, {})));
-  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_step', draft_id: 'ctxabc123456', stage });
+  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_steps', draft_id: 'ctxabc123456', stages: [stage] });
 
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { value: 100 }] } }).ok, true);
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { column: 'budget' }] } }).ok, true);

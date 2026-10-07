@@ -14,7 +14,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepEffect } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -179,7 +179,7 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
 });
 
-// Feature C: incremental build_pipeline_model. Each add_step returns the columns
+// Feature C: incremental build_pipeline_model. Each add_steps returns the columns
 // available for the next stage; a committed draft yields the SAME rows as the
 // all-at-once _buildPipeline (fidelity), proven on the activation funnel.
 test('build_pipeline_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
@@ -188,8 +188,8 @@ test('build_pipeline_model incremental: per-step columns + commit equals all-at-
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation(), include_columns: true });
-  assert.equal(a1.step_index, 1);
+  const a1 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [matchActivation()], include_columns: true });
+  assert.equal(stepEffect(a1).step_index, 1);
   const names = a1.available_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
   assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel output columns available next');
@@ -207,12 +207,12 @@ test('build_pipeline_model incremental: per-step columns + commit equals all-at-
 });
 
 // Lifecycle/validation guard: a rejected stage must NOT mutate the draft.
-test('build_pipeline_model add_step rejects an invalid stage without mutating the draft', opts, async (t) => {
+test('build_pipeline_model add_steps rejects an invalid stage without mutating the draft', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_guard', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
   await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'project', columns: ['no_such_column'] } }),
+    () => engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'project', columns: ['no_such_column'] }] }),
     'a stage referencing a missing column is rejected',
   );
   const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });

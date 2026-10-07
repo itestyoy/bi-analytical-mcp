@@ -182,7 +182,7 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis' }] }, /invalid input/); // features: required by the library
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'has_event', metric_args: { events: ['a'] } }] }] }, /invalid input/);
   // a step is one of the library's own ops, checked by the schema first
-  const step = (st) => ({ action: 'add_step', context_id: 'abc', step: st });
+  const step = (st) => ({ action: 'add_steps', context_id: 'abc', steps: [st] });
   await refused('build_retentioneering_model', step({ type: 'filter_events', sql: 'select * from eventstream' }), /invalid input/);
   await refused('build_retentioneering_model', step({ type: 'add_start_end_events' }), /invalid input/);
   await refused('build_retentioneering_model', step({ type: 'filter_paths', condition: { op: '>', metric: 'has_event_bulk', value: 1 } }), /invalid input/);
@@ -190,7 +190,7 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'collapse_events', loops: true }], analyses: [{ kind: 'describe' }] }, /invalid input/); // steps belong to the eventstream
   // each action takes its own fields: a step with a start, a start's field with a step
   await refused('build_retentioneering_model', { name: 'x', source: 'events', step: { type: 'collapse_events', loops: true } }, /invalid input/);
-  await refused('build_retentioneering_model', { action: 'add_step', context_id: 'abc', source: 'events', step: { type: 'collapse_events', loops: true } }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', source: 'events', steps: [{ type: 'collapse_events', loops: true }] }, /invalid input/);
   await refused('build_retentioneering_model', { action: 'edit_step', context_id: 'abc', step: { type: 'collapse_events', loops: true } }, /invalid input/); // which step
   await refused('build_retentioneering_model', { action: 'truncate', context_id: 'abc' }, /invalid input/);
   await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc' }, /invalid input/);

@@ -68,7 +68,7 @@ function engine(runner, { workspaceRoot, registryPath } = {}) {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const add = (e, draft_id, stage) => e.build_pipeline_model({ action: 'add_step', draft_id, stage });
+const add = (e, draft_id, stage) => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [stage] });
 const materialize = (e, draft_id) => e.build_pipeline_model({ action: 'materialize', draft_id });
 
 async function startedDraft(e, name = 'seg') {

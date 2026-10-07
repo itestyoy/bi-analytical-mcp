@@ -207,7 +207,7 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
   // an order compares no flag: refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] } }), /text column in the warehouse/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
 });
 
 test('a joined text column, under the name the join gave it, is compared with a boolean as text too', opts, async (t) => {
@@ -236,14 +236,14 @@ test('a raw expression takes its columns positionally, in args: the server write
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'order', expr: { column: 'session_number' } } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
   // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
   for (const sql of ['order * 2', '"order" * 2']) {
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } } }), /a column goes in `args`/, sql);
+    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
   }
   // a placeholder with no argument, and an argument no placeholder uses, are refused
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } } }), /has no argument/);
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } } }), /not used/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
 test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
@@ -257,7 +257,7 @@ test('preview with validate runs the draft\'s SQL against the warehouse with no 
   assert.equal(good.ok, true, JSON.stringify(good.error));
   assert.equal(good.validated, true);
   // a function the warehouse does not have: only the warehouse can say so
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
   const bad = await engine.raw.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
   const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
   assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
@@ -275,5 +275,5 @@ test('a time column compared with an expression that yields a moment keeps the r
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] } }), /is a moment/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
 });

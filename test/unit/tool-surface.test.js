@@ -11,7 +11,7 @@ import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
 import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
 import { deref, field } from '../helpers/schema-nav.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
@@ -115,8 +115,8 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
 test('a sampled pipeline flags the result approximate with guidance', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'sampled', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'sample', percent: 10 } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'sample', percent: 10 }] });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
   const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
@@ -124,7 +124,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'exact', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
   const out2 = await e.build_pipeline_model({ action: 'materialize', draft_id: s2.draft_id });
   assert.equal(out2.provenance.approximate, undefined);
   assert.equal(out2.sampling, undefined);
@@ -139,7 +139,7 @@ test('recipes have no standalone tool; _recipe payload is framed as a building b
 });
 
 // #3 gotcha: referencing an event-specific property without scoping its event(s) reads NULL.
-test('add_step warns when an event-specific property is used without its event scope', async () => {
+test('add_steps warns when an event-specific property is used without its event scope', async () => {
   const e = engine();
   // Applicability is DATA-DERIVED from the value index: seed coverage showing ad_type is populated
   // only on ad_started/ad_finished (NULL on first_launch) — the nudge reads this, not a declared list.
@@ -150,18 +150,18 @@ test('add_step warns when an event-specific property is used without its event s
   ] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
-  const a = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-  assert.ok(a.recommendations.some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(a.recommendations));
+  const a = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  assert.ok(stepNotes(a).some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(stepNotes(a)));
   // with an upstream where scoping event_name to those events → no NULL warning.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'scoped', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
-  const a2 = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-  assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] }] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  assert.ok(!stepNotes(a2).some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
   const warnFor = async (cond) => {
     const d = await e.build_pipeline_model({ action: 'start', name: 'scoped2', source: 'events' });
-    await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [cond] } });
-    const r = await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-    return (r.recommendations || []).find((x) => x.includes('populated only on event'));
+    await e.build_pipeline_model({ action: 'add_steps', draft_id: d.draft_id, stages: [{ stage: 'where', conditions: [cond] }] });
+    const r = await e.build_pipeline_model({ action: 'add_steps', draft_id: d.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+    return (stepNotes(r) || []).find((x) => x.includes('populated only on event'));
   };
   // a scope WITHIN the field's events is the right choice: every row it keeps carries the field
   assert.equal(await warnFor({ column: 'event_name', op: 'eq', value: 'ad_started' }), undefined);
@@ -236,14 +236,14 @@ test('semantic_index({ model }) reports an owned relationship as owned, with a g
 // two sources carry can never be attached to the wrong one, and never has to be disambiguated.
 test('memory targets: { source, name } resolves; a bare name is not a target', async () => {
   const e = engine();
-  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] });
+  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] }] })).notes[0];
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
-  const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', targets: ['app_version'] }] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
+  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] }] })).notes[0];
   assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
 });
 
@@ -317,7 +317,7 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
 
   const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
   const start = await e.build_pipeline_model({ action: 'start', name: 'fnl_part', source: 'events' });
-  const add = (partition_by) => e.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage: { stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) } });
+  const add = (partition_by) => e.build_pipeline_model({ action: 'add_steps', draft_id: start.draft_id, stages: [{ stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) }] });
   // a relationship written as a bare word is not a column — and the message says what to write
   await assert.rejects(() => add(['user']), /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/);
   // a relationship keyed by several columns cannot be a partition column at all

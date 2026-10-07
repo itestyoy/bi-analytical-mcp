@@ -16,7 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js';
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes, stepEffect } from '../helpers/settle.js';
 
 /** An import form's `package` field — folded into $defs when the two forms share it, so followed there. */
 const packageField = (root, py) => {
@@ -210,20 +210,20 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   assert.equal(r.python[0].runtime, 'pyspark', 'the model is compiled for the same runtime the schema described');
 });
 
-test('incremental builder: add_step python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
+test('incremental builder: add_steps python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const p = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: PY_STAGE });
-  assert.deepEqual(p.columns_added.map((c) => c.name), ['revenue_z']);
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
+  const p = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [PY_STAGE] });
+  assert.deepEqual(stepEffect(p).columns_added.map((c) => c.name), ['revenue_z']);
   const pv = await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
   assert.equal(pv.models[1].input, `pipe_seg_${s.draft_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
-  assert.equal(after.step_index, 3);
+  const after = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 5 }] });
+  assert.equal(stepEffect(after).step_index, 3);
   const m = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.model, `pipe_seg_${s.draft_id}`);
   assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
@@ -651,7 +651,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
 // went in as `step 2: unknown pipeline stage: undefined`, which reads like a schema problem and
 // sent the caller to shrink the payload. The schema's own limits (30 functions, 40,000 characters of
 // body per function, 50 steps, 20 imports) are nowhere near that, so a payload this size
-// must simply pass: through add_step, through add_steps, and through the all-at-once register.
+// must simply pass: through add_steps and through the all-at-once register.
 // Whatever produced that message, it was not a limit here, and this test is what would catch it
 // becoming one.
 test('a python stage of six functions / ~150 lines is accepted by every entry point', async (t) => {
@@ -690,9 +690,9 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'bigpy', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: big });
-  assert.equal(added.step?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
+  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [big] });
+  assert.equal(added.steps_added[added.steps_added.length - 1]?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
@@ -713,14 +713,14 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
 // (a model scoring every event), and from here there is no way to tell those apart.
 test('a python stage with no preparation before it is told so; one after an SQL stage is not', async (t) => {
   if (skipNoPy(t)) return;
-  const nudge = (res) => (res.recommendations || res.warnings || []).filter((w) => /reads .* as it is/.test(w));
+  const nudge = (res) => (res.step_effects ? stepNotes(res) : res.warnings || []).filter((w) => /reads .* as it is/.test(w));
 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
   const raw = await e.build_pipeline_model({ action: 'start', name: 'raw_py', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: raw.draft_id, stage: PY_STAGE });
+  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: raw.draft_id, stages: [PY_STAGE] });
   const [said] = nudge(added);
-  assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(added.recommendations || [])}`);
+  assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(stepNotes(added))}`);
   assert.match(said, /'events'/, 'it names the source being read raw');
   assert.match(said, /aggregating to the grain/, 'and what belongs in a stage before it');
   assert.match(said, /device_time/, 'including the time column of that source');
@@ -728,15 +728,15 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 2. the same stage after an aggregate → nothing to say
   const prepared = await e.build_pipeline_model({ action: 'start', name: 'prep_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: AGG });
-  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: PY_STAGE });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: prepared.draft_id, stages: [AGG] });
+  const after = await e.build_pipeline_model({ action: 'add_steps', draft_id: prepared.draft_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
   const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: AGG });
-  const scopedPy = await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: PY_STAGE });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [AGG] });
+  const scopedPy = await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)

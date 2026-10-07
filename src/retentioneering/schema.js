@@ -191,8 +191,8 @@ export function buildSchema(catalog) {
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
       eventstream: { type: 'string', pattern: NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
-      step: { ...stepSchema(), description: 'add_step / edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
-      steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: several steps, applied in order.' },
+      step: { ...stepSchema(), description: 'edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
+      steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: the library\'s own steps — one or several, applied in order, each { type: <op>, ...its parameters under the library\'s names }.' },
       index,
       after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
       name: { type: 'string', pattern: NAME, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
@@ -274,13 +274,12 @@ export function buildSchema(catalog) {
 }
 
 /** The build's actions, the pipeline builder's own words for the same moves. */
-export const BUILD_ACTIONS = ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize'];
+export const BUILD_ACTIONS = ['start', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize'];
 
 /** What each build action does — said once, on the form of that action (and joined for the field that lists them all). */
 const ACTION_SAYS = () => ({
   start: 'declares the eventstream and builds it in SQL (a task); the default',
-  add_step: `appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
-  add_steps: 'appends several steps, all or none, each checked as add_step checks one',
+  add_steps: `appends library steps — one or several, all or none — and returns what the eventstream holds after each: its events, path columns, segments and their levels. Each is checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
   edit_step: 'replaces step `index`, re-checking every step after it and naming the first one it breaks',
   insert_step: 'inserts a step before step `index`, re-checking every step after it',
   delete_step: 'removes step `index`, re-checking every step after it',
@@ -314,8 +313,7 @@ function buildForms(event, schema) {
     anyOf: [
       form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: pick(F, ['source', ...declaration]) }),
       form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'columns'], properties: pick(lifted, ['from_task', 'columns', 'source', ...declaration]) }),
-      step('add_step', 'add a step', ['step']),
-      step('add_steps', 'add several steps', ['steps']),
+      step('add_steps', 'add steps', ['steps']),
       step(['edit_step', 'insert_step'], 'edit or insert a step', ['index', 'step']),
       step('delete_step', 'delete a step', ['index']),
       step('truncate', 'truncate the steps', ['after']),

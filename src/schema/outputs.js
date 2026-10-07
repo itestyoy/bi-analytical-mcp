@@ -75,17 +75,12 @@ export const OUTPUTS = {
     note: str,
   }),
 
-  // record: saved + id (or notes, one each); forget: forgotten + id
-  memory: shape('The note saved (record: `saved`, `id`; several: `notes`, each with its `id`), or the note removed (forget: `forgotten`, `id`).', [], {
+  // record: saved + notes (each with its id); forget: forgotten + id
+  memory: shape('The notes saved (record: `saved`, `notes`, each with its `id`), or the note removed (forget: `forgotten`, `id`).', [], {
     saved: bool,
     notes: list(obj),
     forgotten: bool,
     id: str,
-    note: str,
-    linked_to: list(obj),
-    unresolved_terms: list(str),
-    aliases: list(str),
-    links: list(),
     next: str,
   }),
 

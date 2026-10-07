@@ -5,7 +5,7 @@
 //                    value search, asserting the rewarded → ad_type → ad_finished
 //                    provenance fact from the value index.
 //   2. INDEX STATE — semantic_index reports the value-index sync after refresh().
-//   3. PIPELINE — build_pipeline_model (start/add_step/preview/commit) builds the
+//   3. PIPELINE — build_pipeline_model (start/add_steps/preview/commit) builds the
 //                    activation funnel; rows read back via query_pipeline_model; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
@@ -36,7 +36,7 @@ import { Engine } from '../../src/engine.js';
 
 import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, readTable, one } from '../helpers/settle.js';
+import { settle, readTable, one, stepEffect } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -191,17 +191,17 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
 });
 
 // ───────────────────────── 3. PIPELINE (incremental) ─────────────────────────
-test('3a. build_pipeline_model: start → add_step (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
+test('3a. build_pipeline_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.draft_id;
 
-  // default add_step returns a DIFF; the funnel columns show up as added.
-  const a1 = await engine.build_pipeline_model({ action: 'add_step', draft_id: S.draftId, stage: matchActivation() });
-  assert.equal(a1.step_index, 1);
-  const cols = a1.columns_added.map((c) => c.name);
+  // default add_steps returns a DIFF; the funnel columns show up as added.
+  const a1 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: S.draftId, stages: [matchActivation()] });
+  assert.equal(stepEffect(a1).step_index, 1);
+  const cols = stepEffect(a1).columns_added.map((c) => c.name);
   assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
 
   const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: S.draftId });
@@ -317,13 +317,13 @@ test('5a. build_pipeline_model fed the conversion recipe stages → per-variant 
   if (skip(t)) return;
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
   // stages one at a time, then commit. (_buildPipeline with the same payload
-  // is the documented fallback; here we prove the add_step path also works.)
+  // is the documented fallback; here we prove the add_steps path also works.)
   const r = recipes.list.find((x) => x.id === 'experiment_conversion');
   const stages = r.pipeline_payload.pipeline.stages;
   const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.pipeline.source });
   for (const stage of stages) {
-    const a = await engine.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage });
-    assert.ok(Number.isInteger(a.step_index), 'each add_step advances the draft');
+    const a = await engine.build_pipeline_model({ action: 'add_steps', draft_id: start.draft_id, stages: [stage] });
+    assert.ok(Number.isInteger(stepEffect(a).step_index), 'each add_steps advances the draft');
   }
   const commit = await engine.build_pipeline_model({ action: 'materialize', draft_id: start.draft_id });
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));

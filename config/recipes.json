@@ -5362,7 +5362,7 @@
           ]
         }
       },
-      "notes": "Without `between`, the key alone matches EVERY historical version of the row: the count and any money inflate silently (the add_step response nudges about it and names the real window columns). The value side is the time being asked about — the event time, the spend day, or a funnel's first event after a match_recognize stage. The governed path applies the window itself; a pipeline states it here, deliberately, so the moment is visible at the call site.",
+      "notes": "Without `between`, the key alone matches EVERY historical version of the row: the count and any money inflate silently (the add_steps response nudges about it and names the real window columns). The value side is the time being asked about — the event time, the spend day, or a funnel's first event after a match_recognize stage. The governed path applies the window itself; a pipeline states it here, deliberately, so the moment is visible at the call site.",
       "hack": "Point-in-time = the key AND a time inside the window: `between: { value: <the time asked about>, from: <validity start>, to: <validity end> }`. The window is half-open on the right — the CURRENT version has no end (NULL) and must still match. Extrapolate: any versioned dimension."
     },
     {

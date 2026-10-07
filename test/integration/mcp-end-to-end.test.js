@@ -85,10 +85,10 @@ async function callErr(name, args) {
   return out;
 }
 
-/** A whole pipeline over MCP: start → add_step per stage → materialize. */
+/** A whole pipeline over MCP: start → add_steps → materialize. */
 async function mcpPipeline(source, stages, name) {
   const s = await call('build_pipeline_model', { action: 'start', name: name || `e2e_${seq++}`, source });
-  for (const stage of stages) await call('build_pipeline_model', { action: 'add_step', draft_id: s.draft_id, stage });
+  for (const stage of stages) await call('build_pipeline_model', { action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
   const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return built;
@@ -195,9 +195,8 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   // …and the step that omits it says so, before anything is built.
   const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
   const step = await call('build_pipeline_model', {
-    action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] },
-  });
+    action: 'add_steps', draft_id: s.draft_id,
+    stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
   const recs = JSON.stringify(step.recommendations || []);
   assert.match(recs, /INCOMPLETE JOIN/);
   assert.match(recs, /install_time_valid_from/, 'and names the real window columns');
@@ -238,16 +237,14 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (a) no attrs → refused, and the error lists what the model actually offers.
   const missing = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: await start(),
-    stage: { stage: 'join', with: 'acquisition', via: 'user' },
-  });
+    action: 'add_steps', draft_id: await start(),
+    stages: [{ stage: 'join', with: 'acquisition', via: 'user' }] });
   assert.match(missing.error.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
   const dup = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: await start(),
-    stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] },
-  });
+    action: 'add_steps', draft_id: await start(),
+    stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }] });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
   assert.match(dup.error.message, /name: 'events_event_name'/);
 
@@ -266,11 +263,10 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] } });
+  await call('build_pipeline_model', { action: 'add_steps', draft_id: s, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] }] });
   const unlisted = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: s,
-    stage: { stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] },
-  });
+    action: 'add_steps', draft_id: s,
+    stages: [{ stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] }] });
   assert.match(unlisted.error.message, /unknown column 'tracking_id'/);
 });
 

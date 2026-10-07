@@ -33,7 +33,7 @@ test('a draft keeps its description, reports it, and hands it to the fork', asyn
   const note = 'revenue per player for the payer-share question';
   const start = await e.build_pipeline_model({ action: 'start', name: 'lbl', source: 'events', description: note });
   assert.equal(start.description, note, 'the start response echoes what it recorded');
-  await e.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage: AGG });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: start.draft_id, stages: [AGG] });
 
   const described = await e.context({ action: 'describe', context_id: start.draft_id });
   assert.equal(described.draft?.description, note);
@@ -51,9 +51,9 @@ test('a draft keeps its description, reports it, and hands it to the fork', asyn
 test('the description belongs to the draft, not to every action on it', async () => {
   const e = engine();
   const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'lbl2', source: 'events', description: 'x' });
-  // add_step / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
+  // add_steps / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG, description: 'nope' }),
+    () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [AGG], description: 'nope' }),
     /invalid input|description/i,
   );
   await assert.rejects(

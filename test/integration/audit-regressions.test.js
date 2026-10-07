@@ -85,8 +85,8 @@ const evtsTask = (eng, name, more = {}) => eng.build_semantic_model({
 async function pipeRows(source, stages, eng = engine) {
   const s = await eng.build_pipeline_model({ action: 'start', name: `au_${seq++}`, source });
   for (const stage of stages) {
-    const r = await eng.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
-    assert.ok(!r.error, `add_step failed: ${JSON.stringify(r.error || r)}`);
+    const r = await eng.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+    assert.ok(!r.error, `add_steps failed: ${JSON.stringify(r.error || r)}`);
   }
   const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
@@ -311,7 +311,7 @@ test('20. with an owner declared, both sides label the relationship consistently
 
 test('21. a finding recorded on { source: events, name: ad_finished } surfaces on that event', opts, async (t) => {
   if (skip(t)) return;
-  const saved = await engine.memory({ action: 'record', note: 'ad_finished carries revenue; ad_started never does', targets: [{ source: 'events', name: 'ad_finished' }] });
+  const saved = (await engine.memory({ action: 'record', notes: [{ note: 'ad_finished carries revenue; ad_started never does', targets: [{ source: 'events', name: 'ad_finished' }] }] })).notes[0];
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event']);
   const v = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((v.memory || []).some((m) => /ad_finished carries revenue/.test(m.note)), JSON.stringify(v.memory));
@@ -319,14 +319,14 @@ test('21. a finding recorded on { source: events, name: ad_finished } surfaces o
 
 test('22. a finding on a qualified crash property surfaces on that property', opts, async (t) => {
   if (skip(t)) return;
-  await engine.memory({ action: 'record', note: 'ANR seconds are only on anr reports', targets: [{ source: 'crashlytics', name: 'anr_duration_of_event_data' }] });
+  await engine.memory({ action: 'record', notes: [{ note: 'ANR seconds are only on anr reports', targets: [{ source: 'crashlytics', name: 'anr_duration_of_event_data' }] }] });
   const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
   assert.ok((v.memory || []).some((m) => /ANR seconds/.test(m.note)), JSON.stringify(v.memory));
 });
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}.*\{ term \}/);
+  await assert.rejects(() => engine.memory({ action: 'record', notes: [{ note: 'x', targets: ['app_version'] }] }), /must be exactly one of: \{ source: "events", name\? \}.*\{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════

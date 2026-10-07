@@ -59,12 +59,10 @@ export function memorySchema(catalog) {
     type: 'object',
     description: 'Write the analyst memory: record a finding, or forget one by id. Notes are read with semantic_index — { search }, { notes: true }, and on the views of the entities they are about.',
     anyOf: [
-      branch('record', finding, ['note'],
-        'Save a finding. Required: note (one atomic fact). Optional: question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
-      // what one study turned up is several atomic notes: saved in one call, all or none
+      // one finding is a list of one; what one study turned up is several atomic notes, saved all or none
       branch('record', {
-        notes: { type: 'array', minItems: 2, maxItems: 10, description: 'Several findings at once — what one study turned up, each its own atomic note. All are checked before any is saved.', items: { type: 'object', additionalProperties: false, required: ['note'], properties: finding } },
-      }, ['notes'], 'Save several findings at once (2–10): each item is what a single record takes.'),
+        notes: { type: 'array', minItems: 1, maxItems: 10, description: 'The findings — one, or what one study turned up (up to 10), each its own atomic note. All are checked before any is saved.', items: { type: 'object', additionalProperties: false, required: ['note'], properties: finding } },
+      }, ['notes'], 'Save findings. Each item: note (one atomic fact; required), question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
       branch('forget', { id: F.id }, ['id'],
         'Delete one note. Required: id (from record / list / search).'),
     ],

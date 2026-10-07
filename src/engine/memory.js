@@ -80,7 +80,7 @@ export class MemoryTool {
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
    * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
-   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links), or several (notes)
+   *   action:'record' → save notes, one or several (each + targets it is about, + aliases the user used, + links)
    *   action:'forget' → delete one note by id
    * (the notes are read with semantic_index: { search }, { notes, about? } — see list() below)
    */
@@ -90,12 +90,9 @@ export class MemoryTool {
 
     if (action === 'record') {
       const next = 'Saved. A finding surfaces in semantic_index on the entities it is linked to, via semantic_index({ request: { search } }) — including its aliases — and in semantic_index({ request: { notes: true } }).';
-      if (input.notes) {
-        // every note is checked before any is saved: a batch is saved whole or not at all
-        const findings = input.notes.map((n, i) => this._finding(n, `notes[${i}]`));
-        return { saved: true, notes: findings.map((f) => this._save(f)), next };
-      }
-      return { saved: true, ...this._save(this._finding(input)), next };
+      // every note is checked before any is saved: the notes are saved all or none
+      const findings = (input.notes || []).map((n, i) => this._finding(n, input.notes.length > 1 ? `notes[${i}]` : null));
+      return { saved: true, notes: findings.map((f) => this._save(f)), next };
     }
 
     if (action === 'forget') {

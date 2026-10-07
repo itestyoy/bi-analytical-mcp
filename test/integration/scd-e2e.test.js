@@ -20,7 +20,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, readTable } from '../helpers/settle.js';
+import { settle, readTable, stepNotes } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -163,15 +163,15 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
 test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] } });
-  const w = (r.recommendations || []).find((x) => /INCOMPLETE JOIN/.test(x));
-  assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(r.recommendations)}`);
+  const r = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
+  const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
+  assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(stepNotes(r))}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
   assert.match(w, /device_time/);               // the event-time column from the catalog
   assert.match(w, /install_time_valid_from/);   // validity-window columns from the catalog
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
   const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
-  assert.ok(!(r2.recommendations || []).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
+  const r2 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+  assert.ok(!stepNotes(r2).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

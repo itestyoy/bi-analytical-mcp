@@ -103,9 +103,9 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
 test('python stage: the incremental builder materializes the same split and returns the rows', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'seg2', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
   const keep = { name: 'keep', params: ['df', 'columns'], body: "return df[columns]" };
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } }] });
   const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.build?.executed, true, JSON.stringify(m.error || m));
   assert.equal(m.row_count, 4);

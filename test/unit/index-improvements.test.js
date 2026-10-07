@@ -40,19 +40,19 @@ test('memory record refuses a near-miss name inside its source, suggesting the r
   // typo: missing a 't' in "event". The source is written down, so the miss is a misspelling WITHIN
   // it — the schema refuses it with the nearest real name, never silently linked to one of them.
   await assert.rejects(
-    () => e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_even_data' }] }),
+    () => e.memory({ action: 'record', notes: [{ note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_even_data' }] }] }),
     /targets\.0\.name` must be one of: .*Did you mean 'ad_type_of_event_data'/s,
   );
   // spelled correctly, it links — and surfaces on that property's view.
-  const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
+  const out = (await e.memory({ action: 'record', notes: [{ note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] }] })).notes[0];
   assert.deepEqual(out.linked_to[0].target, { source: 'events', name: 'ad_type_of_event_data' });
   const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === out.id), 'note surfaces on the linked property');
   // a phrase is written as one — and stays itself, searchable, linked to nothing
-  const t = await e.memory({ action: 'record', note: 'x', targets: [{ term: 'totally unrelated phrase 123' }] });
+  const t = (await e.memory({ action: 'record', notes: [{ note: 'x', targets: [{ term: 'totally unrelated phrase 123' }] }] })).notes[0];
   assert.equal(t.linked_to[0].kind, 'term');
   // an identifier the catalog does not have is a phrase too, and says so
-  const u = await e.memory({ action: 'record', note: 'y', targets: [{ term: 'zzz_nothing_like_this' }] });
+  const u = (await e.memory({ action: 'record', notes: [{ note: 'y', targets: [{ term: 'zzz_nothing_like_this' }] }] })).notes[0];
   assert.equal(u.linked_to[0].kind, 'term');
 });
 
@@ -64,7 +64,7 @@ test('memoryDbPath persists findings across engine instances', async () => {
   const cat = () => loadCatalog(CATALOG, {});
 
   const e1 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
-  const rec = await e1.memory({ action: 'record', note: 'durable finding about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
+  const rec = (await e1.memory({ action: 'record', notes: [{ note: 'durable finding about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] }] })).notes[0];
   e1.close();
 
   const e2 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));

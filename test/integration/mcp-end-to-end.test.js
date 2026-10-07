@@ -23,7 +23,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
-import { settleMcp } from '../helpers/settle.js';
+import { settleMcp, stepNotes } from '../helpers/settle.js';
 import { forms, pinned } from '../helpers/schema-nav.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
@@ -197,7 +197,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   const step = await call('build_pipeline_model', {
     action: 'add_steps', draft_id: s.draft_id,
     stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
-  const recs = JSON.stringify(step.recommendations || []);
+  const recs = JSON.stringify(stepNotes(step));
   assert.match(recs, /INCOMPLETE JOIN/);
   assert.match(recs, /install_time_valid_from/, 'and names the real window columns');
 });

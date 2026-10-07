@@ -16,7 +16,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepEffect } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -183,7 +183,7 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
         { name: 'again', event_name: ['fatal_crash'] },
       ],
     }] });
-  assert.equal(a.step_index, 1);
+  assert.equal(stepEffect(a).step_index, 1);
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 3, 'one row per player who crashed');
@@ -221,12 +221,12 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
     action: 'add_steps',
     draft_id: s.draft_id,
     stages: [{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }] });
-  assert.equal(a.step_index, 1);
+  assert.equal(stepEffect(a).step_index, 1);
   const g = await engine.build_pipeline_model({
     action: 'add_steps',
     draft_id: s.draft_id,
     stages: [{ stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }] }] });
-  assert.equal(g.step_index, 2);
+  assert.equal(stepEffect(g).step_index, 2);
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   const by = mapCol(c.rows, 'crumb', 'n');

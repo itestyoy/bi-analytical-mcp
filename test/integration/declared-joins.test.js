@@ -52,7 +52,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
 import { mcp } from '../helpers/catalog-doc.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -263,8 +263,8 @@ test('2. without the window the same join duplicates: 15 rows from 13 spend rows
   assert.equal(r.n, 15, 'u1 has 2 spend rows x 2 install versions');
   assert.equal(r.distinct, 13, 'still only 13 real spend rows — the extra 2 are duplicates');
   const warned = await joinStep('acquisition', { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] });
-  assert.match(JSON.stringify(warned.recommendations || []), /INCOMPLETE JOIN/);
-  assert.match(JSON.stringify(warned.recommendations || []), /install_time_valid_from/, 'the nudge names the real window columns');
+  assert.match(JSON.stringify(stepNotes(warned)), /INCOMPLETE JOIN/);
+  assert.match(JSON.stringify(stepNotes(warned)), /install_time_valid_from/, 'the nudge names the real window columns');
 });
 
 // 3. Money is the thing duplicates corrupt: with the window the total is untouched.
@@ -364,7 +364,7 @@ test('12. events without the window: 220 rows from 184 events, with the nudge', 
   assert.equal(r.n, 220);
   assert.equal(r.distinct, 184);
   const warned = await joinStep('events', { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] });
-  assert.match(JSON.stringify(warned.recommendations || []), /INCOMPLETE JOIN/);
+  assert.match(JSON.stringify(stepNotes(warned)), /INCOMPLETE JOIN/);
 });
 
 // 13. Attribution moves with the window: 30 of u1's events are US, 6 are GB.
@@ -609,8 +609,8 @@ test('an unowned relationship offers no governed group-by path', opts, async (t)
 
 test('join guards: an undeclared relationship, a self-join and a top-level on are all rejected', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
-    /`stage.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }),
+    /`stages\.0\.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property 'on'/, 'how the rows match is one field, via: a relationship or { on }');
 });
@@ -837,10 +837,10 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     const s2 = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
     const bad = await client.callTool({
       name: 'build_pipeline_model',
-      arguments: { request: { action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }] } },
+      arguments: { request: { action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }] } },
     });
     assert.equal(bad.isError, true);
-    assert.match(JSON.parse(bad.content[0].text).error.message, /`stage.via` must be "user"/);
+    assert.match(JSON.parse(bad.content[0].text).error.message, /`stages\.0\.via` must be "user"/);
   } finally {
     await mcpConn.close();
   }
@@ -1211,7 +1211,7 @@ test('48. duplicate names and unknown columns are refused with the fix', opts, a
   // (b) a column the joined model does not have.
   await assert.rejects(
     () => joinStep('crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: [{ column: 'cost' }, { column: 'nope' }] }),
-    /`stage.attrs.1.column` must be one of: .*cost/s,
+    /`stages\.0\.attrs\.1\.column` must be one of: .*cost/s,
   );
   // (c) a name the pipeline already carries, holding DIFFERENT data → rename it.
   await assert.rejects(

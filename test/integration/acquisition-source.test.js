@@ -179,7 +179,7 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
     const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
     await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
     await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } }] });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'acquisition', on, attrs: [{ column: 'media_source' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'acquisition', via: { on }, attrs: [{ column: 'media_source' }] }] });
     await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
     const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));

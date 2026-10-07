@@ -357,7 +357,7 @@ test('filter_events takes a condition tree — what keep / drop cannot say — w
   assert.deepEqual(got, want);
   // a name that is not a column of the eventstream is the library's refusal, as the step is added
   await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'bad_where', after: 0 });
-  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: { op: 'and', conditions: [{ column: 'no_such_col', op: '=', value: 'x' }] } }] }), (e) => e.field === 'step' && /no_such_col/.test(e.message));
+  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: { op: 'and', conditions: [{ column: 'no_such_col', op: '=', value: 'x' }] } }] }), (e) => e.field === 'steps[0]' && /no_such_col/.test(e.message));
 });
 
 test('an analysis the library raises on keeps its error; the call\'s other analyses keep their numbers', opts, async (t) => {
@@ -445,7 +445,7 @@ test('each step is checked by the library as it is added, and says what it chang
   assert.deepEqual(s3.changed.segments_added, ['band']);
   assert.deepEqual(s3.shape.segments.band.levels.sort(), ['long', 'short']);
   // refused by the library, with its own message, on what the eventstream holds at that step
-  const refusedStep = (step, re) => assert.rejects(add(step), (e) => e.field === 'step' && re.test(e.message) && /nothing changed/.test(e.message));
+  const refusedStep = (step, re) => assert.rejects(add(step), (e) => e.field === 'steps[0]' && re.test(e.message) && /nothing changed/.test(e.message));
   await refusedStep({ type: 'rename_events', mapping: { shop_opened: 'store' } }, /shop_opened/); // renamed at step 1
   await refusedStep({ type: 'filter_events', keep: { platform: ['no_such_platform'] } }, /no_such_platform/);
   await refusedStep({ type: 'collapse_events', loops: true, name: 'x->y' }, /->/);
@@ -503,8 +503,8 @@ test('metric bins: each bin holds the paths whose metric falls in it — by valu
   assert.deepEqual(sizes(a.by_value), Object.fromEntries(Object.entries({ short: count((n) => n < 5), mid: count((n) => n >= 5 && n < 10), long: count((n) => n >= 10) }).filter(([, n]) => n)));
   assert.deepEqual(sizes(a.by_quantile), Object.fromEntries(Object.entries({ lower: count((n) => n < median), upper: count((n) => n >= median) }).filter(([, n]) => n)));
   const bins = (list) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bands', steps: [{ type: 'add_segment', name: 'x', metric_bins: { metric: { metric: 'length' }, bins: list } }] });
-  await assert.rejects(bins([{ level: 'a' }, { level: 'a', from: 3 }]), (e) => e.field === 'step.metric_bins' && /two bins are named 'a'/.test(e.message));
-  await assert.rejects(bins([{ level: 'a' }, { level: 'b', from: 3 }, { level: 'c', from: 3 }]), (e) => e.field === 'step.metric_bins' && /two bins start/.test(e.message));
+  await assert.rejects(bins([{ level: 'a' }, { level: 'a', from: 3 }]), (e) => e.field === 'steps[0].metric_bins' && /two bins are named 'a'/.test(e.message));
+  await assert.rejects(bins([{ level: 'a' }, { level: 'b', from: 3 }, { level: 'c', from: 3 }]), (e) => e.field === 'steps[0].metric_bins' && /two bins start/.test(e.message));
 });
 
 test('rules are cases the tool writes: each path gets the level of the first case its row matches, the rest the else level', opts, async (t) => {
@@ -556,10 +556,10 @@ test('a column a step makes is an identifier the warehouse stores; a segment nam
   if (skip(t)) return;
   const ctx = await stepsContext();
   const segmentNamed = (name) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'base', steps: [{ type: 'add_segment', name, rules: { cases: [{ column: 'platform', op: '=', value: 'ios', level: 'x' }], else: 'y' } }] });
-  await assert.rejects(segmentNamed('ad format'), (e) => e.field === 'step' && /'ad format' cannot be a column/.test(e.message) && /nothing changed/.test(e.message));
-  await assert.rejects(segmentNamed('seg\n'), (e) => e.field === 'step' && /cannot be a column/.test(e.message));
+  await assert.rejects(segmentNamed('ad format'), (e) => e.field === 'steps[0]' && /'ad format' cannot be a column/.test(e.message) && /nothing changed/.test(e.message));
+  await assert.rejects(segmentNamed('seg\n'), (e) => e.field === 'steps[0]' && /cannot be a column/.test(e.message));
   // nor a name the stored eventstream uses for what it carries besides
-  await assert.rejects(segmentNamed('event_order'), (e) => e.field === 'step' && /uses that name itself/.test(e.message));
+  await assert.rejects(segmentNamed('event_order'), (e) => e.field === 'steps[0]' && /uses that name itself/.test(e.message));
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it
   const b = await engine.build_retentioneering_model({ context_id: ctx, name: 'keyworded', source: 'events', segments: [{ model: 'users', attribute: 'platform', name: 'group' }] });
   const read = await readDone(b.task_id);

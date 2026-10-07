@@ -81,9 +81,8 @@ export class MemoryTool {
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
    * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
    *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
-   *   action:'list'   → all notes, or those linked to one { target }
-   *   action:'search' → notes matching a word (text / alias / target)
    *   action:'forget' → delete one note by id
+   * (the notes are read with semantic_index: { search }, { notes, about? } — see list() below)
    */
   async run(input = {}) {
     this.validate('memory', input);
@@ -140,13 +139,13 @@ function memoryTarget(kind, source, name = null) {
 
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
-// memory({ request: { action: 'list', target } }) — so the view stays light without losing the finding.
+// semantic_index({ request: { notes: true, about } }) — so the view stays light without losing the finding.
 function memoryCompact(e, maxLen = 220) {
   const note = String(e.note || '');
   const truncated = note.length > maxLen;
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
-  // via memory({ request: { action: 'list', target } }).
+  // via semantic_index({ request: { notes: true, about } }).
   const targets = [...(e.targets || [])];
   return {
     view: {

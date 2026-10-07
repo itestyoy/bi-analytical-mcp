@@ -165,7 +165,7 @@ export const semanticIndexMethods = {
       const viaable = rels.filter((r) => r.joins);
       const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
       const notes = [];
-      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>'${viaable[0].entity !== c.primaryEntityName(viaable[0].joins) ? `, via: '${viaable[0].entity}'` : ''} } with use_base_models: ['${viaable[0].joins}'].`);
+      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' } with use_base_models: ['${viaable[0].joins}'].`);
       // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
       // onto a unique key) — say so here, or it looks like a missing feature at query time.
       if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);

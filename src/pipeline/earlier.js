@@ -3,7 +3,8 @@
 // version's spelling here, once, before a stage is built — the renames from the ONE table that also
 // tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
 // avg → average, as → name), a computed column written as { op, …fields } to its expression, a derive
-// stage to the compute stage reading the same event property, a funnel step's condition on `property`
+// stage to the compute stage reading the same event property, a join's top-level `on` to via: { on },
+// a funnel step's condition on `property`
 // to the condition every where writes, and a python function body written as nested arrays of lines
 // (a nested array the block under the line before it) to its text. A funnel's `filter` and `metrics`
 // have no spelling here: such a kept draft builds as it did (src/match-recognize.js).
@@ -102,6 +103,10 @@ export function currentSpelling(st, ctx = {}) {
   }
   if (st.stage === 'aggregate' && (st.measures || []).some((m) => m && (m.fn !== undefined || m.q !== undefined))) return { ...st, measures: st.measures.map((m) => respelled(m, ['fn', 'q'])) };
   if (st.stage === 'pivot' && st.fn !== undefined) return respelled(st, ['fn']);
+  if (st.stage === 'join' && st.on !== undefined && st.via === undefined) {
+    const { on, ...rest } = st;
+    return currentSpelling({ ...rest, via: { on } }, ctx);
+  }
   if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return { ...st, attrs: st.attrs.map((a) => (a && typeof a === 'object' ? respelled(a, ['as']) : a)) };
   if (st.stage === 'unnest' && st.as !== undefined) return respelled(st, ['as']);
   if (st.stage === 'match_recognize' && (st.steps || []).some((x) => JSON.stringify(x?.where || []).includes('"property"'))) {

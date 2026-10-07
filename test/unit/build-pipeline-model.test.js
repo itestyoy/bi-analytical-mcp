@@ -152,7 +152,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   const s = await e.build_pipeline_model({ action: 'start', name: 'pit', source: 'events' });
   // value is a base (events) column; from/to are columns of the joined model.
   const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: {
-    stage: 'join', with: 'users', on: ['player_id_of_internal'], attrs: [{ column: 'country' }],
+    stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
     between: { value: 'device_time', from: 'install_date', to: 'install_date' },
   }, include_columns: true });
   assert.ok(ok.available_columns.some((c) => c.name === 'country'), 'joined attr exposed');
@@ -163,7 +163,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
     () => e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: {
-      stage: 'join', with: 'users', on: ['player_id_of_internal'], attrs: [{ column: 'country' }],
+      stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
       between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
     } }),
     /between\.from` must be one of: [^;]*install_time_valid_from/,

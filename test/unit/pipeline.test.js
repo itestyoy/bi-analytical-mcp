@@ -48,7 +48,7 @@ test('user attribute is rejected on the fact directly, accepted via a users-join
   ]), /unknown column 'country'/);
   // joined from the users dimension → resolves and renders.
   const { sql } = renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'join', with: 'users', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] },
+    { stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.ok(sql.length > 0);
@@ -57,7 +57,7 @@ test('user attribute is rejected on the fact directly, accepted via a users-join
 test('pivot rejects an unsafe value (non-identifier)', () => {
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
     { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'join', with: 'users', on: ['appsflyer_id'], attrs: [{ column: 'country' }] },
+    { stage: 'join', with: 'users', via: { on: ['appsflyer_id'] }, attrs: [{ column: 'country' }] },
     { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ["US'); drop"] },
   ]));
 });

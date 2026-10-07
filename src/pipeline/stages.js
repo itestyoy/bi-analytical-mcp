@@ -95,10 +95,10 @@ export const STAGES = {
         // one enum object for every place the form names a column of the model, so the transport folds it into one $defs entry
         const column = strEnum(columns, `A column of ${model}.`);
         const fields = {
-          with: { const: model, description: 'Catalog model to join (any model but the pipeline\'s own source).' },
+          with: { const: model },
           attrs: {
             type: 'array', minItems: 1, uniqueItems: true,
-            description: 'The columns of the joined model to expose — exactly these arrive (see the stage).',
+            description: 'The columns of the joined model that arrive — exactly these.',
             items: {
               type: 'object', additionalProperties: false, required: ['column'],
               properties: {
@@ -109,38 +109,33 @@ export const STAGES = {
           },
           between: {
             type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
-            description: 'Point-in-time window on the joined model (see the stage).',
+            description: 'The version valid at a moment of this side (see the stage).',
             properties: {
               // from / to: the window's lower and upper bound columns on the joined model (inclusive), e.g. valid_from / valid_until
-              value: { type: 'string', pattern: NAME, description: 'A column on THIS (left) side compared against the window — e.g. the event time; from / to are the joined model\'s lower and upper bound columns (inclusive), e.g. valid_from / valid_until.' },
+              value: { type: 'string', pattern: NAME, description: 'A column of this side (e.g. the event time); from / to are the joined model\'s bounds, inclusive.' },
               from: column,
               to: column,
             },
           },
           kind: { enum: ['left', 'inner'], default: 'left' },
         };
-        // the relationships this model carries that another model carries too — what `via` can name
+        // HOW the two sides match, one field: a relationship declared in the schema (its key columns
+        // come from the catalog, on both sides), or { on } — columns both sides name alike
         const vias = Object.keys(catalog.entitiesOf(model)).filter((e) => catalog.joinEntityNames().includes(e));
-        if (vias.length) {
-          forms.push(form({ title: `join ${model} by a declared relationship (via)`, tag: ['stage', 'join'], required: ['stage', 'with', 'via', 'attrs'], properties: { ...fields, via: { enum: vias, description: 'A relationship declared in the schema and carried by both sides (see the stage).' } } }));
-        }
-        forms.push(form({
-          title: `join ${model} on columns both sides name alike (on)`, tag: ['stage', 'join'], required: ['stage', 'with', 'on', 'attrs'],
-          properties: { ...fields, on: { type: 'array', minItems: 1, uniqueItems: true, items: column, description: 'Ad-hoc fallback when no relationship is declared: the key column(s) that exist under the SAME NAME on both sides — several for a composite key.' } },
-        }));
+        const on = { type: 'object', additionalProperties: false, required: ['on'], title: '{ on }', properties: { on: { type: 'array', minItems: 1, uniqueItems: true, items: column, description: 'Key column(s) both sides name identically — when no relationship is declared.' } } };
+        forms.push(form({ title: `join ${model}`, tag: ['stage', 'join'], required: ['stage', 'with', 'via', 'attrs'], properties: { ...fields, via: vias.length ? { anyOf: [{ enum: vias, title: 'a declared relationship' }, on] } : on } }));
       }
       return {
         type: 'object',
-        description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there. VIA: A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at. ATTRS: REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is { column } — or { column, name } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns. BETWEEN: Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
+        description: 'Bring in columns of a related model. `via` says how the rows match: a relationship declared in the schema (preferred — its key columns, even composite or named differently on each side, come from the catalog; a relationship carried on alternative columns is offered as <relationship>_<variant>), or { on: [...] } for columns both sides name alike. `attrs` lists exactly the columns that arrive ({ column, name? } — a clash with an existing name is refused with the rename to apply). `between` picks the version of a slowly-changing model valid at a moment of this side (base.<value> BETWEEN joined.<from> AND joined.<to>) — without it every historical version matches and counts inflate; which moment you pick changes the answer. Joins stack; `via` resolves its left key on the pipeline\'s own source. semantic_index({ request: { model } }) lists a model\'s columns and relationships.',
         anyOf: forms,
       };
     },
     build: ({ catalog, cols, source }, p) => {
       const m = catalog.getModel(p.with);
       if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);
-      if (p.via && p.on) throw new Error('join: pass `via` (the declared relationship) OR `on` (ad-hoc shared column names), not both');
       let on = []; let onKeys;
-      if (p.via) {
+      if (typeof p.via === 'string') {
         // The key columns come from the SCHEMA, on both sides — including a composite key — and
         // each side may name its columns its own way. The LEFT key is resolved on the pipeline's
         // own SOURCE, not on whatever the previous stages accumulated, so a chained join must use
@@ -150,13 +145,13 @@ export const STAGES = {
         if (!left || !right) {
           const missing = !left ? source : p.with;
           const shared = catalog.sharedEntities(source, p.with).map((x) => x.entity);
-          throw new Error(`join via '${p.via}': '${missing}' declares no such relationship.${shared.length ? ` '${source}' and '${p.with}' share: ${shared.join(', ')}.` : ` '${source}' and '${p.with}' share no declared relationship — declare one (meta.mcp.entities) or use \`on\` with a column both sides name identically.`}`);
+          throw new Error(`join via '${p.via}': '${missing}' declares no such relationship.${shared.length ? ` '${source}' and '${p.with}' share: ${shared.join(', ')}.` : ` '${source}' and '${p.with}' share no declared relationship — declare one (meta.mcp.entities) or use via: { on: [...] } with a column both sides name identically.`}`);
         }
         for (const part of left) requireCol(cols, part.column); // the left key must survive to here
         onKeys = { left, right };
       } else {
-        on = p.on;
-        if (!on?.length) throw new Error('join: `on` needs the key column names');
+        on = p.via?.on;
+        if (!on?.length) throw new Error('join: `via` is a declared relationship, or { on: [key columns both sides name alike] }');
         for (const k of on) requireCol(cols, k); // every key must exist on THIS side
       }
       // What the joined model REALLY has (declared, and already grounded to the physical table at

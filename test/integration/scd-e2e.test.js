@@ -129,7 +129,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-      { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
+      { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
       { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
   });
@@ -153,7 +153,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-      { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }] },
+      { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] },
       { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
   });
@@ -169,7 +169,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
 test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }] } });
+  const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] } });
   const w = (r.recommendations || []).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(r.recommendations)}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
@@ -178,6 +178,6 @@ test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real c
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
   const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', on: ['internal_player_id'], attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
+  const r2 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
   assert.ok(!(r2.recommendations || []).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

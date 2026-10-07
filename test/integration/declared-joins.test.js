@@ -607,12 +607,12 @@ test('an unowned relationship offers no governed group-by path', opts, async (t)
   assert.equal(sumCol(good.rows, 'jev_evts'), 184);
 });
 
-test('join guards: an undeclared relationship, a self-join and via+on are all rejected', opts, async (t) => {
+test('join guards: an undeclared relationship, a self-join and a top-level on are all rejected', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
     /`stage.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
-  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property '(on|via)' — join users (by a declared relationship|on columns both sides name alike)/, 'via and on are two forms: the schema takes one');
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property 'on'/, 'how the rows match is one field, via: a relationship or { on }');
 });
 
 // ═══════════ F. THE GENERATED JOIN CODE, PROVEN BY RUNNING IT ═══════════

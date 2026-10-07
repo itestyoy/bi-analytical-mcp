@@ -70,7 +70,7 @@ export const semanticIndexMethods = {
    * dumping everything at once is wasteful. Call with NO arguments for a compact
    * OVERVIEW, then drill down:
    *   { model }    → one model's entities/time/dimensions (with real values) + physical columns
-   *   { source, event } → only the properties POPULATED on that event (what you can use)
+   *   { source, event } → only the properties populated on that event (what you can use)
    *   { source, property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
@@ -696,7 +696,7 @@ export const semanticIndexMethods = {
     // can be chosen without parsing prose. Exactly one view key per call (mutually exclusive).
     views: [
       { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
-      { view: 'event', arg: 'event name', when: 'the properties POPULATED on that event (what you can measure/group/filter)' },
+      { view: 'event', arg: 'event name', when: 'the properties populated on that event (what you can measure/group/filter)' },
       { view: 'property', arg: 'source + property', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
       { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
       ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),

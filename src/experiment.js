@@ -102,7 +102,7 @@ export function abTest(input) {
 
   // Correct the p-values across the variant family (FWER via Holm, or FDR via BH)
   // so several arms don't inflate false positives; raw `significant` is kept too.
-  // family_p_values: p-values of OTHER metrics in the same experiment readout —
+  // family_p_values: p-values of other metrics in the same experiment readout —
   // included in the family so a 10-metric scorecard doesn't fish significance.
   const familyExtra = (input.family_p_values || []).filter((p) => Number.isFinite(p));
   if (correction !== 'none' && results.length > 0) {
@@ -142,7 +142,7 @@ export function srmCheck(input) {
 
 /**
  * Power / sample-size planning (no warehouse). Given a baseline (proportion) or
- * stddev (mean) plus a target effect, returns the required sample size PER GROUP;
+ * stddev (mean) plus a target effect, returns the required sample size per group;
  * given a sample size, returns the minimum detectable effect (MDE). Use it to size
  * a test up front and to tell "no effect" apart from "underpowered".
  */

@@ -180,7 +180,7 @@ export function srmTest({ groups, ratios }) {
 
 function zAlpha(alpha, alternative) { return alternative === 'two_sided' ? normalQuantile(1 - alpha / 2) : normalQuantile(1 - alpha); }
 
-/** Required sample size PER GROUP to detect an absolute rate lift `mde` from `baseline`. */
+/** Required sample size per group to detect an absolute rate lift `mde` from `baseline`. */
 export function sampleSizeProportion({ baseline, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
   const p1 = baseline; const p2 = baseline + mde; const pbar = (p1 + p2) / 2;
   const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
@@ -195,7 +195,7 @@ export function mdeProportion({ baseline, n, alpha = 0.05, power = 0.8, alternat
   return (lo + hi) / 2;
 }
 
-/** Required sample size PER GROUP to detect an absolute mean lift `mde` at spread `stddev`. */
+/** Required sample size per group to detect an absolute mean lift `mde` at spread `stddev`. */
 export function sampleSizeMean({ stddev, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
   const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
   return Math.ceil(2 * ((za + zb) ** 2) * stddev * stddev / (mde * mde));

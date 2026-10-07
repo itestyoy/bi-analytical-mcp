@@ -22,7 +22,7 @@ export function semanticIndexSchema(catalog) {
     order_by: { enum: ['freq', 'value'], description: 'Order the values by frequency (default) or alphabetically.' },
     direction: { enum: ['asc', 'desc'], description: 'Sort direction (default desc for freq, asc for value).' },
     recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent indexing runs to include.' },
-    include_coverage: { type: 'boolean', description: 'Return the FULL per-event and per-app coverage instead of the summary.' },
+    include_coverage: { type: 'boolean', description: 'Return the full per-event and per-app coverage instead of the summary.' },
   };
   const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
   const eventsOf = (k) => (catalog.isFact(k) ? catalog.eventNames(k) : []);
@@ -50,54 +50,54 @@ export function semanticIndexSchema(catalog) {
 
   // the views that drill into one thing — what a { views } request may hold several of
   const drill = [
-    view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
+    view('{ model }', 'One model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
       model: field.model,
     }),
     // one branch per source: an event name belongs to the source that declares it, so a pairing
     // that source does not have cannot be written down.
-    ...catalog.facts.map((f) => view('{ source, event }', `VIEW { source: '${f}', event }: the properties POPULATED on that event of '${f}'.`, ['source', 'event'], {
+    ...catalog.facts.map((f) => view('{ source, event }', `The properties populated on that event of '${f}'.`, ['source', 'event'], {
       source: { enum: [f], description: `The events source '${f}'.` },
       event: eventRef(f),
     })),
     // A column is ALWAYS asked for within its source — one branch per model, no source-less form.
-    ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
+    ...models.map((k) => view('{ source, property }', `One column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
       source: { enum: [k], description: `The source '${k}'.` },
       property: propRef(k),
       ...paging,
     })),
-    view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
+    view('{ search }', 'Find events, properties, attributes, indexed values and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
       search: field.search,
       fuzzy: field.fuzzy,
       limit: paging.limit,
     }),
-    view('{ notes }', 'VIEW { notes }: the analyst memory — the saved findings, newest first, each with its id (memory forgets one by id): every one, or those `about` one entity. A finding also surfaces on the views of what it is about, and in { search }.', ['notes'], {
+    view('{ notes }', 'The analyst memory — the saved findings, newest first, each with its id (memory forgets one by id): every one, or those `about` one entity. A finding also surfaces on the views of what it is about, and in { search }.', ['notes'], {
       notes: { const: true },
       about: memoryTargetSchema(catalog, 'Only the notes about this one entity — { source, name }, { source }, or { term }.'),
       limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many notes (default 50).' },
     }),
-    ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
+    ...(bundleSources.length ? [view('{ bundle }', 'For one app — which properties carry data for it and which are empty.', ['bundle'], {
       bundle: field.bundle,
       source: { enum: bundleSources, description: 'Which source to read the per-app coverage of (needed when several declare an app column).' },
     })] : []),
-    view('{ recipe }', 'VIEW { recipe }: ONE ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
+    view('{ recipe }', 'One ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
       recipe: field.recipe,
     }),
   ];
   const branches = [
-    view('overview (an empty request)', 'OVERVIEW (an empty request): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    view('overview (an empty request)', 'The overview: models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
     ...drill,
     // several drill-ins at once (a few events, their properties): one call where they would go one by one
-    view('{ views }', 'VIEWS { views: [...] }: 2–5 of the drill-in views at once, answered in the order asked — e.g. the events a question names and the properties it groups by.', ['views'], {
+    view('{ views }', '2–5 of the drill-in views at once, answered in the order asked — e.g. the events a question names and the properties it groups by.', ['views'], {
       views: { type: 'array', minItems: 2, maxItems: 5, items: { anyOf: drill } },
     }),
-    view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
+    view('{ status }', 'Operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
       status: field.status,
       recent: paging.recent,
     }),
-    view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
+    view('{ run }', 'One sync run by id — its per-property breakdown, slowest first.', ['run'], {
       run: field.run,
     }),
-    view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
+    view('{ guide }', 'How to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
       guide: field.guide,
     }),
   ];

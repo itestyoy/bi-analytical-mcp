@@ -42,10 +42,10 @@ export function memorySchema(catalog) {
   // Per-action field definitions (shared between the client-facing union `properties` and
   // the strict per-action branches, so the two never drift).
   const F = {
-    note: { type: 'string', minLength: 1, description: 'ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
-    question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
-    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself. A name is never written on its own: the source says which entity it is. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
-    aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
+    note: { type: 'string', minLength: 1, description: 'One finding, in plain words (e.g. "\'ad format\' = ad_type_of_event_data, only on ad_started / ad_finished"). One fact per note: small notes link and match better.' },
+    question: { type: 'string', description: 'The business question this finding answers, in the stakeholder\'s words; it is embedded with the note, so a later question with the same meaning finds it.' },
+    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is about, so it surfaces on their semantic_index views: { source, name } — a property, attribute or event of that source — { source } for a model, or { term } for a phrase the catalog has no entity for.' },
+    aliases: { type: 'array', items: { type: 'string' }, description: 'The user\'s words for it, in their language and in English (e.g. ["ad format", "формат рекламы"]): search matches literal words and cannot cross scripts by itself.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { anyOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
     id: { type: 'string', description: 'Id of the note to delete (as record returned it, or semantic_index({ notes: true }) lists it).' },
   };
@@ -62,9 +62,9 @@ export function memorySchema(catalog) {
       // one finding is a list of one; what one study turned up is several atomic notes, saved all or none
       branch('record', {
         notes: { type: 'array', minItems: 1, maxItems: 10, description: 'The findings — one, or what one study turned up (up to 10), each its own atomic note. All are checked before any is saved.', items: { type: 'object', additionalProperties: false, required: ['note'], properties: finding } },
-      }, ['notes'], 'Save findings. Each item: note (one atomic fact; required), question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
+      }, ['notes'], 'Save findings — one, or several from one study, each its own note.'),
       branch('forget', { id: F.id }, ['id'],
-        'Delete one note. Required: id (from record / list / search).'),
+        'Delete one note by id.'),
     ],
   };
 }

@@ -51,7 +51,7 @@ function abTestForms(extra = {}) {
   });
   // Cross-metric multiplicity: p-values of the experiment's OTHER metrics join the
   // correction family, so a 10-metric scorecard cannot fish significance.
-  const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
+  const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of other metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
   const sequential = { type: 'boolean', description: 'Also compute an always-valid p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a running experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
   const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
   // The split this test was designed for: given, the sample-ratio check runs in the same call, so
@@ -60,7 +60,7 @@ function abTestForms(extra = {}) {
   // Whether a rise is good is a property of the METRIC, which the test cannot know: conversion up is
   // an improvement, crash rate or churn up is a regression. It changes no statistic — only how a
   // significant result is read (outcome: better | worse).
-  const good = { enum: ['up', 'down'], default: 'up', description: 'Which direction of the metric is GOOD: up (conversion, revenue, retention) or down (crash rate, churn, load time, cost). Decides whether a significant change is an improvement or a regression; no statistic changes.' };
+  const good = { enum: ['up', 'down'], default: 'up', description: 'Which direction of the metric is good: up (conversion, revenue, retention) or down (crash rate, churn, load time, cost). Decides whether a significant change is an improvement or a regression; no statistic changes.' };
 
   // One metric's form.
   // a group may be given in several closed forms (each with distinct required fields): `fields` a list of [fields, description]
@@ -130,7 +130,7 @@ export function checkSplitContract() {
 export function planContract() {
   return {
     type: 'object',
-    description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size PER GROUP, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
+    description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size per group, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
     anyOf: sampleSizeForms(),
   };
 }
@@ -139,8 +139,8 @@ function sampleSizeForms(extra = {}) {
   const power = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.8, description: 'Desired statistical power (1−β).' };
   const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (1−α).' };
   const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction.' };
-  const mde = { type: 'number', exclusiveMinimum: 0, description: 'Absolute minimum detectable effect (e.g. +0.02 rate, or +1.5 revenue) — the sample size PER GROUP is solved for.' };
-  const n = { type: 'integer', minimum: 2, description: 'Sample size PER GROUP — the minimum detectable effect is solved for.' };
+  const mde = { type: 'number', exclusiveMinimum: 0, description: 'Absolute minimum detectable effect (e.g. +0.02 rate, or +1.5 revenue) — the sample size per group is solved for.' };
+  const n = { type: 'integer', minimum: 2, description: 'Sample size per group — the minimum detectable effect is solved for.' };
   const dispersion = {
     proportion: ['baseline', { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Baseline conversion rate.' }],
     mean: ['stddev', { type: 'number', exclusiveMinimum: 0, description: 'Standard deviation of the metric.' }],
@@ -174,8 +174,8 @@ export function experimentSchema() {
     type: 'object',
     description: 'One form per action: plan (before the test — the sample size, or the MDE at a given n), check_split (the sample-ratio guardrail), analyze (the significance test over the per-group aggregates you bring; `metric` picks the test).',
     anyOf: [
-      ...sampleSizeForms({ action: action('plan', 'plan: the required sample size, or the MDE at a given n (power planning, BEFORE running).'), card: { schema: noCard } }).map((f) => ({ ...f, title: `plan — ${f.title}` })),
-      { ...form({ title: 'check_split', description: srm.description, tag: ['action', 'check_split'], tagDescription: 'check_split: the Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift).', required: srm.required, properties: { ...srm.properties, card: noCard } }) },
+      ...sampleSizeForms({ action: action('plan', 'plan: the required sample size, or the MDE at a given n (power planning, before running).'), card: { schema: noCard } }).map((f) => ({ ...f, title: `plan — ${f.title}` })),
+      { ...form({ title: 'check_split', description: srm.description, tag: ['action', 'check_split'], tagDescription: 'check_split: the Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run it before trusting any lift).', required: srm.required, properties: { ...srm.properties, card: noCard } }) },
       ...abTestForms({ action: action('analyze', 'analyze: the A/B significance test on per-group aggregates.'), card: { schema: card } }).map((f) => ({ ...f, title: `analyze — ${f.title}` })),
     ],
   };

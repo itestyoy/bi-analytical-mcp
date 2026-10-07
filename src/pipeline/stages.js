@@ -15,7 +15,7 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold — an item may be a group: { or: [...] } keeps a row when any of its conditions holds (each a condition or { and: [...] }). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column (eq … lte; every other operator compares with a constant). Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column. A constant is compared in the column\'s own type: a boolean column takes true / false ("true" is read as true), a numeric one a number; one of another type is refused here, since the warehouse would refuse it.',
+      description: 'Keep only rows where all conditions hold; { or: [...] } holds when any of its items does (each a condition or { and: [...] }). A condition compares a column ({ column, op, value }) or an expression ({ left, op, right }) with a constant, a column or now — an expression on the right only with eq … lte. Use it to scope to events, a segment or a value range, anywhere in the pipeline, after a window or an aggregate too. A constant is compared in the column\'s type (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse.',
       properties: {
         stage: { enum: ['where'] },
         conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
@@ -30,7 +30,7 @@ export const STAGES = {
     defs: (catalog) => ({ expr: exprSchema(catalog) }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
-      description: 'Add a column computed from existing columns, event properties and constants: `expr` is one expression — an event property (event_property / array_length / array_contains), arithmetic, rounding, coalesce, cast, text functions, dates (date_diff / date_trunc / date_part / unix_date / elapsed_days), a CASE (fn: "case"), a window function (row_number / rank / lag / lead / running and rolling sum / average / count / min / max, over a window) — its arguments expressions themselves, so a whole formula is one stage.',
+      description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a window function — nested, so a whole formula is one stage.',
       properties: {
         stage: { enum: ['compute'] },
         name: { type: 'string', pattern: NAME, description: 'The name of the column it adds.' },
@@ -128,7 +128,7 @@ export const STAGES = {
       }
       return {
         type: 'object',
-        description: 'Bring in columns of a related model. `via` says how the rows match: a relationship declared in the schema (preferred — its key columns, even composite or named differently on each side, come from the catalog; a relationship carried on alternative columns is offered as <relationship>_<variant>), or { on: [...] } for columns both sides name alike. `attrs` lists exactly the columns that arrive ({ column, name? } — a clash with an existing name is refused with the rename to apply). `between` picks the version of a slowly-changing model valid at a moment of this side (base.<value> BETWEEN joined.<from> AND joined.<to>) — without it every historical version matches and counts inflate; which moment you pick changes the answer. Joins stack; `via` resolves its left key on the pipeline\'s own source. semantic_index({ request: { model } }) lists a model\'s columns and relationships.',
+        description: 'Bring in columns of a related model. `via` is a relationship the schema declares (its key columns come from the catalog, even composite or named differently on each side; one carried on alternative columns is offered as <relationship>_<variant>), or { on: [...] } for columns both sides name alike. `attrs` lists exactly the columns that arrive. `between` picks the version of a slowly-changing model valid at a moment of this side — without it every historical version matches and counts inflate. Joins stack; via\'s left key is on the pipeline\'s own source.',
         anyOf: forms,
       };
     },
@@ -239,7 +239,7 @@ export const STAGES = {
       // query execution", with analytic windows as the whole of the accounted memory, and it
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
-      description: `Group rows and compute measures — the grain collapses to the group keys. A TABLE-WIDE NUMBER (a threshold, a mean) is this stage with no group_by: one row, the memory-safe way — an analytic OVER() with no PARTITION BY keeps every row and exhausts the query's memory on a large table ("Resources exceeded"); apply such a number per row in a later pass, as a { value }. `
+      description: `Group rows and compute measures — the grain collapses to the group keys. A table-wide number (a threshold, a mean) is this stage with no group_by — one row, then applied per row later as a { value }; a window with no partition_by keeps every row and runs out of memory on a large table ("Resources exceeded"). `
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
@@ -328,7 +328,7 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
-      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, APPROXIMATE read of the population for a first estimate / where-to-dig signal on large data (no need to scan everything just to see the direction). Put it early. The result is flagged `approximate` with safe/unsafe guidance; re-run WITHOUT this stage for any exact number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).',
+      description: 'Keep about `percent`% of rows at random — a fast, approximate first look on large data. Put it early. The result is flagged approximate; rerun without it for any number you act on (sampling error is large near 0 / 1 rates, in small segments and for distinct counts).',
       properties: {
         stage: { enum: ['sample'] },
         percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },

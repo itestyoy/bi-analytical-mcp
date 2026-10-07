@@ -193,7 +193,7 @@ test('by a key declared only as an entity: sums, a max and an average over nulli
     from fct_player_acquisition group by 1`)).rows;
   const got = rowsOf(await q(ACQ, {
     metrics: ['project_cost', 'project_ctr', 'project_cost_per_touch', 'project_cost_max', 'project_cost_avg', 'project_paid_rows', 'project_touches'],
-    group_by: [{ entity: 'media_source' }], order_by: [{ key: { entity: 'media_source' } }],
+    group_by: [{ entity: 'media_source' }], order_by: [{ key: 'media_source' }],
   }));
   assert.deepEqual(got.map((r) => r.media_source), want.map((r) => r.media_source).sort());
   const close = (a, b, what) => (b == null ? assert.equal(a, null, what) : assert.ok(Math.abs(num(a) - num(b)) < 1e-9, `${what}: ${a} vs ${b}`));
@@ -628,7 +628,7 @@ test('a query is addressed by what and where, and nothing handed back spells Met
   const ownColumn = { context_id: ACQ, metrics: ['project_impressions'], group_by: [{ semantic_model: [ACQ], dimension: 'campaign' }], time_range: WINDOW };
   for (const input of [project, task, ownColumn]) {
     const rows = rowsOf(await engine.query_semantic_model(input));
-    const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, explain: true, include_plan: true })).task_id);
+    const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, dry_run: true, include_plan: true })).task_id);
     assert.equal(explained.ok, true, JSON.stringify(explained.error));
     noInternal(explained, 'the explained query');
     // the SQL as shown is the query: run it, and it gives the same rows under the same column names

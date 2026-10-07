@@ -104,20 +104,20 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(byDay.rows.every((r) => num(r.active_users_dau) <= mau));    // DAU <= MAU
   assert.equal(num(events.rows[0].active_users_events), 184);           // 184 seeded events
 
-  // explain: the rendered SQL WITHOUT executing; the dataflow plan only with include_plan (feature/
+  // dry_run: the rendered SQL WITHOUT executing; the dataflow plan only with include_plan (feature/
   // lifecycle check — we assert the plan/SQL are PRESENT, not their content).
-  const ex = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], explain: true });
+  const ex = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true });
   assert.equal(ex.ok, true, JSON.stringify(ex.error || ex));
-  assert.equal(ex.explain, true);
+  assert.equal(ex.dry_run, true);
   assert.ok(typeof ex.sql === 'string' && ex.sql.length > 0);            // rendered SQL returned
   assert.equal(ex.plan, undefined, 'no plan unless asked for');
-  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], explain: true, include_plan: true });
+  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, include_plan: true });
   assert.ok(planned.plan && typeof planned.plan === 'object');           // plan object returned
   assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0); // dataflow plan present
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include_plan: true }), /include_plan goes with explain/);
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include_plan: true }), /include_plan goes with dry_run/);
 
   // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
-  // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.
+  // suffix need not be guessed); dry_run surfaces the orderable tokens; a bad key lists them.
   assert.ok(ex.orderable_keys.includes('metric_time_day') && ex.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(ex.orderable_keys)}`);
   const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time' }] });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));

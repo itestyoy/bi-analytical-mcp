@@ -38,6 +38,7 @@ export const CROSS_PATH_SPELLING = {
   fn: 'agg',
   as: 'name',
   alias: 'name',
+  explain: 'dry_run',
 };
 
 /** What this path calls `used`, when it has a name for it at all. */

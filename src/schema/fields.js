@@ -244,15 +244,3 @@ export const READ_PAGE = 50;
 /** How many contexts one context({ action: list }) page holds, unless it asks for another number. */
 export const CONTEXT_PAGE = 20;
 
-/** A copy of a schema without its descriptions: the same checks, told once where it is described. */
-export function terse(schema) {
-  if (Array.isArray(schema)) return schema.map(terse);
-  if (!schema || typeof schema !== 'object') return schema;
-  const out = {};
-  for (const [k, v] of Object.entries(schema)) {
-    if (k === 'description') continue;
-    // under `properties` the keys are field names, not schema keywords
-    out[k] = k === 'properties' ? Object.fromEntries(Object.entries(v).map(([f, sub]) => [f, terse(sub)])) : terse(v);
-  }
-  return out;
-}

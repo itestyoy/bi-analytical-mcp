@@ -134,9 +134,9 @@ export const semanticQueryMethods = {
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
-    // A query only compiled (explain / dry_run) runs nothing on the warehouse: it waits for the
+    // A query only compiled (dry_run) runs nothing on the warehouse: it waits for the
     // declaration it compiles, not behind the queries before it.
-    const compileOnly = !!(input.explain || input.dry_run);
+    const compileOnly = !!input.dry_run;
     const slot = project ? { batch: { before: null } } : compileOnly ? { batch: this.tasks.afterBuilds(ctx) } : {};
     return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...slot }), { context_id: ctx.id });
   },
@@ -434,10 +434,10 @@ export const semanticQueryMethods = {
     return { limit, offset, fetch: limit + offset + 1, page: (rows) => { const page = rows.slice(offset, offset + limit); return { rows: page, page: pageBlock({ offset, limit, returned: page.length, has_more: rows.length > offset + limit, ordered }) }; } };
   },
 
-  /** Whether a query is only compiled (explain / dry_run); a plan is asked for only with one of them. */
+  /** Whether a query is only compiled (dry_run); a plan is asked for only with it. */
   _compileOnly(input) {
-    const only = !!(input.dry_run || input.explain);
-    if (input.include_plan && !only) throw new ToolError('include_plan goes with explain (or dry_run): the dataflow plan is how a query compiles, and a query that runs returns its rows instead', { stage: 'validate', field: 'include_plan' });
+    const only = !!input.dry_run;
+    if (input.include_plan && !only) throw new ToolError('include_plan goes with dry_run: the dataflow plan is how a query compiles, and a query that runs returns its rows instead', { stage: 'validate', field: 'include_plan' });
     return only;
   },
 
@@ -445,7 +445,7 @@ export const semanticQueryMethods = {
   _metricEarlyAnswer(res, { explain, input, speak, extra = {} }) {
     if (!res.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
     if (!explain) return null;
-    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true } : {}), ...(input.include_plan ? { plan: speak(res.plan) } : {}) };
+    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.include_plan ? { plan: speak(res.plan) } : {}) };
   },
 
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then

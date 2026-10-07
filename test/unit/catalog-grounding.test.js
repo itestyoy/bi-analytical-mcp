@@ -318,7 +318,8 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.ok(!offers(schemas.build_semantic_model, 'crashlytics'), 'build_semantic_model must not offer the unavailable source');
   assert.ok(!offers(schemas.build_pipeline_model, 'crashlytics'), 'build_pipeline_model must not offer the unavailable source');
   assert.ok(offers(schemas.build_semantic_model, 'events'));
-  const modelView = schemas.semantic_index.anyOf.find((b) => b.title === '{ model }');
+  const si = schemas.semantic_index;
+  const modelView = si.anyOf.map((b) => (b.$ref ? si.$defs[b.$ref.split('/').pop()] : b)).find((b) => b.title === '{ model }');
   assert.ok(modelView.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
 });
 

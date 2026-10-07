@@ -89,6 +89,18 @@ export const semanticIndexMethods = {
     // not page, a name a source does not carry — none of it can be written down, so none of it is
     // re-checked here.
 
+    // ── { views }: several drill-ins in one call, each answered as on its own, in the order asked ──
+    if (input.views) {
+      const views = [];
+      for (const [i, v] of input.views.entries()) {
+        try { views.push(await this.semantic_index(v)); } catch (e) {
+          if (e instanceof ToolError) throw new ToolError(`views[${i}]: ${e.message}`, { stage: e.stage, code: e.code, field: `views[${i}]${e.field ? `.${e.field}` : ''}` });
+          throw e;
+        }
+      }
+      return { views };
+    }
+
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this.indexViews.run(input);
     if (input.status) return this.indexViews.status(input);

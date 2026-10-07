@@ -172,7 +172,7 @@ export function experimentSchema() {
   const srm = checkSplitContract();
   return {
     type: 'object',
-    description: 'The A/B experiment lifecycle in one tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) before running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it before trusting any lift); analyze = the significance test on pre-aggregated per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',
+    description: 'One form per action: plan (before the test — the sample size, or the MDE at a given n), check_split (the sample-ratio guardrail), analyze (the significance test over the per-group aggregates you bring; `metric` picks the test).',
     anyOf: [
       ...sampleSizeForms({ action: action('plan', 'plan: the required sample size, or the MDE at a given n (power planning, BEFORE running).'), card: { schema: noCard } }).map((f) => ({ ...f, title: `plan — ${f.title}` })),
       { ...form({ title: 'check_split', description: srm.description, tag: ['action', 'check_split'], tagDescription: 'check_split: the Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift).', required: srm.required, properties: { ...srm.properties, card: noCard } }) },

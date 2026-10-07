@@ -151,3 +151,14 @@ test('semantic_index: an event or a column is never asked for without its source
   await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
   await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
 });
+
+test('semantic_index({ views }): several drill-ins in one call, each as it answers alone', async () => {
+  const e = engine();
+  const alone = [await e.semantic_index({ source: 'events', event: 'ad_finished' }), await e.semantic_index({ model: 'users' })];
+  const both = await e.semantic_index({ views: [{ source: 'events', event: 'ad_finished' }, { model: 'users' }] });
+  assert.deepEqual(both.views, alone);
+  // only drill-ins, 2 to 5 of them, and a view of the batch is checked like one on its own
+  await assert.rejects(() => e.semantic_index({ views: [{ status: true }, { model: 'users' }] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ views: [{ model: 'users' }] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ views: [{ model: 'users' }, { source: 'events', event: 'no_such_event' }] }), /invalid input/);
+});

@@ -48,8 +48,8 @@ export function semanticIndexSchema(catalog) {
     guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: `true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with ${RESEARCH_DOMAINS.map((d) => `"${d}"`).join(', ')} for what matters in each domain. "python", "research" and "research/<domain>" are reserved: not recipe families.` },
   };
 
-  const branches = [
-    view('overview (an empty request)', 'OVERVIEW (an empty request): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+  // the views that drill into one thing — what a { views } request may hold several of
+  const drill = [
     view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
       model: field.model,
     }),
@@ -75,19 +75,27 @@ export function semanticIndexSchema(catalog) {
       about: memoryTargetSchema(catalog, 'Only the notes about this one entity — { source, name }, { source }, or { term }.'),
       limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many notes (default 50).' },
     }),
-    view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
-      status: field.status,
-      recent: paging.recent,
-    }),
-    view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
-      run: field.run,
-    }),
     ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
       bundle: field.bundle,
       source: { enum: bundleSources, description: 'Which source to read the per-app coverage of (needed when several declare an app column).' },
     })] : []),
     view('{ recipe }', 'VIEW { recipe }: ONE ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
       recipe: field.recipe,
+    }),
+  ];
+  const branches = [
+    view('overview (an empty request)', 'OVERVIEW (an empty request): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    ...drill,
+    // several drill-ins at once (a few events, their properties): one call where they would go one by one
+    view('{ views }', 'VIEWS { views: [...] }: 2–5 of the drill-in views at once, answered in the order asked — e.g. the events a question names and the properties it groups by.', ['views'], {
+      views: { type: 'array', minItems: 2, maxItems: 5, items: { anyOf: drill } },
+    }),
+    view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
+      status: field.status,
+      recent: paging.recent,
+    }),
+    view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
+      run: field.run,
     }),
     view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
       guide: field.guide,
@@ -97,7 +105,7 @@ export function semanticIndexSchema(catalog) {
     // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
     // so the branch union narrows the shape but never replaces it.
     type: 'object',
-    description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass an empty request ({ request: {} }) for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
+    description: 'An empty request for the overview, exactly one view (one of the forms below), or { views: [...] } for several drill-ins at once. A source and a name are separate fields, never glued into one string.',
     // One closed form per view (an `anyOf` — src/schema-kit.js says why), each with its own required
     // set, so exactly one matches. A NAME is never offered without its owner: the { source, event }
     // and { source, property } forms enumerate one source's names each.

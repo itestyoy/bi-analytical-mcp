@@ -148,14 +148,18 @@ export class Engine {
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
     // The recipe view offers the ids this server actually has — the schema says what exists.
+    // a form offered in two places (a drill-in view is also an item of { views }) was folded into
+    // $defs: patching that one copy patches both
+    const si = this.schemas.semantic_index;
+    const siForms = (si?.anyOf || []).map((b) => (b.$ref ? si.$defs?.[b.$ref.split('/').pop()] : b));
     if (recipes) {
       // one form takes a recipe id ({ recipe }); the ids are known only now, after the schemas were built
-      const branch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.recipe);
+      const branch = siForms.find((b) => b?.properties?.recipe);
       if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), ...(branch.properties.recipe.description ? { description: branch.properties.recipe.description } : {}) };
     }
     // The guide view takes true or a name this server answers — the recipe families, the reserved
     // guides (python, research, research/<domain>) and a feature's own — known only now, like the ids.
-    const guideBranch = (this.schemas.semantic_index?.anyOf || []).find((b) => b.properties?.guide);
+    const guideBranch = siForms.find((b) => b?.properties?.guide);
     if (guideBranch) {
       const names = [...new Set(['python', ...Object.keys(RESEARCH_GUIDES), ...(recipes ? recipes.summary().map((r) => r.task_type) : []), ...features.map((f) => f.guide?.name).filter(Boolean)])];
       guideBranch.properties.guide = { description: guideBranch.properties.guide.description, anyOf: [{ type: 'boolean', const: true, description: 'The whole guide.' }, { type: 'string', enum: names, description: 'One guide or recipe family by name.' }] };

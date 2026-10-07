@@ -76,10 +76,10 @@ test('a name with no counterpart in this path gets the plain list, with no inven
 });
 
 test("a read's projection explains '*': count rows by leaving `column` out", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', column: '*' }] } });
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', column: '*', name: 'n' }] } });
   assert.equal(res.ok, false);
   assert.match(text(res), /'\*' is not a column — leave `column` out to count rows/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count' }] } }).ok, true);
+  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', name: 'n' }] } }).ok, true);
 });
 
 // `count(*)` is a SQL habit; in a stage the rows are counted by leaving `column` out. The refusal

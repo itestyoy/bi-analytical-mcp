@@ -117,7 +117,7 @@ test('the stage says whether this warehouse computes median/percentile exactly o
   assert.match(describe('duckdb'), /every measure here is exact/);
   // …and both warn off the global window, since that part is not per warehouse
   for (const d of ['bigquery', 'duckdb']) {
-    assert.match(describe(d), /NO group_by/);
+    assert.match(describe(d), /no group_by/i);
     assert.match(describe(d), /Resources exceeded/);
   }
 });

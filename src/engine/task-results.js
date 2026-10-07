@@ -47,12 +47,12 @@ export const taskResultMethods = {
   /** Run a (optionally projected) read over a materialized result table. */
   async _readTable(dir, table, limit, transform, extra = {}, offset = 0, sample = false, samplePercent = 10) {
     const ref = `{{ ref('${table}') }}`;
-    const quote = (x) => getDialect(this.catalog.dialect).quoteIdent(x);
-    const base = transform ? buildProjection(ref, transform, quote) : `select * from ${ref}`;
+    const d = getDialect(this.catalog.dialect);
+    const base = transform ? buildProjection(ref, transform, d) : `select * from ${ref}`;
     if (sample) {
       // A REPRESENTATIVE random subset rather than the first rows by physical order, the
       // dialect's way (src/dialects). Paging doesn't apply.
-      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform, quote) : `select * from ${rel}`));
+      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform, d) : `select * from ${rel}`));
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
       return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };

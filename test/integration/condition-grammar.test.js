@@ -87,7 +87,7 @@ test('a read of a built model filters and keeps groups with the same grammar: wh
   // the names whose count is the smallest or the largest
   const counts = (await wh.query('select event_name, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => num(r.n));
   const lo = Math.min(...counts); const hi = Math.max(...counts);
-  const kept = await engine.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }], having: [{ or: [{ agg: 'sum', column: 'n', op: 'eq', value: lo }, { agg: 'sum', column: 'n', op: 'eq', value: hi }] }] } });
+  const kept = await engine.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }], having: [{ or: [{ column: 'n', op: 'eq', value: lo }, { column: 'n', op: 'eq', value: hi }] }] } });
   assert.equal(kept.rows.length, counts.filter((n) => n === lo || n === hi).length);
 });
 
@@ -166,15 +166,19 @@ test('a project stage drops the columns it names and keeps the rest; the next st
   await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', agg: 'sum', column: 'session_number' }] }] }), (e) => !(e instanceof assert.AssertionError));
 });
 
-test('a query over a built model computes a sample stddev and variance, as the warehouse does', opts, async (t) => {
+test('a query over a built model computes a sample stddev, variance, median and percentile, as the warehouse does', opts, async (t) => {
   if (skip(t)) return;
   const sd = await truth('select stddev_samp(session_number) as n from fct_analytics_events');
   const vr = await truth('select var_samp(session_number) as n from fct_analytics_events');
   const { draft_id } = await pipe([{ stage: 'where', conditions: [{ column: 'session_number', op: 'is_not_null' }] }]);
-  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }] } });
+  const md = await truth('select quantile_cont(session_number, 0.5) as n from fct_analytics_events');
+  const p9 = await truth('select quantile_cont(session_number, 0.9) as n from fct_analytics_events');
+  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }, { agg: 'median', column: 'session_number', name: 'md' }, { agg: 'percentile', percentile: 0.9, column: 'session_number', name: 'p9' }] } });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
+  // the measures of a pipeline's aggregate stage: the median and a percentile, as the warehouse computes them
+  assert.deepEqual([num(read.rows[0].md), num(read.rows[0].p9)], [md, p9]);
 });
 
 test('a query over a built model reads columns named with reserved words (order, group): every name is quoted', opts, async (t) => {

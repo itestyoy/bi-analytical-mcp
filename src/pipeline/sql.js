@@ -22,6 +22,29 @@ export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce
 
 export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
+/** The functions that fold NO column or may fold one: a count counts rows without it; a sketch reads one when given. */
+const COLUMN_OPTIONAL = new Set(['count', 'hll_init', 'hll_merge', 'hll_merge_partial']);
+
+/**
+ * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform:
+ * { name, agg, column?, percentile?, where? }, in closed forms told apart by `agg` — the functions
+ * that fold a column (column required), those for which it is optional (a count of rows), and the
+ * percentile (column and percentile required). `aggs` is what the place can compute; `column` its
+ * column schema; `where` the conditions a conditional aggregate folds only the rows of; `pattern`
+ * what a produced name may be (a stored table's columns are named by whoever made it).
+ */
+export function measureSchema({ aggs, column, where, description, pattern = NAME }) {
+  const name = { type: 'string', pattern, description: 'The name of the column it produces.' };
+  const needs = aggs.filter((a) => a !== 'percentile' && !COLUMN_OPTIONAL.has(a));
+  const optional = aggs.filter((a) => COLUMN_OPTIONAL.has(a));
+  const forms = [
+    form({ title: `agg: ${needs.join(' | ')}`, tag: ['agg', needs], required: ['name', 'column'], properties: { name, column, where } }),
+    ...(optional.length ? [form({ title: `agg: ${optional.join(' | ')} (column optional)`, tag: ['agg', optional], required: ['name'], properties: { name, column, where } })] : []),
+    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: ['name', 'column', 'percentile'], properties: { name, column, where, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
+  ];
+  return { type: 'object', description, anyOf: forms };
+}
+
 /**
  * What THIS warehouse's statistical aggregates are: exact, or a sketch. The dialect declares it
  * (`approximateStats`), because the same `percentile` is exact on one warehouse and approximate on

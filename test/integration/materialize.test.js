@@ -188,7 +188,7 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // a second level reads the first's columns only
-  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'sum', column: 'event_name', name: 's' }] } } }), /then\.aggregations/);
 });
 
 test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {

@@ -3,7 +3,7 @@
 // `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
 // themselves (src/match-recognize.js, src/python-model.js).
 
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, measureSchema, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
 import { exprSchema, exprSql } from './compute.js';
 import { form, strEnum } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
@@ -226,13 +226,12 @@ export const STAGES = {
       // query execution", with analytic windows as the whole of the accounted memory, and it
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
-      description: `Group rows and compute measures (COLLAPSES grain to the group keys). Measures (agg): sum/average/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile (its share in percentile). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles. `
-        + `A TABLE-WIDE NUMBER IS THIS STAGE WITH NO group_by — it returns ONE row (a threshold, a mean, a deviation) and is the memory-safe way to get one; an analytic OVER() with no PARTITION BY (a window function whose over has no partition_by, or raw SQL) instead keeps all the rows and attaches the value to each, which exhausts the query's memory on a large table ("Resources exceeded during query execution") — the exact percentile worst of all, because it also has to order the values. So: get the numbers here first, then apply them per row in a later pass as literals (compute sub / div / least with a { value } argument). `
+      description: `Group rows and compute measures — the grain collapses to the group keys. A TABLE-WIDE NUMBER (a threshold, a mean) is this stage with no group_by: one row, the memory-safe way — an analytic OVER() with no PARTITION BY keeps every row and exhausts the query's memory on a large table ("Resources exceeded"); apply such a number per row in a later pass, as a { value }. `
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/average/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
+        measures: { type: 'array', minItems: 1, items: measureSchema({ aggs: AGG_FNS, column: { type: 'string' }, where: CONDITIONS('A conditional aggregate: fold only the rows these conditions hold for — count the failed loads, sum the revenue of payers.'), description: 'A measure. For distinct counts prefer the HLL sketch: approx_count_distinct (one shot), or hll_init per group → hll_merge (mergeable across buckets and segments); exact count_distinct does not re-aggregate across groups.' }) },
       },
     }),
     build: ({ d, catalog, cols, source }, p) => {
@@ -382,27 +381,4 @@ export function pipelineStageSchema(catalog) {
   // each stage's schema pins `stage` to its own name, so exactly one branch is the stage asked for —
   // and the refusal of a bad stage is that stage's, not every stage's (src/validate.js)
   return { anyOf: availableStages(catalog).map((s) => s.schema(catalog)) };
-}
-
-/**
- * One measure of an aggregate stage, in three forms told apart by its `fn`: a percentile, which reads a
- * column at the quantile `q`; the functions that read a column; and the ones for which a column is
- * optional (count counts rows without one; the sketch functions read one when given).
- */
-function aggregateMeasure(fnDescription) {
-  const needColumn = ['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median'];
-  const optional = AGG_FNS.filter((f) => f !== 'percentile' && !needColumn.includes(f));
-  const name = { type: 'string', pattern: NAME };
-  const column = { type: 'string' };
-  // a CONDITIONAL aggregate — the counters a compute + case pair made one by one: count / sum only the
-  // rows these conditions hold for (the same conditions as a where stage)
-  const where = CONDITIONS('A conditional aggregate: fold only the rows these conditions hold for — count the failed loads, sum the revenue of payers — instead of a compute + case per counter.');
-  return {
-    type: 'object',
-    anyOf: [
-      form({ title: `agg: ${needColumn.join(' | ')}`, tag: ['agg', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column, where } }),
-      form({ title: `agg: ${optional.join(' | ')}`, tag: ['agg', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column, where } }),
-      form({ title: 'agg: percentile', tag: ['agg', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'percentile'], properties: { name, column, where, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The percentile in (0,1), e.g. 0.95 for p95.' } } }),
-    ],
-  };
 }

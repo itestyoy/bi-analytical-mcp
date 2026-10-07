@@ -159,7 +159,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   // the first build is in flight: a query on it is accepted, checked against that build's columns
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['no_such_column'] } }), (err) => err.field === 'transform' && /no_such_column/.test(err.message));
   await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], order_by: [{ key: 'player_id_of_internal' }] } }), /order_by/);
-  const q1 = await e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'count' }], order_by: [{ key: 'count' }] } });
+  const q1 = await e.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'count', name: 'count' }], order_by: [{ key: 'count' }] } });
   assert.ok(isStartedTask(q1) && q1.read_with === 'query_pipeline_model');
   await until(() => runner.held.length);
   runner.held.shift()();
@@ -175,7 +175,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   assert.notEqual(built2.model, built1.model);
   assert.equal((await taskResult(e, q2.task_id)).model, built2.model);
   // a sum needs a column: refused by the schema, in the call
-  await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'sum' }] } }), /column/);
+  await assert.rejects(() => e.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'sum', name: 's' }] } }), /column/);
 });
 
 test('a protocol task refuses a read of the other side at once, instead of waiting out the build', async () => {

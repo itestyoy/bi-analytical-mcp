@@ -190,11 +190,13 @@ export function measureRefs(metric, metrics = []) {
 /**
  * Compile a full declaration. Returns resolved additions per model, metric
  * specs (incl. auto-created simple metrics for ratio), used models, and the
- * declared measure/metric names (namespaced). `measures`: the namespaced measures the task
- * already has (an update's), which its metrics read by the names they were declared under;
- * `metrics`: the namespaced metrics it already has, which a derived metric may be built from.
+ * declared measure/metric names (namespaced). What the context declared into already holds (an
+ * update's, or a declaration beside a task already there): `measures`, the stored names of its
+ * measures, which a metric reads by the name it was declared under or the stored one; `metrics`,
+ * its compiled metrics, which a derived metric may be built from and a ratio may read through.
+ * Neither may be declared again under the same stored name: the context would keep one of the two.
  */
-export function compileDeclaration(catalog, decl, { measures = [], metrics: existingMetricNames = [] } = {}) {
+export function compileDeclaration(catalog, decl, { measures = [], metrics: contextMetrics = [] } = {}) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
 
@@ -202,6 +204,11 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: exis
   const existingMeasures = new Set(measures); // namespaced, declared before this call
   const declaredMeasures = new Set(); // namespaced
   const ensure = (k) => (additions[k] ||= { measures: [], dimensions: [] });
+  // what a refusal lists, each name said as what it is: declared in this call, or already in the context
+  const inScope = (kind, inCall, inContext) => [
+    inCall.length ? `Declared in this call: ${inCall.join(', ')}.` : `This call declares no ${kind}.`,
+    inContext.length ? `Already in this context: ${inContext.join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
 
   // The models this task READS — taken from the payload, never assumed. A context carries only
   // the sources it was asked for, so a task on one events source does not drag in another.
@@ -221,7 +228,10 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: exis
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);
       // two measures of one name would both be written, and dbt refuses the duplicate at parse
-      if (declaredMeasures.has(cm.name) || existingMeasures.has(cm.name)) fail(`measure '${m.name}' is already declared in task '${task}'`, 'measures.name');
+      if (declaredMeasures.has(cm.name)) fail(`measure '${m.name}' is declared twice in this call (stored as '${cm.name}')`, 'measures.name');
+      if (existingMeasures.has(cm.name)) {
+        fail(`measure '${m.name}' is already in this context, as '${cm.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { measures: ['${cm.name}'] }, semantic_models: [...] } }) — with cascade: true when metrics read it`, 'measures.name');
+      }
       declaredMeasures.add(cm.name);
       ensure(modelKey).measures.push(cm);
     }
@@ -239,24 +249,50 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: exis
       return ref;
     }
     // listed as stored — a name a metric takes as it is, beside the one it was declared under
-    fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...existingMeasures, ...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
+    fail(`metric references unknown measure '${ref}'. ${inScope('measure', [...declaredMeasures], [...existingMeasures])}`, 'metrics.measure');
   };
 
+  const existingMetrics = new Map(contextMetrics.map((m) => [m.name, m]));
   const metrics = [];
   const metricNames = new Set();
+  const declaredMetrics = new Set(); // the ones the caller named, beside those a ratio made
   const derivedInputs = []; // derived metrics, their inputs resolved once every metric is known
   const simpleByMeasure = new Map(); // measureName -> simple metric name
   const addMetric = (m) => {
-    if (metricNames.has(m.name)) return;
     if (!m.label) m.label = m.name; // dbt 1.11+ requires a label on every metric
     metricNames.add(m.name);
     metrics.push(m);
   };
-  // ensure a simple metric wraps a measure (for ratio operands)
-  const ensureSimpleFor = (measureName) => {
+  // a metric a ratio may read a measure through: a simple metric over exactly that measure
+  const simpleOver = (m, measureName) => m?.type === 'simple' && ownMeasures(m)[0] === measureName;
+  const described = (m) => `a ${m.type} metric${ownMeasures(m).length ? ` over measure '${ownMeasures(m)[0]}'` : ''}`;
+  // A metric the caller declares takes a name nothing else holds: of two definitions under one name
+  // the context would keep one and drop the other without a word.
+  const declareMetric = (m, md) => {
+    if (existingMetrics.has(m.name)) {
+      fail(`metric '${md.name}' is already in this context, as '${m.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { metrics: ['${m.name}'] }, metrics: [...] } }) — with cascade: true when other metrics are built from it`, 'metrics.name');
+    }
+    if (declaredMetrics.has(m.name)) fail(`metric '${md.name}' is declared twice in this call (stored as '${m.name}')`, 'metrics.name');
+    declaredMetrics.add(m.name);
+    const made = metrics.findIndex((x) => x.name === m.name); // made by a ratio above, to read a measure through
+    if (made < 0) return addMetric(m);
+    if (!simpleOver(m, ownMeasures(metrics[made])[0])) {
+      fail(`metric '${md.name}' is stored as '${m.name}', the name of the simple metric over measure '${ownMeasures(metrics[made])[0]}' that a ratio of this call reads it through. Give the metric another name`, 'metrics.name');
+    }
+    if (!m.label) m.label = m.name;
+    metrics[made] = m; // the same reading: the ratio reads the caller's definition (its fill_nulls_with)
+  };
+  // a ratio reads each measure through a simple metric over it: one already declared over that
+  // measure, else one named as the measure is — never a different metric that holds that name
+  const ensureSimpleFor = (measureName, ref, md) => {
     if (simpleByMeasure.has(measureName)) return simpleByMeasure.get(measureName);
     const name = measureName; // simple metric shares the measure's name
-    addMetric({ name, type: 'simple', type_params: { measure: { name: measureName } } });
+    const holder = metrics.find((x) => x.name === name) || existingMetrics.get(name);
+    if (holder && !simpleOver(holder, measureName)) {
+      const inContext = !metricNames.has(name);
+      fail(`ratio '${md.name}' reads measure '${ref}' through a simple metric named '${name}', and '${name}' is already ${described(holder)} ${inContext ? 'in this context' : 'of this call'}. Declare a simple metric over measure '${ref}' under another name before the ratio, and the ratio reads that one${inContext ? `; or remove '${name}' in the update that declares the ratio` : ''}`, 'metrics.name');
+    }
+    if (!holder) addMetric({ name, type: 'simple', type_params: { measure: { name: measureName } } });
     simpleByMeasure.set(measureName, name);
     return name;
   };
@@ -267,18 +303,18 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: exis
       const measureName = resolveMeasure(md.measure.name);
       const tp = { measure: { name: measureName } };
       if (typeof md.fill_nulls_with === 'number') tp.measure.fill_nulls_with = md.fill_nulls_with;
-      addMetric({ name, type: 'simple', type_params: tp });
+      declareMetric({ name, type: 'simple', type_params: tp }, md);
       simpleByMeasure.set(measureName, name);
     } else if (md.type === 'ratio') {
-      const num = ensureSimpleFor(resolveMeasure(md.numerator.name));
-      const den = ensureSimpleFor(resolveMeasure(md.denominator.name));
-      addMetric({ name, type: 'ratio', type_params: { numerator: { name: num }, denominator: { name: den } } });
+      const num = ensureSimpleFor(resolveMeasure(md.numerator.name), md.numerator.name, md);
+      const den = ensureSimpleFor(resolveMeasure(md.denominator.name), md.denominator.name, md);
+      declareMetric({ name, type: 'ratio', type_params: { numerator: { name: num }, denominator: { name: den } } }, md);
     } else if (md.type === 'cumulative') {
       const ctp = {};
       if (md.window) ctp.window = md.window;
       if (md.grain_to_date) ctp.grain_to_date = md.grain_to_date;
       if (md.period_agg) ctp.period_agg = md.period_agg;
-      addMetric({ name, type: 'cumulative', type_params: { measure: { name: resolveMeasure(md.measure.name) }, cumulative_type_params: ctp } });
+      declareMetric({ name, type: 'cumulative', type_params: { measure: { name: resolveMeasure(md.measure.name) }, cumulative_type_params: ctp } }, md);
     } else if (md.type === 'derived') {
       // derived expr is a formula over the input metric aliases only. Enforce a
       // safe grammar: allowed charset (no quotes/semicolons), and every
@@ -294,25 +330,37 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: exis
           fail(`derived metric '${md.name}': expr references unknown identifier '${tok}' (only input metric names + safe math functions allowed)`, 'metrics.expr');
         }
       }
-      // input metrics are namespaced; alias each to the raw name so the user's
-      // `expr` (written with raw metric names) resolves correctly in MetricFlow.
       // An input is named as it was declared ('n') or as it is stored ('ret_n'), as a measure is; it is
       // resolved once every metric of this declaration is known, so the order they are written in is free
       const derived = { name, type: 'derived', type_params: { expr: md.expr, metrics: [] } };
       derivedInputs.push({ derived, md });
-      addMetric(derived);
+      declareMetric(derived, md);
     } else {
       fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }
   }
 
-  const known = new Set([...existingMetricNames, ...metricNames]);
+  // Each input resolves to the metric it names, and the formula is written over those names — no
+  // aliases: MetricFlow refuses an alias that equals an input's name, and one shorter than two
+  // characters, while the identifiers of the formula are checked against the inputs above already.
+  const derivedFrom = new Map(); // a derived metric of this declaration → the metrics it reads
   for (const { derived, md } of derivedInputs) {
-    derived.type_params.metrics = md.metrics.map((x) => {
-      const stored = [NS(task, x.metric), x.metric].find((n) => known.has(n));
-      if (!stored) fail(`derived metric '${md.name}': its input '${x.metric}' is not a metric of this task. Its metrics: ${[...known].join(', ') || '(none)'}`, 'metrics.metrics');
-      return { name: stored, alias: x.name || x.metric };
-    });
+    const from = [...metricNames].filter((n) => n !== derived.name); // a metric is not built from itself
+    const storedOf = new Map();
+    for (const x of md.metrics) {
+      const stored = [NS(task, x.metric), x.metric].find((n) => from.includes(n) || existingMetrics.has(n));
+      if (!stored) fail(`derived metric '${md.name}': no metric named '${x.metric}' or '${NS(task, x.metric)}' to build it from. ${inScope('metric', from, [...existingMetrics.keys()])}`, 'metrics.metrics');
+      storedOf.set(x.name || x.metric, stored);
+    }
+    derived.type_params.expr = derived.type_params.expr.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (tok) => storedOf.get(tok) ?? tok);
+    derived.type_params.metrics = [...new Set(storedOf.values())].map((n) => ({ name: n }));
+    derivedFrom.set(derived.name, [...new Set(storedOf.values())]);
+  }
+  // two derived metrics of one declaration built from each other have no value to compute
+  const cycle = (n, path = []) => (path.includes(n) ? [...path, n] : (derivedFrom.get(n) || []).map((m) => cycle(m, [...path, n])).find(Boolean));
+  for (const n of derivedFrom.keys()) {
+    const c = cycle(n);
+    if (c) fail(`derived metrics built from each other: ${c.join(' → ')} — one of them has to read other metrics`, 'metrics.metrics');
   }
 
   if (!usedModels.size) {

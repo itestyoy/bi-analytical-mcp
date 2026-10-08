@@ -12,6 +12,12 @@ import { clone } from './helpers.js';
 /** What a semantic declaration keeps in a context's state — all an update changes. */
 const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
 
+/** What a context already holds, which a declaration into it reads and may not declare again (compileDeclaration). */
+const heldBy = (state) => ({
+  measures: Object.values(state.additions || {}).flatMap((a) => a.measures.map((m) => m.name)),
+  metrics: state.metrics || [],
+});
+
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
   _compile(input, options) {
@@ -89,7 +95,10 @@ export const semanticBuildMethods = {
     // already in a context. They share this schema (and therefore its vocabularies, which is the
     // whole reason they are one tool) but not their bodies.
     if (input.action === 'update') return this._updateSemanticModel(input);
-    const compiled = this._compile(input);
+    // a declaration beside the task already in a context compiles against what that context holds, so
+    // a measure or metric it would declare a second time is refused here, not written twice
+    const into = input.context_id && this.ctxs.has(input.context_id) ? this._ctx(input.context_id).state : null;
+    const compiled = this._compile(input, into ? heldBy(into) : undefined);
 
     if (input.dry_run) {
       const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
@@ -157,7 +166,7 @@ export const semanticBuildMethods = {
     const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
     for (const sm of input.semantic_models || []) state.additions[sm.from] ||= { measures: [], dimensions: [] };
     const task = input.task || state.tasks[0] || 'task';
-    const measureNames = () => Object.values(state.additions).flatMap((a) => a.measures.map((m) => m.name));
+    const measureNames = () => heldBy(state).measures;
 
     // Removals first (so one update can replace a measure). A measure or metric is named as it was
     // declared ('n') or as it is stored, task-namespaced ('ret_n'); a name that matches nothing is
@@ -208,7 +217,7 @@ export const semanticBuildMethods = {
     // task keeps — so a metric added alone reads them by the names they were declared under
     // (the context's sources come along, so metrics alone — or removals alone — compile against them)
     const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
-    const compiled = this._compile(frag, { measures: measureNames(), metrics: state.metrics.map((m) => m.name) });
+    const compiled = this._compile(frag, heldBy(state));
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });

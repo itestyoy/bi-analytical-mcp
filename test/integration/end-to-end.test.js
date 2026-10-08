@@ -297,6 +297,24 @@ test('4b. build_semantic_model action update adds a payers metric; re-query = 7 
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 
+test('4b2. derived metrics added by an update read the task\'s metrics by stored name, by declared name and under a short name alike: 85 / 7', opts, async (t) => {
+  if (skip(t)) return;
+  const upd = await engine.build_semantic_model({ action: 'update',
+    context_id: S.semCtx,
+    metrics: [
+      { name: 'per_payer_stored', type: 'derived', expr: 'e2e_mon_revenue / e2e_mon_payers', metrics: [{ metric: 'e2e_mon_revenue' }, { metric: 'e2e_mon_payers' }] },
+      { name: 'per_payer_declared', type: 'derived', expr: 'revenue / payers', metrics: [{ metric: 'revenue' }, { metric: 'payers' }] },
+      { name: 'per_payer_short', type: 'derived', expr: 'r / p', metrics: [{ metric: 'revenue', name: 'r' }, { metric: 'payers', name: 'p' }] },
+    ],
+  });
+  assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
+
+  const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_short'];
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: names });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  for (const n of names) close(num(r.rows[0][n]), 85 / 7);
+});
+
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {
   if (skip(t)) return;
   const dc = await engine.context({ action: 'describe', context_id: S.semCtx });

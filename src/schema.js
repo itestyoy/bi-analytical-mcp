@@ -65,14 +65,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'Metrics to add.' },
     remove: {
       type: 'object', additionalProperties: false,
-      description: 'What to remove: by the names it was added under.',
+      description: 'What to remove, by the names it was added under. Removals come first, so one update replaces a measure or a metric by removing it and declaring it again.',
       properties: {
         dimensions: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['from', 'field'], properties: { from: { enum: modelKeys }, field: { type: 'string' } } } },
         measures: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a metric reads one, unless cascade.' },
-        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } },
+        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a ratio or derived metric is built from one, unless cascade.' },
       },
     },
-    cascade: { type: 'boolean', description: 'Also remove the metrics that read a removed measure.' },
+    cascade: { type: 'boolean', description: 'Also remove what is built on a removed item: the metrics that read a removed measure, and the ratio and derived metrics built from a removed metric.' },
     dry_run: createFields.dry_run,
     include_yaml: createFields.include_yaml,
   };

@@ -115,7 +115,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // materialized until materialize).
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied before the stages.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   const pipelineFields = {
-    draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). For fork it may also be a context whose pipeline was already materialized.' },
+    context_id: { type: 'string', pattern: CTX, description: 'The context the draft is in — the context_id start returned. For fork it may also be a context whose pipeline was already materialized.' },
     name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
     description: { type: 'string', description: 'What this pipeline computes, in your words — kept with the draft, shown by context list / describe and in the model it builds, so two drafts can be told apart.' },
     materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
@@ -134,14 +134,16 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const echo = ['include_columns', 'include_steps'];
   // One form per action, each with exactly the fields that action takes: a stray field is refused
   // rather than silently ignored, and nothing is said about it beside the form — it is not in it.
-  const step = (action, title, tagDescription, required, optional = []) => form({ title, tag: ['action', action], tagDescription, required: ['draft_id', ...required], properties: pick(pipelineFields, ['draft_id', ...required, ...optional, ...echo]) });
-  const startOptional = ['draft_id', 'description', 'materialized', 'time_range', 'stages', ...echo];
+  const step = (action, title, tagDescription, required, optional = []) => form({ title, tag: ['action', action], tagDescription, required: ['context_id', ...required], properties: pick(pipelineFields, ['context_id', ...required, ...optional, ...echo]) });
+  // a start makes the draft: in a new context, or — context_id given — in that one (its draft replaced)
+  const startFields = { ...pipelineFields, context_id: { type: 'string', pattern: CTX, description: 'Start the draft in this context (one a build returned; a draft already in it is replaced). Omit it for a new context.' } };
+  const startOptional = ['context_id', 'description', 'materialized', 'time_range', 'stages', 'materialize', ...echo];
   const buildModel = {
     type: 'object',
-    description: 'One form per `action`: start (with `stages`, its first steps) → add_steps (materialize: true builds right after) → optionally preview → materialize, then more steps and materialize again. Every edit revalidates the whole pipeline and names the step it breaks. A materialized table stands for the steps so far: later steps read it instead of recomputing the prefix, and editing a step at or before it retires it (from_checkpoint / steps_recomputed / checkpoints_dropped say which).',
+    description: 'One form per `action`: start (the default — with `stages`, its first steps) → add_steps → optionally preview → materialize, then more steps and materialize again; materialize: true on start or add_steps builds right after the steps. Every edit revalidates the whole pipeline and names the step it breaks. A materialized table stands for the steps so far: later steps read it instead of recomputing the prefix, and editing a step at or before it retires it (from_checkpoint / steps_recomputed / checkpoints_dropped say which).',
     anyOf: [
-      form({ title: 'start from a source', tag: ['action', 'start'], tagDescription: 'start a new draft over a catalog source (returns a draft_id + the source columns); draft_id reuses a context.', required: ['name', 'source'], properties: pick(pipelineFields, ['name', 'source', ...startOptional]) }),
-      form({ title: 'start from a task', tag: ['action', 'start'], tagDescription: 'start a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(pipelineFields, ['name', 'from_task', 'source', ...startOptional]) }),
+      form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over a catalog source (returns its context_id + the source columns).', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', ...startOptional]) }),
+      form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(startFields, ['name', 'from_task', 'source', ...startOptional]) }),
       step('add_steps', 'add steps', 'add_steps: append stages — one or several, in order, all or none; returns what each did to the data.', ['stages'], ['materialize']),
       step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a stage before `index`.', ['index', 'stage']),
       step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
@@ -250,7 +252,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       type: 'object',
       description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
       anyOf: queryModes(
-        { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
+        { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the context_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
         batchOf({ type: 'object', additionalProperties: false, properties: pipelineQueryFields }, 'queries over the built model'),
         readPaging(pipelineQueryFields),
       ),

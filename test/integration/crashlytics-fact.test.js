@@ -171,10 +171,10 @@ test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (
 test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
-  assert.ok(s.draft_id, 'start returns a draft_id');
+  assert.ok(s.context_id, 'start returns a context_id');
   const a = await engine.build_pipeline_model({
     action: 'add_steps',
-    draft_id: s.draft_id,
+    context_id: s.context_id,
     stages: [{
       stage: 'match_recognize',
       partition_by: ['player_id_of_internal'],
@@ -184,7 +184,7 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
       ],
     }] });
   assert.equal(stepEffect(a).step_index, 1);
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 3, 'one row per player who crashed');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, 2);
@@ -198,7 +198,7 @@ test('an event of the other fact is rejected in a crash-fact funnel', opts, asyn
   const s = await engine.build_pipeline_model({ action: 'start', name: 'crash_mixed', source: 'crashlytics' });
   const a = await engine.build_pipeline_model({
     action: 'add_steps',
-    draft_id: s.draft_id,
+    context_id: s.context_id,
     stages: [{
       stage: 'match_recognize',
       partition_by: ['player_id_of_internal'],
@@ -219,15 +219,15 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   const s = await engine.build_pipeline_model({ action: 'start', name: 'crumbs', source: 'crashlytics' });
   const a = await engine.build_pipeline_model({
     action: 'add_steps',
-    draft_id: s.draft_id,
+    context_id: s.context_id,
     stages: [{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }] });
   assert.equal(stepEffect(a).step_index, 1);
   const g = await engine.build_pipeline_model({
     action: 'add_steps',
-    draft_id: s.draft_id,
+    context_id: s.context_id,
     stages: [{ stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }] }] });
   assert.equal(stepEffect(g).step_index, 2);
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   const by = mapCol(c.rows, 'crumb', 'n');
   assert.equal(sumCol(c.rows, 'n'), 20, 'every array element became a row');
@@ -247,8 +247,8 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
   const count = async (conditions) => {
     const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
-    const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+    const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
   };
@@ -258,7 +258,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.equal(await count([{ left: { value: 'true' }, op: 'eq', right: { column: 'is_fatal_of_event_data' } }]), num(want.yes));
   // a constant that is no boolean is refused in the call, naming the column
   const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] }] })), /'is_fatal_of_event_data' is a boolean column/);
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] }] })), /'is_fatal_of_event_data' is a boolean column/);
 });
 
 // A funnel step's condition follows the same rule: a flag spelled "true" is compared as TRUE.
@@ -269,16 +269,16 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   const fatal = { event_name: names, where: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'true' }] };
   const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
   await engine.build_pipeline_model({
-    action: 'add_steps', draft_id: s.draft_id,
+    action: 'add_steps', context_id: s.context_id,
     stages: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, perPlayer.filter((r) => num(r.n) >= 2).length, 'and a second one');
   // a constant that is no flag is refused as the step is added, naming the property
   const bad = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({
-    action: 'add_steps', draft_id: bad.draft_id,
+    action: 'add_steps', context_id: bad.context_id,
     stages: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] }, { name: 'again', event_name: names }] }] })), /'is_fatal_of_event_data' is a boolean column/);
 });
 
@@ -287,12 +287,12 @@ test('columns named like keywords (group, order) flow through the stages as colu
   if (skip(t)) return;
   const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
     { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
   ] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.reduce((n, r) => n + num(r.order), 0), num(want.n));
   assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
@@ -306,12 +306,12 @@ test('a raw expression takes its columns in args, with functions, keywords and s
   const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
   // the same column written by name in the text is refused when the step is added
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
     { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ column: 'fatal_flag', op: 'eq', value: 'fatal_x' }] }] },
   ] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.ok(num(want.n) > 0, 'the fixture has fatal crashes');
   assert.equal(num(c.rows[0].n), num(want.n));

@@ -61,7 +61,7 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
 
   const total = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], materialize: true });
   assert.equal(total.status, 'done', JSON.stringify(total));
-  const totalR = await readTable(engine, ctx, total.table, { transform: { aggregations: [{ agg: 'sum', column: 'scd_rev_revenue', name: 't' }] } });
+  const totalR = await readTable(engine, ctx, total.table, { transform: { measures: [{ agg: 'sum', column: 'scd_rev_revenue', name: 't' }] } });
   assert.equal(num(totalR.rows[0].t), 100, 'point-in-time total revenue = 100 (a fan-out join would give 130)');
 
   const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
@@ -111,7 +111,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   await assert.rejects(engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_players'] }), /not in its semantic layer/);
   // and the surviving metric still queries to the point-in-time total
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_revenue'], materialize: true });
-  const r = await readTable(engine, created.context_id, m.table, { transform: { aggregations: [{ agg: 'sum', column: 'scd_drop_revenue', name: 't' }] } });
+  const r = await readTable(engine, created.context_id, m.table, { transform: { measures: [{ agg: 'sum', column: 'scd_drop_revenue', name: 't' }] } });
   assert.equal(num(r.rows[0].t), 100);
 });
 
@@ -120,7 +120,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_pipeline_model({
-    action: 'add_steps', draft_id: s.draft_id, stages: [
+    action: 'add_steps', context_id: s.context_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
@@ -128,7 +128,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
     ],
   });
   assert.equal(r.action, 'add_steps');
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const rows = await readTable(engine, mat.context_id, mat.model);
   const by = mapOf(rows.rows, 'country', 'revenue');
@@ -144,14 +144,14 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
   await engine.build_pipeline_model({
-    action: 'add_steps', draft_id: s.draft_id, stages: [
+    action: 'add_steps', context_id: s.context_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] },
       { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
     ],
   });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const rows = await readTable(engine, mat.context_id, mat.model);
   assert.equal(num(rows.rows[0].revenue), 130, 'fan-out double-counts u1 across both versions → 130 (vs the correct 100)');
@@ -163,7 +163,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
 test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
+  const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
   const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(stepNotes(r))}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
@@ -172,6 +172,6 @@ test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real c
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
   const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+  const r2 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
   assert.ok(!stepNotes(r2).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

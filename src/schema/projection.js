@@ -15,20 +15,21 @@ export const rowFilter = conditionList(rowCondition, 'Row filters on result colu
 export const onlyWhere = { ...conditionList(rowCondition), description: 'A CONDITIONAL aggregate: fold only the rows these conditions hold for (sum/count of the loads that succeeded, the distinct cycles that reached a show) — sum(case when …) without writing it.' };
 
 // ONE MEASURE, as a pipeline's aggregate stage takes it (src/pipeline/sql.js measureSchema), over the
-// functions a read computes
+// functions a read computes — in a list called `measures`, as there. Its names are a stored table's
+// columns, which may carry the project's mixed-case names.
 const IDENT = '^[a-zA-Z_][a-zA-Z0-9_]*$';
-const aggregation = measureSchema({ aggs: [...PROJECTION_AGGS], column: { type: 'string', pattern: IDENT }, where: onlyWhere, pattern: IDENT });
+const measure = measureSchema({ aggs: [...PROJECTION_AGGS], column: { type: 'string', pattern: IDENT }, where: onlyWhere, pattern: IDENT });
 
 export const projectionLevel = (withThen) => ({
   type: 'object', additionalProperties: false,
   description: withThen
     ? 'A read-only projection over the stored table: filter rows, group, aggregate (the measures of a pipeline\'s aggregate stage), keep result rows (having), sort — nothing upstream is recomputed. `then` aggregates the result once more: count the groups that passed, sum a per-group flag.'
-    : 'The second level: the same projection over the first level\'s result — its group_by columns and aggregate aliases are the columns here (count the groups: aggregations: [{ agg: "count", name: "groups" }]).',
+    : 'The second level: the same projection over the first level\'s result — its group_by columns and measure names are the columns here (count the groups: measures: [{ agg: "count", name: "groups" }]).',
   properties: {
     where: rowFilter,
     group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
-    aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: aggregation },
-    having: conditionList(rowCondition, 'Keep the rows of the result these conditions hold for — on its group_by columns and aggregation names.'),
+    measures: { type: 'array', description: 'The measures to compute over the (grouped) result — as a pipeline\'s aggregate stage takes them.', items: measure },
+    having: conditionList(rowCondition, 'Keep the rows of the result these conditions hold for — on its group_by columns and measure names.'),
     order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
     ...(withThen ? { then: projectionLevel(false) } : {}),
   },

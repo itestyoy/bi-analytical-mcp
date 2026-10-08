@@ -55,10 +55,10 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 async function pipeRows(...stages) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `cx_${seq++}`, source: 'crashlytics' });
   for (const stage of stages) {
-    const r = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+    const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
     assert.ok(!r.error, `add_steps ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -66,7 +66,7 @@ async function pipeRows(...stages) {
 /** The add_steps response (for rejection assertions). */
 async function step(stage) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `cxw_${seq++}`, source: 'crashlytics' });
-  return engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+  return engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
 }
 
 // ═══════════ A. an array of scalars ═══════════

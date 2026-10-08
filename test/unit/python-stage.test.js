@@ -214,19 +214,19 @@ test('incremental builder: add_steps python → columns, nothing may follow, pre
   if (skipNoPy(t)) return;
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
-  const p = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [PY_STAGE] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [AGG] });
+  const p = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [PY_STAGE] });
   assert.deepEqual(stepEffect(p).columns_added.map((c) => c.name), ['revenue_z']);
-  const pv = await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
-  assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
-  assert.equal(pv.models[1].input, `pipe_seg_${s.draft_id}_s1`, 'the python model reads the SQL model before it');
+  const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
+  assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.context_id}_s1`, 'sql'], [`pipe_seg_${s.context_id}`, 'python']]);
+  assert.equal(pv.models[1].input, `pipe_seg_${s.context_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 5 }] });
+  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 5 }] });
   assert.equal(stepEffect(after).step_index, 3);
-  const m = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
-  assert.equal(m.model, `pipe_seg_${s.draft_id}`);
-  assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
+  const m = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  assert.equal(m.model, `pipe_seg_${s.context_id}`);
+  assert.deepEqual(pipeFiles(e, s.context_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
 });
 
 // The body is the function's TEXT: Python decides whether it is Python. The gate parses it as the
@@ -630,7 +630,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
       assert.ok(body.reference.version, `${id} must name the version it was read from`);
       assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
     } else {
-      assert.ok(body.pipeline_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.pipeline_payload?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
       assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
     }
   }
@@ -690,14 +690,14 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'bigpy', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
-  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [big] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [AGG] });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [big] });
   assert.equal(added.steps_added[added.steps_added.length - 1]?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
   const s2 = await e2.build_pipeline_model({ action: 'start', name: 'bigpy2', source: 'events' });
-  const many = await e2.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [AGG, big] });
+  const many = await e2.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [AGG, big] });
   assert.equal(many.added, 2, JSON.stringify(many.error || many).slice(0, 300));
 
   // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
@@ -718,7 +718,7 @@ test('a python stage with no preparation before it is told so; one after an SQL 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
   const raw = await e.build_pipeline_model({ action: 'start', name: 'raw_py', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: raw.draft_id, stages: [PY_STAGE] });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: raw.context_id, stages: [PY_STAGE] });
   const [said] = nudge(added);
   assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(stepNotes(added))}`);
   assert.match(said, /'events'/, 'it names the source being read raw');
@@ -728,15 +728,15 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 2. the same stage after an aggregate → nothing to say
   const prepared = await e.build_pipeline_model({ action: 'start', name: 'prep_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: prepared.draft_id, stages: [AGG] });
-  const after = await e.build_pipeline_model({ action: 'add_steps', draft_id: prepared.draft_id, stages: [PY_STAGE] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, stages: [AGG] });
+  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
   const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [AGG] });
-  const scopedPy = await e.build_pipeline_model({ action: 'add_steps', draft_id: scoped.draft_id, stages: [PY_STAGE] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [AGG] });
+  const scopedPy = await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)

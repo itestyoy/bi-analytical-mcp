@@ -23,6 +23,7 @@ import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
 import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
 import { OPS } from '../conditions.js';
+import { CTX } from '../schema/fields.js';
 
 let factsCache;
 /** The facts sheet (read once). */
@@ -56,7 +57,6 @@ export const offeredOps = () => Object.keys(retentioneeringFacts().ops).filter((
 export const NAME = '^[a-z][a-z0-9_]*$';
 /** A column of an eventstream: an identifier the warehouse stores (a segment, a path column, a custom one). */
 const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
-const CTX = '^[A-Za-z0-9_-]{1,64}$';
 /** The library's per-path column, which this wrapper names `path` (see pathField). */
 const PATH_PARAM = 'path_col';
 export const CONDITION_DEF = 'retentioneering_condition';
@@ -306,7 +306,9 @@ function buildForms(event, schema) {
   const lifted = event.enum ? relax(F) : F;
   const action = (value) => ({ tag: ['action', value], tagDescription: [].concat(value).map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') });
   const declaration = ['context_id', 'name', 'description', 'time_range', 'path', 'events', 'segments', 'where', 'sessions', 'sample'];
-  const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: pick(F, ['context_id', 'eventstream', ...required, ...optional]) });
+  // a step names the context its eventstream is in — a start may omit it (a new context), a step may not
+  const stepContext = { ...F.context_id, description: 'The context the eventstream is in — the context_id start returned.' };
+  const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: { ...pick(F, ['context_id', 'eventstream', ...required, ...optional]), context_id: stepContext } });
   return {
     type: 'object',
     description,

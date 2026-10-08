@@ -24,7 +24,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, startAndBuild } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -54,7 +54,7 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // keyed by variant_group (control / variant_b), plus a cleanup handle.
 async function aggregatesFor(id) {
   const r = recipe(id);
-  const out = await engine._buildPipeline(r.pipeline_payload);
+  const out = await startAndBuild(engine, r.pipeline_payload); // the recipe's start request, as it is served
   assert.equal(out.build.ok, true, `build failed for ${id}: ${JSON.stringify(out.error || out.build)}`);
   const map = r.experiment;
   const byGroup = {};

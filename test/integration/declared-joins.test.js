@@ -214,10 +214,10 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 async function pipeRows(source, ...stages) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `jn_${seq++}`, source });
   for (const stage of stages) {
-    const r = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+    const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
     assert.ok(!r.error, `add_steps ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -237,7 +237,7 @@ async function joinStats(source, joinStage, idColumn) {
 /** The add_steps response for a join — used to read its warnings. */
 async function joinStep(source, joinStage) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `jw_${seq++}`, source });
-  return engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [joinStage] });
+  return engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [joinStage] });
 }
 
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
@@ -523,7 +523,7 @@ test('23. a phantom relationship is pruned and rejected at the call', opts, asyn
   // Refused before any SQL exists: the pruned name is not even in the tool's `via` enum, so the
   // rejection lists the relationships that DID survive and never mentions the ghost.
   await assert.rejects(
-    () => phantomEngine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_ghost' }] }),
+    () => phantomEngine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_ghost' }] }),
     (e) => /must be one of|declares no such relationship/.test(e.message) && !/ad_funnel_ghost/.test(e.message),
     'a key the warehouse cannot back is refused here, not as a SQL error',
   );
@@ -542,10 +542,10 @@ test('24. the real variants are untouched by the pruning: 14 / 12 / 8', opts, as
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
       { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
     ]) {
-      const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', draft_id: st.draft_id, stages: [stage] });
+      const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', context_id: st.context_id, stages: [stage] });
       assert.ok(!r.error, JSON.stringify(r.error));
     }
-    const c = await phantomEngine.build_pipeline_model({ action: 'materialize', draft_id: st.draft_id });
+    const c = await phantomEngine.build_pipeline_model({ action: 'materialize', context_id: st.context_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
   };
@@ -572,10 +572,10 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'distinct_base', agg: 'count_distinct', column: 'event_id' }] },
   ]) {
-    const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', draft_id: st.draft_id, stages: [stage] });
+    const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', context_id: st.context_id, stages: [stage] });
     assert.ok(!r.error, JSON.stringify(r.error));
   }
-  const c = await phantomEngine.build_pipeline_model({ action: 'materialize', draft_id: st.draft_id });
+  const c = await phantomEngine.build_pipeline_model({ action: 'materialize', context_id: st.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(num(c.rows[0].n), 184);
   assert.equal(num(c.rows[0].distinct_base), 184, 'and it did not fan out');
@@ -645,10 +645,10 @@ function ordered(sql, cols) {
 async function generatedSql(source, ...stages) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `gen_${seq++}`, source });
   for (const stage of stages) {
-    const r = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+    const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
     assert.ok(!r.error, `add_steps ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const p = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
+  const p = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.ok(p.model_sql, 'preview returns the generated model SQL');
   return p.model_sql;
 }
@@ -819,13 +819,13 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     const s = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'acquisition' });
     await call('build_pipeline_model', {
       action: 'add_steps',
-      draft_id: s.draft_id,
+      context_id: s.context_id,
       stages: [{ stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: [{ column: 'country' }] }] });
     await call('build_pipeline_model', {
       action: 'add_steps',
-      draft_id: s.draft_id,
+      context_id: s.context_id,
       stages: [{ stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', agg: 'sum', column: 'cost' }] }] });
-    const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
+    const built = await call('build_pipeline_model', { action: 'materialize', context_id: s.context_id });
     assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
     const by = mapCol(built.rows, 'country', 'total');
     assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -837,7 +837,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     const s2 = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
     const bad = await client.callTool({
       name: 'build_pipeline_model',
-      arguments: { request: { action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }] } },
+      arguments: { request: { action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }] } },
     });
     assert.equal(bad.isError, true);
     assert.match(JSON.parse(bad.content[0].text).error.message, /`stages\.0\.via` must be "user"/);
@@ -1037,20 +1037,20 @@ test('42. a chained relationship the pipeline source does not declare is refused
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: `ch_${seq++}`, source: 'acquisition' });
   const ok = await engine.build_pipeline_model({
-    action: 'add_steps', draft_id: s.draft_id,
+    action: 'add_steps', context_id: s.context_id,
     stages: [{ stage: 'join', with: 'events', via: 'user', kind: 'inner', attrs: [{ column: 'tracking_id' }] }] });
   assert.ok(!ok.error, JSON.stringify(ok.error));
   // `tracking_id` is now IN the pipeline — but the ad-funnel relationship belongs to the events
   // source, not to acquisition, so it cannot be the next hop.
   await assert.rejects(
     () => engine.build_pipeline_model({
-      action: 'add_steps', draft_id: s.draft_id,
+      action: 'add_steps', context_id: s.context_id,
       stages: [{ stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded', attrs: [{ column: 'crash_id' }] }] }),
     /'acquisition' declares no such relationship.*share: user/s,
   );
   // the hop the source DOES declare works from the same draft.
   const good = await engine.build_pipeline_model({
-    action: 'add_steps', draft_id: s.draft_id,
+    action: 'add_steps', context_id: s.context_id,
     stages: [{ stage: 'join', with: 'crashlytics', via: 'user', kind: 'inner', attrs: [{ column: 'crash_id' }] }] });
   assert.ok(!good.error, JSON.stringify(good.error));
 });
@@ -1443,11 +1443,11 @@ async function perDayMatches(catalog) {
   const s = await eng.build_pipeline_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
   const j = await eng.build_pipeline_model({
     action: 'add_steps',
-    draft_id: s.draft_id,
+    context_id: s.context_id,
     stages: [{ stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: [{ column: 'cost' }] }] });
   assert.ok(!j.error, `add_steps join: ${JSON.stringify(j.error)}`);
-  await eng.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] }] });
-  const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] }] });
+  const c = await eng.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return { n: num(c.rows[0].n), spend: num(c.rows[0].spend) };
 }

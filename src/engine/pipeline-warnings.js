@@ -300,13 +300,14 @@ export class PipelineAdvisor {
     return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
   }
 
-  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
-  stepRecommendations(stage, available) {
+  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.
+   *  `building`: the call that adds it also starts the build (materialize: true), so "materialize when done" is not said. */
+  stepRecommendations(stage, available, { building = false } = {}) {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...this.dateBoundWarnings(stage, available),
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
-      'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
+      ...(building ? [] : ['Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }
 }

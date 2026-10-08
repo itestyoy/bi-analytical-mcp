@@ -185,20 +185,20 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 test('build_pipeline_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
-  assert.ok(s.draft_id, 'start returns a draft_id');
+  assert.ok(s.context_id, 'start returns a context_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [matchActivation()], include_columns: true });
+  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [matchActivation()], include_columns: true });
   assert.equal(stepEffect(a1).step_index, 1);
   const names = a1.available_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
   assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel output columns available next');
   // preview renders SQL without materializing.
-  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
+  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL');
   assert.equal(pv.steps.length, 1);
   // commit materializes; rows MATCH the all-at-once funnel exactly.
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -210,12 +210,12 @@ test('build_pipeline_model incremental: per-step columns + commit equals all-at-
 test('build_pipeline_model add_steps rejects an invalid stage without mutating the draft', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_guard', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
   await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'project', columns: ['no_such_column'] }] }),
+    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', columns: ['no_such_column'] }] }),
     'a stage referencing a missing column is rejected',
   );
-  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
+  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
 });
 

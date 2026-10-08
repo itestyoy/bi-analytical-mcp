@@ -26,7 +26,7 @@ export const semanticIndexMethods = {
       ...(payload ? { pipeline_payload: payload } : {}),
       ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is built in three calls — build_pipeline_model({ request: { action: \'start\', name, source, time_range } }) from its name and pipeline.source / pipeline.time_range, then { action: \'add_steps\', draft_id, stages: <pipeline.stages> }, then { action: \'materialize\', draft_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its stages — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
     };
   },
 
@@ -43,9 +43,9 @@ export const semanticIndexMethods = {
    */
   _fitRecipePipeline(payload) {
     const fitted = [];
-    const stages = payload?.pipeline?.stages;
+    const stages = payload?.stages;
     if (!Array.isArray(stages)) return { payload: null, fitted };
-    const source = payload.pipeline.source;
+    const source = payload.source;
     // A recipe is shipped for every deployment, so it may name a source THIS catalog does not have.
     // getModel throws on an unknown key, and the recipe view would then fail outright instead of
     // showing the recipe (the caller can still read it and adapt it). Fitting is best-effort.
@@ -61,7 +61,7 @@ export const semanticIndexMethods = {
       fitted.push(`join with '${st.with}': added between { value: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
       return { ...st, between: { value: eventTime, from, to } };
     });
-    return { payload: fitted.length ? { ...payload, pipeline: { ...payload.pipeline, stages: next } } : null, fitted };
+    return { payload: fitted.length ? { ...payload, stages: next } : null, fitted };
   },
 
   /**

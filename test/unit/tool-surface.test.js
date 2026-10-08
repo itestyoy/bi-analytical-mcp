@@ -78,22 +78,22 @@ test('context lists and describes, delete_context removes — and a read never r
   // start a draft to create a context.
   const s = await e.build_pipeline_model({ action: 'start', name: 'ctxtool', source: 'events' });
   const list = await e.context({ action: 'list' });
-  assert.ok(list.contexts.some((c) => c.context_id === s.draft_id), 'list shows the created context');
-  const desc = await e.context({ action: 'describe', context_id: s.draft_id });
-  assert.equal(desc.context_id ?? desc.id ?? s.draft_id, desc.context_id ?? desc.id ?? s.draft_id); // describe returns the context shape
+  assert.ok(list.contexts.some((c) => c.context_id === s.context_id), 'list shows the created context');
+  const desc = await e.context({ action: 'describe', context_id: s.context_id });
+  assert.equal(desc.context_id ?? desc.id ?? s.context_id, desc.context_id ?? desc.id ?? s.context_id); // describe returns the context shape
   // strict: describe requires context_id; list forbids it.
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
-  await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
+  await assert.rejects(() => e.context({ action: 'list', context_id: s.context_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
   // context only reads: an action that would remove is not one of its actions
-  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /must be one of: list, describe/);
-  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.context_id }), /must be one of: list, describe/);
+  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.context_id), 'a read removed nothing');
   // delete_context: semantic_model needs its model; context forbids the model's fields
-  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);
-  await assert.rejects(() => e.delete_context({ context_id: s.draft_id, cascade: true }), /invalid input/);
-  await e.delete_context({ context_id: s.draft_id });
+  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.context_id }), /invalid input/);
+  await assert.rejects(() => e.delete_context({ context_id: s.context_id, cascade: true }), /invalid input/);
+  await e.delete_context({ context_id: s.context_id });
   const after = await e.context({ action: 'list' });
-  assert.ok(!after.contexts.some((c) => c.context_id === s.draft_id), 'dropped context is gone');
+  assert.ok(!after.contexts.some((c) => c.context_id === s.context_id), 'dropped context is gone');
 });
 
 // Recipes folded into semantic_index: overview lists them; { recipe: id } returns one.
@@ -115,17 +115,17 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
 test('a sampled pipeline flags the result approximate with guidance', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'sampled', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'sample', percent: 10 }] });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
-  const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'sample', percent: 10 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const out = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
   assert.equal(out.sampling.sample_percent, 10);
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'exact', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
-  const out2 = await e.build_pipeline_model({ action: 'materialize', draft_id: s2.draft_id });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const out2 = await e.build_pipeline_model({ action: 'materialize', context_id: s2.context_id });
   assert.equal(out2.provenance.approximate, undefined);
   assert.equal(out2.sampling, undefined);
 });
@@ -150,17 +150,17 @@ test('add_steps warns when an event-specific property is used without its event 
   ] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
-  const a = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const a = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
   assert.ok(stepNotes(a).some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(stepNotes(a)));
   // with an upstream where scoping event_name to those events → no NULL warning.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'scoped', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] }] });
-  const a2 = await e.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] }] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
   assert.ok(!stepNotes(a2).some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
   const warnFor = async (cond) => {
     const d = await e.build_pipeline_model({ action: 'start', name: 'scoped2', source: 'events' });
-    await e.build_pipeline_model({ action: 'add_steps', draft_id: d.draft_id, stages: [{ stage: 'where', conditions: [cond] }] });
-    const r = await e.build_pipeline_model({ action: 'add_steps', draft_id: d.draft_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+    await e.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [cond] }] });
+    const r = await e.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
     return (stepNotes(r) || []).find((x) => x.includes('populated only on event'));
   };
   // a scope WITHIN the field's events is the right choice: every row it keeps carries the field
@@ -317,7 +317,7 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
 
   const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
   const start = await e.build_pipeline_model({ action: 'start', name: 'fnl_part', source: 'events' });
-  const add = (partition_by) => e.build_pipeline_model({ action: 'add_steps', draft_id: start.draft_id, stages: [{ stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) }] });
+  const add = (partition_by) => e.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, stages: [{ stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) }] });
   // a relationship written as a bare word is not a column — and the message says what to write
   await assert.rejects(() => add(['user']), /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/);
   // a relationship keyed by several columns cannot be a partition column at all

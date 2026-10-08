@@ -85,10 +85,10 @@ const evtsTask = (eng, name, more = {}) => eng.build_semantic_model({
 async function pipeRows(source, stages, eng = engine) {
   const s = await eng.build_pipeline_model({ action: 'start', name: `au_${seq++}`, source });
   for (const stage of stages) {
-    const r = await eng.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
+    const r = await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
     assert.ok(!r.error, `add_steps failed: ${JSON.stringify(r.error || r)}`);
   }
-  const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await eng.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }

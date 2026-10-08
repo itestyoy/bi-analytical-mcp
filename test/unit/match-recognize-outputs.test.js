@@ -39,30 +39,30 @@ const funnel = (extra = {}) => ({
 });
 
 async function columnsAfter(e, stage) {
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [stage], include_columns: true });
-  return { draft_id, types: new Map(added.available_columns.map((c) => [c.name, c.type])) };
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [stage], include_columns: true });
+  return { context_id, types: new Map(added.available_columns.map((c) => [c.name, c.type])) };
 }
 
 test('a capture cannot take the name of a column the funnel outputs anyway', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   // the fixed columns, the partition key, each step's own, and a capture taken twice
   for (const name of ['completed', 'first_seen_at', 'furthest_step_name', 'player_id_of_internal', 'reached_a', 'at_b']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
       (err) => err.field === 'stages[0]' && new RegExp(`capture '${name}': the funnel already outputs a column of that name`).test(err.message),
       name,
     );
   }
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [funnel({ capture: [{ name: 'lvl', step: 'a', column: 'level_id_of_event_data' }, { name: 'lvl', step: 'b', column: 'level_id_of_event_data' }] })] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name: 'lvl', step: 'a', column: 'level_id_of_event_data' }, { name: 'lvl', step: 'b', column: 'level_id_of_event_data' }] })] }),
     /capture 'lvl': the funnel already outputs a column of that name/,
   );
   // nor the name of a working column of the match itself (the axis, each step's time and flag)
   for (const name of ['ts', 't1', 't2', 'is1', 'is2']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
       new RegExp(`capture '${name}': the funnel uses that name for a working column of its own`),
       name,
     );
@@ -79,10 +79,10 @@ test('only the working columns THIS funnel makes are refused as a capture name â
   assert.deepEqual(['t3', 'is3', 't30', 'is5'].map((c) => two.get(c)), ['numeric', 'numeric', 'numeric', 'numeric']);
   // three steps: t3 and is3 are now its own
   const three = funnel({ steps: [...funnel().steps, { name: 'c', event_name: ['level_started'] }] });
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   for (const name of ['t3', 'is3']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ ...three, capture: [{ name, step: 'c', column: 'level_id_of_event_data' }] }] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ ...three, capture: [{ name, step: 'c', column: 'level_id_of_event_data' }] }] }),
       new RegExp(`capture '${name}': the funnel uses that name for a working column of its own`),
       name,
     );
@@ -110,13 +110,13 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
   // and a comparison text cannot spell is refused â€” on the capture as on the column it copies
   const e = engine();
   e.probe.physicalColumns = async () => SOURCE_COLS;
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   const captured = funnel({ capture: [{ name: 'clicked', step: 'b', column: 'is_clicked_of_event_data' }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'gt', value: true }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'gt', value: true }] }] }),
     /'clicked' is a text column in the warehouse/,
   );
-  const ok = await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'eq', value: true }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'eq', value: true }] }] });
   assert.equal(ok.steps_count, 2);
   // the column map the next stage reads: the capture is marked as the compute copy of the same column is
   for (const dialect of ['duckdb', 'bigquery']) {
@@ -133,9 +133,9 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
 
 test('a capture naming a step the funnel does not have is refused as the capture it is', async () => {
   const e = engine();
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [funnel({ capture: [{ name: 'x', step: 'zz', column: 'level_id_of_event_data' }] })] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name: 'x', step: 'zz', column: 'level_id_of_event_data' }] })] }),
     (err) => /capture 'x' names step 'zz'/.test(err.message) && /steps: a, b/.test(err.message) && !/metric/.test(err.message),
   );
 });
@@ -144,13 +144,13 @@ test('at_<step> and first_seen_at are of the sequence axis\'s type: a moment by 
   const e = engine();
   const byTime = (await columnsAfter(e, funnel())).types;
   assert.deepEqual(['first_seen_at', 'at_a', 'at_b'].map((c) => byTime.get(c)), ['time', 'time', 'time']);
-  const { draft_id, types } = await columnsAfter(e, funnel({ order_by: 'session_number' }));
+  const { context_id, types } = await columnsAfter(e, funnel({ order_by: 'session_number' }));
   assert.deepEqual(['first_seen_at', 'at_a', 'at_b'].map((c) => types.get(c)), ['numeric', 'numeric', 'numeric']);
   // two of them compare as numbers: a constant is written as one, and a date is refused as the number column it is
-  const ok = await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'at_b' }, op: 'gt', right: { column: 'at_a' } }, { column: 'at_a', op: 'gte', value: '2' }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'at_b' }, op: 'gt', right: { column: 'at_a' } }, { column: 'at_a', op: 'gte', value: '2' }] }] });
   assert.equal(ok.steps_count, 2);
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'where', conditions: [{ column: 'at_a', op: 'gte', value: '2026-01-01' }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'at_a', op: 'gte', value: '2026-01-01' }] }] }),
     /'at_a' is a numeric column/,
   );
 });

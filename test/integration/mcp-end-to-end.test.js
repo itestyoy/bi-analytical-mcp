@@ -88,8 +88,8 @@ async function callErr(name, args) {
 /** A whole pipeline over MCP: start → add_steps → materialize. */
 async function mcpPipeline(source, stages, name) {
   const s = await call('build_pipeline_model', { action: 'start', name: name || `e2e_${seq++}`, source });
-  for (const stage of stages) await call('build_pipeline_model', { action: 'add_steps', draft_id: s.draft_id, stages: [stage] });
-  const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
+  for (const stage of stages) await call('build_pipeline_model', { action: 'add_steps', context_id: s.context_id, stages: [stage] });
+  const built = await call('build_pipeline_model', { action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return built;
 }
@@ -195,7 +195,7 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   // …and the step that omits it says so, before anything is built.
   const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
   const step = await call('build_pipeline_model', {
-    action: 'add_steps', draft_id: s.draft_id,
+    action: 'add_steps', context_id: s.context_id,
     stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
   const recs = JSON.stringify(stepNotes(step));
   assert.match(recs, /INCOMPLETE JOIN/);
@@ -233,17 +233,17 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
 
 test('5. the attrs contract, enforced at the protocol boundary', opts, async (t) => {
   if (skip(t)) return;
-  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).draft_id;
+  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).context_id;
 
   // (a) no attrs → refused, and the error lists what the model actually offers.
   const missing = await callErr('build_pipeline_model', {
-    action: 'add_steps', draft_id: await start(),
+    action: 'add_steps', context_id: await start(),
     stages: [{ stage: 'join', with: 'acquisition', via: 'user' }] });
   assert.match(missing.error.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
   const dup = await callErr('build_pipeline_model', {
-    action: 'add_steps', draft_id: await start(),
+    action: 'add_steps', context_id: await start(),
     stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }] });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
   assert.match(dup.error.message, /name: 'events_event_name'/);
@@ -263,9 +263,9 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_pipeline_model', { action: 'add_steps', draft_id: s, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] }] });
+  await call('build_pipeline_model', { action: 'add_steps', context_id: s, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] }] });
   const unlisted = await callErr('build_pipeline_model', {
-    action: 'add_steps', draft_id: s,
+    action: 'add_steps', context_id: s,
     stages: [{ stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] }] });
   assert.match(unlisted.error.message, /unknown column 'tracking_id'/);
 });
@@ -382,8 +382,8 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, stages) => {
     const d = await call('build_pipeline_model', { action: 'start', name, from_task: built.task_id });
-    await call('build_pipeline_model', { action: 'add_steps', draft_id: d.draft_id, stages });
-    return call('build_pipeline_model', { action: 'materialize', draft_id: d.draft_id });
+    await call('build_pipeline_model', { action: 'add_steps', context_id: d.context_id, stages });
+    return call('build_pipeline_model', { action: 'materialize', context_id: d.context_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] },

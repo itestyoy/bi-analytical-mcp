@@ -24,7 +24,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, startAndBuild } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -181,7 +181,7 @@ test('TASK funnel_from_event_property_steps: tutorial step_id drop-off 8 -> 5 ->
 // conditional count per horizon. Proven against the same reading of the events written by hand.
 test('TASK conversion_metric_window: a return (a second session) within 48h / 7×24h of the first launch', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine._buildPipeline(engine._recipe({ id: 'conversion_metric_window' }).pipeline_payload);
+  const out = await startAndBuild(engine, engine._recipe({ id: 'conversion_metric_window' }).pipeline_payload);
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   const { rows } = await wh.query(`
     with base as (select player_id_of_internal as p, min(device_time) as t from fct_analytics_events where event_name = 'first_launch' group by 1),

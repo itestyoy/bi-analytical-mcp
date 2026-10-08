@@ -44,10 +44,10 @@ after(async () => { try { engine?.close(); } catch { /* noop */ } if (wh) await 
 /** A pipeline over the events source, materialized; its rows. */
 async function pipe(stages) {
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages });
-  const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages });
+  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
-  return { rows: built.rows, draft_id: s.draft_id };
+  return { rows: built.rows, context_id: s.context_id };
 }
 
 test('a where keeps a row when any condition of an { or } holds, beside the conditions that all hold — and a text operator matches as LIKE does', opts, async (t) => {
@@ -80,14 +80,14 @@ test('a CASE branch takes the same conditions: an { or } in `when` flags the row
 
 test('a read of a built model filters and keeps groups with the same grammar: where and having take { or }', opts, async (t) => {
   if (skip(t)) return;
-  const { draft_id } = await pipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }]);
+  const { context_id } = await pipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }]);
   const want = await truth("select count(*) as n from fct_analytics_events where event_name like 'level%' or event_name = 'tutorial'");
-  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { where: [{ or: [{ column: 'event_name', op: 'starts_with', value: 'level' }, { column: 'event_name', op: 'eq', value: 'tutorial' }] }], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }] } });
+  const read = await engine.query_pipeline_model({ context_id, transform: { where: [{ or: [{ column: 'event_name', op: 'starts_with', value: 'level' }, { column: 'event_name', op: 'eq', value: 'tutorial' }] }], measures: [{ agg: 'sum', column: 'n', name: 'n' }] } });
   assert.equal(num(read.rows[0].n), want);
   // the names whose count is the smallest or the largest
   const counts = (await wh.query('select event_name, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => num(r.n));
   const lo = Math.min(...counts); const hi = Math.max(...counts);
-  const kept = await engine.query_pipeline_model({ context_id: draft_id, transform: { group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'n', name: 'n' }], having: [{ or: [{ column: 'n', op: 'eq', value: lo }, { column: 'n', op: 'eq', value: hi }] }] } });
+  const kept = await engine.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'sum', column: 'n', name: 'n' }], having: [{ or: [{ column: 'n', op: 'eq', value: lo }, { column: 'n', op: 'eq', value: hi }] }] } });
   assert.equal(kept.rows.length, counts.filter((n) => n === lo || n === hi).length);
 });
 
@@ -131,8 +131,8 @@ test('a time window whose bounds carry their own offset is those instants, whate
   const local = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 09:00:00' and device_time <= '2026-01-04 08:59:59'");
   assert.ok(want > 0 && want < all && want !== local, 'the fixture tells the readings apart');
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
-  const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.equal(num(built.rows[0].n), want);
 });
@@ -163,17 +163,17 @@ test('a project stage drops the columns it names and keeps the rest; the next st
   assert.equal(rows.length, want);
   // once session_number is dropped the next stage cannot name it — refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', agg: 'sum', column: 'session_number' }] }] }), (e) => !(e instanceof assert.AssertionError));
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', agg: 'sum', column: 'session_number' }] }] }), (e) => !(e instanceof assert.AssertionError));
 });
 
 test('a query over a built model computes a sample stddev, variance, median and percentile, as the warehouse does', opts, async (t) => {
   if (skip(t)) return;
   const sd = await truth('select stddev_samp(session_number) as n from fct_analytics_events');
   const vr = await truth('select var_samp(session_number) as n from fct_analytics_events');
-  const { draft_id } = await pipe([{ stage: 'where', conditions: [{ column: 'session_number', op: 'is_not_null' }] }]);
+  const { context_id } = await pipe([{ stage: 'where', conditions: [{ column: 'session_number', op: 'is_not_null' }] }]);
   const md = await truth('select quantile_cont(session_number, 0.5) as n from fct_analytics_events');
   const p9 = await truth('select quantile_cont(session_number, 0.9) as n from fct_analytics_events');
-  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { aggregations: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }, { agg: 'median', column: 'session_number', name: 'md' }, { agg: 'percentile', percentile: 0.9, column: 'session_number', name: 'p9' }] } });
+  const read = await engine.query_pipeline_model({ context_id, transform: { measures: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }, { agg: 'median', column: 'session_number', name: 'md' }, { agg: 'percentile', percentile: 0.9, column: 'session_number', name: 'p9' }] } });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
@@ -184,11 +184,11 @@ test('a query over a built model computes a sample stddev, variance, median and 
 test('a query over a built model reads columns named with reserved words (order, group): every name is quoted', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial'");
-  const { draft_id } = await pipe([
+  const { context_id } = await pipe([
     { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
   ]);
-  const read = await engine.query_pipeline_model({ context_id: draft_id, transform: { where: [{ column: 'group', op: 'eq', value: 'tutorial' }], group_by: ['group'], aggregations: [{ agg: 'sum', column: 'order', name: 'select' }], order_by: [{ key: 'select', direction: 'desc' }] } });
+  const read = await engine.query_pipeline_model({ context_id, transform: { where: [{ column: 'group', op: 'eq', value: 'tutorial' }], group_by: ['group'], measures: [{ agg: 'sum', column: 'order', name: 'select' }], order_by: [{ key: 'select', direction: 'desc' }] } });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
 });
@@ -207,7 +207,7 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
   // an order compares no flag: refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
 });
 
 test('a text flag stays text after a checkpoint and from a build\'s task, with the constant on either side', opts, async (t) => {
@@ -222,16 +222,16 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'is_not_null' }] }] });
-  const prefix = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const prefix = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(prefix.build?.ok, true, JSON.stringify(prefix.error || prefix.build));
-  const added = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: counts });
+  const added = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: counts });
   assert.ok(added.from_checkpoint, 'the counts read the built prefix');
-  const after = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const after = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(after.build?.ok, true, JSON.stringify(after.error || after.build));
   assert.deepEqual([num(after.rows[0].yes), num(after.rows[0].no)], [truthy, all - truthy]);
   // a draft started from the prefix's task reads the same table, and the same column in it
   const from = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, stages: counts });
-  const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: from.draft_id });
+  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: from.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.deepEqual([num(built.rows[0].yes), num(built.rows[0].no)], [truthy, all - truthy]);
 });
@@ -262,32 +262,32 @@ test('a raw expression takes its columns positionally, in args: the server write
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
   // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
   for (const sql of ['order * 2', '"order" * 2']) {
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
+    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
   }
   // a placeholder with no argument, and an argument no placeholder uses, are refused
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
 test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] },
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
   ] });
-  const good = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  const good = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
   assert.equal(good.ok, true, JSON.stringify(good.error));
   assert.equal(good.validated, true);
   // a function the warehouse does not have: only the warehouse can say so
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
-  const bad = await engine.raw.build_pipeline_model({ action: 'preview', draft_id: s.draft_id, validate: true });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
+  const bad = await engine.raw.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
   const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
   assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
-  assert.ok(!engine.ctxs.generatedFiles(s.draft_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
+  assert.ok(!engine.ctxs.generatedFiles(s.context_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
 });
 
 test('a time column compared with an expression that yields a moment keeps the rows the warehouse keeps; with a number it is refused as the step is added', opts, async (t) => {
@@ -301,5 +301,5 @@ test('a time column compared with an expression that yields a moment keeps the r
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
 });

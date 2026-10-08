@@ -17,11 +17,24 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { pythonReferenceRecipes } from './python-guide.js';
 
+/**
+ * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
+ * earlier version carries `{ name, pipeline: { source, time_range?, stages } }` — the one-call contract
+ * no tool takes — and a deployment's file is not ours to rewrite, so it is read as that request here:
+ * what the recipe view hands over is always a request the tool accepts as it stands.
+ */
+export function pipelineStartRequest(payload) {
+  if (!payload || typeof payload !== 'object' || !payload.pipeline || typeof payload.pipeline !== 'object') return payload;
+  // context_id and dry_run belonged to the one-call contract: a recipe starts a draft of its own
+  const { pipeline, context_id: _ctx, dry_run: _dry, ...rest } = payload;
+  return { action: 'start', ...rest, ...pipeline };
+}
+
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. */
 function readFile(path, origin) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  return (raw.recipes || []).map((r) => ({ ...r, origin }));
+  return (raw.recipes || []).map((r) => ({ ...r, ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}), origin }));
 }
 
 /**

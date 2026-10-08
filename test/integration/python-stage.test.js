@@ -92,7 +92,7 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   // The result IS a table in the warehouse: re-read it, and re-slice it.
   const again = await readTable(engine, r.context_id, r.model);
   assert.equal(again.rows.length, 4);
-  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], aggregations: [{ agg: 'count', name: 'players' }], order_by: [{ key: 'tier' }] } });
+  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], measures: [{ agg: 'count', name: 'players' }], order_by: [{ key: 'tier' }] } });
   assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
   // and so is the prep table, under its own name
   const prep = await readTable(engine, r.context_id, r.models[0].model);
@@ -103,10 +103,10 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
 test('python stage: the incremental builder materializes the same split and returns the rows', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'seg2', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [AGG] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [AGG] });
   const keep = { name: 'keep', params: ['df', 'columns'], body: "return df[columns]" };
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } }] });
-  const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } }] });
+  const m = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(m.build?.executed, true, JSON.stringify(m.error || m));
   assert.equal(m.row_count, 4);
   assert.deepEqual(Object.keys(m.rows[0]).sort(), ['player_id_of_internal', 'revenue_z']);

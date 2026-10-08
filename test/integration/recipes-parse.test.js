@@ -1,11 +1,12 @@
 // Every recipe must be RUNNABLE end-to-end: its semantic_payload parses (dbt parse)
-// and its first example query executes (mf query). This guarantees the recipes we
-// hand to the agent actually build valid models and compute metrics.
+// and its first example query executes (mf query); its pipeline_payload — a build_pipeline_model
+// start request — is sent AS IT STANDS, with materialize: true, and its build returns rows. This
+// guarantees the recipes we hand to the agent are requests the tools take, and compute.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -14,7 +15,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, startAndBuild } from '../helpers/settle.js';
 import { DBT_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -61,10 +62,13 @@ for (const r of recipes.list) {
       const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
       pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
       const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY_BIN }));
-      const out = await pyEngine._buildPipeline({ ...r.pipeline_payload, dry_run: true });
-      assert.equal(out.dry_run, true, `${r.id}: ${JSON.stringify(out.error || {})}`);
+      // the start request as it is served: every stage checked (the bodies through the static gate),
+      // then the preview lays out the chain of models a build would run
+      const started = await pyEngine.build_pipeline_model(r.pipeline_payload);
+      assert.equal(started.steps_count, r.pipeline_payload.stages.length, `${r.id}: every stage is on the draft`);
+      const out = await pyEngine.build_pipeline_model({ action: 'preview', context_id: started.context_id });
       assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
-      const declared = r.pipeline_payload.pipeline.stages.flatMap((st) => st.output?.columns || []);
+      const declared = r.pipeline_payload.stages.flatMap((st) => st.output?.columns || []);
       for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
       assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
       assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
@@ -81,10 +85,10 @@ for (const r of recipes.list) {
       return;
     }
 
-    // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
-    // declares an experiment mapping (analyze, or check_split) — feed its per-group rows into the test.
+    // Pipeline recipe (e.g. A/B): its start request, built in the same call, then — if it
+    // declares an experiment mapping (analyze, or check_split) — its per-group rows fed into the test.
     if (r.pipeline_payload) {
-      const out = await engine._buildPipeline(r.pipeline_payload);
+      const out = await startAndBuild(engine, r.pipeline_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
       // A recipe that feeds a two-group test needs its groups; one that collapses the table to a
       // single row of statistics (the table-wide aggregate) is correct at exactly one row.
@@ -127,3 +131,20 @@ for (const r of recipes.list) {
     }
   });
 }
+
+// A deployment's own file written for an earlier version carries a pipeline recipe as
+// { name, pipeline: { source, stages } } — the one-call shape no tool takes. It is served as the start
+// request it stands for, and that request builds: the shipped A/B conversion, as such a file would
+// hold it, gives the per-variant numbers the fixture holds (control 6 of 6, variant_b 1 of 6).
+test('a deployment recipe in the earlier { name, pipeline } shape is served as a start request that builds', opts, async (t) => {
+  if (!HAS_DBT) return t.skip('dbt/mf not installed');
+  const shipped = recipes.get('experiment_conversion').pipeline_payload;
+  const file = join(mkdtempSync(join(tmpdir(), 'rp-old-')), 'mine.json');
+  writeFileSync(file, JSON.stringify({ recipes: [{ id: 'my_conversion', task_type: 'experiment', title: 'mine', when_to_use: '', hack: '', pipeline_payload: { name: 'my_conversion', pipeline: { source: shipped.source, stages: shipped.stages } } }] }));
+  const served = loadRecipes(join(process.cwd(), 'config', 'recipes.json'), file).get('my_conversion').pipeline_payload;
+  const out = await startAndBuild(engine, served);
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  const byGroup = Object.fromEntries(out.rows.map((row) => [String(row.variant_group), [Number(row.n), Number(row.conversions)]]));
+  assert.deepEqual([byGroup.control, byGroup.variant_b], [[6, 6], [6, 1]]);
+  await engine._deletePipelineModel({ context_id: out.context_id });
+});

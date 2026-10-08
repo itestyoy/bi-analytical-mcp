@@ -26,9 +26,11 @@ export function makeValidators(schemas) {
 
 /**
  * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. Every path aggregates with
- * `agg`, the mean is `average`, a quantile is `percentile` and the name a step produces is `name`;
- * a caller used to SQL or another tool writes `avg`, `q`, `fn`, `as` — and the refusal says what
- * this server calls it, when that name is allowed where it was written.
+ * `agg`, the mean is `average`, a quantile is `percentile`, the name a step produces is `name`, a
+ * context is `context_id` and a list of measures is `measures`; a caller used to SQL or another tool
+ * (or to an earlier version of this one) writes `avg`, `q`, `fn`, `as`, `draft_id`, `aggregations` —
+ * and the refusal says what this server calls it, when that name is allowed where it was written.
+ * A hint, never an alias: the other spelling is refused.
  */
 export const CROSS_PATH_SPELLING = {
   avg: 'average',
@@ -39,6 +41,8 @@ export const CROSS_PATH_SPELLING = {
   as: 'name',
   alias: 'name',
   explain: 'dry_run',
+  draft_id: 'context_id',
+  aggregations: 'measures',
 };
 
 /** What this path calls `used`, when it has a name for it at all. */

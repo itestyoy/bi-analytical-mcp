@@ -129,10 +129,30 @@ export const pipelineMaterializeMethods = {
     throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
   },
 
+  /**
+   * The cost guardrail (catalog require_time_range): a pipeline over a source that demands a window
+   * scans its whole history unless a time_range or a stage bounds it.
+   */
+  _unboundedInTime(source, timeRange, stages) {
+    if (timeRange && (timeRange.start || timeRange.end)) return false;
+    return this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages);
+  },
+
+  /** The refusal of an unbounded pipeline — named in the fields build_pipeline_model takes. */
+  _unboundedPipelineError(source) {
+    const m = this.catalog.getModel(source);
+    const bounds = [m.time?.column, m.partition_column].filter(Boolean).map((c) => `'${c}'`).join(' or ');
+    return new ToolError(
+      `this catalog requires a bounded time window (require_time_range) for '${source}': start the draft with time_range { start, end } `
+      + `(build_pipeline_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (insert_step at index 1). Unbounded scans over '${m.dbt_model}' are blocked.`,
+      { stage: 'validate', field: 'time_range' },
+    );
+  },
+
   async _draftMaterialize(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_steps first', { stage: 'validate', field: 'draft_id' });
+    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
-      throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'draft_id', code: RESULT_GONE });
+      throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });
     }
     // A build of THIS draft already in flight is never started twice: a second run would write the
     // same model files under the first one's feet. A retried call is the same pipeline; a draft that
@@ -146,16 +166,19 @@ export const pipelineMaterializeMethods = {
         same
           ? `a build of this draft is already in flight (started ${b.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. Read it with ${read}; the result table is ${b.model}.`
           : `a build of this draft is still running (started ${b.started_at}, steps 1..${b.steps}), and one build runs on a draft at a time — a second would write over it. The draft has changed since that build started, so materialize again once it ends: read it with ${read} (its table is ${b.model}).`,
-        { stage: 'validate', field: 'draft_id' },
+        { stage: 'validate', field: 'context_id' },
       );
     }
     // Build only what is NOT already a table: with a live checkpoint the run starts from it and
     // only the steps after it are rendered. Each build gets its own model name, so a rebuild never
     // overwrites the very table it is reading (nor one a fork inherited).
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
+    // the cost guardrail the build would apply, applied in the call: a build that starts from a table
+    // (a checkpoint, a task's) was bounded when that table was made
+    if (!plan.from && this._unboundedInTime(draft.source, draft.time_range, draft.stages)) throw this._unboundedPipelineError(draft.source);
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
-      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_steps first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'draft_id' });
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_steps first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'context_id' });
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
@@ -210,7 +233,7 @@ export const pipelineMaterializeMethods = {
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;
-    }, { input: { action: 'materialize', draft_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
+    }, { input: { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
     draft.building.task_id = taskId;
     this.jobs.setTable(taskId, modelName); // the table this task leaves behind (paged, drawn, started from)
     // The built table STANDS FOR the first `stages.length` steps from now on: record the checkpoint
@@ -225,7 +248,7 @@ export const pipelineMaterializeMethods = {
     // Snapshot the built pipeline (with its checkpoints) so it can still be forked after a discard.
     ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, ...(draft.base ? { base: JSON.parse(JSON.stringify(draft.base)) } : {}), stages: stages.map((s) => JSON.parse(JSON.stringify(s))), checkpoints: draft.checkpoints.map((cp) => JSON.parse(JSON.stringify(cp))) };
     this.ctxs.touch(ctx.id);
-    return this._taskStarted(taskId, { context_id: ctx.id, draft_id: ctx.id, model: modelName });
+    return this._taskStarted(taskId, { context_id: ctx.id, model: modelName });
   },
 
   /**
@@ -251,14 +274,8 @@ export const pipelineMaterializeMethods = {
       if (!this.catalog.getModel(source).time?.column) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
       const conditions = this._timeRangeConditions(source, tr);
       if (conditions) stages = [{ stage: 'where', conditions }, ...stages];
-    } else if (this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages)) {
-      // Cost guardrail (catalog require_time_range): an unbounded pipeline over the fact
-      // would scan the whole history — demand a window unless a stage already bounds it.
-      throw new ToolError(
-        `this catalog requires a bounded time window (require_time_range): pass pipeline.time_range { start, end } `
-        + `or add a leading where on the time/partition column. Unbounded scans over '${this.catalog.getModel(source).dbt_model}' are blocked.`,
-        { stage: 'validate', field: 'time_range' },
-      );
+    } else if (this._unboundedInTime(source, null, stages)) {
+      throw this._unboundedPipelineError(source);
     }
     // Render ONLY the active warehouse dialect — every response is in the dialect the
     // pipeline actually runs on, never a mix. Grounded to the physical relation so a

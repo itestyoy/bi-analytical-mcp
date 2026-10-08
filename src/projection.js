@@ -1,5 +1,5 @@
 // Build a safe, read-only projection SQL over a materialized result table:
-// optional WHERE, GROUP BY, aggregations and HAVING — so a caller can compress /
+// optional WHERE, GROUP BY, measures and HAVING — so a caller can compress /
 // re-slice the stored results from different angles without recomputing the
 // underlying analytics query. No raw SQL from the caller: identifiers are
 // validated and QUOTED by the warehouse's dialect (a column may be named with a
@@ -9,11 +9,11 @@
 import { comparison, conditionsSql, eachCondition } from './conditions.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-/** The aggregations a projection (a read's transform, a drill-down) takes — the one list its schema offers. */
+/** The aggregations a projection's measure (a read's transform, a drill-down) takes — the one list its schema offers. */
 export const AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance', 'median', 'percentile']);
 // the statistical ones are the warehouse's (the dialect writes them, as the pipeline's aggregate does)
 const STATS = new Set(['stddev', 'variance', 'median', 'percentile']);
-/** The column an aggregation produces: its name. */
+/** The column a measure produces: its name. */
 export const aggName = (a) => a.name;
 
 // a dialect that writes names as they are — for checking a projection's shape, never for running it
@@ -30,7 +30,7 @@ function writer(d) {
   const predicate = (c) => comparison(col(c.column), c.op, c.value);
   const aggSql = (a) => {
     if (!AGGS.has(a.agg)) throw new Error(`unsupported agg: ${a.agg}`);
-    if (!a.name) throw new Error(`${a.agg}: every aggregation names the column it produces (name)`);
+    if (!a.name) throw new Error(`${a.agg}: every measure names the column it produces (name)`);
     // only a count may go without a column (it counts rows); every other function folds one
     if (a.agg !== 'count' && !a.column) throw new Error(`${a.agg} needs a column to fold`);
     // a CONDITIONAL aggregate folds only the rows its `where` holds for: the value becomes NULL on
@@ -52,7 +52,7 @@ function writer(d) {
 
 /**
  * @param relation  SQL relation expression (e.g. `{{ ref('qr_x') }}`).
- * @param t         { where[], group_by[], aggregations[{ name, agg, column?, percentile?, where? }], having[], order_by[{key,direction,nulls}], limit }
+ * @param t         { where[], group_by[], measures[{ name, agg, column?, percentile?, where? }], having[], order_by[{key,direction,nulls}], limit }
  * @param d         the warehouse's dialect — every name is written quoted, every statistic its way
  */
 export function buildProjection(relation, t = {}, d) {
@@ -65,7 +65,7 @@ export function buildProjection(relation, t = {}, d) {
   }
   const { col, predicate, aggSql } = writer(d);
   const groupCols = (t.group_by || []).map(col);
-  const aggCols = (t.aggregations || []).map((a) => `${aggSql(a)} as ${col(aggName(a))}`);
+  const aggCols = (t.measures || []).map((a) => `${aggSql(a)} as ${col(aggName(a))}`);
   const select = [...groupCols, ...aggCols];
   let sql = `select ${select.length ? select.join(', ') : '*'} from ${relation}`;
   if (t.where?.length) sql += ` where ${conditionsSql(t.where, predicate).join(' and ')}`;
@@ -89,11 +89,11 @@ export function projectionProblems(t = {}, columns = null, at = '') {
   const need = (c, where) => { if (columns && c && !have.has(c)) problems.push(`${at}${where}: '${c}' is not a column of ${at ? 'the first level\'s result' : 'this model'}`); };
   eachCondition(t.where, (w) => need(w.column, 'where'));
   for (const g of t.group_by || []) need(g, 'group_by');
-  for (const a of t.aggregations || []) { need(a.column, `aggregations.${a.agg}`); eachCondition(a.where, (w) => need(w.column, `aggregations.${a.agg}.where`)); }
+  for (const a of t.measures || []) { need(a.column, `measures.${a.agg}`); eachCondition(a.where, (w) => need(w.column, `measures.${a.agg}.where`)); }
   // what the projection returns is what it can be sorted by — and what a second level reads
-  const aggregated = (t.group_by || []).length || (t.aggregations || []).length;
+  const aggregated = (t.group_by || []).length || (t.measures || []).length;
   const out = aggregated
-    ? new Set([...(t.group_by || []), ...(t.aggregations || []).map(aggName)])
+    ? new Set([...(t.group_by || []), ...(t.measures || []).map(aggName)])
     : have;
   eachCondition(t.having, (h) => { if ((columns || aggregated) && !out.has(h.column)) problems.push(`${at}having: '${h.column}' is not a column of what this query returns (${[...out].join(', ')})`); });
   if (t.then && (t.order_by || []).length) problems.push(`${at}order_by: with a second level (then), the order is the second level's — move order_by into then`);

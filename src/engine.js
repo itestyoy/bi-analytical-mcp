@@ -316,7 +316,7 @@ export class Engine {
       // is the one to start from, its transform said again as steps
       const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
       const why = job.status === 'error' ? 'it failed'
-        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") and say the query's where / group_by / aggregations again as steps (where, aggregate)` : ': start from the pipeline build\'s task, or continue that draft'}`
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") and say the query's where / group_by / measures again as steps (where, aggregate)` : ': start from the pipeline build\'s task, or continue that draft'}`
           : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
       throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
     }

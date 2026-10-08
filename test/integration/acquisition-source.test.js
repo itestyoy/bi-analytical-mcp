@@ -94,7 +94,7 @@ test('a marked amount is aggregated the way the task asks: cost 17.50 / impressi
 // THE SAME marked field, three different aggregations chosen by the task — including one that
 // carries a parameter. Over the 13 daily costs: max 3.00, mean 17.50/13, and percentile_cont(0.9)
 // interpolating between 2.50 and 2.75 → 2.70. Nothing in the schema decided any of these.
-test('the same amount under three aggregations: max 3.00, mean 17.50/13, p90 2.70', opts, async (t) => {
+test('the same amount under three measures: max 3.00, mean 17.50/13, p90 2.70', opts, async (t) => {
   if (skip(t)) return;
   const r = await q({ metrics: ['uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -177,11 +177,11 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
   if (skip(t)) return;
   const rowsAfterJoin = async (name, on) => {
     const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } }] });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'join', with: 'acquisition', via: { on }, attrs: [{ column: 'media_source' }] }] });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
-    const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } }] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'acquisition', via: { on }, attrs: [{ column: 'media_source' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+    const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
   };
@@ -216,8 +216,8 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
   const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', agg: 'count' }] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');
   assert.equal(sumCol(c.rows, 'n'), 13);

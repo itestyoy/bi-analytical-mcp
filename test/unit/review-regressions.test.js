@@ -195,7 +195,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   }));
   const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
-  const joinStage = out.pipeline_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
+  const joinStage = out.pipeline_payload.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
   const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
@@ -517,13 +517,13 @@ test('unnest is refused when the payload column it explodes is gone', async () =
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] });
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', draft_id: agg.draft_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', draft_id: agg.draft_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

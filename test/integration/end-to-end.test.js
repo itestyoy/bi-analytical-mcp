@@ -194,21 +194,21 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
 test('3a. build_pipeline_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
-  assert.ok(s.draft_id, 'start returns a draft_id');
+  assert.ok(s.context_id, 'start returns a context_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
-  S.draftId = s.draft_id;
+  S.draftId = s.context_id;
 
   // default add_steps returns a DIFF; the funnel columns show up as added.
-  const a1 = await engine.build_pipeline_model({ action: 'add_steps', draft_id: S.draftId, stages: [matchActivation()] });
+  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: S.draftId, stages: [matchActivation()] });
   assert.equal(stepEffect(a1).step_index, 1);
   const cols = stepEffect(a1).columns_added.map((c) => c.name);
   assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
 
-  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: S.draftId });
+  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: S.draftId });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (existence only)');
   assert.equal(pv.steps.length, 1);
 
-  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: S.draftId });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: S.draftId });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -233,7 +233,7 @@ test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_
   assert.equal(reached(r.rows, 'tut2'), 5);
   assert.equal(reached(r.rows, 'tut3'), 3);
   // transform the stored table in place: count users whose furthest step is tut3 = 3
-  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ agg: 'count', name: 'n' }] } });
+  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], measures: [{ agg: 'count', name: 'n' }] } });
   assert.equal(t3.ok, true, JSON.stringify(t3.error));
   assert.equal(num(t3.rows[0].n), 3);
 });
@@ -337,13 +337,13 @@ test('5a. build_pipeline_model fed the conversion recipe stages → per-variant 
   // stages one at a time, then commit. (_buildPipeline with the same payload
   // is the documented fallback; here we prove the add_steps path also works.)
   const r = recipes.list.find((x) => x.id === 'experiment_conversion');
-  const stages = r.pipeline_payload.pipeline.stages;
-  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.pipeline.source });
+  const stages = r.pipeline_payload.stages;
+  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
   for (const stage of stages) {
-    const a = await engine.build_pipeline_model({ action: 'add_steps', draft_id: start.draft_id, stages: [stage] });
+    const a = await engine.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, stages: [stage] });
     assert.ok(Number.isInteger(stepEffect(a).step_index), 'each add_steps advances the draft');
   }
-  const commit = await engine.build_pipeline_model({ action: 'materialize', draft_id: start.draft_id });
+  const commit = await engine.build_pipeline_model({ action: 'materialize', context_id: start.context_id });
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));
   S.abCtx = commit.context_id;
 
@@ -413,7 +413,7 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
   }
   const conv = await engine.semantic_index({ recipe: 'experiment_conversion' });
   assert.equal(conv.id, 'experiment_conversion');
-  assert.ok(conv.pipeline_payload && conv.pipeline_payload.pipeline, 'A/B recipe carries a pipeline_payload pipeline');
+  assert.ok(conv.pipeline_payload?.action === 'start' && conv.pipeline_payload.stages?.length, 'A/B recipe carries a pipeline_payload: a start request with its stages');
   assert.ok(typeof conv.hack === 'string' && conv.hack.length > 0, 'recipe carries a generalizable hack');
   const power = await engine.semantic_index({ recipe: 'experiment_power' });
   assert.ok(Array.isArray(power.tool_calls) && power.tool_calls.length > 0, 'tool-only recipe carries tool_calls');

@@ -84,8 +84,8 @@ test('a pipeline started FROM a stored result re-slices it without recomputing (
   const from = async (name, stages) => {
     const d = await engine.build_pipeline_model({ action: 'start', name, from_task: m.task_id });
     assert.equal(d.reads, m.table, 'the draft reads the task\'s table');
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: d.draft_id, stages });
-    const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: d.draft_id });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages });
+    const built = await engine.build_pipeline_model({ action: 'materialize', context_id: d.context_id });
     assert.equal(built.status, 'done', JSON.stringify(built.error));
     return built.rows;
   };
@@ -131,26 +131,26 @@ test('a drawn card reads its views from its own task: a row opens into a level t
 test('query_pipeline_model over a built model: count(column) counts NON-NULL only, values are literals', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'nullcount', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const started = await engine.raw.query_pipeline_model({ context_id: s.draft_id, transform: { aggregations: [{ agg: 'count', name: 'total' }] } });
+  const started = await engine.raw.query_pipeline_model({ context_id: s.context_id, transform: { measures: [{ agg: 'count', name: 'total' }] } });
   assert.ok(isStartedTask(started), 'a query over a built model is a task too');
   const totalR = await taskResult(engine, started.task_id);
-  const read = (transform) => engine.query_pipeline_model({ context_id: s.draft_id, transform });
-  const nnR = await read({ aggregations: [{ agg: 'count', column: 'price', name: 'nn' }] });
-  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ agg: 'count', name: 'nulls' }] });
+  const read = (transform) => engine.query_pipeline_model({ context_id: s.context_id, transform });
+  const nnR = await read({ measures: [{ agg: 'count', column: 'price', name: 'nn' }] });
+  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], measures: [{ agg: 'count', name: 'nulls' }] });
   assert.equal(totalR.ok !== false && nnR.ok !== false && nullR.ok !== false, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
   const total = num(totalR.rows[0].total); const nonNull = num(nnR.rows[0].nn); const nulls = num(nullR.rows[0].nulls);
   assert.ok(nulls > 0, `fixture must have NULL price rows, got ${nulls}`);
   assert.ok(nonNull < total, `count(price)=${nonNull} must exclude NULLs (< total ${total}) — a COUNT(*) regression makes them equal`);
   assert.equal(nonNull + nulls, total, `count(column) + null_count must equal count(*): ${nonNull} + ${nulls} != ${total}`);
   // grouped: the priced rows per event name add back up to the non-NULL count, and only purchase events carry a price
-  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'count', column: 'price', name: 'n' }] });
+  const byEvent = await read({ where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], measures: [{ agg: 'count', column: 'price', name: 'n' }] });
   assert.ok(byEvent.rows.every((r) => String(r.event_name).startsWith('iap_purchase')), JSON.stringify(byEvent.rows));
   assert.equal(byEvent.rows.reduce((a, r) => a + num(r.n), 0), nonNull);
   // injection/escaping proven on DATA: the literal matches nothing, and the query runs
-  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], aggregations: [{ agg: 'count', name: 'n' }] });
+  const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], measures: [{ agg: 'count', name: 'n' }] });
   assert.equal(num(inj.rows[0].n), 0);
   // a semantic context is not a pipeline model
   await assert.rejects(() => engine.query_pipeline_model({ context_id: ctxId }), /no built pipeline model/);
@@ -166,19 +166,19 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   const per = new Map();
   for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
   const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
-  const step = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, include_columns: true, stages: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
+  const step = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, include_columns: true, stages: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ agg: 'count', name: 'n' }] } });
+  const prev = await engine.query_pipeline_model({ context_id: s.context_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], measures: [{ agg: 'count', name: 'n' }] } });
   assert.ok(prev.rows.every((r) => typeof r.prev_event === 'string' && src.some((x) => x.e === r.prev_event)), 'its values are event names');
-  const r = await engine.query_pipeline_model({ context_id: s.draft_id, transform: {
+  const r = await engine.query_pipeline_model({ context_id: s.context_id, transform: {
     group_by: ['player_id_of_internal'],
-    aggregations: [
+    measures: [
       { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], name: 'starts' },
       { agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], name: 'completes' },
     ],
-    then: { aggregations: [
+    then: { measures: [
       { agg: 'count', name: 'players' },
       { agg: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], name: 'completed_once' },
       { agg: 'sum', column: 'starts', name: 'starts' },
@@ -191,7 +191,7 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // a second level reads the first's columns only
-  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'sum', column: 'event_name', name: 's' }] } } }), /then\.aggregations/);
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.context_id, transform: { group_by: ['player_id_of_internal'], measures: [{ agg: 'count', name: 'n' }], then: { measures: [{ agg: 'sum', column: 'event_name', name: 's' }] } } }), /then\.measures/);
 });
 
 test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {

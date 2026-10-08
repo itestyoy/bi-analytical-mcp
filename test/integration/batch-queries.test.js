@@ -94,16 +94,16 @@ test('a batch started right after the declaration waits for its parse, runs ever
 test('a batch of projections over a built pipeline model: count, non-NULL count and sums read back together', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'priced', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const started = await engine.raw.query_pipeline_model({
-    context_id: s.draft_id,
+    context_id: s.context_id,
     queries: [
-      { transform: { aggregations: [{ agg: 'count', name: 'rows' }] } },
-      { transform: { aggregations: [{ agg: 'count', column: 'price', name: 'priced' }] } },
-      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
-      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
+      { transform: { measures: [{ agg: 'count', name: 'rows' }] } },
+      { transform: { measures: [{ agg: 'count', column: 'price', name: 'priced' }] } },
+      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], measures: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
+      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], measures: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');

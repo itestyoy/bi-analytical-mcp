@@ -22,7 +22,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
-const stage = (st) => ({ action: 'add_steps', draft_id: 'ctxabc123456', stages: [st] });
+const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', stages: [st] });
 
 test("a pipeline stage refuses `avg` and says it is spelled `average` here", () => {
   const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'avg', column: 'price' }] }));
@@ -76,10 +76,30 @@ test('a name with no counterpart in this path gets the plain list, with no inven
 });
 
 test("a read's projection explains '*': count rows by leaving `column` out", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', column: '*', name: 'n' }] } });
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', column: '*', name: 'n' }] } });
   assert.equal(res.ok, false);
   assert.match(text(res), /'\*' is not a column — leave `column` out to count rows/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', name: 'n' }] } }).ok, true);
+  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', name: 'n' }] } }).ok, true);
+});
+
+// A list of measures is `measures` wherever rows are aggregated — a stage, a read, a semantic model —
+// and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
+// name in the refusal (a hint, not an alias).
+test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], aggregations: [{ agg: 'count', name: 'n' }] } });
+  assert.equal(res.ok, false);
+  assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
+  const then = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'count', name: 'groups' }] } } });
+  assert.match(text(then), /'aggregations' — here that field is called 'measures'/);
+});
+
+test('a pipeline step names its context with context_id; `draft_id` is refused with that name', () => {
+  const res = check('build_pipeline_model', { action: 'materialize', draft_id: 'ctxabc123456' });
+  assert.equal(res.ok, false);
+  assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
+  assert.equal(check('build_pipeline_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
+  // a start may omit its action (the default) and name a context to start the draft in
+  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', n: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; in a stage the rows are counted by leaving `column` out. The refusal

@@ -245,7 +245,7 @@ test('what the project does not define is refused in the call, naming what it do
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, dry_run: true, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
   // …by any tool that would write into it
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, remove: { metrics: ['project_cost'] } })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', draft_id: ACQ })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);
   // and it still serves its layer after them
   assert.ok(rowsOf(await q(ACQ, { metrics: ['project_cost'] }))[0].project_cost != null);
@@ -319,7 +319,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   // reads), while one nothing reads ages out
   const base = await q(ACQ, { metrics: ['project_clicks'], group_by: [{ entity: 'media_source' }], materialize: true });
   const draft = await raw.build_pipeline_model({ action: 'start', name: 'from_clicks', source: 'events', from_task: base.task_id });
-  assert.ok(draft.draft_id, JSON.stringify(draft));
+  assert.ok(draft.context_id, JSON.stringify(draft));
   await new Promise((r) => { setTimeout(r, 20); });
   engine.gc(10); // the store's results are swept first (the draft still reads `base`), then idle contexts — the draft among them
   const held = await readStored(base.task_id);
@@ -328,7 +328,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   const aged = await readBack();
   assert.equal(aged.ok, false);
   assert.equal(aged.error.code, 'result_gone');
-  assert.equal(ctxs.has(draft.draft_id), false, 'the idle draft itself was reclaimed');
+  assert.equal(ctxs.has(draft.context_id), false, 'the idle draft itself was reclaimed');
   // once nothing reads it, it ages out too: the context stays, the result goes
   engine.gc(10);
   assert.equal(ctxs.has(ACQ), true);

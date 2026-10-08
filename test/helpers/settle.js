@@ -5,7 +5,7 @@
 // (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
 // `engine.raw`, for a test about the task itself.
 
-const STARTED_KEYS = new Set(['task_id', 'context_id', 'draft_id', 'model', 'read_with', 'next']);
+const STARTED_KEYS = new Set(['task_id', 'context_id', 'model', 'read_with', 'next']);
 
 /** Whether a tool's answer is a started task (and nothing else). */
 export function isStartedTask(out) {
@@ -102,3 +102,15 @@ export async function settleMcp(client, name, args, { deadlineMs = 10 * 60 * 100
 export const stepNotes = (r) => (r.step_effects || []).flatMap((e) => e.recommendations || []);
 /** The one stage an add_steps of a single stage added: its effect on the data. */
 export const stepEffect = (r) => r.step_effects[r.step_effects.length - 1];
+
+/**
+ * A pipeline started with its steps and built in the same call — build_pipeline_model({ request:
+ * { …start, materialize: true } }), what a recipe's pipeline_payload is handed over for — and its build
+ * read back: the build's result, as query_pipeline_model returns it.
+ */
+export async function startAndBuild(engine, request) {
+  const raw = engine.raw || engine;
+  const out = await raw.build_pipeline_model({ ...request, materialize: true });
+  if (!out.materialize?.task_id) throw new Error(`the build did not start: ${JSON.stringify(out.materialize?.error || out)}`);
+  return taskResult(raw, out.materialize.task_id);
+}

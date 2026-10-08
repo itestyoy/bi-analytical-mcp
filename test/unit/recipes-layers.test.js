@@ -79,3 +79,33 @@ test('a recipe is offered only where this deployment can run it', () => {
   assert.match(local.get('bq_only').unavailable_here, /this warehouse is duckdb/);
   assert.equal(local.get('anywhere').unavailable_here, undefined);
 });
+
+// A pipeline recipe's payload is the build_pipeline_model start request itself, handed over as it
+// stands: build_pipeline_model({ request: <pipeline_payload> }). Every shipped one is held to the
+// tool's own schema here (input validation — what they compute is recipes-parse.test.js's), on a
+// deployment that runs python models, so the python ones are offered their stage.
+test('every shipped pipeline_payload is a build_pipeline_model start request the tool accepts as it stands', async () => {
+  await import('../../src/engine.js'); // the engine registers the funnel and python stages, as a server does
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
+  const validators = makeValidators(buildSchemas(catalog));
+  const pipelines = loadRecipes(SYSTEM).list.filter((r) => r.pipeline_payload);
+  assert.ok(pipelines.length > 10, 'the shipped set has pipeline recipes');
+  for (const r of pipelines) {
+    const res = validateInput(validators.build_pipeline_model, r.pipeline_payload);
+    assert.equal(res.ok, true, `${r.id}: ${(res.errors || []).join(' | ')}`);
+    assert.equal(r.pipeline_payload.action, 'start', `${r.id}: a start request`);
+  }
+});
+
+// A deployment's file is not ours to rewrite: one written for an earlier version carries the
+// one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes. It is
+// served as the start request it stands for.
+test('a deployment recipe in the earlier { name, pipeline } shape is served as the start request', () => {
+  const stages = [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }];
+  const mine = deploymentFile([{ id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages } } }]);
+  assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
+});

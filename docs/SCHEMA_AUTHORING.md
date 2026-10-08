@@ -711,7 +711,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
 | `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
-| `pipeline_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
+| `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, stages }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
 | `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
 | `experiment` | для A/B | `{ action: 'analyze', metric, … }` — сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, n_field, expected_ratio? }` → `experiment({ action: 'check_split' })` | см. таблицу ниже |
@@ -780,7 +780,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Pipeline** — `pipeline_payload` c `pipeline`, часто с `experiment`. Для того, чего
+**Pipeline** — `pipeline_payload`, запрос `build_pipeline_model` на старт со всеми стадиями, часто с `experiment`. Для того, чего
 управляемая метрика не выражает. Результат — таблица; тест требует **не меньше двух строк**.
 
 ```json
@@ -790,23 +790,22 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "required_roles": ["experiments"],
   "metric_types": ["proportion"],
   "pipeline_payload": {
+    "action": "start",
     "name": "ab_checkout_conversion",
-    "pipeline": {
-      "source": "events",
-      "stages": [
-        { "stage": "join", "with": "experiments", "via": "user",
-          "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
-        { "stage": "where", "conditions": [
-          { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
-          { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
-        { "stage": "compute", "name": "is_conv", "expr": { "fn": "case", "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }], "else": { "value": 0 }, "type": "int" } },
-        { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
-          "measures": [{ "name": "converted", "agg": "max", "column": "is_conv" }] },
-        { "stage": "aggregate", "group_by": ["experiment_name", "variant_group"],
-          "measures": [{ "name": "n", "agg": "count" }, { "name": "conversions", "agg": "sum", "column": "converted" }] },
-        { "stage": "order_by", "keys": [{ "key": "variant_group", "direction": "asc" }] }
-      ]
-    }
+    "source": "events",
+    "stages": [
+      { "stage": "join", "with": "experiments", "via": "user",
+        "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
+      { "stage": "where", "conditions": [
+        { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
+        { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
+      { "stage": "compute", "name": "is_conv", "expr": { "fn": "case", "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }], "else": { "value": 0 }, "type": "int" } },
+      { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
+        "measures": [{ "name": "converted", "agg": "max", "column": "is_conv" }] },
+      { "stage": "aggregate", "group_by": ["experiment_name", "variant_group"],
+        "measures": [{ "name": "n", "agg": "count" }, { "name": "conversions", "agg": "sum", "column": "converted" }] },
+      { "stage": "order_by", "keys": [{ "key": "variant_group", "direction": "asc" }] }
+    ]
   },
   "experiment": { "action": "analyze", "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
   "notes": "Rows are n + conversions per variant (exposed = users with in-window events). Control = the control variant_group row, variants = the rest.",
@@ -873,7 +872,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "requires": "python_models",
   "runtime": "bigframes",
   "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-  "pipeline_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
+  "pipeline_payload": { "action": "start", "name": "lookup_merge", "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] },
   "notes": "…",
   "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group."
 }
@@ -898,9 +897,9 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | форма | что проверяется |
 |---|---|
 | `semantic_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
-| `pipeline_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
+| `pipeline_payload` | запрос отправляется как есть, с `materialize: true` (`build_pipeline_model`), сборка выполняется, результат ≥ 2 строк; если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
-| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `_buildPipeline({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
+| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: запрос на старт отправляется как есть, затем `preview` — стадии рендерятся, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после, цепочка моделей раскладывается; плюс наличие `read_first`, `hack`, `notes` |
 
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не

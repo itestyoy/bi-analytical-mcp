@@ -188,7 +188,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // (the arguments are kept as they came, so a failure is replayed by the same call)
   // (a call refused for not using the envelope still carried its ids — at the top)
   const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
     failed(name, unknownToolMessage(name), { stage: 'validate' });

@@ -68,52 +68,52 @@ function engine(runner, { workspaceRoot, registryPath } = {}) {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const add = (e, draft_id, stage) => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [stage] });
-const materialize = (e, draft_id) => e.build_pipeline_model({ action: 'materialize', draft_id });
+const add = (e, context_id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [stage] });
+const materialize = (e, context_id) => e.build_pipeline_model({ action: 'materialize', context_id });
 
 async function startedDraft(e, name = 'seg') {
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name, source: 'events' });
-  await add(e, draft_id, AGG);
-  await add(e, draft_id, PY_STAGE);
-  return draft_id;
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name, source: 'events' });
+  await add(e, context_id, AGG);
+  await add(e, context_id, PY_STAGE);
+  return context_id;
 }
 
 test('a build is a task: the call returns at once; a retried materialize builds nothing new and names the task', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const draft_id = await startedDraft(e);
+  const context_id = await startedDraft(e);
 
-  const bg = await materialize(e, draft_id);
+  const bg = await materialize(e, context_id);
   assert.ok(isStartedTask(bg), 'the call answers with its task only');
   assert.match(bg.task_id, /^[a-f0-9]{12}$/);
   await untilHeld(runner);
   // The prefix is already a PLAN (its columns are known) but not yet a table.
-  const cp = draftOf(e, draft_id).checkpoints;
+  const cp = draftOf(e, context_id).checkpoints;
   assert.equal(cp.length, 1);
   assert.deepEqual([cp[0].at, cp[0].model, cp[0].task_id], [2, bg.model, bg.task_id]);
   assert.equal(runner.held.length, 1, 'exactly one build in flight');
 
   // The caller lost the response and retries the SAME materialize: refused, pointing at the task.
-  await assert.rejects(() => materialize(e, draft_id), (err) => {
+  await assert.rejects(() => materialize(e, context_id), (err) => {
     assert.match(err.message, /already in flight/);
     assert.match(err.message, new RegExp(bg.task_id));
     return true;
   });
   assert.equal(runner.held.length, 1, 'no second build was started');
-  assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
+  assert.equal(draftOf(e, context_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
   assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
   const peek = await one(e.query_pipeline_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.
-  const step = await add(e, draft_id, TAIL);
+  const step = await add(e, context_id, TAIL);
   assert.equal(step.from_checkpoint.model, bg.model);
   assert.equal(step.steps_recomputed, 1);
   // …but building on a table that does not exist yet is still refused — not as the same pipeline
   // (the draft holds a step that build does not compute), but as one to build once that one ends
-  await assert.rejects(() => materialize(e, draft_id), (err) => {
+  await assert.rejects(() => materialize(e, context_id), (err) => {
     assert.match(err.message, /still running/);
     assert.match(err.message, /materialize again once it ends/);
     assert.doesNotMatch(err.message, /SAME pipeline/);
@@ -124,27 +124,27 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   runner.finish(true);
   const built = await taskResult(e, bg.task_id);
   assert.equal(built.status, 'done');
-  const done = await finishTask(e, await materialize(e, draft_id), runner);
+  const done = await finishTask(e, await materialize(e, context_id), runner);
   assert.equal(done.from_checkpoint.at, 2);
   assert.equal(done.steps_recomputed, 1);
   assert.notEqual(done.model, bg.model, 'a rebuild never overwrites the table it reads');
-  assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2, 3]);
-  assert.ok(e.ctxs.hasPipelineModel(draft_id, bg.model), 'the prefix is still there to be read again');
+  assert.deepEqual(draftOf(e, context_id).checkpoints.map((c) => c.at), [2, 3]);
+  assert.ok(e.ctxs.hasPipelineModel(context_id, bg.model), 'the prefix is still there to be read again');
 });
 
 test('two materialize calls at once: the second is refused and the draft keeps ONE prefix', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const draft_id = await startedDraft(e);
+  const context_id = await startedDraft(e);
 
-  const first = materialize(e, draft_id); // in flight before the second call is made
-  await assert.rejects(() => materialize(e, draft_id), /already in flight/);
+  const first = materialize(e, context_id); // in flight before the second call is made
+  await assert.rejects(() => materialize(e, context_id), /already in flight/);
   const bg = await first;
   assert.ok(isStartedTask(bg));
   await untilHeld(runner);
   assert.equal(runner.held.length, 1, 'one build, not two');
-  assert.equal(draftOf(e, draft_id).checkpoints.length, 1);
+  assert.equal(draftOf(e, context_id).checkpoints.length, 1);
   runner.finish(true);
   await taskResult(e, bg.task_id);
 });
@@ -153,18 +153,18 @@ test('a build that FAILED is no prefix: the task says so, and the next materiali
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const draft_id = await startedDraft(e);
-  const bg = await materialize(e, draft_id);
+  const context_id = await startedDraft(e);
+  const bg = await materialize(e, context_id);
   const failed = await finishTask(e, bg, runner, false); // dbt failed on the warehouse
   assert.equal(failed.status, 'error');
-  assert.deepEqual(draftOf(e, draft_id).checkpoints, [], 'the failed build left no prefix behind');
+  assert.deepEqual(draftOf(e, context_id).checkpoints, [], 'the failed build left no prefix behind');
 
-  const out = await finishTask(e, await materialize(e, draft_id), runner); // the whole pipeline again
+  const out = await finishTask(e, await materialize(e, context_id), runner); // the whole pipeline again
   assert.equal(out.status, 'done');
   assert.equal(out.from_checkpoint, undefined, 'nothing was reused');
   assert.equal(out.steps_recomputed, undefined);
-  assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2], 'exactly one prefix — the new one');
-  assert.notEqual(draftOf(e, draft_id).checkpoints[0].model, bg.model, 'and it is a new model, not the failed one');
+  assert.deepEqual(draftOf(e, context_id).checkpoints.map((c) => c.at), [2], 'exactly one prefix — the new one');
+  assert.notEqual(draftOf(e, context_id).checkpoints[0].model, bg.model, 'and it is a new model, not the failed one');
 });
 
 test('a build whose builder is gone does not wedge the draft: the restart retires it and rebuilds', async (t) => {
@@ -173,22 +173,22 @@ test('a build whose builder is gone does not wedge the draft: the restart retire
   const registryPath = join(workspaceRoot, 'registry.json');
   const runner = heldRunner();
   const e = engine(runner, { workspaceRoot, registryPath });
-  const draft_id = await startedDraft(e);
-  const bg = await materialize(e, draft_id);
+  const context_id = await startedDraft(e);
+  const bg = await materialize(e, context_id);
   await untilHeld(runner);
-  e.ctxs.touch(draft_id); // the draft, in-flight marker and all, is what the registry holds when the process dies
+  e.ctxs.touch(context_id); // the draft, in-flight marker and all, is what the registry holds when the process dies
 
   // A new process reads the same registry: no in-flight marker survives it…
   const runner2 = heldRunner();
   const e2 = engine(runner2, { workspaceRoot, registryPath });
-  assert.equal(draftOf(e2, draft_id).building, undefined);
-  assert.equal(draftOf(e2, draft_id).checkpoints.length, 1, 'the prefix record itself survived');
+  assert.equal(draftOf(e2, context_id).building, undefined);
+  assert.equal(draftOf(e2, context_id).checkpoints.length, 1, 'the prefix record itself survived');
   // …and the prefix whose build nobody is driving any more is retired instead of waited on.
-  const out = await finishTask(e2, await materialize(e2, draft_id), runner2);
+  const out = await finishTask(e2, await materialize(e2, context_id), runner2);
   assert.equal(out.status, 'done');
   assert.equal(out.from_checkpoint, undefined, 'the unfinished prefix was not read');
   assert.match(out.checkpoints_dropped[0].reason, /did not finish|no task record/);
-  assert.deepEqual(draftOf(e2, draft_id).checkpoints.map((c) => c.at), [2]);
+  assert.deepEqual(draftOf(e2, context_id).checkpoints.map((c) => c.at), [2]);
   runner.finish(true); // release the abandoned build of the first "process"
   await taskResult(e, bg.task_id);
 });
@@ -197,21 +197,21 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
-  await add(e, draft_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] });
-  const r = await finishTask(e, await materialize(e, draft_id), runner);
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  await add(e, context_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] });
+  const r = await finishTask(e, await materialize(e, context_id), runner);
   assert.equal(r.materialized, 'view');
   assert.ok(r.warnings.some((w) => /VIEW/.test(w)), 'a view is not a computed prefix — said once, here');
   assert.equal(r.checkpoint.carries_source, 'events', 'a filtered slice is still the source\'s events');
 
-  const d = await e._describeContext({ context_id: draft_id });
+  const d = await e._describeContext({ context_id });
   assert.deepEqual(d.draft.checkpoints.map((c) => [c.at, c.model, c.carries_source]), [[1, r.model, 'events']]);
   assert.equal(d.draft.steps.length, 1);
   // preview says what materialize would actually build now (nothing — everything is the table).
-  const pv = await e.build_pipeline_model({ action: 'preview', draft_id });
+  const pv = await e.build_pipeline_model({ action: 'preview', context_id });
   assert.equal(pv.steps_recomputed, 0);
   assert.match(pv.checkpoint_note, /Every step is already materialized/);
-  await assert.rejects(() => materialize(e, draft_id), /nothing to build/);
+  await assert.rejects(() => materialize(e, context_id), /nothing to build/);
 });
 
 // Editing a step retires the prefixes at or after it and removes their files — but a build that is
@@ -221,16 +221,16 @@ test('an edit during a build does not remove the files that build is producing',
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const draft_id = await startedDraft(e);
-  const bg = await materialize(e, draft_id);
+  const context_id = await startedDraft(e);
+  const bg = await materialize(e, context_id);
   await untilHeld(runner);
 
   // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
-  const ed = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 1, stage: AGG });
+  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id, index: 1, stage: AGG });
   assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
-  assert.deepEqual(draftOf(e, draft_id).checkpoints, []);
+  assert.deepEqual(draftOf(e, context_id).checkpoints, []);
   // …but the model it is building stays on disk, so the task's own result is still readable
-  assert.ok(e.ctxs.hasPipelineModel(draft_id, bg.model), 'the running build keeps its definition');
+  assert.ok(e.ctxs.hasPipelineModel(context_id, bg.model), 'the running build keeps its definition');
   runner.finish(true);
   assert.equal((await taskResult(e, bg.task_id)).status, 'done');
 });
@@ -255,7 +255,7 @@ test('no build holds its call — a python build and an SQL build both answer wi
   runner.finish(true);
   await taskResult(e, out.task_id);
 
-  const { draft_id: sql } = await e.build_pipeline_model({ action: 'start', name: 'grace_sql', source: 'events' });
+  const { context_id: sql } = await e.build_pipeline_model({ action: 'start', name: 'grace_sql', source: 'events' });
   await add(e, sql, AGG);
   const sqlStarted = await materialize(e, sql);
   assert.ok(isStartedTask(sqlStarted), 'an SQL build is a task too');

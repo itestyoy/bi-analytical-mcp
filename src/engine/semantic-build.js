@@ -3,17 +3,20 @@
 // into a context. Methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
-import { compileDeclaration, measureRefs } from '../compile.js';
+import { compileDeclaration, measureRefs, inputMetrics, NS } from '../compile.js';
 import { renderContext } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { clone } from './helpers.js';
 
+/** What a semantic declaration keeps in a context's state — all an update changes. */
+const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
+
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
-  _compile(input) {
+  _compile(input, options) {
     try {
-      return compileDeclaration(this.catalog, input);
+      return compileDeclaration(this.catalog, input, options);
     } catch (e) {
       if (e instanceof ToolError) throw e;
       // compile.js attaches the offending INPUT FIELD to the error — surface it so the
@@ -148,40 +151,64 @@ export const semanticBuildMethods = {
    *  additions written as a declaration writes them, removals by the names they were added under. */
   async _updateSemanticModel(input) {
     const ctx = this._ctxToWrite(input.context_id);
-    // dry_run must NOT mutate the context (state or files): work on a clone.
-    const state = input.dry_run ? clone(ctx.state) : ctx.state;
+    // The update is made on a COPY of the state, which replaces the context's only once every check
+    // below has passed: a refused update leaves the context as it was, and a dry run never touches it.
+    const state = clone(ctx.state);
     const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
-    for (const k of models) state.additions[k] ||= { measures: [], dimensions: [] };
-
-    // the additions are a declaration fragment, compiled as a declaration is
+    for (const sm of input.semantic_models || []) state.additions[sm.from] ||= { measures: [], dimensions: [] };
     const task = input.task || state.tasks[0] || 'task';
-    // (the context's sources come along, so metrics alone — or removals alone — compile against them)
-    const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
-    const compiled = this._compile(frag);
+    const measureNames = () => Object.values(state.additions).flatMap((a) => a.measures.map((m) => m.name));
 
-    // removals (with dependency checks for measures), each by the name it was added under
+    // Removals first (so one update can replace a measure). A measure or metric is named as it was
+    // declared ('n') or as it is stored, task-namespaced ('ret_n'); a name that matches nothing is
+    // refused rather than reported removed.
     const rm = input.remove || {};
-    if (rm.metrics) state.metrics = state.metrics.filter((m) => !rm.metrics.includes(m.name));
+    const stored = (kind, names, have) => names.map((n) => {
+      const found = [NS(task, n), n].find((x) => have.includes(x));
+      if (found) return found;
+      throw new ToolError(`cannot remove ${kind} '${n}': this context has no ${kind} named '${n}' or '${NS(task, n)}'.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: `remove.${kind}s` });
+    });
+    if (rm.metrics) {
+      const names = stored('metric', rm.metrics, state.metrics.map((m) => m.name));
+      // a ratio or a derived metric built from a removed one would read a metric that is gone
+      const byName = new Map(state.metrics.map((m) => [m.name, m]));
+      const builtOn = (m, seen = new Set()) => inputMetrics(m).some((n) => names.includes(n) || (!seen.has(n) && seen.add(n) && builtOn(byName.get(n), seen)));
+      const dependents = state.metrics.filter((m) => !names.includes(m.name) && builtOn(m));
+      if (dependents.length && !input.cascade) {
+        throw new ToolError(`cannot remove metric${names.length > 1 ? 's' : ''} ${names.map((n) => `'${n}'`).join(', ')}; metrics are built from ${names.length > 1 ? 'them' : 'it'}: ${dependents.map((d) => d.name).join(', ')} (cascade removes them too)`, { stage: 'validate', field: 'remove.metrics' });
+      }
+      state.metrics = state.metrics.filter((m) => !names.includes(m.name) && !builtOn(m));
+    }
     if (rm.measures) {
-      for (const name of rm.measures) {
+      const names = stored('measure', rm.measures, measureNames());
+      // a metric reads a measure itself or through the metrics it is built from (measureRefs)
+      const reads = (m) => [...measureRefs(m, state.metrics)].some((x) => names.includes(x));
+      for (const name of names) {
         const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(name));
         if (dependents.length && !input.cascade) {
           throw new ToolError(`cannot remove measure '${name}'; metrics read it: ${dependents.map((d) => d.name).join(', ')} (cascade removes them too)`, { stage: 'validate', field: 'remove.measures' });
         }
       }
-      for (const add of Object.values(state.additions)) add.measures = add.measures.filter((m) => !rm.measures.includes(m.name));
+      state.metrics = state.metrics.filter((m) => !reads(m)); // cascade: they go with the measure
+      for (const add of Object.values(state.additions)) add.measures = add.measures.filter((m) => !names.includes(m.name));
     }
     for (const d of rm.dimensions || []) {
       // A dimension is named by its FIELD — the name `groupable` offers and a declaration takes. What
       // is STORED is the task-namespaced copy ('ret_country'), a name the caller is never shown; a
       // name that matches nothing is refused rather than reported removed.
-      const add = state.additions[d.from];
-      if (!add.dimensions.some((x) => x._attribute === d.field || x.name === d.field)) {
-        const have = [...new Set(add.dimensions.map((x) => x._attribute))];
+      const dims = state.additions[d.from]?.dimensions || [];
+      if (!dims.some((x) => x._attribute === d.field || x.name === d.field)) {
+        const have = [...new Set(dims.map((x) => x._attribute))];
         throw new ToolError(`cannot remove dimension '${d.field}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
       }
-      add.dimensions = add.dimensions.filter((x) => x._attribute !== d.field && x.name !== d.field);
+      state.additions[d.from].dimensions = dims.filter((x) => x._attribute !== d.field && x.name !== d.field);
     }
+
+    // the additions are a declaration fragment, compiled as a declaration is, against the measures the
+    // task keeps — so a metric added alone reads them by the names they were declared under
+    // (the context's sources come along, so metrics alone — or removals alone — compile against them)
+    const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
+    const compiled = this._compile(frag, { measures: measureNames() });
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
@@ -189,6 +216,10 @@ export const semanticBuildMethods = {
       const out = { context_id: ctx.id, semantic_models: models, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
+    // every check passed: the update is the context's now. Only the semantic part is written back —
+    // the live state stays the same object, which a build running on the context's draft or
+    // eventstream holds while it waits
+    for (const k of SEMANTIC_STATE) if (state[k] !== undefined) ctx.state[k] = state[k];
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {

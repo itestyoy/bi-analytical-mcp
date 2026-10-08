@@ -9,7 +9,8 @@ import { comparison, conditionsSql } from './conditions.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
-const NS = (task, name) => `${task}_${name}`;
+// Exported so an update names what it removes by the same rule (src/engine/semantic-build.js).
+export const NS = (task, name) => `${task}_${name}`;
 
 /** Throw a compile error that CARRIES the input field it refers to — the engine
  *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
@@ -30,6 +31,9 @@ function propExpr(catalog, modelKey, name) {
   return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
+/** The operators whose constants ARE events — a pattern's (like, contains, …) is text, not an event. */
+const EVENT_VALUE_OPS = new Set(['eq', 'neq', 'in', 'not_in']);
+
 /**
  * SQL for one condition of a semantic model on a `field` — a column of the model (its event name
  * spelled as the source stores it), or a scalar payload property read where it is stored.
@@ -41,7 +45,7 @@ function fieldCond(catalog, modelKey, cond) {
   if (catalog.isFact(modelKey) && cond.field === m.event_name?.column) {
     lhs = cond.field;
     // an event of the source, as it stores it — one that is not its own is refused, naming the owner
-    if (value !== undefined && value !== null) value = Array.isArray(value) ? value.map((v) => factName(catalog, modelKey, v, 'where.value')) : factName(catalog, modelKey, value, 'where.value');
+    if (EVENT_VALUE_OPS.has(cond.op) && value !== undefined && value !== null) value = Array.isArray(value) ? value.map((v) => factName(catalog, modelKey, v, 'where.value')) : factName(catalog, modelKey, value, 'where.value');
   } else if (catalog.isFact(modelKey) && catalog.scalarEventProps(modelKey).includes(cond.field)) {
     const found = factProp(catalog, modelKey, cond.field, 'where.field');
     lhs = propExpr(catalog, modelKey, found.name);
@@ -158,7 +162,7 @@ function ownMeasures(metric) {
 }
 
 /** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */
-function inputMetrics(metric) {
+export function inputMetrics(metric) {
   const tp = metric?.type_params || {};
   const name = (v) => (typeof v === 'string' ? v : v?.name);
   return [tp.numerator, tp.denominator, ...(tp.metrics || [])].map(name).filter(Boolean);
@@ -186,13 +190,15 @@ export function measureRefs(metric, metrics = []) {
 /**
  * Compile a full declaration. Returns resolved additions per model, metric
  * specs (incl. auto-created simple metrics for ratio), used models, and the
- * declared measure/metric names (namespaced).
+ * declared measure/metric names (namespaced). `measures`: the namespaced measures the task
+ * already has (an update's), which its metrics read by the names they were declared under.
  */
-export function compileDeclaration(catalog, decl) {
+export function compileDeclaration(catalog, decl, { measures = [] } = {}) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
 
   const additions = {}; // modelKey -> { measures:[], dimensions:[] }
+  const existingMeasures = new Set(measures); // namespaced, declared before this call
   const declaredMeasures = new Set(); // namespaced
   const ensure = (k) => (additions[k] ||= { measures: [], dimensions: [] });
 
@@ -213,6 +219,8 @@ export function compileDeclaration(catalog, decl) {
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);
+      // two measures of one name would both be written, and dbt refuses the duplicate at parse
+      if (declaredMeasures.has(cm.name) || existingMeasures.has(cm.name)) fail(`measure '${m.name}' is already declared in task '${task}'`, 'measures.name');
       declaredMeasures.add(cm.name);
       ensure(modelKey).measures.push(cm);
     }
@@ -221,13 +229,16 @@ export function compileDeclaration(catalog, decl) {
   const baseMeasureRefs = new Set(catalog.baseMeasureRefs());
   const resolveMeasure = (ref) => {
     const nsName = NS(task, ref);
-    if (declaredMeasures.has(nsName)) return nsName;
+    if (declaredMeasures.has(nsName) || existingMeasures.has(nsName)) return nsName;
+    // …or by the stored name a context describes it under ('ret_n'), as remove takes it too
+    if (declaredMeasures.has(ref) || existingMeasures.has(ref)) return ref;
     if (baseMeasureRefs.has(ref)) { // base measure (already a global name) — load its own model
       const owner = catalog.modelOwningMeasure(ref);
       if (owner) usedModels.add(owner);
       return ref;
     }
-    fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
+    // listed as stored — a name a metric takes as it is, beside the one it was declared under
+    fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...existingMeasures, ...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
   };
 
   const metrics = [];

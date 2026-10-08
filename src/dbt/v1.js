@@ -12,6 +12,25 @@ import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
+import yaml from 'js-yaml';
+
+/**
+ * dbt 1.12's parse of the LATEST spec writes a cumulative metric's window twice — into its
+ * cumulative_type_params and into the deprecated type_params.window — and its own validation then
+ * refuses the metric for the deprecated one (the `require_nested_cumulative_type_params` behavior
+ * flag, on by default): no cumulative metric with a window parses. The flag is read from
+ * dbt_project.yml alone, so the copy a context parses carries it off, unless the project set it
+ * itself. Written only into the directory the parse runs in — a context's own copy of the project.
+ */
+function allowLatestCumulativeWindow(projectDir) {
+  const file = join(projectDir, 'dbt_project.yml');
+  try {
+    const doc = yaml.load(readFileSync(file, 'utf8')) || {};
+    if (doc.flags && Object.hasOwn(doc.flags, 'require_nested_cumulative_type_params')) return;
+    doc.flags = { ...(doc.flags || {}), require_nested_cumulative_type_params: false };
+    writeFileSync(file, yaml.dump(doc, { lineWidth: -1, noRefs: true }));
+  } catch { /* a project dbt cannot read is the parse's to report */ }
+}
 
 /**
  * The one correction a semantic manifest parsed from the LATEST spec needs: a percentile is written
@@ -94,6 +113,7 @@ export class DbtV1 {
   }
 
   async parse(projectDir) {
+    if (this.semanticSpec === 'latest') allowLatestCumulativeWindow(projectDir);
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
     const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (r.ok && this.semanticSpec === 'latest') restorePercentiles(file);

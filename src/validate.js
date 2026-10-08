@@ -370,8 +370,12 @@ function explainNode(root, n, value, memo) {
   // required field means they meant it and left something out; a bad enum/const value means they DID
   // name it and got the value wrong — that is the message worth showing, so it costs least.
   const weight = (e) => ({ additionalProperties: 10, type: 8, required: 6, pinnedNone: 3 }[e.keyword] ?? 1);
-  const scored = candidates.map((i) => { const es = explain(root, branches[i], value, memo); return { i, es, score: es.reduce((s, e) => s + weight(e), 0) }; });
-  const best = scored.sort((a, b) => a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
+  // The value's own fields decide first: the branch that knows more of them is closer, whatever lies
+  // deeper inside the fields it knows — a list of views with one bad item is still the { views } form,
+  // not the empty one that knows no `views` (errors under a field would otherwise outweigh the field).
+  const unknown = (es) => es.filter((e) => e.keyword === 'additionalProperties' && e.instancePath === '').length;
+  const scored = candidates.map((i) => { const es = explain(root, branches[i], value, memo); return { i, es, unknown: unknown(es), score: es.reduce((s, e) => s + weight(e), 0) }; });
+  const best = scored.sort((a, b) => a.unknown - b.unknown || a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
   // the modes are named unless the value named its own — or meant the default one, which it need not name
   const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(candidates.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);

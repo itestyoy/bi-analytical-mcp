@@ -14,7 +14,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, DRILL_ROWS, pivotRows, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
 import { settle, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
@@ -201,9 +201,10 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const byC = Object.fromEntries(m.rows.map((r) => [r.label, r.values[0]]));
   assert.deepEqual([byC.US, byC.GB, byC.BR], [35, 25, 25]);
   assert.equal(m.rows[0].label, 'US', 'the largest first');
-  // open US: the card's own read
+  // open US: the card's own read — the row taken, as a path; the server opens the next level
   const us = m.rows.find((r) => r.label === 'US');
-  const level = await engine.drill_result({ ...m.source, transform: pivotTransform(display, [us.key]), limit: PIVOT_LEVEL_ROWS });
+  const level = await engine.drill_result({ ...m.source, path: [{ column: 'users_country', value: us.key }], limit: PIVOT_LEVEL_ROWS });
+  assert.equal(level.ok, true, JSON.stringify(level.error));
   const children = pivotRows(level, display, 1);
   assert.ok(children.length >= 1);
   assert.equal(children.reduce((a, c) => a + (c.values[0] ?? 0), 0), 35, 'the children of US add up to US');
@@ -229,7 +230,8 @@ test('a drillable bar is drawn folded over its drill level, and a bar drills int
   const i = m.chart.labels.indexOf('US');
   const path = [{ column: 'users_country', value: m.chart.drill.keys[i] }];
   const view = drillView(display, path, { level: { column: 'users_platform' }, mode: 'breakdown' });
-  const got = await engine.drill_result({ ...m.chart.drill.source, transform: view.transform, limit: DRILL_ROWS });
+  const got = await engine.drill_result({ ...m.chart.drill.source, path, level: 'users_platform', mode: 'breakdown', limit: DRILL_ROWS });
+  assert.equal(got.ok, true, JSON.stringify(got.error));
   const next = buildViewModel('display_model_result', { ...got, display: view.display, drill_source: m.chart.drill.source, drill_path: path });
   assert.equal(next.chart.x, 'users_platform');
   assert.equal(next.chart.bars.reduce((a, b) => a + b.value, 0), 35, 'US by platform adds up to US');

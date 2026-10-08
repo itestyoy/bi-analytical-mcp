@@ -2,7 +2,7 @@
 // a materialized='table' dbt model named after the task, built (dbt run), and rows are read back
 // from that table (dbt show) — results live in the warehouse (resilient, pageable). A stored result
 // is re-sliced by a pipeline started from its task (from_task), and a drawn card reads its views
-// from it (drill_result). Data-only assertions.
+// from it (drill_result: the path taken, the server makes the level). Data-only assertions.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -104,19 +104,22 @@ test('a pipeline started FROM a stored result re-slices it without recomputing (
   assert.ok(big.reduce((s, r) => s + num(r.rev), 0) <= 85);
 });
 
-test('a drawn card reads its views from its own task: values are bound as literals, a count counts values', opts, async (t) => {
+test('a drawn card reads its views from its own task: a row opens into a level that adds up to it, a path value is bound as a literal', opts, async (t) => {
   if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'mon_revenue' }] } });
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }], materialize: true });
+  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue' }] } });
   assert.equal(card.drawn, true, JSON.stringify(card).slice(0, 300));
   assert.equal(card.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85, 'the top level is the whole result, folded by country');
-  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
-  assert.equal(num(us.rows[0].rev), 35);
-  // injection/escaping proven on DATA: a value containing a quote+SQL is bound as a literal ->
+  // the card opens the US row: the path taken, and the server reads the next level (platform) under it
+  const us = await engine.drill_result({ task_id: m.task_id, path: [{ column: 'users_country', value: 'US' }] });
+  assert.equal(us.ok, true, JSON.stringify(us.error));
+  assert.ok(us.rows.length >= 1);
+  assert.equal(us.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 35, 'US by platform adds up to US');
+  // injection/escaping proven on DATA: a path value containing a quote+SQL is bound as a literal ->
   // the read runs safely and simply matches nothing.
-  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ agg: 'sum', column: 'mon_revenue', name: 'rev' }] } });
+  const inj = await engine.drill_result({ task_id: m.task_id, path: [{ column: 'users_country', value: "US'); drop table x; --" }] });
   assert.equal(inj.ok, true, JSON.stringify(inj.error));
-  assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null);
+  assert.equal(inj.rows.length, 0);
 });
 
 // QUERYING A BUILT PIPELINE MODEL: query_pipeline_model({ context_id, transform }) filters, groups

@@ -208,7 +208,7 @@ export const semanticBuildMethods = {
     // task keeps — so a metric added alone reads them by the names they were declared under
     // (the context's sources come along, so metrics alone — or removals alone — compile against them)
     const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
-    const compiled = this._compile(frag, { measures: measureNames() });
+    const compiled = this._compile(frag, { measures: measureNames(), metrics: state.metrics.map((m) => m.name) });
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });

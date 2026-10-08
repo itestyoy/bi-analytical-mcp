@@ -191,9 +191,10 @@ export function measureRefs(metric, metrics = []) {
  * Compile a full declaration. Returns resolved additions per model, metric
  * specs (incl. auto-created simple metrics for ratio), used models, and the
  * declared measure/metric names (namespaced). `measures`: the namespaced measures the task
- * already has (an update's), which its metrics read by the names they were declared under.
+ * already has (an update's), which its metrics read by the names they were declared under;
+ * `metrics`: the namespaced metrics it already has, which a derived metric may be built from.
  */
-export function compileDeclaration(catalog, decl, { measures = [] } = {}) {
+export function compileDeclaration(catalog, decl, { measures = [], metrics: existingMetricNames = [] } = {}) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
 
@@ -243,6 +244,7 @@ export function compileDeclaration(catalog, decl, { measures = [] } = {}) {
 
   const metrics = [];
   const metricNames = new Set();
+  const derivedInputs = []; // derived metrics, their inputs resolved once every metric is known
   const simpleByMeasure = new Map(); // measureName -> simple metric name
   const addMetric = (m) => {
     if (metricNames.has(m.name)) return;
@@ -294,11 +296,23 @@ export function compileDeclaration(catalog, decl, { measures = [] } = {}) {
       }
       // input metrics are namespaced; alias each to the raw name so the user's
       // `expr` (written with raw metric names) resolves correctly in MetricFlow.
-      const inputs = md.metrics.map((x) => ({ name: NS(task, x.metric), alias: x.name || x.metric }));
-      addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
+      // An input is named as it was declared ('n') or as it is stored ('ret_n'), as a measure is; it is
+      // resolved once every metric of this declaration is known, so the order they are written in is free
+      const derived = { name, type: 'derived', type_params: { expr: md.expr, metrics: [] } };
+      derivedInputs.push({ derived, md });
+      addMetric(derived);
     } else {
       fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }
+  }
+
+  const known = new Set([...existingMetricNames, ...metricNames]);
+  for (const { derived, md } of derivedInputs) {
+    derived.type_params.metrics = md.metrics.map((x) => {
+      const stored = [NS(task, x.metric), x.metric].find((n) => known.has(n));
+      if (!stored) fail(`derived metric '${md.name}': its input '${x.metric}' is not a metric of this task. Its metrics: ${[...known].join(', ') || '(none)'}`, 'metrics.metrics');
+      return { name: stored, alias: x.name || x.metric };
+    });
   }
 
   if (!usedModels.size) {

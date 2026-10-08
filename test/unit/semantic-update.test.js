@@ -84,6 +84,22 @@ test('an update adds a metric over measures the task declared before, by their d
     /unknown measure 'nope'\. Declared in this task: ret_n, ret_u$/);
 });
 
+// ── a derived metric over a metric named as the context lists it read a metric that is not there ──
+test('a derived metric in an update reads the task\'s metrics by their declared or stored names, and refuses one it does not have', async () => {
+  const e = engine();
+  const first = await declare(e);
+  await update(e, first.context_id, { metrics: [{ name: 'per_user', type: 'derived', expr: 'ret_n / ret_u', metrics: [{ metric: 'ret_n' }, { metric: 'ret_u' }] }] });
+  await update(e, first.context_id, { metrics: [{ name: 'per_user2', type: 'derived', expr: 'n / u', metrics: [{ metric: 'n' }, { metric: 'u' }] }] });
+  const state = e.ctxs.get(first.context_id).state;
+  const inputsOf = (name) => state.metrics.find((m) => m.name === name).type_params.metrics.map((x) => x.name);
+  assert.deepEqual(inputsOf('ret_per_user'), ['ret_n', 'ret_u'], 'the stored names, as they are');
+  assert.deepEqual(inputsOf('ret_per_user2'), ['ret_n', 'ret_u'], 'the declared names, namespaced');
+  const before = structuredClone(state);
+  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'bad', type: 'derived', expr: 'zz', metrics: [{ metric: 'zz' }] }] }),
+    /derived metric 'bad': its input 'zz' is not a metric of this task/);
+  assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'a refused update changes nothing');
+});
+
 // ── a removed metric left the metrics built on it pointing at nothing ───────────────────────
 test('a metric other metrics are built from is removed with them only under cascade', async () => {
   const e = engine();

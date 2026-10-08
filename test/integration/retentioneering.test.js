@@ -438,11 +438,11 @@ test('each step is checked by the library as it is added, and says what it chang
   const add = (step) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'loop', steps: [step] });
   const started = Date.now();
   const s1 = await add({ type: 'rename_events', mapping: { shop_opened: 'shop' } });
-  assert.deepEqual([s1.step.checked, s1.changed.events_added, s1.changed.events_removed], [true, ['shop'], ['shop_opened']]);
+  assert.deepEqual([s1.added[0].checked, s1.added[0].changed.events_added, s1.added[0].changed.events_removed], [true, ['shop'], ['shop_opened']]);
   const s2 = await add({ type: 'split_sessions', timeout: '30m', session_col: 'visit' });
-  assert.deepEqual(s2.changed.paths_added, ['visit']);
+  assert.deepEqual(s2.added[0].changed.paths_added, ['visit']);
   const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } });
-  assert.deepEqual(s3.changed.segments_added, ['band']);
+  assert.deepEqual(s3.added[0].changed.segments_added, ['band']);
   assert.deepEqual(s3.shape.segments.band.levels.sort(), ['long', 'short']);
   // refused by the library, with its own message, on what the eventstream holds at that step
   const refusedStep = (step, re) => assert.rejects(add(step), (e) => e.field === 'steps[0]' && re.test(e.message) && /nothing changed/.test(e.message));

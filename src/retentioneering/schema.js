@@ -279,7 +279,7 @@ export const BUILD_ACTIONS = ['start', 'add_steps', 'edit_step', 'insert_step', 
 /** What each build action does — said once, on the form of that action (and joined for the field that lists them all). */
 const ACTION_SAYS = () => ({
   start: 'declares the eventstream and builds it in SQL (a task); the default',
-  add_steps: `appends library steps — one or several, all or none — and returns what the eventstream holds after each: its events, path columns, segments and their levels. Each is checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
+  add_steps: `appends library steps — one or several, all or none — and returns what each step changed (the events, path columns and segments it added or removed) and the eventstream's shape after them: its events, path columns, segments and their levels. Each is checked by the library itself on what the eventstream holds before it, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
   edit_step: 'replaces step `index`, re-checking every step after it and naming the first one it breaks',
   insert_step: 'inserts a step before step `index`, re-checking every step after it',
   delete_step: 'removes step `index`, re-checking every step after it',

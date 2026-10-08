@@ -395,3 +395,47 @@ test('a read of several path-analysis tasks says how long it waited for them', a
   assert.ok(r2.waited_seconds >= 0.9 && r2.results[0].waited_seconds >= 0.9, JSON.stringify(r2));
   e.close();
 });
+
+// A segment joined from a related model is compared in the type the warehouse stores it in, as a
+// pipeline's joined column is: the start grounds every model its joins bring in, not the source alone.
+// The stub is what the warehouse says of each relation (every column text); a refusal, no run.
+test('a segment joined from a related model is compared in the type the warehouse stores it in', async () => {
+  const e = on();
+  const asText = (k) => {
+    const names = [...e.catalog.modelColumns(k).map((c) => c.name), ...(e.catalog.getModel(k).event_data_column ? [e.catalog.getModel(k).event_data_column] : [])].map((c) => c.toLowerCase());
+    return Object.assign(new Set(names), { types: new Map(names.map((c) => [c, 'VARCHAR'])) });
+  };
+  e.probe.physicalColumns = async (k) => asText(k);
+  // users.country kept as text, filtered as a flag: a boolean is compared with text by its spellings
+  // alone, so one mixed with another constant is refused at the start, naming the segment as the call does
+  const start = { name: 'x', source: 'events', segments: [{ model: 'users', attribute: 'country', name: 'flag' }], where: [{ column: 'flag', op: 'in', value: [true, 'x'] }] };
+  await assert.rejects(e.build_retentioneering_model(start), (err) => err.stage === 'validate' && /'flag' is a text column in the warehouse/.test(err.message));
+  e.close();
+});
+
+// What add_steps answers: every added step under `added`, with what it changed and, when it was not
+// checked, why; the top-level step / changed are an edit's or an insert's. The library's check is a stub.
+test('add_steps lists each added step with what it changed and why one was not checked', async () => {
+  const { commitSteps } = await import('../../src/retentioneering/steps.js');
+  const shape = (events) => ({ events, paths: ['user_id'], segments: {}, columns: [] });
+  const commit = (reply, action, input, steps = []) => {
+    const feature = { checker: { check: async () => ({ steps: reply }) } };
+    const es = { base: { shape: shape(['a', 'shop_opened', 'tutorial']), model: 'm', summary: {} }, steps, checkpoint: null };
+    return commitSteps({ ctxs: { touch() {} } }, feature, { id: 'c1', state: {} }, 'es', es, action, input);
+  };
+  const two = [{ type: 'rename_events', mapping: { shop_opened: 'shop' } }, { type: 'drop_events', names: ['tutorial'] }];
+  const a = await commit([{ ok: true, shape: shape(['a', 'shop', 'tutorial']) }, { ok: true, shape: shape(['a', 'shop']) }], 'add_steps', { steps: two });
+  assert.deepEqual(a.added, [
+    { index: 1, type: 'rename_events', checked: true, changed: { events_added: ['shop'], events_removed: ['shop_opened'] } },
+    { index: 2, type: 'drop_events', checked: true, changed: { events_removed: ['tutorial'] } },
+  ]);
+  assert.deepEqual([a.step, a.changed, a.shape.events], [undefined, undefined, ['a', 'shop']]);
+  // the first step the stand-ins could not carry: its own reason, and the next one's
+  const b = await commit([{ ok: null, note: 'the stand-ins could not carry it' }], 'add_steps', { steps: two });
+  assert.deepEqual(b.added.map((s) => [s.index, s.checked, typeof s.note]), [[1, false, 'string'], [2, false, 'string']]);
+  assert.equal(b.added[0].note, 'the stand-ins could not carry it');
+  assert.deepEqual(b.unchecked_steps, [1, 2]);
+  // an edit names the step it put in place and what that step changed
+  const c = await commit([{ ok: true, shape: shape(['a', 'shop_opened']) }], 'edit_step', { index: 1, step: two[1] }, [{ step: two[0], library: {}, checked: true, shape: shape(['a', 'shop', 'tutorial']) }]);
+  assert.deepEqual([c.step, c.changed, c.added], [{ index: 1, type: 'drop_events', checked: true }, { events_removed: ['tutorial'] }, undefined]);
+});

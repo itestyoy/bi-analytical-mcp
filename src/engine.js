@@ -188,7 +188,8 @@ export class Engine {
       validate: (tool, input) => this._validate(tool, input),
       context: (id) => this._ctx(id),
       timeRangeConditions: (source, tr) => this._timeRangeConditions(source, tr),
-      physicalColumns: (source) => this.probe.physicalColumns(source),
+      // what the warehouse says of a source's columns and of every model its join stages bring in (src/engine/warehouse-probe.js)
+      grounding: (source, stages) => this.probe.grounding(source, stages),
       modelConfigLine: (materialized) => this._modelConfigLine(materialized),
       expiryConfig: (kind) => this._expiryConfig(kind),
       taskBase: (input) => this._taskBase(input),

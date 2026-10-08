@@ -233,14 +233,16 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   es.steps = list;
   if (dropped) { es.checkpoint = null; es.model = es.base.model; es.summary = es.base.summary; }
   engine.ctxs.touch(ctx.id);
-  const at = action === 'add_steps' ? n + input.steps.length : action === 'truncate' || action === 'delete_step' ? null : from;
+  // the step an edit or an insert put in place; added steps are each listed under `added`, with what
+  // each changed and why one was not checked
+  const at = action === 'edit_step' || action === 'insert_step' ? from : null;
   const entry = at ? es.steps[at - 1] : null;
   const pending = es.steps.length - (es.checkpoint?.upto || 0);
   const unchecked = es.steps.map((s, i) => (s.checked ? null : i + 1)).filter(Boolean);
   return {
     ok: true, context_id: ctx.id, eventstream: name, action, steps: es.steps.length,
     ...(entry ? { step: { index: at, type: entry.step.type, checked: entry.checked, ...(entry.note ? { note: entry.note } : {}) } } : {}),
-    ...(action === 'add_steps' ? { added: checked.map((e, j) => ({ index: from + j, type: e.step.type, checked: e.checked, ...(shapeChange(shapeBefore(view, from + j), e.shape) ? { changed: shapeChange(shapeBefore(view, from + j), e.shape) } : {}) })) } : {}),
+    ...(action === 'add_steps' ? { added: checked.map((e, j) => ({ index: from + j, type: e.step.type, checked: e.checked, ...(e.note ? { note: e.note } : {}), ...(shapeChange(shapeBefore(view, from + j), e.shape) ? { changed: shapeChange(shapeBefore(view, from + j), e.shape) } : {}) })) } : {}),
     ...(entry && shapeChange(shapeBefore(es, at), entry.shape) ? { changed: shapeChange(shapeBefore(es, at), entry.shape) } : {}),
     shape: describeShape(shapeAtEnd(es)),
     ...(unchecked.length ? { unchecked_steps: unchecked } : {}),

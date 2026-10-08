@@ -173,7 +173,15 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const { stages, segments, eventColumn, pathColumn } = eventstreamStages(catalog, spec, { timeConditions });
   // `from`: a task's stored table (a pipeline build) is the relation the stages run over — the same
   // start a pipeline makes from a task; the source is then only what the stages resolve names against
-  const base = renderPipeline(catalog, catalog.dialect, spec.source, stages, { physicalCols, modelName, from });
+  let base;
+  try {
+    base = renderPipeline(catalog, catalog.dialect, spec.source, stages, { physicalCols, modelName, from });
+  } catch (e) {
+    // a refusal names a segment as the call does, not by the column the eventstream carries it under
+    let message = e?.message || String(e);
+    for (const sg of segments) if (sg.expr !== sg.name && sg.expr.startsWith('es_')) message = message.split(`'${sg.expr}'`).join(`'${sg.name}'`);
+    throw new Error(message);
+  }
   const q = (c) => c; // column names are plain identifiers, as the pipeline renders them
   const cols = pathColumns(catalog, spec);
   // the path owner: the source's user, or the key the caller named (pathColumn)

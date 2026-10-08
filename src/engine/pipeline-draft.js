@@ -5,6 +5,7 @@
 
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
+import { physicalColumnType } from '../catalog/column-types.js';
 
 export const pipelineDraftMethods = {
   /**
@@ -225,16 +226,28 @@ export const pipelineDraftMethods = {
   },
 
   /**
-   * A task's table as a draft's step 0, with the warehouse's word on its columns' types where the
-   * build that made it recorded one (the checkpoint it left, `physical`): a constant is compared with
-   * a column of that table as it was before the table was built — a flag stored as text stays text.
+   * A task's table as a draft's step 0, its columns in the type the WAREHOUSE gives them (`physical`),
+   * as a catalog source's are: a constant is compared with a column of that table as it is stored — a
+   * flag stored as text stays text. The table's own relation is asked, whichever tool built it (a
+   * pipeline, a query run with materialize: true) and whether or not a checkpoint still records it;
+   * where the warehouse cannot be asked, the marks the build's checkpoint recorded stand, and past
+   * them the types the task stored. A JSON or array column keeps its type, as a source's does.
    */
-  _baseWithPhysical(base) {
+  async _baseWithPhysical(base) {
+    const phys = await this.probe.tableColumns(base);
     const owner = this.ctxs.has(base.owner) ? this.ctxs.get(base.owner).state : null;
     const cp = [...(owner?.draft?.checkpoints || []), ...(owner?.pipeline_origin?.checkpoints || [])].find((c) => c.task_id === base.task_id);
-    const physical = new Map((cp?.columns || []).filter((c) => c.physical).map((c) => [c.name, c.type]));
-    if (!physical.size) return base;
-    return { ...base, columns: base.columns.map((c) => (physical.get(c.name) === c.type ? { ...c, physical: true } : c)) };
+    const marked = new Map((cp?.columns || []).filter((c) => c.physical).map((c) => [c.name, c.type]));
+    if (!phys?.types?.size && !marked.size) return base;
+    return {
+      ...base,
+      columns: base.columns.map((c) => {
+        const dtype = c.type === 'json' || c.type === 'array' ? null : phys?.types?.get(c.name.toLowerCase());
+        const type = dtype ? physicalColumnType(dtype) : 'unknown';
+        if (type !== 'unknown') return { ...c, type, physical: true };
+        return marked.get(c.name) === c.type ? { ...c, physical: true } : c;
+      }),
+    };
   },
 
   /** True when some pipeline stage already bounds the source's time/partition column. */
@@ -258,7 +271,8 @@ export const pipelineDraftMethods = {
 
   async _draftStart(input) {
     const found = input.from_task ? this._taskBase(input) : null;
-    const base = found ? this._baseWithPhysical(found.base) : null;
+    if (input.draft_id) this._ctxToWrite(input.draft_id, 'draft_id'); // refused before the warehouse is asked
+    const base = found ? await this._baseWithPhysical(found.base) : null;
     const ctx = input.draft_id ? this._ctxToWrite(input.draft_id, 'draft_id') : this.ctxs.create();
     const source = found ? found.source : input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };

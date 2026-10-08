@@ -185,19 +185,23 @@ function resolve(catalog, spec, dialect, availableCols, source) {
 
   // each capture: the value a column holds at a step, as a column of its own — under a name no other
   // output column has (the partition key, the fixed columns, each step's, a kept draft's metric columns)
-  const propCaptures = []; // { id, idx, column, type, isColumn }
+  const propCaptures = []; // { id, idx, property, type, physical, isColumn }
   const names = new Set([
     ...partCols, 'first_seen_at', 'furthest_step_name', 'completed',
     ...steps.flatMap((s) => [`reached_${s.name}`, `at_${s.name}`]),
     ...(spec.metrics || []).flatMap((mt) => (mt.type === 'avg_seconds_between' ? [`secs_${mt.name}`] : mt.type === 'agg_at_step' ? [`pv_${mt.name}`] : [])),
   ]);
+  // the match's own working columns in the lowerings: the sequence axis (ts), and each step's time
+  // (t<i>) and flag (is<i>) — for this funnel's steps, so a name beyond them is free
+  const working = new Set(['ts', ...steps.flatMap((s) => [`t${s.idx}`, `is${s.idx}`])]);
   for (const c of spec.capture || []) {
     if (names.has(c.name)) throw new Error(`capture '${c.name}': the funnel already outputs a column of that name — name it otherwise`);
-    // ts, t<i>, is<i> are the match's own working columns (each step's time and flag) in both lowerings
-    if (/^(ts|t\d+|is\d+)$/.test(c.name)) throw new Error(`capture '${c.name}': the funnel uses that name for a working column of its own — name it otherwise`);
+    if (working.has(c.name)) throw new Error(`capture '${c.name}': the funnel uses that name for a working column of its own — name it otherwise`);
     names.add(c.name);
     if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage (event_property)`);
-    propCaptures.push({ id: c.name, idx: stepIdx(c.step, `capture '${c.name}'`), property: c.column, type: prepCols.get(c.column)?.type || 'unknown', isColumn: true });
+    // a copy of a column is stored as that column is (its `physical` mark: a boolean is compared with a text flag as text)
+    const from = prepCols.get(c.column);
+    propCaptures.push({ id: c.name, idx: stepIdx(c.step, `capture '${c.name}'`), property: c.column, type: from?.type || 'unknown', physical: !!from?.physical, isColumn: true });
   }
   // A DRAFT KEPT FROM AN EARLIER VERSION may carry `metrics`: it builds the columns it built then —
   // secs_<name> for a time between two steps, pv_<name> for a property's value at a step (the other
@@ -208,15 +212,15 @@ function resolve(catalog, spec, dialect, availableCols, source) {
     if (mt.type === 'avg_seconds_between') metrics.push({ name: mt.name, type: mt.type, from: stepIdx(mt.from, who), to: stepIdx(mt.to, who) });
     else if (mt.type === 'agg_at_step') {
       const idx = stepIdx(mt.step, who);
-      let type; const isColumn = prepCols.has(mt.property);
-      if (isColumn) type = prepCols.get(mt.property).type;
+      let type; let physical = false; const isColumn = prepCols.has(mt.property);
+      if (isColumn) { type = prepCols.get(mt.property).type; physical = !!prepCols.get(mt.property).physical; }
       else {
         const p = (m.properties || {})[mt.property];
         if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
         if (catalog.isComplexEventProp(mt.property, source)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; compute a scalar from it in a prepare stage first`);
         type = p.type;
       }
-      propCaptures.push({ id: `pv_${mt.name}`, idx, property: mt.property, type, isColumn });
+      propCaptures.push({ id: `pv_${mt.name}`, idx, property: mt.property, type, physical, isColumn });
     } else if (!['reached', 'completed', 'conversion'].includes(mt.type)) throw new Error(`unknown sequence metric type: ${mt.type}`);
   }
 
@@ -265,20 +269,24 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the CTE equivalent other warehouses run");
   }
   const preds = r.stepPreds(dialectName);
+  // every column the caller named — a partition column, the sequence axis, a capture — quoted by the
+  // dialect (a capture may be named like a keyword: group, order); the match's own working columns
+  // (ts, t<i>, is<i>) are this server's names
+  const q = (c) => d.quoteIdent(c);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? d.quoteIdent(c.property) : catalog.propertyExpr(r.fact, c.property, dialectName, { type: c.type })}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? q(c.property) : catalog.propertyExpr(r.fact, c.property, dialectName, { type: c.type })}) AS ${q(c.id)}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
-  const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
-  const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
+  const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${q(c.id)}`).join('');
+  const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${q(c.id)} AS ${q(c.id)}`).join('');
   const pk = r.partCols; // one or more partition columns (composite key)
-  const pkList = pk.join(', ');
-  const pkE = pk.map((c) => `e.${c}`).join(', ');
+  const pkList = pk.map(q).join(', ');
+  const pkE = pk.map((c) => `e.${q(c)}`).join(', ');
   // one_per_partition (default): the FIRST match per partition (DISTINCT ON the key).
   // one_per_match: EVERY occurrence of the start step S1; t1 becomes part of the match
   // identity, carried through so each S1 chains its own subsequent steps independently.
   const perMatch = r.rows === 'one_per_match';
-  const ctes = [{ name: 'ev', sql: `SELECT ${pkList}, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
+  const ctes = [{ name: 'ev', sql: `SELECT ${pkList}, ${q(r.timeCol)} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
   ctes.push({ name: 'r1', sql: perMatch
     ? `SELECT ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1`
     : `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
@@ -286,30 +294,30 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
   // (only non-step rows may fill the gap). Unset/'any' = nearest later occurrence.
   const anyStepG = r.steps.map((_, k) => `g.is${k + 1}`).join(' OR ');
   const gapGuard = (i) => (r.betweenSteps === 'gap'
-    ? ` AND NOT EXISTS (SELECT 1 FROM ev g WHERE ${pk.map((c) => `g.${c} = e.${c}`).join(' AND ')} AND g.ts > r${i - 1}.t${i - 1} AND g.ts < e.ts AND (${anyStepG}))`
+    ? ` AND NOT EXISTS (SELECT 1 FROM ev g WHERE ${pk.map((c) => `g.${q(c)} = e.${q(c)}`).join(' AND ')} AND g.ts > r${i - 1}.t${i - 1} AND g.ts < e.ts AND (${anyStepG}))`
     : '');
   for (let i = 2; i <= r.steps.length; i++) {
-    const joinOn = pk.map((c) => `e.${c} = r${i - 1}.${c}`).join(' AND ');
+    const joinOn = pk.map((c) => `e.${q(c)} = r${i - 1}.${q(c)}`).join(' AND ');
     const where = `e.is${i} AND e.ts > r${i - 1}.t${i - 1}${gapGuard(i)}`;
     ctes.push({ name: `r${i}`, sql: perMatch
       ? `SELECT DISTINCT ON (${pkE}, r${i - 1}.t1) ${pkE}, r${i - 1}.t1 AS t1, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE ${where} ORDER BY ${pkE}, r${i - 1}.t1, e.ts`
       : `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE ${where} ORDER BY ${pkE}, e.ts` });
   }
-  const sel = [...pk.map((c) => `r1.${c}`), ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
+  const sel = [...pk.map((c) => `r1.${q(c)}`), ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${q(c.id)}`)];
   let joins = 'FROM r1';
   const usingKey = perMatch ? `${pkList}, t1` : pkList;
   for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (${usingKey})`;
   ctes.push({ name: 'joined', sql: `SELECT ${sel.join(', ')} ${joins}` });
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const outCols = [
-    ...pk.map((c) => `j.${c}`),
+    ...pk.map((c) => `j.${q(c)}`),
     'j.t1 AS first_seen_at',
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(j.t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
     ...r.steps.map((s) => `j.t${s.idx} AS at_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`j.t${m.from}`, `j.t${m.to}`)} AS secs_${m.name}`),
-    ...r.propCaptures.map((c) => `j.${c.id}`),
+    ...r.propCaptures.map((c) => `j.${q(c.id)}`),
   ];
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
@@ -325,11 +333,13 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
  *    window + `|> WHERE` — the earliest start's match, whatever the skip mode. */
 export function matchStepBigQueryPipe(r, spec, catalog) {
   const d = getDialect('bigquery');
+  const q = (c) => d.quoteIdent(c); // a column the caller named, as in the CTE lowering
   const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
+  const pkList = r.partCols.map(q).join(', ');
   const measures = [
-    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${d.quoteIdent(c.property)}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
+    ...r.steps.map((s) => `    MAX(S${s.idx}.${q(r.timeCol)}) AS t${s.idx}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${q(c.property)}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${q(c.id)}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);
@@ -345,19 +355,19 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`t${m.from}`, `t${m.to}`)} AS secs_${m.name}`),
   ];
   const outCols = [
-    ...r.partCols,
+    ...r.partCols.map(q),
     'first_seen_at', 'furthest_step_name', 'completed',
     ...r.steps.map((s) => `reached_${s.name}`),
     ...r.steps.map((s) => `at_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
-    ...r.propCaptures.map((c) => c.id),
+    ...r.propCaptures.map((c) => q(c.id)),
   ];
   const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact, { partitionCol: r.partitionCol });
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
-    PARTITION BY ${r.partCols.join(', ')}
-    ORDER BY ${r.timeCol}
+    PARTITION BY ${pkList}
+    ORDER BY ${q(r.timeCol)}
     MEASURES
 ${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
     PATTERN ${nestedPattern(r.steps, gapMode)}
@@ -367,7 +377,7 @@ ${defines.join(',\n')}
   lines.push(`|> EXTEND ${derived.join(', ')}`);
   if (r.rows !== 'one_per_match') {
     // keep the earliest match per partition (parity with the table-form QUALIFY).
-    lines.push(`|> EXTEND ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) AS _mr_rn`);
+    lines.push(`|> EXTEND ROW_NUMBER() OVER (PARTITION BY ${pkList} ORDER BY t1) AS _mr_rn`);
     lines.push('|> WHERE _mr_rn = 1');
   }
   lines.push(`|> SELECT ${outCols.join(', ')}`);
@@ -381,7 +391,7 @@ function matchOutputColumns(r) {
   for (const s of r.steps) cols.set(`reached_${s.name}`, { type: 'boolean' });
   for (const s of r.steps) cols.set(`at_${s.name}`, { type: r.axisType });
   for (const m of r.metrics.filter((x) => x.type === 'avg_seconds_between')) cols.set(`secs_${m.name}`, { type: 'numeric' });
-  for (const c of r.propCaptures) cols.set(c.id, { type: c.type });
+  for (const c of r.propCaptures) cols.set(c.id, { type: c.type, ...(c.physical ? { physical: true } : {}) });
   return cols;
 }
 

@@ -348,6 +348,23 @@ test('funnel + prepare compute (array_length): n_words captured at level 1 avera
   assert.ok(Math.abs(avg - 3) < 1e-9, `avg n_words=${avg}`);
 });
 
+test('a funnel whose partition, order and capture columns are SQL keywords (group / order / select) runs: 12 reach level 1, n_words averages 3', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await pipe([
+    { stage: 'compute', name: 'group', expr: { column: 'player_id_of_internal' } },
+    { stage: 'compute', name: 'order', expr: { column: 'device_time' } },
+    { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
+    { stage: 'match_recognize', partition_by: ['group'], order_by: 'order', mode: 'ordered',
+      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
+      capture: [{ name: 'select', step: 'lvl1', column: 'n_words' }] },
+  ]);
+  assert.equal(out.rows.length, 12, 'one row per player');
+  assert.equal(new Set(out.rows.map((r) => r.group)).size, 12, 'the partition column carries each player once');
+  assert.equal(reached(out.rows, 'lvl1'), 12);
+  const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.select));
+  assert.ok(Math.abs(vals.reduce((s, v) => s + v, 0) / vals.length - 3) < 1e-9, `avg select=${vals}`);
+});
+
 test('funnel + prepare compute (array_contains): step filtered by derived boolean reaches 12', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([

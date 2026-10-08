@@ -74,7 +74,12 @@ const arith = (sym) => ({ args: 2, sql: ({ a }) => ({ expr: sym === '/' ? `(${a[
 // An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
 // KNOWN non-array type fails — an array, or a column whose type is unknown (raw, native), passes.
 const ARRAY_TYPES = new Set(['array', 'unknown', undefined, null]);
-const needsArray = (fn, t) => { if (!ARRAY_TYPES.has(t)) throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`); };
+const needsArray = (fn, t) => {
+  if (ARRAY_TYPES.has(t)) return;
+  // an array of structs has no scalar element to take: its elements are read a field at a time
+  if (String(t).startsWith('array')) throw new Error(`${fn}: its argument is '${t}' — ${fn} takes an array of scalars. Read the elements' fields instead: unnest the property, then json_field on the element`);
+  throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
+};
 
 /** The window clause of a window function: OVER (PARTITION BY … ORDER BY … frame). */
 function overSql(d, cols, over = {}, { frame = false } = {}) {

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { openStore } from '../../src/store.js';
 import { settle, taskResult } from '../helpers/settle.js';
 
 // Allowed non-data tests: a CHECKPOINT's invalidation is draft STATE (positional — we own the
@@ -299,4 +300,91 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   assert.ok(from.available_columns.some((c) => c.name === 'is_clicked_of_event_data'));
   assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
   await refusedBoth(from.draft_id, 'from the task');
+});
+
+// A draft started from a task's table asks the warehouse for that table's own column types — whoever
+// built it, and whether or not a checkpoint still records them. The stub warehouse answers for the
+// source and, with `tables`, for every table a task built: a flag stored as text, a count as a number.
+const FLAG_TYPES = { event_id: 'VARCHAR', player_id_of_internal: 'VARCHAR', event_name: 'VARCHAR', device_time: 'TIMESTAMP', event_date: 'DATE', event_data: 'JSON', is_clicked_of_event_data: 'VARCHAR', task_cnt: 'BIGINT', events_event_name: 'VARCHAR' };
+function flagRunner({ tables = true } = {}) {
+  const sourceModel = loadCatalog(CATALOG, {}).getModel('events').dbt_model;
+  return {
+    async parse() { return { ok: true }; },
+    async query() { return { ok: true, sql: 'select 1' }; },
+    async run() { return { ok: true, stdout: '', stderr: '' }; },
+    async show() { return { ok: true, columns: [{ name: 'task_cnt' }, { name: 'events_event_name' }], rows: [{ task_cnt: 3, events_event_name: 'level_started' }] }; },
+    async relationColumns(_dir, model) {
+      if (!tables && model !== sourceModel) return { ok: false };
+      return { ok: true, columns: Object.entries(FLAG_TYPES).map(([name, dtype]) => ({ name, dtype })) };
+    },
+  };
+}
+const flagEngine = (runner, { workspaceRoot = mkdtempSync(join(tmpdir(), 'cp-')), store } = {}) => new Engine({
+  catalog: loadCatalog(CATALOG, {}), runner, ...(store ? { store } : {}),
+  contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot }),
+});
+const TEXT_FLAG = /'is_clicked_of_event_data' is a text column in the warehouse/;
+const flagOrdered = { stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'gt', value: true }] };
+const flagEq = { stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'eq', value: true }] };
+const builtFlags = async (e, draft_id) => {
+  const started = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  assert.equal((await taskResult(e, started.task_id)).status, 'done');
+  return started.task_id;
+};
+
+test('a draft started from an earlier build reads its table\'s types from the warehouse after a later build superseded its checkpoint', async () => {
+  const e = flagEngine(flagRunner());
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });
+  const first = await builtFlags(e, draft_id);
+  await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 1, stage: keepEvents('level_completed') });
+  const second = await builtFlags(e, draft_id);
+  const owner = e.ctxs.get(draft_id).state;
+  assert.ok(![...(owner.draft.checkpoints || []), ...(owner.pipeline_origin?.checkpoints || [])].some((c) => c.task_id === first), 'no checkpoint records the first build any more');
+  for (const task of [first, second]) {
+    const from = await e.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include_columns: true });
+    assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [flagOrdered] }), TEXT_FLAG, `from task ${task}`);
+    const eq = await e.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [flagEq] });
+    assert.equal(eq.added, 1, 'a boolean compared by eq is taken, spelled as text');
+  }
+});
+
+test('where the warehouse cannot be asked about a task\'s table, the marks its build\'s checkpoint recorded stand', async () => {
+  const e = flagEngine(flagRunner({ tables: false }));
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });
+  const task = await builtFlags(e, draft_id);
+  const from = await e.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task });
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [flagOrdered] }), TEXT_FLAG);
+});
+
+test('a draft started from a semantic query run with materialize: true has its table\'s column types from the warehouse', async () => {
+  const e = flagEngine(flagRunner());
+  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }] });
+  await taskResult(e, created.task_id);
+  const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ model: 'events', attribute: 'event_name' }], materialize: true });
+  assert.equal((await taskResult(e, stored.task_id)).status, 'done');
+  const from = await e.build_pipeline_model({ action: 'start', name: 'slice', from_task: stored.task_id, include_columns: true });
+  assert.deepEqual(from.available_columns, [{ name: 'task_cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
+  await assert.rejects(
+    () => e.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 'many' }] }] }),
+    /'task_cnt' is a numeric column/,
+  );
+  await assert.rejects(
+    () => e.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'events_event_name', op: 'gt', value: true }] }] }),
+    /'events_event_name' is a text column in the warehouse/,
+  );
+});
+
+test('after a restart, a draft started from a build\'s task has its table\'s column types from the warehouse', async () => {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), 'cp-'));
+  const store = openStore({ dbPath: join(workspaceRoot, 'store.sqlite') });
+  const e = flagEngine(flagRunner(), { workspaceRoot, store });
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });
+  const task = await builtFlags(e, draft_id);
+  // a new process over the same registry and job store: the task's answer held in memory is gone
+  const e2 = flagEngine(flagRunner(), { workspaceRoot, store });
+  assert.equal(e2.jobs.get(task).status, 'ready');
+  const from = await e2.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include_columns: true });
+  assert.deepEqual(from.available_columns.find((c) => c.name === 'is_clicked_of_event_data'), { name: 'is_clicked_of_event_data', type: 'string' });
+  await assert.rejects(() => e2.build_pipeline_model({ action: 'add_steps', draft_id: from.draft_id, stages: [flagOrdered] }), TEXT_FLAG);
 });

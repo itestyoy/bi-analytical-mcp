@@ -5299,7 +5299,7 @@
         }
       },
       "notes": "The join names `via: \"<relationship>\"` and nothing else — the key columns (here a funnel id PLUS the entity, two columns) come from the schema, and the two sides may spell them differently. Both sides keep their own column names, so take from the other side only what you need (`attrs`) and never a name this side already has. Where a side carries the relationship in several alternative columns, each is offered as `<relationship>_<variant>` and the CALLER picks the one the question is about (the semantic_index model view lists them); an empty variant column matches nothing, and a left join is what keeps the unmatched rows. Joins STACK: another join stage reaches a third source.",
-      "hack": "A many-to-many match (several rows share the id on both sides) has no governed path by design — MetricFlow only joins onto a unique key — so it is a pipeline join, declared by relationship name. Extrapolate: any declared relationship, plus `on:` as the ad-hoc fallback when both sides name one column identically."
+      "hack": "A many-to-many match (several rows share the id on both sides) has no governed path by design — MetricFlow only joins onto a unique key — so it is a pipeline join, declared by relationship name. Extrapolate: any declared relationship as `via`, plus `via: { on: [...] }` as the ad-hoc fallback when both sides name one column identically."
     },
     {
       "required_events": [],

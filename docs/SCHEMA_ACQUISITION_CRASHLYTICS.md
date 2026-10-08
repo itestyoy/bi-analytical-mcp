@@ -414,7 +414,7 @@ semantic_index({ request: { model: 'acquisition' } }) describes them.
 ```json
 { "stage": "join", "with": "users", "via": "user",
   "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-  "attrs": [{ "column": "app_version", "name": "users_app_version" }, { column: "country" }] }
+  "attrs": [{ "column": "app_version", "name": "users_app_version" }, { "column": "country" }] }
 ```
 
 Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
@@ -428,10 +428,10 @@ semantic_index({ request: { model: 'acquisition' } }) describes them.
 
 ```json
 { "source": "crashlytics", "stages": [
-  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ column: "event_id" }] },
-  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ column: "country" }],
+  { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ "column": "event_id" }] },
+  { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ "column": "country" }],
     "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
-  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ column: "media_source" }, { column: "cost" }] }
+  { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ "column": "media_source" }, { "column": "cost" }] }
 ] }
 ```
 
@@ -477,7 +477,8 @@ acquisition × events: строки расходов размножаются п
 { "stage": "join", "with": "users", "via": "user",
   "between": { "value": "spend_date",
                "from": "install_time_valid_from",
-               "to": "install_time_valid_until" } }
+               "to": "install_time_valid_until" },
+  "attrs": [{ "column": "country" }] }
 ```
 
 `value` — колонка **этой** стороны: для acquisition это `spend_date`, для событий —
@@ -560,7 +561,7 @@ MetricFlow умеет соединять только по уникальном�
 { "source": "acquisition", "stages": [
   { "stage": "join", "with": "users", "via": "user",
     "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-    "kind": "inner", "attrs": [{ column: "country" }] },
+    "kind": "inner", "attrs": [{ "column": "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
     "measures": [{ "name": "total", "agg": "sum", "column": "cost" }] }
 ] }
@@ -571,14 +572,31 @@ MetricFlow умеет соединять только по уникальном�
 ```json
 { "source": "crashlytics", "stages": [
   { "stage": "join", "with": "events", "via": "ad_funnel_rewarded",
-    "kind": "inner", "attrs": [{ column: "event_id" }, { column: "event_name" }] }
+    "kind": "inner", "attrs": [{ "column": "event_id" }, { "column": "event_name", "name": "ad_event_name" }] }
 ] }
 ```
 
-Медиана стоимости клика — функция выбрана на месте, в схеме её нет:
+У строки падения своя колонка `event_name`, поэтому имя события воронки приходит под своим
+именем (`name`) — иначе две колонки делили бы одно имя, и шаг отказал бы (таблица выше).
+
+Медиана стоимости клика — функция выбрана на месте, в схеме её нет. `cost_per_click` — выражение
+модели (`meta.mcp.measures`), и читает его мера семантической модели — по `field`:
+
+```json
+{ "name": "ua_cpc",
+  "semantic_models": [{ "from": "acquisition",
+    "measures": [{ "name": "cpc_p50", "agg": "median", "field": "cost_per_click" }] }],
+  "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": { "name": "cpc_p50" } }] }
+```
+
+В pipeline такой колонки нет: его стадии видят только колонки модели. То же частное там
+пишет шаг `compute` (`div` делит через `NULLIF` на ноль, как и выражение), а агрегирует его
+следующий шаг:
 
 ```json
 { "source": "acquisition", "stages": [
+  { "stage": "compute", "name": "cost_per_click",
+    "expr": { "fn": "div", "args": [{ "column": "cost" }, { "column": "clicks" }] } },
   { "stage": "aggregate", "group_by": ["media_source"],
     "measures": [{ "name": "cpc_p50", "agg": "median", "column": "cost_per_click" }] }
 ] }

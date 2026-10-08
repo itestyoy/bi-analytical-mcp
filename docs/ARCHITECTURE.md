@@ -36,7 +36,8 @@ The declarative tool input is a direct transcription of that pipe chain:
     { "stage": "where",  "conditions": [ ... ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
     { "stage": "unnest", "source": "words_collected", "name": "word" },
-    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ] },
+    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ],
+      "between": { "value": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "country" ], "steps": [ ... ] },
     { "stage": "aggregate", "group_by": ["country"], "measures": [ ... ] },
     { "stage": "order_by", "keys": [ ... ] },
@@ -119,12 +120,20 @@ an aggregate) before generating SQL.
   against the live pipeline schema; values are bound via `sqlLiteral`
   (escaped). JSON keys / column names pass strict identifier regexes.
 - **Catalog is the boundary.** Scalar vs complex (array/struct) properties are
-  distinguished: complex props are rejected where a scalar is required and may
-  only be consumed by `compute`'s event-property functions (`array_length`, `array_contains`,
-  `event_property` with a `field`) and `unnest`. A `join` can only target a catalog model
-  through a relationship BOTH sides declare — the key columns come from the schema,
-  never from the call. Stages stack, so a chain reaches several models; `via` always
-  resolves its left-hand key on the pipeline's own source.
+  distinguished: the catalog says which a property is, and a function that needs an
+  array checks it when the stage is added — `array_length` / `array_contains` refuse a
+  property not declared as an array, `element_at` / `array_last` an argument of a known
+  non-array type. A complex prop is read with `compute`'s event-property functions —
+  `array_length`, `array_contains`, `event_property` (a struct's field with `field`;
+  without it the whole value) — or expanded with `unnest`. `element_at` / `array_last`
+  take an array of scalars (a native one, or what `json_parse_array` makes); an array of
+  structs is read a field at a time, by `unnest` then `json_field`. A comparison or a
+  grouping is not checked against the type: a condition comparing a whole array with a
+  scalar is accepted and fails or misbehaves only at run time. A `join` can only target
+  a catalog model: through a relationship BOTH sides declare (`via: "<relationship>"`,
+  the key columns from the schema), or ad hoc through columns both sides name
+  identically (`via: { on: [...] }`). Stages stack, so a chain reaches several models;
+  `via` always resolves its left-hand key on the pipeline's own source.
 - **Per-stage validation** happens on the threaded schema (§3): unknown column →
   rejected at the boundary, with a clear message, before any SQL runs.
 - **Generated SQL is read-only** and confined to the context overlay; results are
@@ -240,7 +249,8 @@ Declarative pipeline:
   "source": "events",
   "time_range": { "start": "2026-01-01" },
   "stages": [
-    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ] },
+    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ],
+      "between": { "value": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "where",  "conditions": [ { "column": "country", "op": "eq", "value": "US" } ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ], "mode": "ordered",
@@ -252,9 +262,15 @@ Declarative pipeline:
   ]
 }
 ```
-Lowers to BigQuery pipe syntax directly, or to a CTE chain
-`p0 (join) → p1 (where) → p2 (extend n_words) → p3 (match_recognize per user and
-platform) → p4 (aggregate)` on DuckDB — with a `/* <this config as YAML> */` header.
+`users` holds several versions of a player (a validity window per install record), so the
+join states the point in time it reads them at: `between` keeps the version valid at the
+event's `device_time`; without it every version matches and the counts inflate.
+
+The `time_range` is applied first, as a leading `where` on the source's time column. The
+pipeline lowers to BigQuery pipe syntax directly, or to a CTE chain
+`p0 (where: the time_range window) → p1 (join) → p2 (where) → p3 (extend n_words) →
+p4 (match_recognize per user and platform) → p5 (aggregate)` on DuckDB — with a
+`/* <this config as YAML> */` header.
 
 ---
 

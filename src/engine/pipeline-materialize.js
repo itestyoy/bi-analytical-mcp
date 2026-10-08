@@ -7,6 +7,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { formatDbtError, dbtFailure } from '../dbt/index.js';
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from '../python-model.js';
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
+import { currentSpelling } from '../pipeline/earlier.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { samplingNote, pageBlock } from './helpers.js';
 import { READ_PAGE } from '../schema/fields.js';
@@ -285,7 +286,7 @@ export const pipelineMaterializeMethods = {
     // Sampling is a property of the WHOLE declaration, not of the slice this build renders: a
     // `sample` baked into the materialized prefix still makes every number downstream approximate,
     // and dropping the flag would hand back a 1%-sampled figure as if it were exact.
-    const sampled = (input.pipeline.stages || []).find((st) => st.stage === 'sample') || null;
+    const sampled = (input.pipeline.stages || []).map((st) => currentSpelling(st)).find((st) => st?.stage === 'sample') || null;
     // a declaration that does not render is REFUSED (the caller reads it from the task as a compile error)
     const render = (modelName) => {
       try { return renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName, from: from ? { model: from.model, columns: from.columns } : null }); }
@@ -396,7 +397,7 @@ export const pipelineMaterializeMethods = {
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
       provenance: { tier: 'pipeline', source, data_freshness: await this.probe.dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
-      ...(sampled ? { sampling: samplingNote(sampled.percent ?? 10) } : {}),
+      ...(sampled ? { sampling: samplingNote(sampled.share) } : {}),
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]

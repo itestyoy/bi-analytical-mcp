@@ -5,7 +5,7 @@
 import { AGGS as PROJECTION_AGGS } from '../projection.js';
 import { OPS } from '../conditions.js';
 import { conditionList, CONSTANT } from '../schema-kit.js';
-import { measureSchema } from '../pipeline/sql.js';
+import { measureSchema, SORT_KEY } from '../pipeline/sql.js';
 
 // A read-only projection over a stored table — what query_pipeline_model runs over a built model
 // and what a drill-down card reads one view with. The row cap is the tool's own `limit`.
@@ -30,7 +30,7 @@ export const projectionLevel = (withThen) => ({
     group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
     measures: { type: 'array', description: 'The measures to compute over the (grouped) result — as a pipeline\'s aggregate stage takes them.', items: measure },
     having: conditionList(rowCondition, 'Keep the rows of the result these conditions hold for — on its group_by columns and measure names.'),
-    order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
+    order_by: { type: 'array', description: 'Sort the projected output — the sort keys of the order_by stage.', items: SORT_KEY },
     ...(withThen ? { then: projectionLevel(false) } : {}),
   },
 });

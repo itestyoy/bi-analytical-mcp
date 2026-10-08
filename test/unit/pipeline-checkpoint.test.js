@@ -98,7 +98,7 @@ test('truncate retires the checkpoints past the kept prefix; add_steps never ret
   await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 1
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
   await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 2
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', columns: ['player_id_of_internal'] }] });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', keep: ['player_id_of_internal'] }] });
   assert.equal(added.checkpoints_dropped, undefined, 'appending never invalidates a prefix');
   const tr = await e.build_pipeline_model({ action: 'truncate', context_id, after: 1 });
   assert.deepEqual(tr.checkpoints_dropped.map((d) => d.at), [2]);
@@ -165,14 +165,14 @@ test('a checkpoint is retired when the value index moved on, or its model is gon
   assert.equal(draftOf(e, context_id).checkpoints.length, 1);
   // A completed index scan means the source data may have moved — the prefix is no longer trusted.
   draftOf(e, context_id).checkpoints[0].index_run_id = 'a-previous-scan';
-  const afterScan = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', columns: ['player_id_of_internal'] }] });
+  const afterScan = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', keep: ['player_id_of_internal'] }] });
   assert.match(afterScan.checkpoints_dropped[0].reason, /value index was refreshed/);
   assert.deepEqual(draftOf(e, context_id).checkpoints, []);
 
   // And when the model itself is deleted out from under the draft.
   const second = await e.build_pipeline_model({ action: 'materialize', context_id });
   e.ctxs.removePipelineFiles(context_id, second.model);
-  const afterDelete = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', columns: ['player_id_of_internal'] }] });
+  const afterDelete = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', keep: ['player_id_of_internal'] }] });
   assert.match(afterDelete.checkpoints_dropped[0].reason, /no longer exists/);
 });
 
@@ -278,13 +278,15 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   };
   const e = new Engine({ catalog: loadCatalog(CATALOG, {}), runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) });
   const textFlag = /'is_clicked_of_event_data' is a text column in the warehouse/;
-  const forms = [{ column: 'is_clicked_of_event_data' }, { left: { column: 'is_clicked_of_event_data' } }];
+  const forms = [{ column: 'is_clicked_of_event_data' }];
   const ordered = (left) => ({ stage: 'where', conditions: [{ ...left, op: 'gt', value: true }] });
   // …and with the constant written on the left
   const constantLeft = { stage: 'where', conditions: [{ left: { value: true }, op: 'gt', right: { column: 'is_clicked_of_event_data' } }] };
   const refusedBoth = async (context_id, when) => {
     for (const left of forms) await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [ordered(left)] }), textFlag, `${when}: ${JSON.stringify(left)}`);
     await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [constantLeft] }), textFlag, `${when}: a constant on the left`);
+    // the column written as an expression is not another way to say it: it is told the one way
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [ordered({ left: { column: 'is_clicked_of_event_data' } })] }), /write \{ column \} instead of left: \{ column \}/, when);
   };
 
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });

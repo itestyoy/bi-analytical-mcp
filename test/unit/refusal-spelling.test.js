@@ -63,7 +63,7 @@ test('the quantile is `percentile` on both paths, and SQL\'s `q` / `fn` / `as` a
   const fn = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }));
   assert.equal(fn.ok, false);
   assert.match(text(fn), /here that field is called 'agg'/);
-  const as = check('build_pipeline_model', stage({ stage: 'unnest', source: 'items', as: 'item' }));
+  const as = check('build_pipeline_model', stage({ stage: 'unnest', column: 'items', as: 'item' }));
   assert.equal(as.ok, false);
   assert.match(text(as), /here that field is called 'name'/);
 });
@@ -99,7 +99,7 @@ test('a pipeline step names its context with context_id; `draft_id` is refused w
   assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
   assert.equal(check('build_pipeline_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
   // a start may omit its action (the default) and name a context to start the draft in
-  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', n: 1 }], materialize: true }).ok, true);
+  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; in a stage the rows are counted by leaving `column` out. The refusal

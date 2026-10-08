@@ -58,8 +58,8 @@ export const semanticIndexMethods = {
       const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
       const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
       if (!from || !to) return st;
-      fitted.push(`join with '${st.with}': added between { value: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
-      return { ...st, between: { value: eventTime, from, to } };
+      fitted.push(`join with '${st.with}': added between { column: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
+      return { ...st, between: { column: eventTime, from, to } };
     });
     return { payload: fitted.length ? { ...payload, stages: next } : null, fitted };
   },
@@ -407,7 +407,7 @@ export const semanticIndexMethods = {
     if (complex) {
       // Complex values are ~unique arrays/structs — sample_values are EXAMPLES of the shape,
       // not a frequency ranking; distinct/top-N do not apply.
-      if (samples.length) recommendations.push(`${samples.length} example value(s) showing the array/struct SHAPE (not top-N by frequency; complex values are ~unique). Read them into an unnest/struct_field pipeline to work with the contents.`);
+      if (samples.length) recommendations.push(`${samples.length} example value(s) showing the array/struct SHAPE (not top-N by frequency; complex values are ~unique). Read the contents with an unnest stage ({ property }) or a compute event_property with \`field\`.`);
       else recommendations.push(`Complex (${spec.type}) property — no examples indexed yet (the value index may not have run); its structure is in \`items\`/\`fields\` above.`);
     } else if (samples.length) {
       recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);

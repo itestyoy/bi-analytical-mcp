@@ -72,6 +72,6 @@ test('SCD-2 join WITH a point-in-time between window → no incomplete-join warn
   const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
   const r = await e.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id,
-    stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+    stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
   assert.ok(!hasIncompleteJoin(stepNotes(r)), `no warning expected once between is present, got: ${JSON.stringify(stepNotes(r))}`);
 });

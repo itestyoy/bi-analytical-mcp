@@ -17,7 +17,7 @@ const STATS = new Set(['stddev', 'variance', 'median', 'percentile']);
 export const aggName = (a) => a.name;
 
 // a dialect that writes names as they are — for checking a projection's shape, never for running it
-const PLAIN = { quoteIdent: (x) => x, statAggExpr: (fn, c) => `${fn}(${c})` };
+const PLAIN = { quoteIdent: (x) => x, statAggExpr: (fn, c) => `${fn}(${c})`, orderKey: (sql, direction, nulls) => `${sql} ${direction || 'asc'} nulls ${nulls || 'last'}` };
 
 function ident(x) {
   if (!IDENT.test(String(x || ''))) throw new Error(`unsafe identifier: ${x}`);
@@ -52,7 +52,7 @@ function writer(d) {
 
 /**
  * @param relation  SQL relation expression (e.g. `{{ ref('qr_x') }}`).
- * @param t         { where[], group_by[], measures[{ name, agg, column?, percentile?, where? }], having[], order_by[{key,direction,nulls}], limit }
+ * @param t         { where[], group_by[], measures[{ name, agg, column?, percentile?, where? }], having[], order_by[{ key, direction?, nulls? }], limit }
  * @param d         the warehouse's dialect — every name is written quoted, every statistic its way
  */
 export function buildProjection(relation, t = {}, d) {
@@ -72,7 +72,8 @@ export function buildProjection(relation, t = {}, d) {
   if (groupCols.length) sql += ` group by ${groupCols.join(', ')}`;
   // `having` keeps the rows of the result — conditions on its own names, the grammar of `where`
   if (t.having?.length) sql = `select * from (${sql}) grouped where ${conditionsSql(t.having, predicate).join(' and ')}`;
-  if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => `${col(o.key)} ${o.direction === 'desc' ? 'desc' : 'asc'}${o.nulls === 'first' ? ' nulls first' : o.nulls === 'last' ? ' nulls last' : ''}`).join(', ')}`;
+  // a sort key as the order_by stage writes it: NULLs last unless asked first, on every warehouse
+  if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => d.orderKey(col(o.key), o.direction, o.nulls)).join(', ')}`;
   if (typeof t.limit === 'number') sql += ` limit ${Math.trunc(t.limit)}`;
   return sql;
 }

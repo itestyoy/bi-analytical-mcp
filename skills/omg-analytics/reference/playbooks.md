@@ -22,7 +22,9 @@ Use a pipeline with a `match_recognize` stage.
 1. `build_pipeline_model({ request: { action: "start", name, source: "events" } })`.
 2. `add_steps` with `stages: [{ stage: "match_recognize", … }]`: `partition_by: ["<player key>"]`, ordered `steps`
    (each = event + an `event_data` value), e.g. `level_started → level_completed (result=win)`
-   or a tutorial chain. Add `between_steps` if repeats may occur.
+   or a tutorial chain. `between_steps` defaults to `"any"` (each step the next later occurrence;
+   repeats in between are allowed); set `"gap"` when a step's event in between — a repeat too — must
+   break the match (only events that are no step may come between).
 3. (optional) `add_steps` with a downstream `join` (users) / `aggregate` stage to slice conversion by a
    player attribute (country/platform).
 4. `materialize` (it returns a `task_id`), then read the rows with

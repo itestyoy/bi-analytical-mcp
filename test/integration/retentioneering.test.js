@@ -920,7 +920,7 @@ test('an eventstream from a pipeline build: events a window defined, the table\'
   await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ column: 'event_name', op: 'eq', value: 'level_started' }, { column: 'prev', op: 'eq', value: 'level_started' }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
-    { stage: 'project', columns: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
+    { stage: 'project', keep: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
   ] });
   const m = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const built = await one(engine.query_pipeline_model({ task_ids: [m.task_id] }));
@@ -975,7 +975,7 @@ test('from the task of a draft\'s rebuild: the eventstream and a pipeline starte
   await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'neq', value: 'first_launch' }] }] });
   const first = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   assert.equal((await one(engine.query_pipeline_model({ task_ids: [first.task_id] }))).status, 'done');
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'project', columns: ['player_id_of_internal', 'event_name', 'device_time'] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'project', keep: ['player_id_of_internal', 'event_name', 'device_time'] }] });
   const second = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const built = await one(engine.query_pipeline_model({ task_ids: [second.task_id] }));
   assert.equal(built.status, 'done', JSON.stringify(built.error));

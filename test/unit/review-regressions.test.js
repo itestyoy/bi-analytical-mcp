@@ -200,7 +200,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
   const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
   const to = Object.entries(u.dimensions).find(([, d]) => d.validity === 'end')[0];
-  assert.deepEqual(joinStage.between, { value: e.catalog.getModel('events').time.column, from, to });
+  assert.deepEqual(joinStage.between, { column: e.catalog.getModel('events').time.column, from, to });
   assert.ok(out.fitted_to_catalog?.some((f) => f.includes("join with 'users'")), JSON.stringify(out.fitted_to_catalog));
 });
 
@@ -217,7 +217,7 @@ test('_buildPipeline warns about an incomplete SCD join, like the step builder d
   // with the window stated, there is nothing to warn about
   const ok = await e._buildPipeline({
     name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
   });
   assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
 });
@@ -517,13 +517,13 @@ test('unnest is refused when the payload column it explodes is gone', async () =
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] });
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
   await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', source: 'words_collected', name: 'word' }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

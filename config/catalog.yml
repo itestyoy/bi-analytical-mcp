@@ -1766,7 +1766,7 @@ models:
   #   · governed path — MetricFlow applies the window itself; just group by user__<attribute>;
   #   · pipeline — state it in the join stage, explicitly:
   #       { stage: "join", with: "users", via: "user",
-  #         between: { value: "<this source's time column>",
+  #         between: { column: "<this source's time column>",
   #                    from: "install_time_valid_from", to: "install_time_valid_until" } }
   # MetricFlow allows a model with a validity window exactly ONE join key, as its natural key —
   # a second `primary`/`unique` key there is rejected at catalog load. Such a key can still be

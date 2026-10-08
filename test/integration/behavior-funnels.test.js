@@ -323,10 +323,10 @@ test('conversion: 12 visitors, 7 buyers', opts, async (t) => {
 // A conversion is a PIPELINE: one row per visitor from the first session, whether a purchase followed —
 // the semantic layer declares no conversion metric (MetricFlow would filter its base side only).
 const CONVERSION = [
-  { stage: 'match_recognize', partition_by: [{ entity: 'user' }], mode: 'ordered', steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
+  { stage: 'match_recognize', partition_by: [{ entity: 'user' }], steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
 ];
 // users is slowly changing: the country a visitor had at the first visit, not every version of it
-const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
+const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { column: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
 const converted = { name: 'buyers', agg: 'count', where: [{ column: 'completed', op: 'eq', value: true }] };
 
 test('conversion: visit->purchase — 7 of the 12 visitors bought after a session', opts, async (t) => {

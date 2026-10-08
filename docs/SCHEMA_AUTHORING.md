@@ -481,7 +481,7 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одна строка на элемент — «на каком шаге ломалось»
-{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }
+{ stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }
 //   → 20 строк; group_by crumb: level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, …
 
 // длина массива, не меняя грань
@@ -526,11 +526,11 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одно поле элемента, одной стадией — «какие файлы падают»
-{ stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' }
+{ stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' }
 //   → 16 кадров по 10 отчётам; group_by file: Game.cs 5, Net.cs 4, Engine.cs 3, Shop.cs 2, Decode.cs 1, Ads.cs 1
 
 // несколько полей — элемент целиком, потом json_field по каждому
-{ stage: 'unnest',  source: 'stack_frames_of_event_data', name: 'frame' }
+{ stage: 'unnest',  property: 'stack_frames_of_event_data', name: 'frame' }
 { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } }
 { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } }
 { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } }
@@ -612,7 +612,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 ```js
 { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } }
 { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }
-{ stage: 'unnest', source: 'rewards', name: 'rw' }          // элемент-структура целиком
+{ stage: 'unnest', property: 'rewards', name: 'rw' }        // элемент-структура целиком
 { stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item' } }
 ```
 
@@ -627,7 +627,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | массив скаляров, плоская колонка | `array: { items, encoding? }` | `unnest` · `array_length` · `array_contains` · `json_parse_array` + `element_at` / `array_last` |
 | массив объектов, плоская колонка | `array: { fields: {…}, encoding? }` | `unnest` с `field` · `unnest` целиком + `json_field` · `array_length` |
 | JSON-объект, плоская колонка | ничего особого + `description` с формой | `event_property` с `field` · `json_field` с `type` |
-| массив / объект внутри blob | `properties` под `is_event_data` | те же функции и стадии: `property` (у `unnest` — `source`) = имя ключа |
+| массив / объект внутри blob | `properties` под `is_event_data` | те же функции и стадии: `property` = имя ключа (и у `unnest`) |
 | настоящий ARRAY / REPEATED (BigQuery) | `array: { …, encoding: native }` | те же стадии без парсинга |
 
 Что **нельзя**: объявить массив под `dimension` (сложное значение — не атрибут), группировать
@@ -797,8 +797,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
       { "stage": "join", "with": "experiments", "via": "user",
         "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
       { "stage": "where", "conditions": [
-        { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
-        { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
+        { "column": "device_time", "op": "gte", "right": { "column": "assigned_at" } },
+        { "column": "device_time", "op": "lte", "right": { "column": "ended_at" } } ] },
       { "stage": "compute", "name": "is_conv", "expr": { "fn": "case", "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }], "else": { "value": 0 }, "type": "int" } },
       { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
         "measures": [{ "name": "converted", "agg": "max", "column": "is_conv" }] },

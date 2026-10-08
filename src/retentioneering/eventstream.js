@@ -154,7 +154,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     if (m?.scd) {
       const from = Object.entries(m.dimensions || {}).find(([, dd]) => dd.validity === 'start')?.[0];
       const to = Object.entries(m.dimensions || {}).find(([, dd]) => dd.validity === 'end')?.[0];
-      if (from && to) join.between = { value: cols.time, from, to };
+      if (from && to) join.between = { column: cols.time, from, to };
     }
     stages.push(join);
     segments.push({ name, expr: col });

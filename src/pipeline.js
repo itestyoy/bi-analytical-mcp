@@ -45,11 +45,12 @@
 //                            approx_count_distinct (HLL++), stddev/variance/median/
 //                            percentile(q). Solves: totals, rates, distributions,
 //                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.
-//   pivot      |> PIVOT      turn listed values of a column into columns.
-//                            Solves: dashboard-ready matrices (revenue per country column).
+//   pivot      |> AGGREGATE  turn listed values of a column into columns: one conditional
+//                            measure per value. Solves: dashboard-ready matrices (revenue per
+//                            country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
-//   sample     |> TABLESAMPLE  keep ~N% of rows for a FAST approximate first estimate
+//   sample     |> TABLESAMPLE  keep a share of the rows for a FAST approximate first estimate
 //                            on large data (BigQuery TABLESAMPLE SYSTEM; DuckDB random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
@@ -117,7 +118,7 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null) {
   for (const stored of stages) {
     // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
     // its stage too, which an earlier version may have named otherwise
-    const st = currentSpelling(stored, { cols });
+    const st = currentSpelling(stored, { cols, catalog, source });
     const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never

@@ -5,6 +5,7 @@
 
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
+import { operandsMisspelled } from '../pipeline/sql.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 
 export const pipelineDraftMethods = {
@@ -17,6 +18,7 @@ export const pipelineDraftMethods = {
    */
   async build_pipeline_model(input) {
     this._validate('build_pipeline_model', input);
+    this._refuseOperandSpelling({ stages: input.stages, stage: input.stage });
     // start is the default action: a request without one is a start (its forms are the only ones that may omit it)
     if (input.action === undefined || input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
@@ -61,6 +63,19 @@ export const pipelineDraftMethods = {
         next: `The steps are added; the build did not start (materialize.error says why). Materialize with build_pipeline_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
       };
     }
+  },
+
+  /**
+   * A new step's condition written with its column as left: { column }, or its constant as right:
+   * { value }, is refused with the spelling this grammar has ({ column }, `value`) — the schema takes
+   * either as an expression, and the carry-over of a step a draft kept from an earlier version would
+   * otherwise accept it as that step.
+   */
+  _refuseOperandSpelling(value) {
+    const [found] = operandsMisspelled(value);
+    if (!found) return;
+    const [path, told] = found;
+    throw new ToolError(`invalid input: \`${path}\` ${told}`, { stage: 'validate', field: path });
   },
 
   /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom

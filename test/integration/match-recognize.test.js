@@ -42,7 +42,7 @@ const activationSteps = [
   { name: 'tut2', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
   { name: 'tut3', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
-const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
+const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps, ...extra });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -59,10 +59,10 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
 // per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
 // instant to attribute a funnel to: the user as they were when the funnel started.
-const AT_FUNNEL = { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+const AT_FUNNEL = { column: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' };
 // A join placed BEFORE match_recognize — or in a pipeline with no funnel at all — still sees
 // one row per EVENT, so the instant to attribute it to is the event's own time.
-const AT_EVENT = { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+const AT_EVENT = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
@@ -212,7 +212,7 @@ test('build_pipeline_model add_steps rejects an invalid stage without mutating t
   const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_guard', source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
   await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', columns: ['no_such_column'] }] }),
+    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', keep: ['no_such_column'] }] }),
     'a stage referencing a missing column is rejected',
   );
   const pv = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
@@ -251,7 +251,7 @@ test('funnel flexible partition: a declared relationship and a per-(user,session
   assert.equal(reached(byEntity.rows, 'launch'), 12);
   // …and so does the default, which finds that relationship through the ROLE of the model it
   // points at — nothing here knows the relationship is called 'user'.
-  const byDefault = await pipe([{ stage: 'match_recognize', mode: 'ordered', steps: activationSteps }]);
+  const byDefault = await pipe([{ stage: 'match_recognize', steps: activationSteps }]);
   assert.equal(reached(byDefault.rows, 'launch'), 12);
   // A relationship written as a bare word is refused — it is not a column, and the message says so
   await assert.rejects(
@@ -319,7 +319,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   const out = await pipe([
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
     { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
-    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps.slice(0, 2) },
   ]);
   assert.equal(reached(out.rows, 'launch'), 4); // exactly the 4 US users
   assert.ok(reached(out.rows, 'tut1') <= 4);
@@ -338,7 +338,7 @@ test('funnel + prepare compute (array_length): n_words captured at level 1 avera
   // where and in a capture.
   const out = await pipe([
     { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
-    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'],
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
       capture: [{ name: 'words', step: 'lvl1', column: 'n_words' }] },
   ]);
@@ -354,7 +354,7 @@ test('a funnel whose partition, order and capture columns are SQL keywords (grou
     { stage: 'compute', name: 'group', expr: { column: 'player_id_of_internal' } },
     { stage: 'compute', name: 'order', expr: { column: 'device_time' } },
     { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
-    { stage: 'match_recognize', partition_by: ['group'], order_by: 'order', mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['group'], order_by: 'order',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
       capture: [{ name: 'select', step: 'lvl1', column: 'n_words' }] },
   ]);
@@ -369,7 +369,7 @@ test('funnel + prepare compute (array_contains): step filtered by derived boolea
   if (skip(t)) return;
   const out = await pipe([
     { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } },
-    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'],
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ column: 'has_cat', op: 'eq', value: true }] }] },
   ]);
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'
@@ -393,11 +393,11 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
+    { stage: 'pivot', group_by: [], on: 'country', measure: { agg: 'sum', column: 'price' }, values: [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }] },
   ]);
   assert.equal(out.rows.length, 1);
-  assert.equal(num(out.rows[0].US), 35);
-  assert.equal(num(out.rows[0].GB), 25);
+  assert.equal(num(out.rows[0].us), 35);
+  assert.equal(num(out.rows[0].gb), 25);
 });
 
 test('_buildPipeline: dry_run returns SQL without building', opts, async (t) => {
@@ -413,8 +413,8 @@ test('_buildPipeline: dry_run returns SQL without building', opts, async (t) => 
 
 test('_buildPipeline: same name in two contexts → distinct relations', opts, async (t) => {
   if (skip(t)) return;
-  const a = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
-  const b = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
+  const a = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', limit: 1 }] } });
+  const b = await engine._buildPipeline({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', limit: 1 }] } });
   assert.notEqual(a.context_id, b.context_id);
   assert.notEqual(a.model, b.model);
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);

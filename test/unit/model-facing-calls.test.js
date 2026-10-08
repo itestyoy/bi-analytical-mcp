@@ -158,7 +158,7 @@ test('a stage\'s fields, where a text lists them, are the fields the stage takes
   for (const { deployment, engine, texts } of await surfaces()) {
     const schema = engine.schemas.build_pipeline_model;
     const stages = new Set(stageNames(schema));
-    // `pivot` does the reverse (group_by + on + agg + value_column + …): the words of the list that are field names
+    // `pivot` does the reverse (group_by + on + measure + values): the words of the list that are field names
     const list = /`([a-z_]+)`[^`()]{0,40}\(([^()]*\+[^()]*)\)/g;
     let seen = 0;
     for (const [where, text] of [...texts, ...clientSkill()]) {
@@ -190,6 +190,15 @@ test('no text teaches a form the server retired', async () => {
     ['a metric query\'s order_by key written as an object, now the result column\'s name', /\border_by["']?\s*:\s*\[\s*\{\s*["']?key["']?\s*:\s*\{/],
     ['a project dimension named alone, now { semantic_model: [chain], dimension }', /\bgroup_by["']?\s*:\s*\[\s*\{\s*["']?dimension["']?\s*:/],
     ['memory search / one note at the top of record, now semantic_index { search } and record { notes: [...] }', /memory\(\{\s*(?:["']?request["']?\s*:\s*\{\s*)?["']?action["']?\s*:\s*["'](?:search|list|get)["']|memory\(\{\s*(?:["']?request["']?\s*:\s*\{\s*)?["']?action["']?\s*:\s*["']record["']\s*,\s*["']?note["']?\s*:/],
+    ['unpivot\'s name_as / value_as, now name_column / value_column', /\bname_as\b|\bvalue_as\b/],
+    ['a funnel\'s mode, now between_steps', /\bmode["']?\s*:\s*["'](?:ordered|strict)["']/],
+    ['a join window\'s between.value, now between.column', /\bbetween["']?\s*:\s*\{\s*["']?value["']?\s*:/],
+    ['a column written as left: { column }, now { column }', /\bleft["']?\s*:\s*\{\s*["']?column["']?\s*:/],
+    ['a sample\'s percent, now share', /["']?stage["']?\s*:\s*["']sample["']\s*,\s*["']?percent\b/],
+    ['a limit stage\'s n, now limit', /["']?stage["']?\s*:\s*["']limit["']\s*,\s*["']?n["']?\s*:/],
+    ['project\'s columns, now keep', /["']?stage["']?\s*:\s*["']project["']\s*,\s*["']?columns\b/],
+    ['unnest\'s source, now property | column', /["']?stage["']?\s*:\s*["']unnest["']\s*,\s*["']?source\b/],
+    ['a pivot\'s value_column and agg, now one measure', /["']?stage["']?\s*:\s*["']pivot["'][^}]*\bvalue_column\b/],
   ];
   const found = [];
   for (const [where, text] of [...texts, ...clientSkill(), ...docs]) {

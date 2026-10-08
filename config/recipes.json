@@ -396,7 +396,6 @@
                 "entity": "user"
               }
             ],
-            "mode": "ordered",
             "steps": [
               {
                 "name": "base",
@@ -1298,18 +1297,14 @@
             "stage": "where",
             "conditions": [
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "gte",
                 "right": {
                   "column": "assigned_at"
                 }
               },
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "lte",
                 "right": {
                   "column": "ended_at"
@@ -1626,18 +1621,14 @@
             "stage": "where",
             "conditions": [
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "gte",
                 "right": {
                   "column": "assigned_at"
                 }
               },
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "lte",
                 "right": {
                   "column": "ended_at"
@@ -1824,18 +1815,14 @@
                 {
                   "when": [
                     {
-                      "left": {
-                        "column": "device_time"
-                      },
+                      "column": "device_time",
                       "op": "gte",
                       "right": {
                         "column": "assigned_at"
                       }
                     },
                     {
-                      "left": {
-                        "column": "device_time"
-                      },
+                      "column": "device_time",
                       "op": "lte",
                       "right": {
                         "column": "ended_at"
@@ -1862,9 +1849,7 @@
                 {
                   "when": [
                     {
-                      "left": {
-                        "column": "device_time"
-                      },
+                      "column": "device_time",
                       "op": "lt",
                       "right": {
                         "column": "assigned_at"
@@ -2068,18 +2053,14 @@
             "stage": "where",
             "conditions": [
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "gte",
                 "right": {
                   "column": "assigned_at"
                 }
               },
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "lte",
                 "right": {
                   "column": "ended_at"
@@ -2303,18 +2284,14 @@
             "stage": "where",
             "conditions": [
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "gte",
                 "right": {
                   "column": "assigned_at"
                 }
               },
               {
-                "left": {
-                  "column": "device_time"
-                },
+                "column": "device_time",
                 "op": "lte",
                 "right": {
                   "column": "ended_at"
@@ -5292,7 +5269,7 @@
             "via": "user",
             "kind": "inner",
             "between": {
-              "value": "spend_date",
+              "column": "spend_date",
               "from": "install_time_valid_from",
               "to": "install_time_valid_until"
             },
@@ -5330,8 +5307,8 @@
           }
         ]
       },
-      "notes": "Without `between`, the key alone matches EVERY historical version of the row: the count and any money inflate silently (the add_steps response nudges about it and names the real window columns). The value side is the time being asked about — the event time, the spend day, or a funnel's first event after a match_recognize stage. The governed path applies the window itself; a pipeline states it here, deliberately, so the moment is visible at the call site.",
-      "hack": "Point-in-time = the key AND a time inside the window: `between: { value: <the time asked about>, from: <validity start>, to: <validity end> }`. The window is half-open on the right — the CURRENT version has no end (NULL) and must still match. Extrapolate: any versioned dimension."
+      "notes": "Without `between`, the key alone matches EVERY historical version of the row: the count and any money inflate silently (the add_steps response nudges about it and names the real window columns). The `column` side is the time being asked about — the event time, the spend day, or a funnel's first event after a match_recognize stage. The governed path applies the window itself; a pipeline states it here, deliberately, so the moment is visible at the call site.",
+      "hack": "Point-in-time = the key AND a time inside the window: `between: { column: <the time asked about>, from: <validity start>, to: <validity end> }`. The window is half-open on the right — the CURRENT version has no end (NULL) and must still match. Extrapolate: any versioned dimension."
     },
     {
       "required_events": [
@@ -5357,7 +5334,6 @@
             "partition_by": [
               "player_id_of_internal"
             ],
-            "mode": "ordered",
             "steps": [
               {
                 "name": "launch",
@@ -5409,7 +5385,7 @@
         ]
       },
       "notes": "One row per entity (or per match with rows: \"one_per_match\"), with a reached flag and a timestamp per step, so the drop-off between steps and the time spent in each are both readable from the same result. A step is an event plus a payload condition — the same definition the metric funnel uses, here with the ORDER enforced. It scans ONE source: a sequence cannot span two facts.",
-      "hack": "mode: \"ordered\" + partition_by the entity + a step list = the row-pattern scan. Count the reached_<step> flags for a funnel that respects order; a compute date_diff of two at_<step> columns gives the time between steps, and a where on it \"inside N minutes\". Extrapolate: any ordered path (onboarding, checkout, an ad funnel, a support escalation)."
+      "hack": "partition_by the entity + a step list = the row-pattern scan (between_steps: \"any\", the default, lets anything come between two steps; \"gap\" only events that are no step). Count the reached_<step> flags for a funnel that respects order; a compute date_diff of two at_<step> columns gives the time between steps, and a where on it \"inside N minutes\". Extrapolate: any ordered path (onboarding, checkout, an ad funnel, a support escalation)."
     },
     {
       "required_events": [],
@@ -5430,7 +5406,7 @@
         "stages": [
           {
             "stage": "unnest",
-            "source": "breadcrumbs_of_event_data",
+            "property": "breadcrumbs_of_event_data",
             "name": "crumb",
             "type": "string"
           },
@@ -5509,7 +5485,7 @@
             "with": "users",
             "via": "user",
             "between": {
-              "value": "device_time",
+              "column": "device_time",
               "from": "install_time_valid_from",
               "to": "install_time_valid_until"
             },
@@ -5545,8 +5521,8 @@
               "revenue",
               "purchases"
             ],
-            "name_as": "metric",
-            "value_as": "value"
+            "name_column": "metric",
+            "value_column": "value"
           },
           {
             "stage": "order_by",
@@ -5563,7 +5539,7 @@
           }
         ]
       },
-      "notes": "unpivot folds the named columns into (metric, value) rows — the long form a chart or a per-metric comparison wants; `pivot` does the reverse (group_by + on + agg + value_column + the values to spread), which returns ONE row per group and as many columns as values. Both are the LAST shaping step: aggregate first, reshape after.",
+      "notes": "unpivot folds the named columns into (metric, value) rows — name_column and value_column name the two, and `keep` the columns carried onto each row (the rest are dropped) — the long form a chart or a per-metric comparison wants; `pivot` does the reverse (group_by + on + measure + values), one measure computed per listed value of `on`, each value naming its column ({ value, name }), which returns ONE row per group and as many columns as values. Both are the LAST shaping step: aggregate first, reshape after.",
       "hack": "Shape is a stage, not a rewrite: unpivot to compare metrics as rows, pivot to lay a category out as columns. Extrapolate: any wide result to long for a chart, any long result to wide for a table."
     }
   ]

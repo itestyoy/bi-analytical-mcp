@@ -73,7 +73,7 @@ and the integration tests.
 - **Native-sequence time/value metrics (`avg_seconds_between`, `agg_at_step`) — BY DESIGN, untested.** Generated for both dialects and exposed as measures, but no test exercises them.
 - **`percentile` measures — input-validated only.** Compiles, but no value is asserted on data.
 - **N-step funnel in pure MetricFlow is composed, not native.** Chain 2-step conversions, or use the row-pattern pipeline model (the true multi-step engine).
-- **`strict` (contiguous-adjacency) funnels — only on the production warehouse target, rejected on the DuckDB test path** (honest guardrail rather than wrong numbers). Therefore unverified by tests.
+- **`between_steps: "none"` (contiguous-adjacency) funnels — offered only on the production warehouse target, not on the DuckDB test path** (the choice is not in its schema, and a kept draft that asks for it is refused, rather than wrong numbers). Therefore unverified by tests.
 
 ---
 
@@ -112,7 +112,7 @@ Consolidated from the code-quality and production-readiness audits. Severity is 
 - **Injection defense is consistent and layered** — typed predicate trees, strict identifier/path/JSON-key regexes, `sqlLiteral` everywhere, catalog-enum-bounded schemas, and a safe-arithmetic allowlist for `derived` metrics. No injection or path-traversal holes found (injection/escaping is even proven on data in the materialize suite).
 - **Context isolation is real** — per-context overlay projects with isolated `target/`, registry reconciliation against disk, and leases that prevent drop-during-build.
 - **Background-job machinery is durable** — timeout→background, SQLite persistence with restart reconciliation, graceful in-memory fallback, results re-fetchable by table even if the job record is gone.
-- **The MetricFlow-over-a-generated-view funnel architecture is elegant** and proven on data (the `dim_users` join happens at SQL-generation via a shared entity, not baked into the view). The Postgres path honestly rejects `strict` mode rather than returning wrong numbers.
+- **The MetricFlow-over-a-generated-view funnel architecture is elegant** and proven on data (the `dim_users` join happens at SQL-generation via a shared entity, not baked into the view). The DuckDB path does not offer `between_steps: "none"` rather than returning wrong numbers.
 
 ---
 

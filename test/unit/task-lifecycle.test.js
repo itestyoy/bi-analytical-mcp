@@ -169,7 +169,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   const built1 = await taskResult(e, first.task_id);
   assert.equal((await taskResult(e, q1.task_id)).model, built1.model, 'the query read the build it was queued behind');
   // a second build starts; a query issued now reads the NEW table, not the one standing
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', n: 5 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', limit: 5 }] });
   const second = await e.build_pipeline_model({ action: 'materialize', context_id });
   const q2 = await e.query_pipeline_model({ context_id });
   await until(() => runner.held.length);
@@ -184,7 +184,7 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
 test('a draft starts with its first steps, and adding steps may start its build in the same call', async () => {
   const runner = heldBuilds();
   const e = engine(runner);
-  const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', n: 5 }] });
+  const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', limit: 5 }] });
   assert.equal(e.ctxs.get(started.context_id).state.draft.stages.length, 2, 'both steps are on the draft');
   // the answer says the steps it holds: the ones added and their count, never an empty list beside them
   assert.equal(started.steps, undefined, 'no steps: [] beside the steps added');
@@ -193,7 +193,7 @@ test('a draft starts with its first steps, and adding steps may start its build 
   assert.deepEqual(listed.steps.map((s) => s.index), [1], 'include_steps: the whole list');
   // a step that cannot compile leaves the draft started, with none of the batch
   await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'stages[0]');
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, stages: [{ stage: 'limit', n: 3 }], materialize: true });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, stages: [{ stage: 'limit', limit: 3 }], materialize: true });
   assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
   assert.deepEqual(asksToMaterialize(added), [], 'nothing asks for the build this call started');
   await until(() => runner.held.length);
@@ -210,7 +210,7 @@ test('a start is the default action, and a start with its steps and materialize:
   // materialize builds the steps the start adds: with none, it is refused, and no context is made
   await assert.rejects(() => e.build_pipeline_model({ name: 'lvl', source: 'events', materialize: true }), (err) => err.field === 'materialize' && /stages/.test(err.message));
   assert.equal(e.ctxs.list().length, before, 'a refused start makes no context');
-  const started = await e.build_pipeline_model({ name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', n: 5 }], materialize: true });
+  const started = await e.build_pipeline_model({ name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', limit: 5 }], materialize: true });
   assert.equal(started.action, 'start');
   assert.equal(e.ctxs.get(started.context_id).state.draft.stages.length, 2, 'both steps are on the draft');
   assert.ok(isStartedTask(started.materialize), JSON.stringify(started));
@@ -226,7 +226,7 @@ test('a start is the default action, and a start with its steps and materialize:
 test('the context a draft is in is context_id on every action; draft_id is refused with that name', async () => {
   const e = engine(heldBuilds());
   const { context_id } = await e.build_pipeline_model({ name: 'lvl', source: 'events', stages: [WHERE_EVENT] });
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: context_id, stages: [{ stage: 'limit', n: 3 }] }), /'draft_id' — here that field is called 'context_id'/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: context_id, stages: [{ stage: 'limit', limit: 3 }] }), /'draft_id' — here that field is called 'context_id'/);
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused call added nothing');
   const fork = await e.build_pipeline_model({ action: 'fork', context_id });
   assert.deepEqual([fork.forked_from, typeof fork.context_id], [context_id, 'string']);
@@ -239,7 +239,7 @@ test('add_steps with materialize while a build runs: the steps are added, and th
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT] });
   const first = await e.build_pipeline_model({ action: 'materialize', context_id });
   await until(() => runner.held.length);
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', n: 3 }], materialize: true });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', limit: 3 }], materialize: true });
   // answered, not refused: the step is on the draft (once), and the answer says so beside the build's refusal
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 2);
   assert.deepEqual([added.added, added.steps_count], [1, 2]);

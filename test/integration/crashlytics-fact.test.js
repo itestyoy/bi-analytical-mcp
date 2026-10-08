@@ -220,7 +220,7 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   const a = await engine.build_pipeline_model({
     action: 'add_steps',
     context_id: s.context_id,
-    stages: [{ stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }] });
+    stages: [{ stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' }] });
   assert.equal(stepEffect(a).step_index, 1);
   const g = await engine.build_pipeline_model({
     action: 'add_steps',

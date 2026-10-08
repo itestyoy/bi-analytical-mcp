@@ -304,12 +304,20 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
   every condition taking the same operators (`OPS`, src/conditions.js, written by its one
   `comparison`). Only what a condition compares differs by LEVEL: over a table's rows (a pipeline's
-  where, a funnel step, a read's where and having, a measure's where) a `column` or an expression; on
+  where, a funnel step, a read's where and having, a measure's where) a `column` or an expression
+  (`left`, never a bare column), against a constant `value` or an expression `right` — never both
+  (four closed forms, `CONDITION` in src/pipeline/sql.js); on
   a semantic model's source a `field` (a column, a scalar payload property); in a metric query the
   field reference as group_by names it. A MEASURE is ONE form wherever rows are aggregated — a
-  pipeline's aggregate stage, a read's transform, a semantic model — `{ name, agg, column|field?,
+  pipeline's aggregate stage, a pivot's cells (that measure without its name and its where — the
+  cell's condition is `on` = the value — one per listed value),
+  a read's transform, a semantic model — `{ name, agg, column|field?,
   percentile?, where? }`, closed forms by `agg` (`measureSchema`, src/pipeline/sql.js): a count
-  without its column counts rows, events are scoped by a `where`. A computed column is ONE expression —
+  without its column counts rows, events are scoped by a `where`. A SORT KEY over a table's rows (the
+  order_by stage, a window's order, a read) is ONE item `{ key, direction?, nulls? }` (`SORT_KEY`),
+  NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
+  funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a week is the ISO
+  week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE expression —
   `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
   is added there once, its schema form and its SQL beside each other; a window function takes `over`,

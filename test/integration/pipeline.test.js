@@ -37,7 +37,7 @@ after(async () => { if (wh) await wh.stop(); });
 // dim_users is SLOWLY-CHANGING (one row per player per validity window), so every join to it
 // is point-in-time: the declared player key AND the event time inside the window. Without the
 // window a player with several versions matches all of them and counts inflate.
-const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
@@ -65,7 +65,7 @@ test('pipeline unnest: explode words_selected (JSON-string array) and count per 
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-    { stage: 'unnest', source: 'words_selected_of_event_data', name: 'word' },
+    { stage: 'unnest', property: 'words_selected_of_event_data', name: 'word' },
     { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', agg: 'count' }] },
     { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] },
   ]);
@@ -85,7 +85,7 @@ test('pipeline json_parse_array + unnest: parse a flat JSON-string column then e
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
     { stage: 'compute', name: 'words_arr', expr: { fn: 'json_parse_array', args: [{ column: 'words_selected_of_event_data' }] } },
-    { stage: 'unnest', source: 'words_arr', name: 'word' },
+    { stage: 'unnest', column: 'words_arr', name: 'word' },
     { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -143,21 +143,56 @@ test('pipeline where starts_with / contains: iap_purchase_* events', opts, async
   assert.deepEqual(byContains, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
 });
 
-// ... |> PIVOT: country values become columns
+// pivot: each listed value of `on` a column of its own, holding the measure over that value's rows —
+// the aggregate stage's conditional measures, so a count counts rows (not cells) on every warehouse
+const IAP_BY_COUNTRY = [
+  { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+  { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+  { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
+];
+const COUNTRIES = [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }];
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await run([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
-    { stage: 'pivot', group_by: [], on: 'country', agg: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
-  ]);
+  const r = await run([...IAP_BY_COUNTRY, { stage: 'pivot', group_by: [], on: 'country', measure: { agg: 'sum', column: 'price' }, values: COUNTRIES }]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.rows.length, 1);            // one pivoted row
   const row = r.rows[0];
-  assert.equal(num(row.US), 35);
-  assert.equal(num(row.GB), 25);
-  assert.equal(num(row.BR), 25);
+  assert.equal(num(row.us), 35);
+  assert.equal(num(row.gb), 25);
+  assert.equal(num(row.br), 25);
+});
+
+test('pipeline pivot: a count per cell is the rows of that value — the aggregate stage\'s count by country, 8 in all', opts, async (t) => {
+  if (skip(t)) return;
+  const grouped = await run([...IAP_BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }, { name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] }]);
+  const pivoted = await run([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { agg: 'count' }, values: COUNTRIES }]);
+  const payers = await run([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { agg: 'count_distinct', column: 'player_id_of_internal' }, values: COUNTRIES }]);
+  assert.equal(grouped.ok && pivoted.ok && payers.ok, true, JSON.stringify([grouped, pivoted, payers].find((x) => !x.ok)));
+  const by = Object.fromEntries(grouped.rows.map((x) => [String(x.country), x]));
+  for (const { value, name } of COUNTRIES) {
+    assert.equal(num(pivoted.rows[0][name]), num(by[value].n), `${value}: rows`);
+    assert.equal(num(payers.rows[0][name]), num(by[value].payers), `${value}: payers`);
+  }
+  assert.equal(COUNTRIES.reduce((a, c) => a + num(pivoted.rows[0][c.name]), 0), 8); // the 8 purchases, one cell each
+  assert.ok(COUNTRIES.some((c) => num(pivoted.rows[0][c.name]) > 1), 'a cell holds more than one row — a count of cells would read 1');
+});
+
+test('pipeline pivot: a numeric column pivots by number, a missing value is a column too, per group', opts, async (t) => {
+  if (skip(t)) return;
+  // the session number of every event, per event name: sessions 1 and 2 as numbers, and the rows with none
+  const base = [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['first_launch', 'new_session'] }] }];
+  const grouped = await run([...base, { stage: 'aggregate', group_by: ['event_name', 'session_number'], measures: [{ name: 'n', agg: 'count' }] }]);
+  const pivoted = await run([...base, { stage: 'pivot', group_by: ['event_name'], on: 'session_number', measure: { agg: 'count' }, values: [{ value: 1, name: 's1' }, { value: 2, name: 's2' }, { value: null, name: 'none' }] }]);
+  assert.equal(grouped.ok && pivoted.ok, true, JSON.stringify([grouped, pivoted].find((x) => !x.ok)));
+  const cell = (ev, s) => num(grouped.rows.find((x) => String(x.event_name) === ev && (s === null ? x.session_number == null : num(x.session_number) === s))?.n ?? 0);
+  assert.equal(pivoted.rows.length, 2);
+  for (const row of pivoted.rows) {
+    const ev = String(row.event_name);
+    assert.equal(num(row.s1), cell(ev, 1), `${ev}: session 1`);
+    assert.equal(num(row.s2), cell(ev, 2), `${ev}: session 2`);
+    assert.equal(num(row.none), cell(ev, null), `${ev}: no session`);
+  }
+  assert.ok(pivoted.rows.some((row) => num(row.s1) > 0), 'session 1 is counted');
 });
 
 // statistical aggregates over the 8 IAP prices [5,5,5,10,10,10,20,20]
@@ -195,8 +230,8 @@ test('pipeline elapsed_days: 24h buckets (25h=1, 47h59m=1, 48h=2, negative→0)'
     ed('d48h', '2026-01-01 00:00:00', '2026-01-03 00:00:00'),   // 48h → 2
     ed('dneg', '2026-01-03 00:00:00', '2026-01-01 00:00:00'),   // −48h → clamped to 0
     ed('draw', '2026-01-03 00:00:00', '2026-01-01 00:00:00', { clamp_zero: false }), // raw signed → −2
-    { stage: 'limit', n: 1 },
-    { stage: 'project', columns: ['d25h', 'd47h', 'd48h', 'dneg', 'draw'] },
+    { stage: 'limit', limit: 1 },
+    { stage: 'project', keep: ['d25h', 'd47h', 'd48h', 'dneg', 'draw'] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const row = r.rows[0];
@@ -254,7 +289,7 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
   if (skip(t)) return;
   const full = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'sample', percent: 100 },
+    { stage: 'sample', share: 1 },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(full.ok, true, JSON.stringify(full));
@@ -262,7 +297,7 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
 
   const part = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'sample', percent: 10 },
+    { stage: 'sample', share: 0.1 },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(part.ok, true, JSON.stringify(part));
@@ -270,15 +305,15 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
   assert.ok(n >= 0 && n <= 8, `sampled count ${n} out of bounds`); // random subset
 });
 
-// where with operand constants: column-vs-constant + column-vs-now (in past)
-test('pipeline where operands: price>=10 (operand const) and device_time<now → 5 rows summing 70', opts, async (t) => {
+// where with a constant and an expression: column-vs-constant + column-vs-now (in past)
+test('pipeline where operands: price>=10 (a constant) and device_time<now → 5 rows summing 70', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
     { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'where', conditions: [
       { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' },
-      { left: { column: 'price' }, op: 'gte', right: { value: 10 } }, // column vs constant operand
-      { left: { column: 'device_time' }, op: 'lt', right: { now: true } }, // column vs now
+      { column: 'price', op: 'gte', value: 10 }, // column vs constant
+      { column: 'device_time', op: 'lt', right: { now: true } }, // column vs now
     ] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }, { name: 's', agg: 'sum', column: 'price' }] },
   ]);
@@ -351,7 +386,7 @@ test('pipeline unnest struct + json_field: reward item/qty extracted together', 
   // Every level_completed row has a coin reward; gem only on level-1.
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-    { stage: 'unnest', source: 'rewards', name: 'rw' },
+    { stage: 'unnest', property: 'rewards', name: 'rw' },
     { stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item', type: 'string' } },
     { stage: 'compute', name: 'qty', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'qty', type: 'int' } },
     { stage: 'aggregate', group_by: ['item'], measures: [{ name: 'grants', agg: 'count' }, { name: 'total_qty', agg: 'sum', column: 'qty' }] },
@@ -423,6 +458,102 @@ test('pipeline compute date_trunc: all 8 IAP purchases fall in one month bucket'
   assert.equal(num(r.rows[0].n), 8);
 });
 
+// A WEEK IS THE ISO WEEK on every warehouse (Monday start — MetricFlow's week): the seed's events fall on
+// Thu 01-01 (33), Fri 01-02 (42), Sat 01-03 (27), Sun 01-04 (39), Mon 01-05 (37), Thu 01-08 (4), Fri 01-09 (2).
+// A Sunday-start week would split them 102 / 82; the ISO weeks are Mon 2025-12-29 (141) and Mon 2026-01-05 (43).
+test('pipeline date_trunc week / date_part dow, week: the ISO week (Monday 1 … Sunday 7)', opts, async (t) => {
+  if (skip(t)) return;
+  const weeks = await run([
+    { stage: 'compute', name: 'wk', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'week' } },
+    { stage: 'compute', name: 'wk_start', expr: { fn: 'substring', args: [{ fn: 'cast', args: [{ column: 'wk' }], type: 'string' }], start: 1, len: 10 } },
+    { stage: 'aggregate', group_by: ['wk_start'], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(weeks.ok, true, JSON.stringify(weeks));
+  assert.deepEqual(Object.fromEntries(weeks.rows.map((x) => [String(x.wk_start), num(x.n)])), { '2025-12-29': 141, '2026-01-05': 43 });
+  const parts = await run([
+    { stage: 'compute', name: 'dow', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'dow' } },
+    { stage: 'compute', name: 'wk', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'week' } },
+    { stage: 'aggregate', group_by: ['dow', 'wk'], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(parts.ok, true, JSON.stringify(parts));
+  const by = Object.fromEntries(parts.rows.map((x) => [`${num(x.dow)}/${num(x.wk)}`, num(x.n)]));
+  // Thu 4, Fri 5, Sat 6, Sun 7 of ISO week 1; Mon 1, Thu 4, Fri 5 of week 2
+  assert.deepEqual(by, { '4/1': 33, '5/1': 42, '6/1': 27, '7/1': 39, '1/2': 37, '4/2': 4, '5/2': 2 });
+});
+
+// date_diff counts WHOLE units elapsed, truncated toward zero, as an integer (TIMESTAMP_DIFF's count):
+// from the moments below to e1's time, 2026-01-01 08:00:00
+test('pipeline date_diff: whole units elapsed, truncated toward zero, integers', opts, async (t) => {
+  if (skip(t)) return;
+  const dd = (name, from, unit, to = { column: 'device_time' }) => ({ stage: 'compute', name, expr: { fn: 'date_diff', args: [{ value: from }, to], unit } });
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_id', op: 'eq', value: 'e1' }] },
+    dd('h_half', '2026-01-01 07:30:00', 'hour'),       // 30 min → 0 hours (not 0.5)
+    dd('h_neg', '2026-01-01 09:30:00', 'hour'),        // −1 h 30 min → −1 (toward zero, not −2)
+    dd('m_secs', '2026-01-01 07:59:30', 'minute'),     // 30 s → 0 minutes
+    dd('m_back', '2026-01-01 07:58:59', 'minute'),     // 1 min 1 s → 1
+    dd('s_back', '2026-01-01 07:58:59', 'second'),     // 61
+    dd('d_span', '2025-12-30 23:00:00', 'day'),        // 1 day 9 h → 1 (calendar days would be 2)
+    dd('d_neg', '2026-01-03 07:00:00', 'day'),         // −1 day 23 h → −1
+    { stage: 'project', keep: ['h_half', 'h_neg', 'm_secs', 'm_back', 's_back', 'd_span', 'd_neg'] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.rows[0], { h_half: 0, h_neg: -1, m_secs: 0, m_back: 1, s_back: 61, d_span: 1, d_neg: -1 });
+});
+
+// NULLS GO LAST unless a sort key says first — written explicitly by every warehouse (BigQuery would put
+// them first in an ascending sort): the order_by stage, a window's order and a read alike. The level id
+// is NULL on every event that is no level event.
+test('pipeline sort keys: NULLs last by default, first when asked — the order_by stage and a window', opts, async (t) => {
+  if (skip(t)) return;
+  const scope = { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['first_launch', 'level_completed'] }] };
+  const top = async (key) => {
+    const r = await run([scope, { stage: 'order_by', keys: [key, { key: 'event_id' }] }, { stage: 'limit', limit: 1 }]);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return r.rows[0].level_id_of_event_data;
+  };
+  const lowest = await run([scope, { stage: 'aggregate', group_by: [], measures: [{ name: 'lo', agg: 'min', column: 'level_id_of_event_data' }, { name: 'hi', agg: 'max', column: 'level_id_of_event_data' }] }]);
+  assert.equal(lowest.ok, true, JSON.stringify(lowest));
+  assert.equal(num(await top({ key: 'level_id_of_event_data' })), num(lowest.rows[0].lo));
+  assert.equal(num(await top({ key: 'level_id_of_event_data', direction: 'desc' })), num(lowest.rows[0].hi));
+  assert.equal(await top({ key: 'level_id_of_event_data', nulls: 'first' }), null);
+  assert.equal(await top({ key: 'level_id_of_event_data', direction: 'desc', nulls: 'first' }), null);
+  // a window: the first row by level id is a level (a rank and a running count alike), unless NULLs are asked first
+  const ranked = await run([
+    scope,
+    { stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data' }, { key: 'event_id' }] } } },
+    { stage: 'compute', name: 'rn_nulls', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data', nulls: 'first' }, { key: 'event_id' }] } } },
+    { stage: 'compute', name: 'seen', expr: { fn: 'count', args: [{ column: 'level_id_of_event_data' }], over: { order_by: [{ key: 'level_id_of_event_data' }, { key: 'event_id' }], frame: { mode: 'rows' } } } },
+    { stage: 'where', conditions: [{ column: 'rn', op: 'eq', value: 1 }] },
+  ]);
+  assert.equal(ranked.ok, true, JSON.stringify(ranked));
+  assert.notEqual(ranked.rows[0].level_id_of_event_data, null);
+  assert.equal(num(ranked.rows[0].seen), 1, 'the running count of levels at the first row has the one level it is');
+  const nullsFirst = await run([
+    scope,
+    { stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data', nulls: 'first' }, { key: 'event_id' }] } } },
+    { stage: 'where', conditions: [{ column: 'rn', op: 'eq', value: 1 }] },
+  ]);
+  assert.equal(nullsFirst.ok, true, JSON.stringify(nullsFirst));
+  assert.equal(nullsFirst.rows[0].level_id_of_event_data, null);
+});
+
+// a window restarts per a declared relationship as it does per its key column
+test('pipeline window partition_by { entity }: the same rows as the key column', opts, async (t) => {
+  if (skip(t)) return;
+  const nth = (partition) => run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'compute', name: 'pseq', expr: { fn: 'row_number', over: { partition_by: [partition], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
+    { stage: 'aggregate', group_by: ['pseq'], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  const byEntity = await nth({ entity: 'user' });
+  const byColumn = await nth('player_id_of_internal');
+  assert.equal(byEntity.ok && byColumn.ok, true, JSON.stringify([byEntity, byColumn].find((x) => !x.ok)));
+  const counts = (r) => Object.fromEntries(r.rows.map((x) => [num(x.pseq), num(x.n)]));
+  assert.deepEqual(counts(byEntity), counts(byColumn));
+  assert.deepEqual(counts(byEntity), { 1: 7, 2: 1 }); // 7 payers, one of them (u1) twice
+});
+
 // ... |> UNPIVOT: fold measures back into (metric, value) rows
 test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, async (t) => {
   if (skip(t)) return;
@@ -431,7 +562,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
     { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
-    { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_as: 'metric', value_as: 'value' },
+    { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_column: 'metric', value_column: 'value' },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const usRevenue = r.rows.find((x) => String(x.country) === 'US' && String(x.metric) === 'revenue');
@@ -440,6 +571,28 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   // every country contributes exactly the two folded metrics
   const usRows = r.rows.filter((x) => String(x.country) === 'US');
   assert.equal(usRows.length, 2);
+});
+
+// unpivot returns exactly `keep` + the two columns it makes, and a row for every folded value — a
+// NULL one too (BigQuery's UNPIVOT is told INCLUDE NULLS, and selects the kept and folded columns first)
+test('pipeline unpivot: exactly keep + name/value columns, one row per value — NULL values kept', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['iap_purchase_completed', 'first_launch'] }] },
+    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'session', expr: { fn: 'cast', args: [{ column: 'session_number' }], type: 'numeric' } },
+    { stage: 'unpivot', keep: ['event_id', 'event_name'], columns: ['price', 'session'], name_column: 'metric', value_column: 'amount' },
+  ]);
+  const events = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['iap_purchase_completed', 'first_launch'] }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
+  ]);
+  assert.equal(r.ok && events.ok, true, JSON.stringify([r, events].find((x) => !x.ok)));
+  assert.deepEqual(r.columns.map((c) => c.name).sort(), ['amount', 'event_id', 'event_name', 'metric']);
+  assert.equal(r.rows.length, 2 * num(events.rows[0].n)); // two rows per event, the NULL prices of first_launch too
+  const launchPrices = r.rows.filter((x) => String(x.event_name) === 'first_launch' && String(x.metric) === 'price');
+  assert.ok(launchPrices.length > 0 && launchPrices.every((x) => x.amount == null), 'a NULL value is a row, its value NULL');
+  assert.equal(r.rows.filter((x) => String(x.metric) === 'price').reduce((a, x) => a + (x.amount == null ? 0 : num(x.amount)), 0), 85);
 });
 
 // THE TWO-PASS LADDER that replaces a global analytic window. Pass 1 collapses the table to ONE row

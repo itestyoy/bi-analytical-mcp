@@ -1,5 +1,5 @@
 // BigQuery dialect: JSON/array primitives + pipeline lowering to native pipe
-// syntax (FROM ... |> WHERE ... |> AGGREGATE ... |> PIVOT ...).
+// syntax (FROM ... |> WHERE ... |> AGGREGATE ... |> UNPIVOT ...).
 // https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/pipe-syntax
 
 import { Dialect } from './base.js';
@@ -19,6 +19,33 @@ export class BigQueryDialect extends Dialect {
   get writesPipeSyntax() { return true; }
 
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
+
+  /** MATCH_RECOGNIZE says "the immediately next event" with a pattern that has no filler between steps. */
+  get matchesAdjacentSteps() { return true; }
+
+  /**
+   * A window's ORDER BY. A rank or a neighbour (row_number, lag …) takes NULLS FIRST / LAST as a query's
+   * ORDER BY does; an aggregate window (sum, count … OVER) takes none, so a placement other than
+   * BigQuery's own (first in an ascending sort, last in a descending one) is a leading key that sorts
+   * the NULLs — `(k IS NULL)`. A RANGE frame with an offset orders by its one key and takes no other;
+   * a NULL key is a peer of other NULLs alone, so its place changes no row's frame unless a side of the
+   * frame is unbounded — that one case is refused rather than computed with NULLs on the other end.
+   */
+  windowOrder(keys, { aggregate = false, frame = null } = {}) {
+    if (!aggregate) return super.windowOrder(keys);
+    const asked = (k) => (k.nulls === 'first' ? 'first' : 'last');
+    const native = (k) => asked(k) === (k.direction === 'desc' ? 'last' : 'first');
+    const plain = (k) => `${k.sql}${k.direction === 'desc' ? ' DESC' : ''}`;
+    const offset = frame?.mode === 'range' && [frame.preceding, frame.following].some((v) => Number.isInteger(v) && v > 0);
+    if (offset) {
+      const unbounded = (frame.preceding ?? 'unbounded') === 'unbounded' || frame.following === 'unbounded';
+      if (keys.some((k) => !native(k)) && unbounded) {
+        throw new Error('a RANGE window frame with an offset and an unbounded side cannot put NULL order keys anywhere but BigQuery\'s own place (first in an ascending sort, last in a descending one) — say nulls: \'first\' on that key (desc: \'last\'), which every warehouse then writes alike; or filter the NULLs out first (a where with is_not_null); or bound both sides of the frame');
+      }
+      return keys.map(plain).join(', ');
+    }
+    return keys.map((k) => (native(k) ? plain(k) : `(${k.sql} IS NULL)${asked(k) === 'first' ? ' DESC' : ''}, ${plain(k)}`)).join(', ');
+  }
 
   /** A value read out of JSON (or an array) as `type`: SAFE_CAST, so a row whose value does not
    *  convert is NULL for that row — as DuckDB's TRY_CAST answers — instead of failing the query. */
@@ -125,10 +152,12 @@ export class BigQueryDialect extends Dialect {
   // block sampling on the table reference, then the projection over the sample
   sampleQuery(ref, percent, project) { return project(`${ref} TABLESAMPLE SYSTEM (${Number(percent)} PERCENT)`); }
 
+  // TIMESTAMP_DIFF counts the whole units elapsed, truncated toward zero (a DAY is 24 hours, not a
+  // calendar boundary); both sides are read as TIMESTAMP, so a DATE column is its midnight, as on DuckDB
   dateDiff(unit, from, to) {
     const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];
     if (!u) throw new Error(`dateDiff: bad unit ${unit}`);
-    return `TIMESTAMP_DIFF(${to}, ${from}, ${u})`;
+    return `TIMESTAMP_DIFF(${this.timeOperand(to)}, ${this.timeOperand(from)}, ${u})`;
   }
 
   // Whole 24-HOUR days between two timestamps (retention-day style) — the DAY component of the
@@ -139,8 +168,10 @@ export class BigQueryDialect extends Dialect {
     return `EXTRACT(DAY FROM (CAST(${to} AS DATETIME) - CAST(${from} AS DATETIME)))`;
   }
 
+  // A week is the ISO week, starting on Monday (BigQuery's WEEK starts on Sunday) — the week DuckDB
+  // truncates to and MetricFlow's BigQuery renderer writes (`isoweek`)
   dateTrunc(granularity, expr) {
-    const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
+    const g = { day: 'DAY', week: 'ISOWEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);
     return `TIMESTAMP_TRUNC(${expr}, ${g})`;
   }
@@ -150,13 +181,16 @@ export class BigQueryDialect extends Dialect {
   // column was rejected outright. DATE() accepts DATE, DATETIME and TIMESTAMP alike, and every
   // grain a key may declare is a whole day or coarser, so the day is the right unit to compare at.
   grainExpr(granularity, expr) {
-    const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
+    const g = { day: 'DAY', week: 'ISOWEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`grainExpr: bad granularity ${granularity}`);
     return `DATE_TRUNC(DATE(${expr}), ${g})`;
   }
 
+  // ISO numbering, as DuckDB's and MetricFlow's: DAYOFWEEK counts Sunday 1 … Saturday 7, renumbered to
+  // Monday 1 … Sunday 7; the week is ISOWEEK (BigQuery's WEEK starts on Sunday)
   datePart(part, expr) {
-    const p = { dow: 'DAYOFWEEK', hour: 'HOUR', day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR', doy: 'DAYOFYEAR' }[part];
+    if (part === 'dow') return `IF(EXTRACT(DAYOFWEEK FROM ${expr}) = 1, 7, EXTRACT(DAYOFWEEK FROM ${expr}) - 1)`;
+    const p = { hour: 'HOUR', day: 'DAY', week: 'ISOWEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR', doy: 'DAYOFYEAR' }[part];
     if (!p) throw new Error(`datePart: bad part ${part}`);
     return `EXTRACT(${p} FROM ${expr})`;
   }
@@ -264,7 +298,7 @@ export class BigQueryDialect extends Dialect {
         const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
         const on = [
           ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
-          ...(op.between ? [this.validityWindow(`base.${this.quoteIdent(op.between.value)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
+          ...(op.between ? [this.validityWindow(`base.${this.quoteIdent(op.between.column)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
         ];
         const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
         return `|> AS base
@@ -273,16 +307,17 @@ export class BigQueryDialect extends Dialect {
       }
       case 'aggregate':
         return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.quoteIdent(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
-      case 'pivot':
-        return `|> AGGREGATE ${op.fn}(${this.quoteIdent(op.valueCol)}) AS v GROUP BY ${[...op.groupBy, op.on].map((c) => this.quoteIdent(c)).join(', ')}\n|> PIVOT(${op.fn}(v) FOR ${this.quoteIdent(op.on)} IN (${op.values.map((v) => this.sqlLiteral(v)).join(', ')}))`;
       case 'unpivot':
-        return `|> UNPIVOT(${this.quoteIdent(op.valueAs)} FOR ${this.quoteIdent(op.nameAs)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))`;
+        // exactly `keep` + the two produced columns, and a row for every folded value — a NULL one too
+        // (UNPIVOT drops them unless told otherwise), as the UNION ALL of the CTE lowering returns
+        return `|> SELECT ${[...op.keep, ...op.columns].map((c) => this.quoteIdent(c)).join(', ')}\n|> UNPIVOT INCLUDE NULLS (${this.quoteIdent(op.valueColumn)} FOR ${this.quoteIdent(op.nameColumn)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))`;
       case 'order_by':
-        return `|> ORDER BY ${op.keys.map((k) => `${this.quoteIdent(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+        return `|> ORDER BY ${op.keys.map((k) => this.orderKey(this.quoteIdent(k.key), k.direction, k.nulls)).join(', ')}`;
       case 'sample':
-        return `|> TABLESAMPLE SYSTEM (${Number(op.percent)} PERCENT)`;
+        // the share as BigQuery's percent, without a float's tail (0.07 * 100 = 7.000000000000001)
+        return `|> TABLESAMPLE SYSTEM (${+(Number(op.share) * 100).toPrecision(12)} PERCENT)`;
       case 'limit':
-        return `|> LIMIT ${Number(op.n)}`;
+        return `|> LIMIT ${Number(op.limit)}`;
       case 'project':
         return `|> SELECT ${op.cols.map((c) => this.quoteIdent(c)).join(', ')}`;
       case 'match_recognize':

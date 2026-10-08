@@ -10,12 +10,25 @@ import { GRAINS } from '../catalog.js';
 // (sql.js imports this module too: what is read from it here is read when a function runs, never as
 // the module loads)
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { fillPlaceholders, rawNamedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS, propEnum, sourceProp } from './sql.js';
+import { fillPlaceholders, rawNamedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS, TYPE, SORT_KEY, propEnum, sourceProp, partitionItem, partitionColumn } from './sql.js';
 import { conditionsSql, eachCondition } from '../conditions.js';
 import { form, SCALAR } from '../schema-kit.js';
 
-const ORDER = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' };
-const PARTITION = { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Window partition columns. Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.' };
+// (built when the schema is: sql.js imports this module, so what it exports is read lazily here)
+const ORDER = () => ({ type: 'array', items: SORT_KEY, description: 'Window ordering: each key a column, its direction and where its NULLs go (last unless said).' });
+const PARTITION = (catalog) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog), description: 'What the window restarts per: columns, or a declared relationship { entity } (its key column). Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.' });
+
+/** An event property of the pipeline's source, as every place that names one takes it (compute's
+ *  functions, the unnest stage): one enum of the catalog's event properties. */
+export const eventPropertySchema = (catalog, description = 'An event property of the pipeline\'s source — a scalar, an array or a JSON object, read where it is stored (its own column, or the event_data payload).') => propEnum(catalog?.eventPropEnum ? catalog.eventPropEnum() : [], description);
+
+/** An ARRAY event property, as the unnest stage names the one it explodes: the catalog's properties
+ *  declared as arrays — every event property when it declares none of them so (the build still refuses
+ *  one that is no array). */
+export const arrayEventPropertySchema = (catalog, description) => {
+  const arrays = catalog?.arrayEventPropEnum ? catalog.arrayEventPropEnum() : [];
+  return arrays.length ? propEnum(arrays, description) : eventPropertySchema(catalog, description);
+};
 // a frame bound: an offset, or the edge of the partition
 const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
 const FRAME = {
@@ -30,27 +43,27 @@ const FRAME = {
 
 // the parameters a function may take, by name — each function's form picks its own
 const params = (catalog) => ({
-  property: propEnum(catalog?.eventPropEnum ? catalog.eventPropEnum() : [], 'An event property of the pipeline\'s source — a scalar, an array or a JSON object, read where it is stored (its own column, or the event_data payload).'),
+  property: eventPropertySchema(catalog),
   item: { ...SCALAR, description: 'The value to look for among the array\'s elements.' },
   places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
-  type: { enum: ['int', 'numeric', 'float', 'string'], description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read or a raw expression yields, a CASE result.' },
+  type: TYPE,
   start: { type: 'integer', minimum: 1, description: '1-based start position.' },
   len: { type: 'integer', minimum: 0, description: 'Length in characters (optional).' },
   search: { type: 'string', description: 'Substring to find.' },
   replacement: { type: 'string', description: 'What replaces it.' },
   field: { type: 'string', description: 'The field of a JSON OBJECT to read: of the argument (json_field) or of the property (event_property).' },
   index: { type: 'integer', minimum: 1, description: '1-based index.' },
-  unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference.' },
-  grain: { enum: GRAINS, description: 'The time bucket to truncate to.' },
-  part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract.' },
+  unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference: the whole units elapsed from the first argument to the second, truncated toward zero (1 h 59 min is 1 hour; a day is 24 hours, not a calendar boundary — date_trunc both to the day for calendar days), an integer, negative when the second is earlier.' },
+  grain: { enum: GRAINS, description: 'The time bucket to truncate to (a week starts on Monday, the ISO week).' },
+  part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
   sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: EXPR } } },
   else: { ...EXPR, description: 'The value when no branch holds (default NULL).' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
   default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
-  over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION, order_by: ORDER } },
-  over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION, order_by: ORDER, frame: FRAME } },
+  over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION(catalog), order_by: ORDER() } },
+  over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION(catalog), order_by: ORDER(), frame: FRAME } },
 });
 
 // a window clause in raw SQL, outside its string literals, quoted names and comments
@@ -81,15 +94,20 @@ const needsArray = (fn, t) => {
   throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
 };
 
-/** The window clause of a window function: OVER (PARTITION BY … ORDER BY … frame). */
-function overSql(d, cols, over = {}, { frame = false } = {}) {
-  (over.partition_by || []).forEach((c) => requireCol(cols, c));
+/** The window clause of a window function: OVER (PARTITION BY … ORDER BY … frame). `frame`: an
+ *  aggregate of a frame (sum, count …) rather than a rank or a neighbour — the dialect orders the two
+ *  differently where it places NULLs. `opts` carries the pipeline's catalog and source, for a partition
+ *  named by a declared relationship. */
+function overSql(d, cols, over = {}, { frame = false, opts = {} } = {}) {
+  const partCols = (over.partition_by || []).map((p, i) => partitionColumn({ catalog: opts.catalog, source: opts.source, cols }, p, `over.partition_by[${i}]`));
+  partCols.forEach((c) => requireCol(cols, c));
   (over.order_by || []).forEach((o) => requireCol(cols, o.key));
-  const parts = (over.partition_by || []).map((c) => d.quoteIdent(c));
-  const ords = (over.order_by || []).map((o) => `${d.quoteIdent(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
+  const parts = partCols.map((c) => d.quoteIdent(c));
+  const keys = (over.order_by || []).map((o) => ({ sql: d.quoteIdent(o.key), direction: o.direction, nulls: o.nulls }));
   const f = frame ? frameClause(over.frame) : '';
-  if (f && !ords.length) throw new Error('a window frame requires order_by');
-  return `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')}${f})`;
+  if (f && !keys.length) throw new Error('a window frame requires order_by');
+  const ords = keys.length ? d.windowOrder(keys, { aggregate: frame, frame: frame ? over.frame : null }) : '';
+  return `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords ? `ORDER BY ${ords}` : ''].filter(Boolean).join(' ')}${f})`;
 }
 
 /**
@@ -158,7 +176,7 @@ export const FNS = {
   array_contains: { args: 0, needs: ['property', 'item'], sql: (x) => propertyRead('contains', x) },
   element_at: { args: 1, needs: ['index'], may: ['type'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: p.type || 'string' }; } },
   array_last: { args: 1, may: ['type'], sql: ({ d, a, t, p }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: p.type || 'string' }; } },
-  date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: p.unit === 'day' ? 'int' : 'numeric' }) },
+  date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
   date_trunc: { args: 1, needs: ['grain'], sql: ({ d, a, p }) => ({ expr: d.dateTrunc(p.grain, a[0]), type: 'time' }) },
   date_part: { args: 1, needs: ['part'], sql: ({ d, a, p }) => ({ expr: d.datePart(p.part, a[0]), type: 'int' }) },
   // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h buckets,
@@ -193,17 +211,17 @@ export const FNS = {
     },
   },
   // window functions: each over its `over` — the rank of a row, the value of a neighbour, an aggregate of a frame
-  row_number: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p }) => ({ expr: `row_number() ${overSql(d, cols, p.over)}`, type: 'int' }) },
-  rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p }) => ({ expr: `rank() ${overSql(d, cols, p.over)}`, type: 'int' }) },
-  dense_rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p }) => ({ expr: `dense_rank() ${overSql(d, cols, p.over)}`, type: 'int' }) },
-  lag: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p }) => ({ expr: `lag(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over)}`, type: t[0] || 'unknown' }) },
-  lead: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p }) => ({ expr: `lead(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over)}`, type: t[0] || 'unknown' }) },
+  row_number: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `row_number() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  dense_rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `dense_rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  lag: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lag(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
+  lead: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lead(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
   ...Object.fromEntries(['sum', 'average', 'min', 'max'].map((fn) => [fn, {
     args: 1, needs: ['over_frame'], window: true,
-    sql: ({ d, cols, a, t, p }) => ({ expr: `${sqlAgg(fn)}(${a[0]}) ${overSql(d, cols, p.over, { frame: true })}`, type: ['min', 'max'].includes(fn) ? (t[0] || 'unknown') : 'numeric' }),
+    sql: ({ d, cols, a, t, p, opts }) => ({ expr: `${sqlAgg(fn)}(${a[0]}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: ['min', 'max'].includes(fn) ? (t[0] || 'unknown') : 'numeric' }),
   }])),
   // a count of the rows (no argument) or of the non-NULL values of one
-  count: { args: { min: 0, max: 1 }, needs: ['over_frame'], window: true, sql: ({ d, cols, a, p }) => ({ expr: `count(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true })}`, type: 'int' }) },
+  count: { args: { min: 0, max: 1 }, needs: ['over_frame'], window: true, sql: ({ d, cols, a, p, opts }) => ({ expr: `count(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: 'int' }) },
 };
 
 /** The parameter a function's spec names, as the caller writes it (`over_frame` is written `over`). */

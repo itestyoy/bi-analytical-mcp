@@ -103,7 +103,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   const e = engine();
   const PY_OUT = { ...PY_STAGE, output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
   const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: "return df" }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
-  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', n: 10 }] } });
+  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', limit: 10 }] } });
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [
     [`${r.model}_s1`, 'python', 'fct_analytics_events'],   // python FIRST → dbt.ref of the source itself
     [`${r.model}_s2`, 'sql', `${r.model}_s1`],              // the aggregate reads the Python model
@@ -222,7 +222,7 @@ test('incremental builder: add_steps python → columns, nothing may follow, pre
   assert.equal(pv.models[1].input, `pipe_seg_${s.context_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 5 }] });
+  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }] });
   assert.equal(stepEffect(after).step_index, 3);
   const m = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(m.model, `pipe_seg_${s.context_id}`);
@@ -439,12 +439,12 @@ test('a chain with several python stages is gated in one run, and errors name th
   // count the gate's interpreter runs by wrapping the engine's own gate entry point
   const gate = e._gateCompiled.bind(e);
   e._gateCompiled = async (units) => { if (units.length) runs += 1; return gate(units); };
-  const ok = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, second] } }));
+  const ok = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', limit: 5 }, second] } }));
   assert.equal(ok.python.length, 2, 'two python models in the chain');
   assert.equal(runs, 1, 'gated in a single run');
   // and a body that is refused in the SECOND stage is reported against that stage's model
   const bad = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: "df['t'] = getattr(df, 'x')\nreturn df" }], steps: [{ call: 'tag' }] };
-  const err = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
+  const err = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', limit: 5 }, bad] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /pipe_seg: tag line 1 .*'getattr' is not available here/, 'the model whose body was refused is named (here the chain\'s last, which carries the pipeline name)');
 });

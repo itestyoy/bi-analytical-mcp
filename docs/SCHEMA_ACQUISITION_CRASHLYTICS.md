@@ -209,10 +209,10 @@
 
 | что нужно | стадия |
 |---|---|
-| массив, по элементам | `unnest { source, name }` — одна строка на элемент |
+| массив, по элементам | `unnest { property, name }` — одна строка на элемент (массив-колонка этапа — `unnest { column, name }`) |
 | массив, по отчёту | `compute { name, expr: { fn: array_length, property } }` / `{ fn: array_contains, property, item }` — зерно не меняется |
-| массив структур, одно поле | `unnest { source, name, field }` |
-| массив структур, несколько полей | `unnest { source, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
+| массив структур, одно поле | `unnest { property, name, field }` |
+| массив структур, несколько полей | `unnest { property, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
 | массив, по позиции | `compute` с `{ fn: json_parse_array, args: [{ column }] }` → `element_at` / `array_last` |
 | JSON-объект | `compute` с `{ fn: event_property, property, field }` или `{ fn: json_field, args: [{ column }], field }` |
 
@@ -413,7 +413,7 @@ semantic_index({ request: { model: 'acquisition' } }) describes them.
 
 ```json
 { "stage": "join", "with": "users", "via": "user",
-  "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
+  "between": { "column": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
   "attrs": [{ "column": "app_version", "name": "users_app_version" }, { "column": "country" }] }
 ```
 
@@ -430,7 +430,7 @@ semantic_index({ request: { model: 'acquisition' } }) describes them.
 { "source": "crashlytics", "stages": [
   { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ "column": "event_id" }] },
   { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ "column": "country" }],
-    "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+    "between": { "column": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
   { "stage": "join", "with": "acquisition", "via": "user", "kind": "inner", "attrs": [{ "column": "media_source" }, { "column": "cost" }] }
 ] }
 ```
@@ -475,7 +475,7 @@ acquisition × events: строки расходов размножаются п
 
 ```json
 { "stage": "join", "with": "users", "via": "user",
-  "between": { "value": "spend_date",
+  "between": { "column": "spend_date",
                "from": "install_time_valid_from",
                "to": "install_time_valid_until" },
   "attrs": [{ "column": "country" }] }
@@ -560,7 +560,7 @@ MetricFlow умеет соединять только по уникальном�
 ```json
 { "source": "acquisition", "stages": [
   { "stage": "join", "with": "users", "via": "user",
-    "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
+    "between": { "column": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
     "kind": "inner", "attrs": [{ "column": "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
     "measures": [{ "name": "total", "agg": "sum", "column": "cost" }] }

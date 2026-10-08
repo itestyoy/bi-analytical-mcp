@@ -35,13 +35,13 @@ The declarative tool input is a direct transcription of that pipe chain:
   "stages": [
     { "stage": "where",  "conditions": [ ... ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
-    { "stage": "unnest", "source": "words_collected", "name": "word" },
+    { "stage": "unnest", "property": "words_collected", "name": "word" },
     { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ],
-      "between": { "value": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+      "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "country" ], "steps": [ ... ] },
     { "stage": "aggregate", "group_by": ["country"], "measures": [ ... ] },
     { "stage": "order_by", "keys": [ ... ] },
-    { "stage": "limit", "n": 100 }
+    { "stage": "limit", "limit": 100 }
   ]
 }
 ```
@@ -72,11 +72,11 @@ Stage = {
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
 | `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
-| `pivot` | `\|> PIVOT` | turn listed values of a column into columns | **collapses** to group keys |
-| `unpivot` | `\|> UNPIVOT` | fold listed columns into (name, value) rows | **expands** |
+| `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one measure (the aggregate stage's) per value, as conditional measures | **collapses** to group keys |
+| `unpivot` | `\|> UNPIVOT` | fold listed columns into (name_column, value_column) rows; the result is `keep` + those two | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
-| `project` | `\|> SELECT` | keep/rename a column set | unchanged |
-| `sample` | `\|> TABLESAMPLE` | keep ~N% of rows for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; DuckDB row-level random()) | unchanged |
+| `project` | `\|> SELECT` | keep a column set (`keep`) or drop some (`drop`) | unchanged |
+| `sample` | `\|> TABLESAMPLE` | keep a `share` of the rows (0 < share ≤ 1) for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; DuckDB row-level random()) | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 
@@ -152,16 +152,18 @@ implementing the abstract `Dialect` (`src/dialects/base.js`); callers take one
 with `getDialect(name)` (`src/dialects/index.js`). The same op IR lowers two ways:
 
 - **BigQuery → native pipe syntax.** Each stage emits its `|>` operator; the
-  result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> PIVOT …`).
+  result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> UNPIVOT …`).
 - **DuckDB → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
   `SELECT … FROM p{i-1}`. `unnest` → `CROSS JOIN LATERAL jsonb_array_elements*`;
-  `aggregate` → `GROUP BY`; `pivot` → conditional aggregation
-  (`sum(CASE WHEN on = v THEN val END)`); `unpivot` → `CROSS JOIN LATERAL (VALUES …)`.
-  Semantics match the BigQuery pipe lowering step-for-step.
+  `aggregate` → `GROUP BY`; `unpivot` → a `UNION ALL` of one branch per folded column.
+  `pivot` is the aggregate stage's conditional measures on both (`sum(CASE WHEN on = v THEN val END)`).
+  Semantics match the BigQuery pipe lowering step-for-step — one meaning on both warehouses: a week
+  is the ISO week (Monday start), `date_part` dow is ISO (Monday 1 … Sunday 7), `date_diff` counts
+  whole units elapsed, and NULLs sort last unless a sort key says first.
 
 A dialect that supports a stage natively uses it; one that does not uses the
-lowering (or the stage is rejected for that dialect with a clear error, as
-`strict` MATCH_RECOGNIZE already is on DuckDB).
+lowering (or the choice is not offered for that dialect, and refused with a clear error — as a
+funnel's `between_steps: "none"`, each step the immediately next event, is on DuckDB).
 
 ## 6. Where dbt + MetricFlow fit
 
@@ -250,10 +252,10 @@ Declarative pipeline:
   "time_range": { "start": "2026-01-01" },
   "stages": [
     { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ],
-      "between": { "value": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+      "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "where",  "conditions": [ { "column": "country", "op": "eq", "value": "US" } ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
-    { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ], "mode": "ordered",
+    { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ],
       "steps": [ { "name": "launch", "event_name": ["first_launch"] },
                  { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "left": { "fn": "event_property", "property": "level_id_of_event_data" }, "op": "eq", "value": 1 } ] } ],
       "capture": [ { "name": "words_at_lvl1", "step": "lvl1", "column": "n_words" } ] },

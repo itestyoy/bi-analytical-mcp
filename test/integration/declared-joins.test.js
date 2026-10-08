@@ -75,7 +75,7 @@ const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
 
 /** The validity window of the install record, stated per the source's own time column. */
-const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -435,7 +435,7 @@ test('18. the player is part of the key: a shared funnel id does not leak across
   const rows = await pipeRows('crashlytics',
     { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k4' }] },
     { stage: 'join', with: 'events', via: 'ad_funnel_banner', kind: 'inner', attrs: [{ column: 'event_id' }] },
-    { stage: 'project', columns: ['event_id'] });
+    { stage: 'project', keep: ['event_id'] });
   assert.deepEqual(new Set(rows.map((r) => String(r.event_id))), new Set(['e133', 'e134']),
     "only u2's own banner events — e149/e150 are u10's, same funnel id");
 });
@@ -460,7 +460,7 @@ test('20. the funnel is isolated: u1 gets its rewarded pair or its interstitial 
     const rows = await pipeRows('crashlytics',
       { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-      { stage: 'project', columns: ['event_id'] });
+      { stage: 'project', keep: ['event_id'] });
     return new Set(rows.map((r) => String(r.event_id)));
   };
   assert.deepEqual(await ids('rewarded'), new Set(['e129', 'e130']));
@@ -873,7 +873,7 @@ const CHAIN_FROM_CRASH = [
   { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
   { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
   { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'acquisition_id' }, { column: 'cost' }] },
-  { stage: 'project', columns: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
+  { stage: 'project', keep: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
 ];
 
 // the same four models from the other end: event → its install version AT THE EVENT → that
@@ -882,7 +882,7 @@ const CHAIN_FROM_EVENT = [
   { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: [{ column: 'country' }] },
   { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'acquisition_id' }, { column: 'cost' }] },
   { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'crash_id' }] },
-  { stage: 'project', columns: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
+  { stage: 'project', keep: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
 ];
 
 const triples = (rows) => new Set(rows.map((r) => `${r.crash_id}|${r.event_id}|${r.acquisition_id}`));

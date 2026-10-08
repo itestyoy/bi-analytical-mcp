@@ -36,7 +36,7 @@ const num = (v) => Number(v === '' || v == null ? NaN : v);
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
 /** The validity window of the install record, per the crash source's own time column. */
-const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -75,7 +75,7 @@ async function step(stage) {
 test('1. unnest a JSON string array: 20 breadcrumbs, level_start 4 / net_retry 4 / gc_pause 3', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
+    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
     { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
   const by = mapCol(rows, 'crumb', 'n');
@@ -92,7 +92,7 @@ test('2. array_length on the flattened array: 13 rows, 20 elements, longest 3', 
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'n_crumbs', expr: { fn: 'array_length', property: 'breadcrumbs_of_event_data' } },
-    { stage: 'project', columns: ['crash_id', 'n_crumbs'] },
+    { stage: 'project', keep: ['crash_id', 'n_crumbs'] },
   );
   assert.equal(rows.length, 13, 'array_length does not change the grain');
   const by = mapCol(rows, 'crash_id', 'n_crumbs');
@@ -115,7 +115,7 @@ test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', 
   const only = await pipeRows(
     { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
     { stage: 'where', conditions: [{ column: 'retried', op: 'eq', value: true }] },
-    { stage: 'project', columns: ['crash_id'] },
+    { stage: 'project', keep: ['crash_id'] },
   );
   assert.deepEqual(new Set(only.map((r) => String(r.crash_id))), new Set(['k7', 'k8', 'k9']));
 });
@@ -126,7 +126,7 @@ test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', 
 test('4. unnest an array of structs by field: 16 frames over 6 files, Game.cs 5', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' },
+    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
     { stage: 'aggregate', group_by: ['file'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
   const by = mapCol(rows, 'file', 'n');
@@ -141,7 +141,7 @@ test('4. unnest an array of structs by field: 16 frames over 6 files, Game.cs 5'
 test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 / 3', opts, async (t) => {
   if (skip(t)) return;
   const frames = [
-    { stage: 'unnest', source: 'stack_frames_of_event_data', name: 'frame' },
+    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'frame' },
     { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
     { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } },
     { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } },
@@ -169,7 +169,7 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
   // and file + line together identify a frame: the deepest one is Engine.cs:250 in k6
   const deepest = await pipeRows(...frames,
     { stage: 'where', conditions: [{ column: 'line', op: 'eq', value: 250 }] },
-    { stage: 'project', columns: ['crash_id', 'file', 'line'] });
+    { stage: 'project', keep: ['crash_id', 'file', 'line'] });
   assert.equal(deepest.length, 1);
   assert.equal(String(deepest[0].crash_id), 'k6');
   assert.equal(String(deepest[0].file), 'Engine.cs');
@@ -180,7 +180,7 @@ test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read 
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'depth', expr: { fn: 'array_length', property: 'stack_frames_of_event_data' } },
-    { stage: 'project', columns: ['crash_id', 'event_name', 'depth'] },
+    { stage: 'project', keep: ['crash_id', 'event_name', 'depth'] },
   );
   assert.equal(rows.length, 13, 'every report is still here');
   const by = Object.fromEntries(rows.map((r) => [String(r.crash_id), r.depth == null || r.depth === '' ? null : num(r.depth)]));
@@ -197,7 +197,7 @@ test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read 
 test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', opts, async (t) => {
   if (skip(t)) return;
   const exploded = await pipeRows(
-    { stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' },
+    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
   assert.equal(num(exploded[0].n), 16);
@@ -253,7 +253,7 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
     { stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } },
     { stage: 'compute', name: 'entered', expr: { fn: 'element_at', args: [{ column: 'trail' }], index: 1 } },
     { stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } },
-    { stage: 'project', columns: ['crash_id', 'entered', 'died_at'] },
+    { stage: 'project', keep: ['crash_id', 'entered', 'died_at'] },
   );
   assert.equal(rows.length, 13);
   const pair = Object.fromEntries(rows.map((r) => [String(r.crash_id), `${r.entered}>${r.died_at}`]));
@@ -278,7 +278,7 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
 test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 3 / BR 1', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
+    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
     { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
@@ -293,7 +293,7 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
 test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', source: 'stack_frames_of_event_data', name: 'file', field: 'file' },
+    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
     { stage: 'aggregate', measures: [
       { name: 'n', agg: 'count' },
@@ -314,7 +314,7 @@ test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellul
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'network', expr: { fn: 'event_property', property: 'custom_keys_of_event_data', field: 'network' } },
-    { stage: 'unnest', source: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
+    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
     { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
   );
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 13, cellular: 7 });
@@ -328,9 +328,10 @@ test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellul
 //     rather than building array SQL over text and failing in the warehouse.
 test('14. complex ops on a scalar column are refused with what it actually is', opts, async (t) => {
   if (skip(t)) return;
+  // an unnest names only an array property: a scalar one is not among those it offers
   await assert.rejects(
-    () => step({ stage: 'unnest', source: 'issue_title_of_event_data', name: 'x' }),
-    /unnest: 'issue_title_of_event_data' is declared as string, not an array/,
+    () => step({ stage: 'unnest', property: 'issue_title_of_event_data', name: 'x' }),
+    /`stages\.0\.property` must be one of: .*breadcrumbs_of_event_data/,
   );
   await assert.rejects(
     () => step({ stage: 'compute', name: 'x', expr: { fn: 'array_length', property: 'issue_title_of_event_data' } }),

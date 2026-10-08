@@ -14,7 +14,7 @@ import { isNumericType } from './dialects/base.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
-import { physicalColumnType } from './catalog/column-types.js';
+import { physicalColumnType, isArrayPropertyType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
@@ -441,6 +441,11 @@ export class Catalog {
 
   scalarEventPropEnum() {
     return [...new Set(this.facts.flatMap((f) => this.scalarEventProps(f)))];
+  }
+
+  /** The event properties declared as arrays (of scalars or of structs) — what an unnest explodes. */
+  arrayEventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.eventProps(f).filter((k) => isArrayPropertyType(this.eventPropertySpec(k, f)?.type))))];
   }
 
   /** dbt column descriptions for a model: { columnName: description }. */

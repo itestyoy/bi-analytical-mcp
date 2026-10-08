@@ -115,12 +115,12 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
 test('a sampled pipeline flags the result approximate with guidance', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'sampled', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'sample', percent: 10 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'sample', share: 0.1 }] });
   await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
   const out = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
-  assert.equal(out.sampling.sample_percent, 10);
+  assert.equal(out.sampling.sample_share, 0.1);
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'exact', source: 'events' });
@@ -312,7 +312,7 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
   const branches = deref(bpm, field(bpm, st, 'partition_by').items).anyOf.map((b) => deref(bpm, b));
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
-  assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
+  assert.deepEqual(deref(bpm, entityBranch.properties.entity).enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
   assert.ok(branches.some((b) => b.type === 'string'), 'a plain column is still a column');
 
   const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];

@@ -112,8 +112,8 @@ export class PipelineAdvisor {
     const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
     const eventTime = draft?.source ? this.catalog.getModel(draft.source)?.time?.column : null;
     const fix = (from && to && eventTime)
-      ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
-      : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
+      ? ` Add between: { column: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
+      : ' Add a `between` window (column = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
     // The key is a declared relationship (via: '<name>') or columns both sides name alike
     // (via: { on: [...] }) — say whichever the caller used, never the object itself.
     const on = typeof stage.via === 'string' ? null : [].concat(stage.via?.on ?? stage.on ?? []);
@@ -291,9 +291,9 @@ export class PipelineAdvisor {
     const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const hits = [];
     eachCondition(stage.conditions, (c) => {
-      const col = c.column ?? c.left?.column;
+      const col = c.column;
       if (!timeCols.has(col)) return;
-      const value = c.value ?? c.right?.value;
+      const value = c.value;
       const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
       if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
     });

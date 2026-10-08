@@ -3,11 +3,15 @@
 // `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
 // themselves (src/match-recognize.js, src/python-model.js).
 
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, measureSchema, sourceProp, condPred, aggExpr, sqlAgg, addCol, requireCol } from './sql.js';
-import { exprSchema, exprSql } from './compute.js';
-import { form, strEnum } from '../schema-kit.js';
+import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, TYPE, SORT_KEY, measureSchema, sourceProp, condPred, aggExpr, addCol, requireCol } from './sql.js';
+import { exprSchema, exprSql, arrayEventPropertySchema } from './compute.js';
+import { form, strEnum, SCALAR } from '../schema-kit.js';
 import { conditionsSql } from '../conditions.js';
-import { physicalColumnType } from '../catalog/column-types.js';
+import { physicalColumnType, isArrayPropertyType } from '../catalog/column-types.js';
+
+/** The type of the column a measure produces: the earliest / latest of a column is of the column's
+ *  type (a time stays a time), a sketch is a sketch, every other aggregate a number. */
+const measureType = (cols, m) => (SKETCH_FNS.has(m.agg) ? 'sketch' : (m.agg === 'min' || m.agg === 'max') && m.column ? (cols.get(m.column)?.type || 'unknown') : 'numeric');
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -15,7 +19,7 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold; { or: [...] } holds when any of its items does (each a condition or { and: [...] }). A condition compares a column ({ column, op, value }) or an expression ({ left, op, right }) with a constant, a column or now — an expression on the right only with eq … lte. Use it to scope to events, a segment or a value range, anywhere in the pipeline, after a window or an aggregate too. A constant is compared in the column\'s type (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse.',
+      description: 'Keep only rows where all conditions hold; { or: [...] } holds when any of its items does (each a condition or { and: [...] }). A condition compares a column ({ column, op, … }) or another expression ({ left, op, … }: a function, now, a constant) with a constant (`value`) or an expression (`right`: a column, now, a function — eq … lte only), one of the two. Use it to scope to events, a segment or a value range, anywhere in the pipeline, after a window or an aggregate too. A constant is compared in the column\'s type (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse.',
       properties: {
         stage: { enum: ['where'] },
         conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
@@ -46,32 +50,42 @@ export const STAGES = {
   },
 
   unnest: {
-    schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'source', 'name'],
-      description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
-      properties: {
+    // WHAT IT EXPLODES, one of two: an array event property of the source ({ property }, an enum of
+    // the catalog's properties declared as arrays, under the key every function that reads one names
+    // it by) or an array column of the rows here ({ column }) — two closed forms, each built by its own
+    // branch.
+    schema: (catalog) => {
+      const fields = {
         stage: { enum: ['unnest'] },
-        source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by a compute json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
         name: { type: 'string', pattern: NAME, description: 'The name the element column gets.' },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
-        type: { enum: ['int', 'numeric', 'float', 'string'] },
-      },
-    }),
+        type: TYPE,
+      };
+      return {
+        type: 'object',
+        description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }) or an array column here ({ column } — e.g. one a compute json_parse_array made). For per-element analysis (items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
+        anyOf: [
+          form({ title: 'an array event property — { property, name }', required: ['stage', 'property', 'name'], properties: { stage: fields.stage, property: arrayEventPropertySchema(catalog, 'An array event property of the pipeline\'s source (semantic_index lists them) — its flattened column or its key of the event_data payload.'), name: fields.name, field: fields.field, type: fields.type } }),
+          form({ title: 'an array column — { column, name }', required: ['stage', 'column', 'name'], properties: { stage: fields.stage, column: { type: 'string', description: 'An array column at this step: a native ARRAY unnests directly (one json_parse_array made, or a joined one).' }, name: fields.name, field: fields.field, type: fields.type } }),
+        ],
+      };
+    },
     build: ({ catalog, cols, source }, p) => {
-      const found = sourceProp(catalog, source, p.source);
-      const spec = found?.spec;
       let column; let key; let encoding; let isStruct = false;
-      if (spec) {
-        if (!String(spec.type || '').toLowerCase().startsWith('array')) {
-          throw new Error(`unnest: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with a compute json_field.`);
+      if (p.property !== undefined) {
+        const found = sourceProp(catalog, source, p.property);
+        const spec = found?.spec;
+        if (!spec) throw new Error(`unnest: '${p.property}' is not an event property of '${source}' — an array column here is unnested as { column }`);
+        if (!isArrayPropertyType(spec.type)) {
+          throw new Error(`unnest: '${p.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with a compute json_field.`);
         }
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
         else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // a property inside the JSON blob
-      } else if (cols.has(p.source) && cols.get(p.source).type === 'array') {
-        column = p.source; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
       } else {
-        throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
+        requireCol(cols, p.column);
+        if (cols.get(p.column).type !== 'array') throw new Error(`unnest: '${p.column}' is ${cols.get(p.column).type || 'not typed'}, not an array column — make one with a compute json_parse_array, or unnest an array event property as { property }`);
+        column = p.column; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
       }
       // The column it explodes must still be HERE, exactly as an event_property read's must: after a stage
       // that changed the grain (or on top of a materialized prefix built from one) the payload is
@@ -89,7 +103,7 @@ export const STAGES = {
       // ONE CLOSED FORM PER JOINED MODEL AND WAY OF MATCHING: `with` pinned, and every column the form
       // names — attrs, the window's bounds, the shared key — one of THAT model's own columns, so a
       // join is written only with names the model has. (Its left side — `via`'s key on the
-      // pipeline's own source, `between.value` — is the pipeline's, checked when the step is added.)
+      // pipeline's own source, `between.column` — is the pipeline's, checked when the step is added.)
       const forms = [];
       for (const model of catalog.modelKeys()) {
         const m = catalog.models[model];
@@ -111,11 +125,11 @@ export const STAGES = {
             },
           },
           between: {
-            type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
+            type: 'object', additionalProperties: false, required: ['column', 'from', 'to'],
             description: 'The version valid at a moment of this side (see the stage).',
             properties: {
               // from / to: the window's lower and upper bound columns on the joined model (inclusive), e.g. valid_from / valid_until
-              value: { type: 'string', pattern: NAME, description: 'A column of this side (e.g. the event time); from / to are the joined model\'s bounds, inclusive.' },
+              column: { type: 'string', pattern: NAME, description: 'A column of this side holding the moment (e.g. the event time); from / to are the joined model\'s bounds, inclusive.' },
               from: column,
               to: column,
             },
@@ -209,15 +223,15 @@ export const STAGES = {
       for (const a of attrs) { out = addCol(out, a.as, joined.get(a.column)?.type || 'string'); if (joined.get(a.column)?.physical) out.get(a.as).physical = true; }
       let between;
       if (p.between) {
-        // `value` is a column on THIS side (validated against the live column set); `from`/`to`
+        // `column` is a column on THIS side (validated against the live column set); `from`/`to`
         // are columns of the JOINED model (validated against its declared columns when known).
-        requireCol(cols, p.between.value);
+        requireCol(cols, p.between.column);
         const joinedCols = new Set([...catalog.modelColumns(p.with).map((c) => c.name), ...Object.keys(m.dimensions || {})]);
         for (const side of ['from', 'to']) {
           const c = p.between[side];
           if (joinedCols.size && !joinedCols.has(c)) throw new Error(`join between.${side}: '${c}' is not a column of '${p.with}' (available: ${[...joinedCols].join(', ')})`);
         }
-        between = { value: p.between.value, from: p.between.from, to: p.between.to };
+        between = { column: p.between.column, from: p.between.from, to: p.between.to };
       }
       // Each dialect renders the projection `attrs` itself (a `j.col AS alias` list in the CTE
       // form, a projecting subquery on the right side of a pipe JOIN), so the column set promised
@@ -258,85 +272,114 @@ export const STAGES = {
         const cond = m.where?.length ? conditionsSql(m.where, (c) => condPred(d, cols, c, { windows: false, catalog, source })).map((x) => `(${x})`).join(' AND ') : null;
         return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile, cond) };
       });
-      let out = new Map();
+      const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      // the earliest / latest of a column is of the column's type (a time stays a time); every other aggregate is a number
-      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.agg) ? 'sketch' : (m.agg === 'min' || m.agg === 'max') && m.column ? (cols.get(m.column)?.type || 'unknown') : 'numeric' });
+      for (const m of p.measures) out.set(m.name, { type: measureType(cols, m) });
       return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },
 
   pivot: {
+    // ONE MEASURE PER CELL — the aggregate stage's measure, without its name (each value names its own
+    // column) and without its where (the cell's condition is `on` = the value): built as that stage's
+    // conditional measures, one per value, so it counts, sums and takes a percentile alike on every warehouse.
     schema: () => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'on', 'agg', 'value_column', 'values'],
-      description: 'Turn listed values of `on` into columns, each aggregating `value_column` (the values must be listed explicitly). For dashboard-ready matrices (e.g. revenue as one column per country, or retention day as columns).',
+      type: 'object', additionalProperties: false, required: ['stage', 'on', 'measure', 'values'],
+      description: 'Turn listed values of `on` into columns: one row per group_by group, and for each value a column holding `measure` over that group\'s rows where `on` equals it (count the rows, sum an amount…). The values are listed explicitly, each with the name of its column. For dashboard-ready matrices (revenue as one column per country, retention day as columns).',
       properties: {
         stage: { enum: ['pivot'] },
         group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
-        on: { type: 'string', description: 'Column whose values become columns.' },
-        agg: { enum: ['sum', 'average', 'min', 'max', 'count'], description: 'How each pivoted cell aggregates value_column.' },
-        value_column: { type: 'string', description: 'Column aggregated into each pivoted column.' },
-        values: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: '^[A-Za-z0-9_]+$' }, description: 'The values of `on` to pivot into columns.' },
+        on: { type: 'string', description: 'The column whose values become columns.' },
+        measure: measureSchema({ aggs: AGG_FNS, column: { type: 'string' }, named: false, description: 'What each cell holds — a measure of the aggregate stage ({ agg, column?, percentile? }) over the group\'s rows where `on` equals the cell\'s value.' }),
+        values: {
+          type: 'array', minItems: 1, uniqueItems: true,
+          description: 'The values of `on` that become columns, each with its column\'s name.',
+          items: {
+            type: 'object', additionalProperties: false, required: ['value', 'name'],
+            properties: {
+              value: { ...SCALAR, description: 'A value of `on`, in its type (a number for a numeric column); null is the rows where it is missing.' },
+              name: { type: 'string', pattern: NAME, description: 'The name of the column it becomes.' },
+            },
+          },
+        },
       },
     }),
-    build: ({ cols }, p) => {
+    build: ({ d, catalog, cols, source }, p) => {
       const groupBy = p.group_by || [];
-      [...groupBy, p.on, p.value_column].forEach((c) => requireCol(cols, c));
-      let out = new Map();
+      [...groupBy, p.on].forEach((c) => requireCol(cols, c));
+      const m = p.measure || {};
+      if (m.column) requireCol(cols, m.column);
+      const taken = new Set(groupBy); const seen = new Set();
+      for (const v of p.values) {
+        if (taken.has(v.name)) throw new Error(`pivot: '${v.name}' names ${groupBy.includes(v.name) ? 'a group_by column' : 'two values'} — give each value a column name of its own`);
+        taken.add(v.name);
+        const key = JSON.stringify(v.value);
+        if (seen.has(key)) throw new Error(`pivot: the value ${key} is listed twice`);
+        seen.add(key);
+      }
+      const aggs = p.values.map((v) => {
+        const cond = condPred(d, cols, v.value === null ? { column: p.on, op: 'is_null' } : { column: p.on, op: 'eq', value: v.value }, { windows: false, catalog, source });
+        return { as: v.name, expr: aggExpr(d, m.agg, m.column, m.percentile, `(${cond})`) };
+      });
+      const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const v of p.values) out.set(v, { type: 'numeric' });
-      return { op: { op: 'pivot', groupBy, on: p.on, fn: sqlAgg(p.agg), valueCol: p.value_column, values: p.values }, cols: out };
+      for (const v of p.values) out.set(v.name, { type: measureType(cols, m) });
+      return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },
 
   unpivot: {
     schema: () => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_as', 'value_as'],
-      description: 'Fold the listed columns into rows of (name_as, value_as), keeping the rest. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
+      type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_column', 'value_column'],
+      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too). The result is exactly `keep` + those two columns; every other column is dropped. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { enum: ['unpivot'] },
         columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Columns to fold into rows.' },
-        keep: { type: 'array', items: { type: 'string' }, description: 'Columns to keep as-is (default: none).' },
-        name_as: { type: 'string', pattern: NAME },
-        value_as: { type: 'string', pattern: NAME },
+        keep: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Columns carried as they are onto each folded row (default: none).' },
+        name_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds each folded column\'s name.' },
+        value_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds its value.' },
       },
     }),
     build: ({ cols }, p) => {
       const keep = p.keep || [];
       [...keep, ...p.columns].forEach((c) => requireCol(cols, c));
-      let out = new Map();
+      const folded = keep.find((c) => p.columns.includes(c));
+      if (folded) throw new Error(`unpivot: '${folded}' is both kept and folded — list it in one of keep or columns`);
+      for (const n of [p.name_column, p.value_column]) if (keep.includes(n)) throw new Error(`unpivot: '${n}' is a kept column — name the produced column otherwise`);
+      if (p.name_column === p.value_column) throw new Error('unpivot: name_column and value_column name the same column — give each its own name');
+      const out = new Map();
       for (const k of keep) out.set(k, cols.get(k) || { type: 'string' });
-      out.set(p.name_as, { type: 'string' });
-      out.set(p.value_as, { type: 'numeric' });
-      return { op: { op: 'unpivot', keep, columns: p.columns, nameAs: p.name_as, valueAs: p.value_as }, cols: out };
+      out.set(p.name_column, { type: 'string' });
+      out.set(p.value_column, { type: 'numeric' });
+      return { op: { op: 'unpivot', keep, columns: p.columns, nameColumn: p.name_column, valueColumn: p.value_column }, cols: out };
     },
   },
 
   order_by: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
-      description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering.',
-      properties: { stage: { enum: ['order_by'] }, keys: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } } },
+      description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering. NULLs go last unless a key says first — the same on every warehouse.',
+      properties: { stage: { enum: ['order_by'] }, keys: { type: 'array', minItems: 1, items: SORT_KEY, description: 'The sort keys, in order.' } },
     }),
-    build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, dir: k.direction })) }, cols }; },
+    build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, direction: k.direction, nulls: k.nulls })) }, cols }; },
   },
 
   limit: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { enum: ['limit'] }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
-    build: ({ cols }, p) => ({ op: { op: 'limit', n: p.n }, cols }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'limit'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { enum: ['limit'] }, limit: { type: 'integer', minimum: 1, maximum: 1000000, description: 'The most rows kept.' } } }),
+    build: ({ cols }, p) => ({ op: { op: 'limit', limit: p.limit }, cols }),
   },
 
   sample: {
     keepsSourceRows: true,
     schema: () => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'percent'],
-      description: 'Keep about `percent`% of rows at random — a fast, approximate first look on large data. Put it early. The result is flagged approximate; rerun without it for any number you act on (sampling error is large near 0 / 1 rates, in small segments and for distinct counts).',
+      type: 'object', additionalProperties: false, required: ['stage', 'share'],
+      description: 'Keep about `share` of the rows at random (0.1 = about a tenth) — a fast, approximate first look on large data. Put it early. The result is flagged approximate; rerun without it for any number you act on (sampling error is large near 0 / 1 rates, in small segments and for distinct counts).',
       properties: {
         stage: { enum: ['sample'] },
-        percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },
+        share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The approximate share of rows to keep, a fraction: 0 < share <= 1 (0.01 = about 1%).' },
       },
     }),
-    build: ({ cols }, p) => ({ op: { op: 'sample', percent: p.percent }, cols }),
+    build: ({ cols }, p) => ({ op: { op: 'sample', share: p.share }, cols }),
   },
 
   project: {
@@ -344,15 +387,15 @@ export const STAGES = {
       const names = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } };
       return {
         type: 'object',
-        description: 'Trim the columns before they are materialized: `columns` keeps exactly these (in this order), `drop` removes these and keeps the rest.',
+        description: 'Trim the columns before they are materialized: `keep` keeps exactly these (in this order), `drop` removes these and keeps the rest.',
         anyOf: [
-          form({ title: 'keep these columns', required: ['stage', 'columns'], properties: { stage: { enum: ['project'] }, columns: { ...names, description: 'The columns to keep, in order.' } } }),
+          form({ title: 'keep these columns', required: ['stage', 'keep'], properties: { stage: { enum: ['project'] }, keep: { ...names, description: 'The columns to keep, in order.' } } }),
           form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: { ...names, description: 'The columns to remove; every other column stays.' } } }),
         ],
       };
     },
     build: ({ cols }, p) => {
-      const keep = p.drop ? (p.drop.forEach((c) => requireCol(cols, c)), [...cols.keys()].filter((c) => !p.drop.includes(c))) : p.columns;
+      const keep = p.drop ? (p.drop.forEach((c) => requireCol(cols, c)), [...cols.keys()].filter((c) => !p.drop.includes(c))) : p.keep;
       if (!keep.length) throw new Error('project: dropping every column leaves nothing to keep');
       keep.forEach((c) => requireCol(cols, c));
       const out = new Map(); for (const c of keep) out.set(c, cols.get(c) || { type: 'string' });

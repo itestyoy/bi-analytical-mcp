@@ -49,7 +49,7 @@ test('build_pipeline_model: add_steps propagates columns; bad step is rejected w
   assert.equal(stepEffect(a2).step_index, 2);
   assert.deepEqual(a2.available_columns.map((c) => c.name), ['completed', 'n']);
   // a stage referencing a missing column is rejected and NOT persisted.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', columns: ['no_such_col'] }] }));
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', keep: ['no_such_col'] }] }));
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.equal(pv.steps.length, 2, 'rejected step not persisted');
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (schema-only)');
@@ -127,7 +127,7 @@ test('build_pipeline_model: schema rejects malformed actions', async () => {
   await assert.rejects(() => e.build_pipeline_model({ action: 'start' }), 'start requires name');
   await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: 'ctx_deadbeef' }), 'add_steps requires stages');
   // one stage is a list of one: there is no second action for it
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', context_id: 'ctx_deadbeef', stage: { stage: 'limit', n: 1 } }), /add_steps/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', context_id: 'ctx_deadbeef', stage: { stage: 'limit', limit: 1 } }), /add_steps/);
   await assert.rejects(() => e.build_pipeline_model({ action: 'bogus' }), 'unknown action rejected');
 });
 
@@ -155,7 +155,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   // value is a base (events) column; from/to are columns of the joined model.
   const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{
     stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
-    between: { value: 'device_time', from: 'install_date', to: 'install_date' },
+    between: { column: 'device_time', from: 'install_date', to: 'install_date' },
   }], include_columns: true });
   assert.ok(ok.available_columns.some((c) => c.name === 'country'), 'joined attr exposed');
   // it renders end-to-end (forces the ON-clause CTE form so the BETWEEN can be expressed).
@@ -166,7 +166,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   await assert.rejects(
     () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{
       stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
-      between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
+      between: { column: 'device_time', from: 'no_such_col', to: 'install_date' },
     }] }),
     /between\.from` must be one of: [^;]*install_time_valid_from/,
   );
@@ -256,9 +256,9 @@ test('build_pipeline_model: add_steps applies several stages at once with a per-
   assert.ok(r.step_effects.every((x) => typeof x.column_count === 'number' && Array.isArray(x.columns_added)), 'each effect reports the column delta');
   // the steps just added are echoed (with the count); the whole list only when asked for
   assert.deepEqual([r.steps_added.length, r.steps_count, r.steps], [3, 3, undefined]);
-  const more = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 5 }], include_steps: true });
+  const more = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }], include_steps: true });
   assert.deepEqual([more.steps.length, more.steps_added], [4, undefined]);
-  const one = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 3 }] });
+  const one = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 3 }] });
   assert.deepEqual([one.steps_added.map((x) => x.index), one.steps_count], [[5], 5]);
 });
 
@@ -280,12 +280,12 @@ test('build_pipeline_model: add_steps is atomic — a bad stage rolls back the w
 test('build_pipeline_model: a refused stage of add_steps is stages[i], whether one is sent or several', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'field', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 5 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }] });
   const bad = { stage: 'where', conditions: [{ column: 'no_such_col', op: 'eq', value: 1 }] };
   const alone = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [bad] }).catch((err) => err);
   assert.equal(alone.field, 'stages[0]');
   assert.match(alone.message, /^stages\[0\]: step 2: /);
-  const second = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', n: 3 }, bad] }).catch((err) => err);
+  const second = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 3 }, bad] }).catch((err) => err);
   assert.equal(second.field, 'stages[1]');
   assert.match(second.message, /^stages\[1\]: step 3: /);
   assert.equal((await e.build_pipeline_model({ action: 'preview', context_id: s.context_id })).steps.length, 1, 'nothing of either was added');

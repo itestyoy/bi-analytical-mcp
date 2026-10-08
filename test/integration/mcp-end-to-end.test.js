@@ -38,7 +38,7 @@ const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [Str
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
 const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
 /** The validity window of the install record, stated per the calling source's own time column. */
-const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -220,7 +220,7 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
     const built = await mcpPipeline('crashlytics', [
       { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-      { stage: 'project', columns: ['event_id'] },
+      { stage: 'project', keep: ['event_id'] },
     ]);
     return new Set(built.rows.map((r) => String(r.event_id)));
   };
@@ -277,7 +277,6 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
   const built = await mcpPipeline('events', [
     { stage: 'match_recognize',
       partition_by: ['player_id_of_internal'],
-      mode: 'ordered',
       steps: [
         { name: 'launch', event_name: ['first_launch'] },
         { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },

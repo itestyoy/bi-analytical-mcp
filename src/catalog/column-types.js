@@ -28,6 +28,10 @@ export function pipelineColumnType(cm, col) {
 /** A warehouse type that is a boolean (BigQuery BOOL / BOOLEAN, DuckDB BOOLEAN / BOOL). */
 export const isBooleanType = (t) => /^bool(ean)?$/i.test(String(t || '').trim());
 
+/** An event property's declared type that is an array — of scalars (`array`) or of structs
+ *  (`array<struct>`): what an unnest explodes. */
+export const isArrayPropertyType = (t) => String(t || '').toLowerCase().startsWith('array');
+
 /**
  * A pipeline column type from the type a WAREHOUSE reports for a built column (BigQuery's INT64,
  * FLOAT64, TIMESTAMP, ARRAY<…>; DuckDB's BIGINT, DOUBLE, TIMESTAMP WITH TIME ZONE, VARCHAR[] …) —

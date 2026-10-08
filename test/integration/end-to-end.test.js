@@ -63,7 +63,7 @@ const activationSteps = [
   { name: 'tut2', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
   { name: 'tut3', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
-const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
+const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps, ...extra });
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 

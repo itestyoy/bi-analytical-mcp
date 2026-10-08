@@ -12,7 +12,7 @@ import { startWarehouse } from './warehouse-harness.js';
 import { getDialect } from '../../src/dialects/index.js';
 
 const d = getDialect('duckdb');
-const AT = { value: 'event_time', from: 'valid_from', to: 'valid_until' };
+const AT = { column: 'event_time', from: 'valid_from', to: 'valid_until' };
 
 test('a point-in-time join keeps the open-ended current version, and still picks the right one per event', async (t) => {
   const wh = await startWarehouse();

@@ -191,7 +191,7 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: [
+        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [
           { name: 'launch', event_name: ['first_launch'] },
           { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
         ] },

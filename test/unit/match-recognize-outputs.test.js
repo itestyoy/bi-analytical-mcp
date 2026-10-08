@@ -16,6 +16,8 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderPipeline } from '../../src/pipeline.js';
 import '../../src/match-recognize.js';
+import { deref, field } from '../helpers/schema-nav.js';
+import { stageBranch } from '../helpers/stage-schema.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -147,10 +149,31 @@ test('at_<step> and first_seen_at are of the sequence axis\'s type: a moment by 
   const { context_id, types } = await columnsAfter(e, funnel({ order_by: 'session_number' }));
   assert.deepEqual(['first_seen_at', 'at_a', 'at_b'].map((c) => types.get(c)), ['numeric', 'numeric', 'numeric']);
   // two of them compare as numbers: a constant is written as one, and a date is refused as the number column it is
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'at_b' }, op: 'gt', right: { column: 'at_a' } }, { column: 'at_a', op: 'gte', value: '2' }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'at_b', op: 'gt', right: { column: 'at_a' } }, { column: 'at_a', op: 'gte', value: '2' }] }] });
   assert.equal(ok.steps_count, 2);
   await assert.rejects(
     () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'at_a', op: 'gte', value: '2026-01-01' }] }] }),
     /'at_a' is a numeric column/,
   );
+});
+
+test('between_steps is the one choice of what lies between steps: any by default, none only where the warehouse matches adjacent events', async () => {
+  const choices = (options) => {
+    const e = new Engine({ catalog: loadCatalog(CATALOG, options), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mro-')) }) });
+    const bpm = e.schemas.build_pipeline_model;
+    return deref(bpm, field(bpm, stageBranch(bpm, 'match_recognize'), 'between_steps'));
+  };
+  const duck = choices({}); const bq = choices({ dialect: 'bigquery' });
+  assert.deepEqual(duck.enum, ['any', 'gap']);
+  assert.deepEqual(bq.enum, ['any', 'gap', 'none']);
+  assert.equal(duck.default, 'any');
+  // `mode` is gone: the choice it made is between_steps' — refused, not read beside it
+  const e = engine();
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ mode: 'strict' })] }), /unexpected property 'mode'/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ between_steps: 'none' })] }), /between_steps/);
+  // where a row-pattern match runs it, the adjacent-events funnel builds the same columns as any other
+  const cols = (between) => [...renderPipeline(catalog, 'bigquery', 'events', [funnel({ between_steps: between })], { physicalCols: SOURCE_COLS }).columns.keys()];
+  assert.deepEqual(cols('none'), cols('any'));
+  assert.deepEqual(cols(undefined), cols('gap'));
 });

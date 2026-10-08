@@ -55,7 +55,7 @@ export const taskResultMethods = {
       const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform, d) : `select * from ${rel}`));
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-      return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+      return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent / 100), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
     }
     // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
     // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).

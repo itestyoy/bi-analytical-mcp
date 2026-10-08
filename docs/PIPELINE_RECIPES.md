@@ -20,7 +20,7 @@ contract.
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
   {stage:"compute", name:"price", expr:{ fn:"event_property", property:"price_in_usd_of_event_data", type:"numeric" }},
   {stage:"join",   with:"users", via:"user", attrs:[{ column: "country" }]},   // `via` = the relationship the schema declares; add
-  //                                                                 between:{value:"device_time",from:…,to:…} if the
+  //                                                                 between:{column:"device_time",from:…,to:…} if the
   //                                                                 install record is slowly-changing (validity window)
   {stage:"aggregate", group_by:["country"], measures:[{name:"revenue",agg:"sum",column:"price"}]} ]
 ```
@@ -39,9 +39,11 @@ contract.
 ### Revenue pivoted to per-country columns (dashboard matrix)
 ```jsonc
 [ …where+compute(price)+join(country)…,
-  {stage:"pivot", group_by:[], on:"country", agg:"sum", value_column:"price", values:["US","GB","BR"]} ]
+  {stage:"pivot", group_by:[], on:"country", measure:{agg:"sum", column:"price"},
+   values:[{value:"US",name:"us"}, {value:"GB",name:"gb"}, {value:"BR",name:"br"}]} ]
 ```
-`|> PIVOT(SUM(price) FOR country IN ('US','GB','BR'))`
+`|> AGGREGATE SUM(CASE WHEN country = 'US' THEN price END) AS us, …` — each value one measure of the
+aggregate stage over its rows (a count counts them), named by the value's `name`.
 
 ### Days-since-install (retention-day building block)
 ```jsonc
@@ -109,14 +111,14 @@ then merge the trailing-N days' sketches.
 ### Item / reward frequency  (unnest)
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"level_completed"}]},
-  {stage:"unnest", source:"words_collected", name:"word"},
+  {stage:"unnest", property:"words_collected", name:"word"},
   {stage:"aggregate", group_by:["word"], measures:[{name:"n",agg:"count"}]},
-  {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", n:10} ]
+  {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", limit:10} ]
 ```
 
 ### Multi-step funnel  (match_recognize)
 ```jsonc
-[ {stage:"match_recognize", partition_by:[{entity:"user"}], mode:"ordered",
+[ {stage:"match_recognize", partition_by:[{entity:"user"}],   // between_steps: "any" (the default)
    steps:[{name:"launch",event_name:["first_launch"]},
           {name:"purchase",event_name:["iap_purchase_completed"]}]},
   {stage:"aggregate", group_by:[], measures:[

@@ -17,8 +17,8 @@ import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
 import { comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
-import { anyOfOr, strEnum } from './schema-kit.js';
-import { condPred, CONDITIONS } from './pipeline/sql.js';
+import { strEnum } from './schema-kit.js';
+import { condPred, CONDITIONS, partitionItem, partitionColumn } from './pipeline/sql.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -124,37 +124,20 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   const m = catalog.getModel(source);
   // Partition key is FLEXIBLE: the caller chooses any column(s) available at this point in the
   // pipeline (event columns, or ones added by upstream compute/join), or names a
-  // RELATIONSHIP the source declares — { entity: 'user' } — and its key column is used. A
-  // relationship is named, never spelled as a bare magic word: nothing in here knows what any
-  // particular relationship is called.
+  // RELATIONSHIP the source declares — { entity: 'user' } — and its key column is used (the one
+  // partition item a window's over takes too, src/pipeline/sql.js). A relationship is named, never
+  // spelled as a bare magic word: nothing in here knows what any particular relationship is called.
   const declared = Object.keys(m.entities || {});
-  const entityCol = (name, where) => {
-    const e = m.entities?.[name];
-    if (!e) throw new Error(`${where}: '${source}' declares no relationship '${name}' (declared: ${declared.join(', ') || 'none'})`);
-    const parts = e.key || [];
-    // A partition column is ONE real column of the row. A composite key, or a part truncated to a
-    // grain, is an expression — the caller partitions by the columns it means instead.
-    if (parts.length !== 1 || parts[0].grain) {
-      throw new Error(`${where}: relationship '${name}' of '${source}' is keyed by ${parts.map((x) => x.column).join(' + ') || 'nothing'}${parts.some((x) => x.grain) ? ' (truncated to a grain)' : ''}, which is an expression, not a column — partition by the column(s) you mean`);
-    }
-    return parts[0].column;
-  };
-  const resolvePart = (p, i) => {
-    const where = `partition_by[${i}]`;
-    if (p && typeof p === 'object') return entityCol(p.entity, where);
-    const s = String(p);
-    if (m.entities?.[s]) throw new Error(`${where}: '${s}' is a RELATIONSHIP of '${source}', not a column — write { entity: '${s}' } to partition by its key column`);
-    return s;
-  };
+  const at = { catalog, source, cols: availableCols };
   const asList = (v) => (Array.isArray(v) ? v : [v]);
   let partCols;
-  if (spec.partition_by != null && asList(spec.partition_by).length) partCols = asList(spec.partition_by).map(resolvePart);
+  if (spec.partition_by != null && asList(spec.partition_by).length) partCols = asList(spec.partition_by).map((p, i) => partitionColumn(at, p, `partition_by[${i}]`));
   else {
     // Default: one sequence per USER — found through the role the catalog assigns the model the
     // relationship points at, not through what that relationship happens to be called.
     const ent = catalog.entityTowardRole(source, 'users');
     if (!ent) throw new Error(`partition_by is required: '${source}' declares no relationship toward a users model to default to (declared: ${declared.join(', ') || 'none'})`);
-    partCols = [entityCol(ent, 'partition_by (default)')];
+    partCols = [partitionColumn(at, { entity: ent }, 'partition_by (default)')];
   }
   if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
   requireSourceColumns(catalog, spec, source, availableCols);
@@ -162,14 +145,12 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   const timeCol = spec.order_by || m.time.column;
   // at_<step> and first_seen_at hold the axis's value, so they are of its type (a moment, or a number when ordered by one)
   const axisType = availableCols?.get(timeCol)?.type || 'time';
-  const mode = spec.mode || 'ordered';
-  // What may appear BETWEEN consecutive steps (ordered mode only):
-  //  - 'any' : any rows, including repeats of step events — i.e. "the next later
-  //            occurrence of step i+1", repeats don't break the match.
+  // What may appear BETWEEN consecutive steps — one choice, the same default on every warehouse:
+  //  - 'any' (default): any rows, repeats of step events too — "the next later occurrence of
+  //            step i+1", a repeat does not break the match.
   //  - 'gap' : only non-step events; a repeat of any step event breaks/advances.
-  //  Unset = each dialect's historical default (DuckDB ~ 'any', BigQuery ~ 'gap');
-  //  set it explicitly for identical semantics across engines.
-  const betweenSteps = spec.between_steps || null;
+  //  - 'none': nothing — each step is the immediately next event (where the dialect matches that).
+  const betweenSteps = spec.between_steps || 'any';
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
   const byName = new Map(steps.map((s) => [s.name, s]));
   // `who` is what names the step — a capture, or a kept draft's metric — so the refusal points at it
@@ -228,7 +209,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   const rows = spec.rows || 'one_per_partition';
   // the source's day partition column, when the rows here still carry it: the prefilter's window bounds it too
   const partitionCol = m.partition_column && m.partition_column !== timeCol && (!availableCols || availableCols.has(m.partition_column)) ? m.partition_column : null;
-  return { m, fact: source, partCols, timeCol, axisType, partitionCol, mode, betweenSteps, steps, rows, metrics, propCaptures, prepCols, stepPreds };
+  return { m, fact: source, partCols, timeCol, axisType, partitionCol, betweenSteps, steps, rows, metrics, propCaptures, prepCols, stepPreds };
 }
 
 // gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
@@ -240,12 +221,12 @@ function nestedPattern(steps, gapMode) {
   return sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
 }
 
-/** Gap strategy for a resolved spec: strict → none; between_steps='any' → per-level
- *  (filler = "not the next step", so repeats of other step events don't break the
- *  match); otherwise the historical single-GAP ("not any step"). */
+/** Gap strategy for a resolved spec: 'none' → no filler; 'any' → per-level (filler = "not the
+ *  next step", so repeats of other step events don't break the match — the next later occurrence,
+ *  as the CTE lowering finds it); 'gap' → a single GAP ("not any step"). */
 function gapModeFor(r) {
-  if (r.mode === 'strict') return false;
-  return r.betweenSteps === 'any' ? 'perlevel' : 'single';
+  if (r.betweenSteps === 'none') return false;
+  return r.betweenSteps === 'gap' ? 'single' : 'perlevel';
 }
 
 
@@ -265,8 +246,8 @@ function gapModeFor(r) {
  */
 export function matchStepCte(r, fromRel, catalog, dialectName) {
   const d = getDialect(dialectName);
-  if (r.mode === 'strict') {
-    throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the CTE equivalent other warehouses run");
+  if (r.betweenSteps === 'none') {
+    throw new Error(`between_steps 'none' (each step the immediately next event) is matched by a row-pattern match, which ${dialectName} has not — use 'any' or 'gap'`);
   }
   const preds = r.stepPreds(dialectName);
   // every column the caller named — a partition column, the sequence axis, a capture — quoted by the
@@ -291,7 +272,7 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
     ? `SELECT ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1`
     : `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
   // between_steps='gap': forbid ANY step event between the previous step and this one
-  // (only non-step rows may fill the gap). Unset/'any' = nearest later occurrence.
+  // (only non-step rows may fill the gap). 'any' (the default) = nearest later occurrence.
   const anyStepG = r.steps.map((_, k) => `g.is${k + 1}`).join(' OR ');
   const gapGuard = (i) => (r.betweenSteps === 'gap'
     ? ` AND NOT EXISTS (SELECT 1 FROM ev g WHERE ${pk.map((c) => `g.${q(c)} = e.${q(c)}`).join(' AND ')} AND g.ts > r${i - 1}.t${i - 1} AND g.ts < e.ts AND (${anyStepG}))`
@@ -395,9 +376,12 @@ function matchOutputColumns(r) {
   return cols;
 }
 
-/** Every relationship name the events sources declare — what `partition_by: { entity }` may name. */
-function relationshipNames(catalog) {
-  return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
+/** What may lie between steps, as this warehouse matches it: 'none' only where its dialect matches
+ *  adjacent rows (a row-pattern match), as the python stage is offered only where it runs. */
+function betweenStepsChoices(catalog) {
+  let adjacent = false;
+  try { adjacent = !!getDialect(catalog?.dialect)?.matchesAdjacentSteps; } catch { adjacent = false; }
+  return adjacent ? ['any', 'gap', 'none'] : ['any', 'gap'];
 }
 
 /** JSON-Schema for the match_recognize stage: ordered steps, and the values to capture at them. */
@@ -425,24 +409,15 @@ function matchRecognizeSchema(catalog) {
     properties: {
       stage: { enum: ['match_recognize'] },
       partition_by: {
-        type: 'array',
-        // A catalog whose sources declare no relationship offers only the column form — the
-        // { entity } branch is left out rather than carrying an empty vocabulary.
-        items: anyOfOr([
-          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available here.' },
-          ...(relationshipNames(catalog).length ? [{
-            title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
-            description: 'A relationship the source declares — its key column is used.',
-            properties: { entity: strEnum(relationshipNames(catalog)) },
-          }] : []),
-        ]),
-        minItems: 1,
+        type: 'array', minItems: 1, items: partitionItem(catalog),
         description: 'What one sequence is: column(s), a declared relationship { entity }, or both (one sequence per user per level). Default: the source\'s relationship toward the users model.',
       },
       order_by: { type: 'string', pattern: NAME, description: 'The sequence axis (default: the event time).' },
-      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = other events may occur between steps; strict = each step is the immediately next event.' },
       rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition = the first match per partition (counts players); one_per_match = one row per occurrence of the first step (counts situations; matches may overlap).' },
-      between_steps: { enum: ['any', 'gap'], description: '"any" = the next later occurrence of the next step, repeats in between allowed; "gap" = only non-step events between steps. Set it for identical results on every warehouse.' },
+      between_steps: {
+        enum: betweenStepsChoices(catalog), default: 'any',
+        description: `What may come between two consecutive steps: "any" (default) = anything — the next later occurrence of the next step, repeats in between allowed; "gap" = only events that are no step${betweenStepsChoices(catalog).includes('none') ? '; "none" = nothing — each step is the immediately next event' : ''}. The same on every warehouse.`,
+      },
       steps: { type: 'array', minItems: 2, items: step, description: 'The ordered steps (≥ 2).' },
       capture: { type: 'array', items: capture, description: 'Values to carry out of the match: the value a column holds at a step.' },
     },
@@ -455,6 +430,7 @@ registerStage('match_recognize', {
   build: ({ d, catalog, cols, source }, p) => {
     const spec = p;
     const r = resolve(catalog, spec, d.name, cols, source);
+    if (r.betweenSteps === 'none' && !d.matchesAdjacentSteps) throw new Error(`between_steps 'none' (each step the immediately next event) is matched by a row-pattern match, which ${d.name} has not — use 'any' or 'gap'`);
     return {
       op: {
         op: 'match_recognize',

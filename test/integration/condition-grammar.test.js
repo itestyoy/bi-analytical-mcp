@@ -217,7 +217,7 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
   const counts = [
     { stage: 'aggregate', measures: [
       { name: 'yes', agg: 'count', where: [{ left: { value: true }, op: 'eq', right: { column: 'bundle_id' } }] },
-      { name: 'no', agg: 'count', where: [{ left: { column: 'bundle_id' }, op: 'neq', value: true }] },
+      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
     ] },
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
@@ -296,10 +296,10 @@ test('a time column compared with an expression that yields a moment keeps the r
   const all = await truth('select count(*) as n from fct_analytics_events');
   assert.ok(want > 0 && want < all, 'the bound keeps some rows, not all');
   const { rows } = await pipe([
-    { stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'raw', sql: "DATE '2026-01-03'" } }] },
+    { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', right: { fn: 'raw', sql: "DATE '2026-01-03'" } }] },
     { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ left: { column: 'device_time' }, op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'device_time', op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
 });

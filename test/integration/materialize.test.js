@@ -152,6 +152,13 @@ test('query_pipeline_model over a built model: count(column) counts NON-NULL onl
   // injection/escaping proven on DATA: the literal matches nothing, and the query runs
   const inj = await read({ where: [{ column: 'event_name', op: 'eq', value: "x'); drop table x; --" }], measures: [{ agg: 'count', name: 'n' }] });
   assert.equal(num(inj.rows[0].n), 0);
+  // a read sorts as the order_by stage does: NULL prices last unless a key asks them first, on every warehouse
+  const first = async (key) => (await engine.query_pipeline_model({ context_id: s.context_id, transform: { order_by: [key, { key: 'event_id' }] }, limit: 1 })).rows[0].price;
+  const extremes = await read({ measures: [{ agg: 'min', column: 'price', name: 'lo' }, { agg: 'max', column: 'price', name: 'hi' }] });
+  assert.equal(num(await first({ key: 'price' })), num(extremes.rows[0].lo));
+  assert.equal(num(await first({ key: 'price', direction: 'desc' })), num(extremes.rows[0].hi));
+  assert.equal(await first({ key: 'price', nulls: 'first' }), null);
+  assert.equal(await first({ key: 'price', direction: 'desc', nulls: 'first' }), null);
   // a semantic context is not a pipeline model
   await assert.rejects(() => engine.query_pipeline_model({ context_id: ctxId }), /no built pipeline model/);
 });

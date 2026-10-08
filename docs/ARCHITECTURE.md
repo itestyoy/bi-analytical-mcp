@@ -14,7 +14,7 @@ one. This is exactly the shape of
 ```
 FROM events
 |> WHERE device_time >= '2026-01-01'
-|> EXTEND ARRAY_LENGTH(...) AS n_words           -- derive
+|> EXTEND ARRAY_LENGTH(...) AS n_words           -- compute
 |> JOIN dim_users USING (user)                   -- join
 |> MATCH_RECOGNIZE (...)                          -- sequence
 |> AGGREGATE COUNT(*) AS users GROUP BY country   -- group_by
@@ -32,12 +32,12 @@ The declarative tool input is a direct transcription of that pipe chain:
 ```jsonc
 {
   "source": "events",
-  "pipeline": [
+  "stages": [
     { "stage": "where",  "conditions": [ ... ] },
-    { "stage": "derive", "name": "n_words", "source": "words_collected", "op": "array_length" },
-    { "stage": "unnest", "source": "words_collected", "as": "word" },
-    { "stage": "join",   "with": "users", "via": "user" },
-    { "stage": "match_recognize", "partition_by": "user", "steps": [ ... ], "metrics": [ ... ] },
+    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
+    { "stage": "unnest", "source": "words_collected", "name": "word" },
+    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ] },
+    { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "country" ], "steps": [ ... ] },
     { "stage": "aggregate", "group_by": ["country"], "measures": [ ... ] },
     { "stage": "order_by", "keys": [ ... ] },
     { "stage": "limit", "n": 100 }
@@ -67,8 +67,7 @@ Stage = {
 |---|---|---|---|
 | `scan` (implicit source) | `FROM` | the events fact or users dim (catalog model) | rows of the source |
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
-| `derive` | `\|> EXTEND` | add a scalar column from an event_data property (extract / array_length / contains / struct_field) | unchanged |
-| `compute` | `\|> EXTEND` | add a column over existing columns: arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
+| `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (`event_property`, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
 | `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
@@ -83,7 +82,7 @@ Stage = {
 **Implemented**: the registry is `src/pipeline/stages.js` (the compute stage's ops are one
 table in `src/pipeline/compute.js`, the pieces every stage is written with in
 `src/pipeline/sql.js`), rendering is `src/pipeline.js`, and each warehouse lowers the op list
-in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `derive`, `compute`, `unnest`, `join`,
+in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `compute`, `unnest`, `join`,
 `aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
 `match_recognize` (`src/match-recognize.js`) and `python` (`src/python-model.js`), which
 register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax. A stage
@@ -103,7 +102,7 @@ The engine folds `plan()` across the pipeline to compute, at each step, exactly
 which columns are available — and **validates every reference against the schema
 at that point in the chain** (no forward references, no vanished columns):
 
-- `derive`/`unnest` **add** named columns (validated unique, valid identifier).
+- `compute`/`unnest` **add** named columns (validated unique, valid identifier).
 - `aggregate`/`match_recognize` **replace** the schema with their outputs (group keys + measures, or the per-match columns) — references after them must use the new names.
 - `where`/`join`/`order_by` reference only columns present at that step.
 
@@ -121,7 +120,8 @@ an aggregate) before generating SQL.
   (escaped). JSON keys / column names pass strict identifier regexes.
 - **Catalog is the boundary.** Scalar vs complex (array/struct) properties are
   distinguished: complex props are rejected where a scalar is required and may
-  only be consumed by `derive`/`unnest`. A `join` can only target a catalog model
+  only be consumed by `compute`'s event-property functions (`array_length`, `array_contains`,
+  `event_property` with a `field`) and `unnest`. A `join` can only target a catalog model
   through a relationship BOTH sides declare — the key columns come from the schema,
   never from the call. Stages stack, so a chain reaches several models; `via` always
   resolves its left-hand key on the pipeline's own source.
@@ -170,11 +170,9 @@ with the YAML config header. Two consumption modes, unchanged:
 
 `build_semantic_model` stays the declarative way to define measures/metrics over
 the **scalar** two-source models. **A pipeline built in one call (`_buildPipeline`) is the pipeline
-creator**: it accepts either a `sequence` (an ordered MATCH_RECOGNIZE funnel with a
-MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
-general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
-aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in
-`match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
+creator**: it accepts a `pipeline` (`source` + ordered stages — where/compute/unnest/join/
+aggregate/pivot/unpivot/sample/order_by/limit/project and the `match_recognize` funnel stage;
+window functions are compute expressions). A `pipeline` is materialized as a dbt model whose rows ARE the
 result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
 `query_pipeline_model({ context_id, transform })` filters and regroups the built model, and a
 pipeline started from it with `from_task` re-slices them).
@@ -240,28 +238,30 @@ Declarative pipeline:
 ```jsonc
 {
   "source": "events",
-  "pipeline": [
-    { "stage": "where",  "conditions": [ { "field": "metric_time", "op": "gte", "value": "2026-01-01" } ] },
-    { "stage": "where",  "user_segment": [ { "property": "country", "op": "eq", "value": "US" } ] },
-    { "stage": "derive", "name": "n_words", "source": "words_collected", "op": "array_length" },
-    { "stage": "match_recognize", "partition_by": "user", "mode": "ordered",
+  "time_range": { "start": "2026-01-01" },
+  "stages": [
+    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ] },
+    { "stage": "where",  "conditions": [ { "column": "country", "op": "eq", "value": "US" } ] },
+    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
+    { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ], "mode": "ordered",
       "steps": [ { "name": "launch", "event_name": ["first_launch"] },
-                 { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "property": "level_id", "op": "eq", "value": 1 } ] } ],
-      "metrics": [ { "name": "avg_words", "type": "agg_at_step", "agg": "average", "property": "n_words", "step": "lvl1" } ] },
-    { "stage": "aggregate", "group_by": ["furthest_step_name", "user__platform"], "measures": [ { "name": "users", "agg": "count" } ] }
+                 { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "left": { "fn": "event_property", "property": "level_id_of_event_data" }, "op": "eq", "value": 1 } ] } ],
+      "capture": [ { "name": "words_at_lvl1", "step": "lvl1", "column": "n_words" } ] },
+    { "stage": "aggregate", "group_by": ["furthest_step_name", "platform"],
+      "measures": [ { "name": "users", "agg": "count" }, { "name": "avg_words", "agg": "average", "column": "words_at_lvl1" } ] }
   ]
 }
 ```
 Lowers to BigQuery pipe syntax directly, or to a CTE chain
-`p0 (where) → p1 (where) → p2 (extend n_words) → p3 (match_recognize per-user) →
-p4 (aggregate)` on DuckDB — with a `/* <this config as YAML> */` header.
+`p0 (join) → p1 (where) → p2 (extend n_words) → p3 (match_recognize per user and
+platform) → p4 (aggregate)` on DuckDB — with a `/* <this config as YAML> */` header.
 
 ---
 
 ### Summary
 
 One **linear, pipe-syntax-shaped pipeline**; **every transform is a stage** in a
-single registry (filter, derive, unnest, join, aggregate/group_by, and
+single registry (filter, compute, unnest, join, aggregate/group_by, and
 match_recognize alike); a **threaded schema** gives per-stage validation and
 consistency; **safety** comes from catalog-enum params + literal binding + no raw
 SQL + per-stage reference checks; and the same plan **lowers to BigQuery pipe

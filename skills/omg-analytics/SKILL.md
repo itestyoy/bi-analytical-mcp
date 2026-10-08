@@ -47,12 +47,13 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
 ## Workflow & routing — served live by the MCP (single source of truth)
 The generic analyst **procedure** (clarify → discover → prefer governed → bound/exclude →
 adversarial review → report with provenance) and the **IF/DO routing triggers** (which tool
-to use when) are served by the server itself — **call `semantic_index({ guide: true })`** and
-follow it (narrow to a family with `semantic_index({ guide: "retention" })`). This skill does
+to use when) are served by the server itself — **call `semantic_index({ request: { guide: true } })`**
+and follow it (narrow to one recipe family with `semantic_index({ request: { guide: "<family>" } })`,
+e.g. `"pipeline"` — the overview lists the families). This skill does
 **not** copy them, so the two never drift; it adds only the **OMG-specific** layer below.
 
 For an **open research question** — why a metric moved, what drives it, whether a change
-worked, a product / monetization / UA deep dive — read **`semantic_index({ guide: "research" })`**
+worked, a product / monetization / UA deep dive — read **`semantic_index({ request: { guide: "research" } })`**
 first (also served as the server's `research` skill): the investigation sequence, the checks
 before presenting, the report shape, and a guide per domain — `research/product`,
 `research/monetization`, `research/ua`. Apply the OMG cautions below on top of it.
@@ -69,8 +70,9 @@ OMG cautions on top of the generic procedure:
   interpretation.
 - **Record what you learn**: when you track a fuzzy OMG term down to a real field, hit a
   non-obvious gotcha, or rely on a specific Confluence page, save it with the **`memory`** tool
-  — linked to the field/event it concerns (`targets`) and the words the user used (`aliases`),
-  with the page as a `link`. It resurfaces through `semantic_index` (the linked views + search)
+  (`memory({ request: { action: "record", notes: [{ note, targets, aliases, links }] } })`) — each
+  note linked to the field/event it concerns (`targets`), with the words the user used (`aliases`)
+  and the page in `links`. It resurfaces through `semantic_index` (the linked views + search)
   next time, turning one investigation into durable shared knowledge. (Put findings in the live
   memory store, NOT as copied definitions in this skill — same no-drift reason.)
 

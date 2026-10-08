@@ -173,13 +173,15 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   event, time }`), reading that table's columns; its cards are the same transition graph, step
   matrix and sankey.
   It is built in SQL where the data lives and materialized; the call returns a task.
-  Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_step"` (and
-  `add_steps`, `edit_step`, `insert_step`, `delete_step`, `truncate`, `fork`, `preview`) takes one of
-  the library's own steps (`{ type, ...params }`: filter_paths, truncate_paths, collapse_events,
-  split_sessions, add_segment, add_clusters, …). The library itself checks each one, in a warm local
+  Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
+  `steps: [...]` takes one or several of the library's own steps, in order (each
+  `{ type, ...params }`: filter_paths, truncate_paths, collapse_events, split_sessions, add_segment,
+  add_clusters, …); `edit_step` / `insert_step` (one `step` at an `index`), `delete_step`,
+  `truncate`, `fork` and `preview` work as in a pipeline draft. The library itself checks each one, in a warm local
   process on the feature's environment, over stand-in eventstreams of what the eventstream holds at
-  that step — a step it refuses is refused at once with its message; one it takes comes back with what
-  it changed (events, path columns, segments and their levels). `action: "materialize"` runs the steps
+  that step — a step it refuses is refused at once with its message; each one it takes comes back with what
+  it changed (events, path columns, segments added or removed), and the answer ends with the eventstream's
+  shape after them (its events, path columns, segments and their levels). `action: "materialize"` runs the steps
   on the warehouse (one dbt Python model, a task) and stores the eventstream after them.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, eventstream, analyses: [...] }`
   runs every listed analysis over the eventstream as materialized — each a library method with its own
@@ -257,7 +259,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a call
-  that waits on an engine task (a query tool with `{ task_id }`, `display_model_result`) is followed to its end, so the
+  that waits on an engine task (a query tool with `{ task_ids }`, `display_model_result`) is followed to its end, so the
   protocol task's result is the rows, not "still running". A call that starts work still answers
   with its `task_id` at once.
   `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension

@@ -209,12 +209,12 @@
 
 | что нужно | стадия |
 |---|---|
-| массив, по элементам | `unnest { source, as }` — одна строка на элемент |
-| массив, по отчёту | `derive { op: array_length }` / `{ op: contains, value }` — зерно не меняется |
-| массив структур, одно поле | `unnest { source, as, field }` |
-| массив структур, несколько полей | `unnest { source, as }`, затем `compute { op: json_field, field }` на каждое поле |
-| массив, по позиции | `compute { op: json_parse_array }` → `element_at` / `array_last` |
-| JSON-объект | `derive { op: struct_field, field }` или `compute { op: json_field, field }` |
+| массив, по элементам | `unnest { source, name }` — одна строка на элемент |
+| массив, по отчёту | `compute { name, expr: { fn: array_length, property } }` / `{ fn: array_contains, property, item }` — зерно не меняется |
+| массив структур, одно поле | `unnest { source, name, field }` |
+| массив структур, несколько полей | `unnest { source, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
+| массив, по позиции | `compute` с `{ fn: json_parse_array, args: [{ column }] }` → `element_at` / `array_last` |
+| JSON-объект | `compute` с `{ fn: event_property, property, field }` или `{ fn: json_field, args: [{ column }], field }` |
 
 `unnest` **выбрасывает** отчёты, у которых массив NULL (у ANR нет стека исключения);
 `array_length` их сохраняет и читает NULL. Оба чтения верны — выбирается то зерно, о котором
@@ -391,8 +391,8 @@
 join 'acquisition': `attrs` is required — list the columns you want from it; nothing is
 added implicitly. Columns of 'acquisition': acquisition_id, player_id_of_internal,
 spend_date, cost, impressions, clicks, media_source, campaign, campaign_id,
-ingest_batch_id. Use { column, as } to expose one under a different name.
-semantic_index({ model: 'acquisition' }) describes them.
+ingest_batch_id. Use { column, name } to expose one under a different name.
+semantic_index({ request: { model: 'acquisition' } }) describes them.
 ```
 
 ### Одно имя не может адресовать две колонки
@@ -403,7 +403,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 |---|---|
 | имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', name: 'events_event_name' }` |
 | имя уже есть, и это **колонка ключа связи** | `'player_id_of_internal' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs` |
-| два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`as\`` |
+| два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`name\`` |
 
 Про ключ сказано отдельно намеренно: там переименовывать нечего — значение на обеих
 сторонах одинаковое, копию просто не надо просить.
@@ -414,7 +414,7 @@ semantic_index({ model: 'acquisition' }) describes them.
 ```json
 { "stage": "join", "with": "users", "via": "user",
   "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
-  "attrs": [{ "column": "app_version", "as": "users_app_version" }, { column: "country" }] }
+  "attrs": [{ "column": "app_version", "name": "users_app_version" }, { column: "country" }] }
 ```
 
 Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
@@ -562,7 +562,7 @@ MetricFlow умеет соединять только по уникальном�
     "between": { "value": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
     "kind": "inner", "attrs": [{ column: "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
-    "measures": [{ "name": "total", "fn": "sum", "column": "cost" }] }
+    "measures": [{ "name": "total", "agg": "sum", "column": "cost" }] }
 ] }
 ```
 
@@ -580,7 +580,7 @@ MetricFlow умеет соединять только по уникальном�
 ```json
 { "source": "acquisition", "stages": [
   { "stage": "aggregate", "group_by": ["media_source"],
-    "measures": [{ "name": "cpc_p50", "fn": "median", "column": "cost_per_click" }] }
+    "measures": [{ "name": "cpc_p50", "agg": "median", "column": "cost_per_click" }] }
 ] }
 ```
 

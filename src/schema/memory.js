@@ -47,7 +47,7 @@ export function memorySchema(catalog) {
     targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is about, so it surfaces on their semantic_index views: { source, name } — a property, attribute or event of that source — { source } for a model, or { term } for a phrase the catalog has no entity for.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The user\'s words for it, in their language and in English (e.g. ["ad format", "формат рекламы"]): search matches literal words and cannot cross scripts by itself.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { anyOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
-    id: { type: 'string', description: 'Id of the note to delete (as record returned it, or semantic_index({ notes: true }) lists it).' },
+    id: { type: 'string', description: 'Id of the note to delete (as record returned it, or semantic_index({ request: { notes: true } }) lists it).' },
   };
   const finding = { note: F.note, question: F.question, targets: F.targets, aliases: F.aliases, links: F.links };
 

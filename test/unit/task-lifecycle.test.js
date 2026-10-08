@@ -183,13 +183,49 @@ test('a draft starts with its first steps, and adding steps may start its build 
   const e = engine(runner);
   const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', n: 5 }] });
   assert.equal(e.ctxs.get(started.draft_id).state.draft.stages.length, 2, 'both steps are on the draft');
+  // the answer says the steps it holds: the ones added and their count, never an empty list beside them
+  assert.equal(started.steps, undefined, 'no steps: [] beside the steps added');
+  assert.deepEqual([started.steps_count, started.steps_added.map((s) => s.index)], [2, [1, 2]]);
+  const listed = await e.build_pipeline_model({ action: 'start', name: 'lvl2', source: 'events', stages: [WHERE_EVENT], include_steps: true });
+  assert.deepEqual(listed.steps.map((s) => s.index), [1], 'include_steps: the whole list');
   // a step that cannot compile leaves the draft started, with none of the batch
-  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }), /started, with no steps/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'stages[0]');
   const added = await e.build_pipeline_model({ action: 'add_steps', draft_id: started.draft_id, stages: [{ stage: 'limit', n: 3 }], materialize: true });
   assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
   await until(() => runner.held.length);
   runner.held.shift()();
   assert.equal((await taskResult(e, added.materialize.task_id)).status, 'done');
+});
+
+test('add_steps with materialize while a build runs: the steps are added, and the build that could not start says why', async () => {
+  const runner = heldBuilds();
+  const e = engine(runner);
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT] });
+  const first = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  await until(() => runner.held.length);
+  const added = await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'limit', n: 3 }], materialize: true });
+  // answered, not refused: the step is on the draft (once), and the answer says so beside the build's refusal
+  assert.equal(e.ctxs.get(draft_id).state.draft.stages.length, 2);
+  assert.deepEqual([added.added, added.steps_count], [1, 2]);
+  assert.equal(added.materialize.ok, false);
+  assert.equal(added.materialize.error.stage, 'validate');
+  // the build in flight computes fewer steps than the draft holds: not "the same pipeline", but build again once it ends
+  assert.match(added.materialize.error.message, /still running/);
+  assert.match(added.materialize.error.message, new RegExp(first.task_id));
+  assert.doesNotMatch(added.materialize.error.message, /SAME pipeline/);
+  assert.match(added.next, /did not start/);
+  // the call succeeded, its build did not: the error log keeps it as it keeps a refused call
+  const [kept] = e.explore_errors({ tool: 'build_pipeline_model' }).errors;
+  assert.deepEqual([kept?.field, kept?.stage, kept?.context_id], ['materialize', 'validate', draft_id]);
+  assert.equal(runner.held.length, 1, 'no second build started');
+  // once it ends, the build of the grown draft starts
+  runner.held.shift()();
+  assert.equal((await taskResult(e, first.task_id)).status, 'done');
+  const second = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  assert.ok(isStartedTask(second));
+  await until(() => runner.held.length);
+  runner.held.shift()();
+  assert.equal((await taskResult(e, second.task_id)).status, 'done');
 });
 
 test('a protocol task refuses a read of the other side at once, instead of waiting out the build', async () => {

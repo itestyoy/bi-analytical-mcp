@@ -276,6 +276,36 @@ test('build_pipeline_model: add_steps is atomic — a bad stage rolls back the w
   assert.equal(pv.steps.length, 0, 'atomic: nothing applied, draft untouched');
 });
 
+// A refused stage is named by its place in `stages` — add_steps' own field — one stage or several.
+test('build_pipeline_model: a refused stage of add_steps is stages[i], whether one is sent or several', async () => {
+  const e = engine();
+  const s = await e.build_pipeline_model({ action: 'start', name: 'field', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 5 }] });
+  const bad = { stage: 'where', conditions: [{ column: 'no_such_col', op: 'eq', value: 1 }] };
+  const alone = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [bad] }).catch((err) => err);
+  assert.equal(alone.field, 'stages[0]');
+  assert.match(alone.message, /^stages\[0\]: step 2: /);
+  const second = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'limit', n: 3 }, bad] }).catch((err) => err);
+  assert.equal(second.field, 'stages[1]');
+  assert.match(second.message, /^stages\[1\]: step 3: /);
+  assert.equal((await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id })).steps.length, 1, 'nothing of either was added');
+});
+
+// A count counts rows without a column; a sketch (hll_*) reads one, like every other function.
+test('build_pipeline_model: an aggregate measure without a column is a count only — a sketch is refused without one', async () => {
+  const e = engine();
+  const s = await e.build_pipeline_model({ action: 'start', name: 'hll', source: 'events' });
+  for (const agg of ['hll_init', 'hll_merge', 'hll_merge_partial']) {
+    await assert.rejects(
+      () => e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'x', agg }] }] }),
+      (err) => err.stage === 'validate' && /column/.test(err.message) && !/unsafe SQL identifier/.test(err.message),
+      agg,
+    );
+  }
+  const ok = await e.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'players', agg: 'hll_init', column: 'player_id_of_internal' }, { name: 'n', agg: 'count' }] }], include_columns: true });
+  assert.deepEqual(ok.available_columns.map((c) => [c.name, c.type]), [['event_name', 'string'], ['players', 'sketch'], ['n', 'numeric']]);
+});
+
 // data_freshness = live MAX(time), re-queried once per INDEX SCAN (not on a wall-clock timer).
 test('data_freshness re-queries after each index scan (reflects new data, not a frozen MAX)', async () => {
   const catalog = loadCatalog(CATALOG, {});

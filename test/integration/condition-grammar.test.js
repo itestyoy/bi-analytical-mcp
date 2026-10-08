@@ -210,6 +210,32 @@ test('a text column of the warehouse compared with a boolean matches the ways te
   await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
 });
 
+test('a text flag stays text after a checkpoint and from a build\'s task, with the constant on either side', opts, async (t) => {
+  if (skip(t)) return;
+  const all = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
+  const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
+  const counts = [
+    { stage: 'aggregate', measures: [
+      { name: 'yes', agg: 'count', where: [{ left: { value: true }, op: 'eq', right: { column: 'bundle_id' } }] },
+      { name: 'no', agg: 'count', where: [{ left: { column: 'bundle_id' }, op: 'neq', value: true }] },
+    ] },
+  ];
+  // the prefix is built first: the counts then read the checkpoint's table, not the source
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'is_not_null' }] }] });
+  const prefix = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(prefix.build?.ok, true, JSON.stringify(prefix.error || prefix.build));
+  const added = await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: counts });
+  assert.ok(added.from_checkpoint, 'the counts read the built prefix');
+  const after = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(after.build?.ok, true, JSON.stringify(after.error || after.build));
+  assert.deepEqual([num(after.rows[0].yes), num(after.rows[0].no)], [truthy, all - truthy]);
+  // a draft started from the prefix's task reads the same table, and the same column in it
+  const from = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, stages: counts });
+  const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: from.draft_id });
+  assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
+  assert.deepEqual([num(built.rows[0].yes), num(built.rows[0].no)], [truthy, all - truthy]);
+});
+
 test('a joined text column, under the name the join gave it, is compared with a boolean as text too', opts, async (t) => {
   if (skip(t)) return;
   const joined = 'from fct_analytics_events e left join dim_users u on e.player_id_of_internal = u.player_id_of_internal';

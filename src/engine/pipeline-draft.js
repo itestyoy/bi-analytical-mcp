@@ -4,7 +4,7 @@
 // (src/engine/helpers.js — mixin).
 
 import { ToolError, RESULT_GONE } from '../validate.js';
-import { renderPipeline } from '../pipeline.js';
+import { renderPipeline, columnList } from '../pipeline.js';
 
 export const pipelineDraftMethods = {
   /**
@@ -22,8 +22,23 @@ export const pipelineDraftMethods = {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ request: { action: 'start', name } })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
-    // adding steps may build right after them: one call where two would go one after the other
-    const thenBuild = async (added) => (input.materialize ? { ...added, materialize: await this._draftMaterialize(ctx, draft) } : added);
+    // adding steps may build right after them: one call where two would go one after the other. The
+    // steps are in the draft by then, so a build that cannot start (one still running, a table gone) is
+    // answered beside them under `materialize`, not as a refusal of the call that added them
+    const thenBuild = async (added) => {
+      if (!input.materialize) return added;
+      try { return { ...added, materialize: await this._draftMaterialize(ctx, draft) }; }
+      catch (e) {
+        const stage = e instanceof ToolError ? (e.stage || 'validate') : 'internal';
+        // the call succeeds, its build did not: kept in the error log as a refused call is
+        this.errors?.record?.({ source: 'tool', tool: 'build_pipeline_model', stage, field: 'materialize', code: e.code, message: e.message, args: { request: input }, context_id: ctx.id });
+        return {
+          ...added,
+          materialize: { ok: false, error: { stage, message: e.message, ...(e.code ? { code: e.code } : {}) } },
+          next: 'The steps are added; the build did not start (materialize.error says why). Materialize with build_pipeline_model({ request: { action: "materialize", draft_id } }) once that is resolved.',
+        };
+      }
+    };
     if (input.action === 'add_steps') return thenBuild(await this._draftAddSteps(ctx, draft, input.stages, input.include_columns, input.include_steps));
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
@@ -191,9 +206,10 @@ export const pipelineDraftMethods = {
   },
 
   /** Columns available after a draft's accumulated stages (source columns when empty),
-   *  grounded to the physical relation (phantom catalog columns excluded). */
-  _draftColumns(draft, physSet) {
-    if (!draft.stages.length) return draft.base ? draft.base.columns.map((c) => ({ ...c })) : this._groundedDeclared(draft.source, physSet).cols;
+   *  grounded to the physical relation (phantom catalog columns excluded). `stored`: the list a
+   *  checkpoint keeps, with each column's `physical` mark (columnList) — not what an answer shows. */
+  _draftColumns(draft, physSet, { stored = false } = {}) {
+    if (!draft.stages.length) return draft.base ? draft.base.columns.map((c) => (stored ? { ...c } : { name: c.name, type: c.type })) : this._groundedDeclared(draft.source, physSet).cols;
     const plan = this._renderPlan(draft);
     let columns;
     try {
@@ -205,7 +221,20 @@ export const pipelineDraftMethods = {
       const step = at != null ? plan.stepOf(at) : null;
       throw new ToolError(`${step ? `step ${step}: ` : ''}${e.message} — a step this draft already holds; fix it with edit_step${step ? ` (index: ${step})` : ''}`, { stage: 'compile', field: 'stages' });
     }
-    return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+    return stored ? columnList(columns) : [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+  },
+
+  /**
+   * A task's table as a draft's step 0, with the warehouse's word on its columns' types where the
+   * build that made it recorded one (the checkpoint it left, `physical`): a constant is compared with
+   * a column of that table as it was before the table was built — a flag stored as text stays text.
+   */
+  _baseWithPhysical(base) {
+    const owner = this.ctxs.has(base.owner) ? this.ctxs.get(base.owner).state : null;
+    const cp = [...(owner?.draft?.checkpoints || []), ...(owner?.pipeline_origin?.checkpoints || [])].find((c) => c.task_id === base.task_id);
+    const physical = new Map((cp?.columns || []).filter((c) => c.physical).map((c) => [c.name, c.type]));
+    if (!physical.size) return base;
+    return { ...base, columns: base.columns.map((c) => (physical.get(c.name) === c.type ? { ...c, physical: true } : c)) };
   },
 
   /** True when some pipeline stage already bounds the source's time/partition column. */
@@ -229,7 +258,7 @@ export const pipelineDraftMethods = {
 
   async _draftStart(input) {
     const found = input.from_task ? this._taskBase(input) : null;
-    const base = found ? found.base : null;
+    const base = found ? this._baseWithPhysical(found.base) : null;
     const ctx = input.draft_id ? this._ctxToWrite(input.draft_id, 'draft_id') : this.ctxs.create();
     const source = found ? found.source : input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };
@@ -239,7 +268,7 @@ export const pipelineDraftMethods = {
     // the catalog declares but the table lacks simply does not appear (a clean internal
     // guard) — never offered, never buildable, not called out. Only real columns exist.
     const physSet = await this.probe.grounding(source);
-    const cols = base ? base.columns : this._groundedDeclared(source, physSet).cols;
+    const cols = base ? base.columns.map((c) => ({ name: c.name, type: c.type })) : this._groundedDeclared(source, physSet).cols;
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
@@ -260,9 +289,11 @@ export const pipelineDraftMethods = {
     try {
       const added = await this._draftAddSteps(ctx, ctx.state.draft, input.stages, input.include_columns, input.include_steps);
       const { draft_id: _id, action: _a, ...rest } = added;
-      return { ...resp, ...rest, next: added.next || resp.next };
+      // the steps are what add_steps says they are (steps_added + steps_count, or steps with include_steps)
+      const { steps: _none, ...head } = resp;
+      return { ...head, ...rest, next: added.next || resp.next };
     } catch (e) {
-      throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (draft_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: 'stages' });
+      throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (draft_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: e.field || 'stages', code: e.code });
     }
   },
 
@@ -282,8 +313,9 @@ export const pipelineDraftMethods = {
     try {
       for (const [i, stage] of stages.entries()) {
         let r;
+        // named by its place in `stages`, one stage or several (`stage` is edit_step's field, not this one's)
         try { r = await this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns: false, includeSteps: true, action: 'add_steps' }); }
-        catch (e) { throw stages.length > 1 ? new ToolError(`stages[${i}]: ${e.message}`, { stage: e.stage || 'compile', field: `stages[${i}]` }) : e; }
+        catch (e) { throw new ToolError(`stages[${i}]: ${e.message}`, { stage: e.stage || 'compile', field: `stages[${i}]`, code: e.code }); }
         last = r; if (r.checkpoints_dropped) dropped.push(...r.checkpoints_dropped);
         effects.push({
           step_index: r.step_index,
@@ -298,7 +330,7 @@ export const pipelineDraftMethods = {
     } catch (e) {
       draft.stages = snapshot; this.ctxs.touch(ctx.id);
       if (stages.length === 1) throw e;
-      throw new ToolError(`${e.message} — none of the ${stages.length} stages was added (fix that one and send them again)`, { stage: e.stage || 'compile', field: e.field || 'stages' });
+      throw new ToolError(`${e.message} — none of the ${stages.length} stages was added (fix that one and send them again)`, { stage: e.stage || 'compile', field: e.field || 'stages', code: e.code });
     }
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const after = this._draftColumns(draft, physSet);

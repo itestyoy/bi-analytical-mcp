@@ -160,6 +160,8 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   requireSourceColumns(catalog, spec, source, availableCols);
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
+  // at_<step> and first_seen_at hold the axis's value, so they are of its type (a moment, or a number when ordered by one)
+  const axisType = availableCols?.get(timeCol)?.type || 'time';
   const mode = spec.mode || 'ordered';
   // What may appear BETWEEN consecutive steps (ordered mode only):
   //  - 'any' : any rows, including repeats of step events — i.e. "the next later
@@ -170,9 +172,10 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   const betweenSteps = spec.between_steps || null;
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
   const byName = new Map(steps.map((s) => [s.name, s]));
-  const stepIdx = (name) => {
+  // `who` is what names the step — a capture, or a kept draft's metric — so the refusal points at it
+  const stepIdx = (name, who) => {
     const s = byName.get(name);
-    if (!s) throw new Error(`metric references unknown step '${name}'`);
+    if (!s) throw new Error(`${who} names step '${name}', which the funnel does not have (steps: ${steps.map((x) => x.name).join(', ')})`);
     return s.idx;
   };
 
@@ -180,23 +183,31 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   // this one produced.
   const prepCols = availableCols;
 
-  // each capture: the value a column holds at a step, as a column of its own
+  // each capture: the value a column holds at a step, as a column of its own — under a name no other
+  // output column has (the partition key, the fixed columns, each step's, a kept draft's metric columns)
   const propCaptures = []; // { id, idx, column, type, isColumn }
-  const names = new Set(steps.flatMap((s) => [`reached_${s.name}`, `at_${s.name}`]));
+  const names = new Set([
+    ...partCols, 'first_seen_at', 'furthest_step_name', 'completed',
+    ...steps.flatMap((s) => [`reached_${s.name}`, `at_${s.name}`]),
+    ...(spec.metrics || []).flatMap((mt) => (mt.type === 'avg_seconds_between' ? [`secs_${mt.name}`] : mt.type === 'agg_at_step' ? [`pv_${mt.name}`] : [])),
+  ]);
   for (const c of spec.capture || []) {
     if (names.has(c.name)) throw new Error(`capture '${c.name}': the funnel already outputs a column of that name — name it otherwise`);
+    // ts, t<i>, is<i> are the match's own working columns (each step's time and flag) in both lowerings
+    if (/^(ts|t\d+|is\d+)$/.test(c.name)) throw new Error(`capture '${c.name}': the funnel uses that name for a working column of its own — name it otherwise`);
     names.add(c.name);
     if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage (event_property)`);
-    propCaptures.push({ id: c.name, idx: stepIdx(c.step), property: c.column, type: prepCols.get(c.column)?.type || 'unknown', isColumn: true });
+    propCaptures.push({ id: c.name, idx: stepIdx(c.step, `capture '${c.name}'`), property: c.column, type: prepCols.get(c.column)?.type || 'unknown', isColumn: true });
   }
   // A DRAFT KEPT FROM AN EARLIER VERSION may carry `metrics`: it builds the columns it built then —
   // secs_<name> for a time between two steps, pv_<name> for a property's value at a step (the other
   // metric types added no column of their own)
   const metrics = [];
   for (const mt of spec.metrics || []) {
-    if (mt.type === 'avg_seconds_between') metrics.push({ name: mt.name, type: mt.type, from: stepIdx(mt.from), to: stepIdx(mt.to) });
+    const who = `metric '${mt.name}'`;
+    if (mt.type === 'avg_seconds_between') metrics.push({ name: mt.name, type: mt.type, from: stepIdx(mt.from, who), to: stepIdx(mt.to, who) });
     else if (mt.type === 'agg_at_step') {
-      const idx = stepIdx(mt.step);
+      const idx = stepIdx(mt.step, who);
       let type; const isColumn = prepCols.has(mt.property);
       if (isColumn) type = prepCols.get(mt.property).type;
       else {
@@ -213,7 +224,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
   const rows = spec.rows || 'one_per_partition';
   // the source's day partition column, when the rows here still carry it: the prefilter's window bounds it too
   const partitionCol = m.partition_column && m.partition_column !== timeCol && (!availableCols || availableCols.has(m.partition_column)) ? m.partition_column : null;
-  return { m, fact: source, partCols, timeCol, partitionCol, mode, betweenSteps, steps, rows, metrics, propCaptures, prepCols, stepPreds };
+  return { m, fact: source, partCols, timeCol, axisType, partitionCol, mode, betweenSteps, steps, rows, metrics, propCaptures, prepCols, stepPreds };
 }
 
 // gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
@@ -365,10 +376,10 @@ ${defines.join(',\n')}
 
 /** Columns the match_recognize stage exposes (for downstream stages). */
 function matchOutputColumns(r) {
-  const cols = new Map([['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
+  const cols = new Map([['first_seen_at', { type: r.axisType }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
   for (const c of r.partCols) cols.set(c, { type: 'string' });
   for (const s of r.steps) cols.set(`reached_${s.name}`, { type: 'boolean' });
-  for (const s of r.steps) cols.set(`at_${s.name}`, { type: 'time' });
+  for (const s of r.steps) cols.set(`at_${s.name}`, { type: r.axisType });
   for (const m of r.metrics.filter((x) => x.type === 'avg_seconds_between')) cols.set(`secs_${m.name}`, { type: 'numeric' });
   for (const c of r.propCaptures) cols.set(c.id, { type: c.type });
   return cols;

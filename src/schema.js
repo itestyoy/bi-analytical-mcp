@@ -124,7 +124,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     time_range: trProp,
     stage: { $ref: '#/$defs/pipeline_stage', description: 'One pipe stage, placed at `index` (edit_step replaces it, insert_step goes before it), validated against the columns available at that point.' },
     stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Stages to append in order — one or several; with start, the draft\'s first ones. All or none; the response reports each stage\'s effect on the data. A logical chunk at a time (scope, then the funnel, then the aggregate) shows how each changes the data.' },
-    materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects.' },
+    materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects. The steps are added either way; a build that cannot start (one still running, say) is answered under `materialize` with why.' },
     index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the stage before this position (count+1 appends).' },
     after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
     validate: { type: 'boolean', description: 'preview only: check the draft\'s SQL against the warehouse without reading data (dbt run --empty) — a task, read with query_pipeline_model. Worth it before an expensive materialize.' },

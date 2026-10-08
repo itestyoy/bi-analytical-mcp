@@ -136,10 +136,19 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null) {
   return { ops, cols };
 }
 
-/** A tracked column set from a stored column list ([{ name, type }]) or an existing Map. */
+/** A tracked column set from a stored column list ([{ name, type, physical? }]) or an existing Map. */
 export function columnMap(columns) {
   if (columns instanceof Map) return new Map(columns);
-  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
+  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown', ...(c.physical ? { physical: true } : {}) }]));
+}
+
+/**
+ * A tracked column set as a list to store (a checkpoint's, a task's table) — what columnMap reads
+ * back. `physical` (the type is the warehouse's own) is kept, so a constant compared with a column of
+ * that table is written as it was against the source: a flag stored as text stays text.
+ */
+export function columnList(columns) {
+  return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown', ...(c?.physical ? { physical: true } : {}) }));
 }
 
 /**

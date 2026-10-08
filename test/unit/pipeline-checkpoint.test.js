@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { settle } from '../helpers/settle.js';
+import { settle, taskResult } from '../helpers/settle.js';
 
 // Allowed non-data tests: a CHECKPOINT's invalidation is draft STATE (positional — we own the
 // edit sequence), stage availability is an input-validation guard, and the file/reference
@@ -260,4 +260,43 @@ test('the idle GC does not reclaim a context whose prefix a fork reads', async (
   assert.ok(e.ctxs.has(draft_id), 'the owner stayed');
   // once the fork is gone, nothing reads the prefix and the owner is reclaimable again
   assert.deepEqual(e.gc(1000), [draft_id]);
+});
+
+// A constant is compared with a column in the type the WAREHOUSE gives it: a flag stored as text is
+// text, and a boolean is compared with every way text spells it. A checkpoint — and a task's table a
+// draft starts from — stands for the steps before it, so its columns keep that word: the same
+// condition is written the same way before the prefix is built and after it, in either form of the
+// condition. Shown here by what such a column refuses (an order comparison with a boolean); the rows
+// are proven against the warehouse in test/integration/condition-grammar.test.js.
+test('a text flag of the warehouse stays text after a checkpoint and in a draft started from the build', async () => {
+  const dtypes = { event_id: 'VARCHAR', player_id_of_internal: 'VARCHAR', event_name: 'VARCHAR', device_time: 'TIMESTAMP', event_date: 'DATE', event_data: 'JSON', is_clicked_of_event_data: 'VARCHAR' };
+  const runner = {
+    async run() { return { ok: true, stdout: '', stderr: '' }; },
+    async show() { return { ok: true, rows: [], columns: [] }; },
+    async relationColumns() { return { ok: true, columns: Object.entries(dtypes).map(([name, dtype]) => ({ name, dtype })) }; },
+  };
+  const e = new Engine({ catalog: loadCatalog(CATALOG, {}), runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) });
+  const textFlag = /'is_clicked_of_event_data' is a text column in the warehouse/;
+  const forms = [{ column: 'is_clicked_of_event_data' }, { left: { column: 'is_clicked_of_event_data' } }];
+  const ordered = (left) => ({ stage: 'where', conditions: [{ ...left, op: 'gt', value: true }] });
+  // …and with the constant written on the left
+  const constantLeft = { stage: 'where', conditions: [{ left: { value: true }, op: 'gt', right: { column: 'is_clicked_of_event_data' } }] };
+  const refusedBoth = async (draft_id, when) => {
+    for (const left of forms) await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [ordered(left)] }), textFlag, `${when}: ${JSON.stringify(left)}`);
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [constantLeft] }), textFlag, `${when}: a constant on the left`);
+  };
+
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });
+  await refusedBoth(draft_id, 'on the source');
+  const started = await e.build_pipeline_model({ action: 'materialize', draft_id });
+  const built = await taskResult(e, started.task_id);
+  assert.equal(built.status, 'done');
+  await refusedBoth(draft_id, 'after the checkpoint');
+  const eq = await e.build_pipeline_model({ action: 'add_steps', draft_id, stages: [{ stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'eq', value: true }] }] });
+  assert.equal(eq.from_checkpoint.model, built.model, 'the step reads the built table');
+
+  const from = await e.build_pipeline_model({ action: 'start', name: 'flg2', from_task: started.task_id, include_columns: true });
+  assert.ok(from.available_columns.some((c) => c.name === 'is_clicked_of_event_data'));
+  assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
+  await refusedBoth(from.draft_id, 'from the task');
 });

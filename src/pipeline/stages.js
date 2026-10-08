@@ -38,8 +38,10 @@ export const STAGES = {
       },
     }),
     build: ({ d, catalog, cols, source }, p) => {
-      const { sql, type } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source });
-      return { op: { op: 'extend', cols: [{ name: p.name, expr: sql }] }, cols: addCol(cols, p.name, type) };
+      const { sql, type, physical } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source });
+      const out = addCol(cols, p.name, type);
+      if (physical) out.get(p.name).physical = true; // a copy of a column is stored as that column is
+      return { op: { op: 'extend', cols: [{ name: p.name, expr: sql }] }, cols: out };
     },
   },
 

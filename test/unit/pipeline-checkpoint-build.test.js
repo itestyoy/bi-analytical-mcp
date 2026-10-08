@@ -111,8 +111,14 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   const step = await add(e, draft_id, TAIL);
   assert.equal(step.from_checkpoint.model, bg.model);
   assert.equal(step.steps_recomputed, 1);
-  // …but building on a table that does not exist yet is still refused.
-  await assert.rejects(() => materialize(e, draft_id), /already in flight|still being materialized/);
+  // …but building on a table that does not exist yet is still refused — not as the same pipeline
+  // (the draft holds a step that build does not compute), but as one to build once that one ends
+  await assert.rejects(() => materialize(e, draft_id), (err) => {
+    assert.match(err.message, /still running/);
+    assert.match(err.message, /materialize again once it ends/);
+    assert.doesNotMatch(err.message, /SAME pipeline/);
+    return true;
+  });
 
   // The build lands. Now the continuation runs, and ONLY the new step.
   runner.finish(true);

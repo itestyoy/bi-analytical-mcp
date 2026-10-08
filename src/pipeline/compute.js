@@ -211,7 +211,8 @@ const written = (name) => (name === 'over_frame' ? 'over' : name);
  */
 export function exprSql(d, cols, e, at = 'expression', opts = {}) {
   if (e === null || typeof e !== 'object' || Array.isArray(e)) throw new Error(`${at}: must be { column } | { value } | { now: true } | { fn, … }`);
-  if (e.column !== undefined) { requireCol(cols, e.column); return { sql: d.quoteIdent(e.column), type: cols.get(e.column)?.type || null }; }
+  // (physical: the type is the warehouse's own — a condition compares a boolean with a text flag as text)
+  if (e.column !== undefined) { requireCol(cols, e.column); return { sql: d.quoteIdent(e.column), type: cols.get(e.column)?.type || null, physical: !!cols.get(e.column)?.physical }; }
   if (e.now) return { sql: d.nowExpr(), type: 'time' };
   if (e.fn === undefined) {
     if (!Object.hasOwn(e, 'value')) throw new Error(`${at}: needs column | value | now | fn`);

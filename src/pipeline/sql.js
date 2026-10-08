@@ -22,8 +22,8 @@ export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce
 
 export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
-/** The functions for which the column is optional: a count counts rows without it; a sketch reads one when given. */
-const COLUMN_OPTIONAL = ['count', 'hll_init', 'hll_merge', 'hll_merge_partial'];
+/** The functions for which the column is optional: a count counts rows without it (a sketch, like every other function, reads one). */
+const COLUMN_OPTIONAL = ['count'];
 
 /**
  * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform, a
@@ -154,6 +154,19 @@ export function unquotedSql(sql) {
 const TEXT_TRUE = ['true', '1', 't'];
 const TEXT_FALSE = ['false', '0', 'f'];
 
+/** A boolean compared with a TEXT column of the warehouse holding a flag: matched against every way
+ *  text spells it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at
+ *  the spelling — whichever side of the condition the constant is written on. */
+function textFlag(d, sql, op, value, name) {
+  const values = [].concat(value);
+  if (!['eq', 'neq', 'in', 'not_in'].includes(op) || !values.every((v) => typeof v === 'boolean')) {
+    throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+  }
+  const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((x) => d.sqlLiteral(x));
+  return `LOWER(TRIM(${sql})) ${op === 'neq' || op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
+}
+const isTextFlag = (side, value) => side.physical && side.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean');
+
 // One comparison. Each side may be a column, a constant (value), or now:
 //   { column, op, value }        — column vs constant (shorthand)
 //   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
@@ -172,23 +185,18 @@ export function condPred(d, cols, c, opts = {}) {
   if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
     const value = right ? right.value : c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
-    // a TEXT column of the warehouse holding a flag: a boolean is compared with every way text spells
-    // it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at the spelling
-    if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
-      const values = [].concat(value);
-      if (!['eq', 'neq', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
-        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
-      }
-      const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((s) => d.sqlLiteral(s));
-      return `LOWER(TRIM(${left.sql})) ${c.op === 'neq' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
-    }
+    if (isTextFlag(left, value)) return textFlag(d, left.sql, c.op, value, name);
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
   // an expression on the right (a column, now, a function): a plain comparison of the two
   if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
   const r = exprSql(d, cols, right, 'right', opts);
   // a constant on the left compared with a column on the right is written in that column's type
-  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) return `${typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) {
+    const rname = `${right.column ?? 'the right side'}`;
+    if (isTextFlag(r, c.left.value)) return textFlag(d, r.sql, c.op, c.left.value, rname);
+    return `${typedLiteral(r.type, c.left.value, `'${rname}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  }
   // a moment compared with an expression: a number or a boolean is never one — refused here, not as
   // DATE >= INT64 in the run; anything else meets it as a timestamp on both sides, so a DATE column
   // and a TIMESTAMP expression (a raw TIMESTAMP_SUB, now) compare as the warehouse cannot otherwise
@@ -225,6 +233,8 @@ export function aggExpr(d, fn, column, q, cond = null) {
   // a CONDITIONAL aggregate folds only the rows `cond` holds for: the value is NULL on every other
   // row, which every aggregate skips — count(case when …), sum(case when …) — the same on every warehouse
   if (fn === 'count' && !column) return cond ? `count(CASE WHEN ${cond} THEN 1 END)` : 'count(*)';
+  // (the schema asks for it; a step kept from an earlier version is told so here, not by the identifier guard)
+  if (!column) throw new Error(`pipeline: a measure with agg '${fn}' needs \`column\` — only a count counts rows without one`);
   const c = cond ? `CASE WHEN ${cond} THEN ${d.quoteIdent(column)} END` : d.quoteIdent(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
   if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);

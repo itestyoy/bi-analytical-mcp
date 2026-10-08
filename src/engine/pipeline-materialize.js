@@ -134,12 +134,18 @@ export const pipelineMaterializeMethods = {
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
       throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'draft_id', code: RESULT_GONE });
     }
-    // A build of THIS draft already in flight is never started twice. A retried call is the same
-    // pipeline, and a second run would write the same model files under the first one's feet.
+    // A build of THIS draft already in flight is never started twice: a second run would write the
+    // same model files under the first one's feet. A retried call is the same pipeline; a draft that
+    // grew or was edited since the build started is not, and is built once that one ends.
     if (draft.building) {
+      const b = draft.building;
+      const read = b.task_id ? `query_pipeline_model({ request: { task_ids: ['${b.task_id}'] } })` : 'query_pipeline_model and the task_id its call returned';
+      // the same steps: as many, and none edited at or before them (an edit retires the build's checkpoint)
+      const same = draft.stages.length === b.steps && (!b.task_id || (draft.checkpoints || []).some((cp) => cp.task_id === b.task_id));
       throw new ToolError(
-        `a build of this draft is already in flight (started ${draft.building.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. `
-        + `${draft.building.task_id ? `Read it with query_pipeline_model({ request: { task_ids: ['${draft.building.task_id}'] } })` : 'Read it with query_pipeline_model and the task_id its call returned'}; the result table is ${draft.building.model}.`,
+        same
+          ? `a build of this draft is already in flight (started ${b.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. Read it with ${read}; the result table is ${b.model}.`
+          : `a build of this draft is still running (started ${b.started_at}, steps 1..${b.steps}), and one build runs on a draft at a time — a second would write over it. The draft has changed since that build started, so materialize again once it ends: read it with ${read} (its table is ${b.model}).`,
         { stage: 'validate', field: 'draft_id' },
       );
     }
@@ -155,10 +161,11 @@ export const pipelineMaterializeMethods = {
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
     const stages = draft.stages.map((s) => JSON.parse(JSON.stringify(s)));
     // the in-flight marker goes up BEFORE anything awaits, so a second call made meanwhile is refused
-    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null };
+    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null, steps: stages.length };
     let columns;
     try {
-      columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages));
+      // the list the checkpoint keeps: each column's type with the warehouse's word on it (physical)
+      columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages), { stored: true });
     } catch (e) { delete draft.building; throw e; }
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
     const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {

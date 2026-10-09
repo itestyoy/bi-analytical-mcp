@@ -12,6 +12,7 @@ import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../g
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, clone, pageBlock } from './helpers.js';
+import { KEPT_ROWS } from '../schema/fields.js';
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -343,7 +344,7 @@ export const semanticQueryMethods = {
       const { rows: pageRows, page } = paging.page((raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v]))));
       const recs = [];
       if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
-      if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
+      if (page.has_more) recs.push(this._keptRowsNote(page));
       return {
         ok: true, columns, rows: pageRows, row_count: pageRows.length, page,
         ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
@@ -426,12 +427,17 @@ export const semanticQueryMethods = {
     return notes;
   },
 
-  /** Paging: the page asked for, and one row over it fetched so has_more means something. */
+  /** The rows a query task keeps — the first `limit` of its result (a read pages them) — and one row
+   *  over them fetched, so has_more says whether the result goes on past them. */
   _metricPaging(input) {
-    const limit = input.limit ?? 1000;
-    const offset = input.offset ?? 0;
+    const limit = input.limit ?? KEPT_ROWS;
     const ordered = !!input.order_by?.length;
-    return { limit, offset, fetch: limit + offset + 1, page: (rows) => { const page = rows.slice(offset, offset + limit); return { rows: page, page: pageBlock({ offset, limit, returned: page.length, has_more: rows.length > offset + limit, ordered }) }; } };
+    return { limit, fetch: limit + 1, page: (rows) => { const kept = rows.slice(0, limit); return { rows: kept, page: pageBlock({ offset: 0, limit, returned: kept.length, has_more: rows.length > limit, ordered }) }; } };
+  },
+
+  /** What a query whose result goes on past the rows its task keeps is told: how to have the rest. */
+  _keptRowsNote(page) {
+    return `More rows exist past the ${page.limit} this task keeps — query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to the last one; or add order_by so the rows kept are the ones that matter.`;
   },
 
   /** Whether a query is only compiled (dry_run); a plan is asked for only with it, and a result is
@@ -593,7 +599,7 @@ export const semanticQueryMethods = {
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
-      if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
+      if (page.has_more) recs.push(this._keptRowsNote(page));
       recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ request: { action: \'start\', from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,

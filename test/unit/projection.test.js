@@ -34,3 +34,14 @@ test('accepts valid structured input (incl. quoted value) and builds output', ()
   assert.equal(typeof sql, 'string');
   assert.ok(sql.length > 0);
 });
+
+// a read's measure takes the aggregate stage's functions but for the sketch PRODUCERS: a read returns
+// values, and merges a sketch a pipeline stored with hll_merge (its numbers: test/integration/materialize.test.js)
+test('a read folds with the aggregate stage\'s functions, but makes no sketch', () => {
+  for (const agg of ['approx_count_distinct', 'hll_merge', 'median', 'count_distinct']) {
+    assert.equal(typeof buildProjection('t', { group_by: ['g'], measures: [{ agg, column: 'x', name: 'v' }] }, q), 'string', agg);
+  }
+  for (const agg of ['hll_init', 'hll_merge_partial']) assert.throws(() => buildProjection('t', { group_by: ['g'], measures: [{ agg, column: 'x', name: 'v' }] }, q), /unsupported agg/, agg);
+  assert.throws(() => buildProjection('t', { measures: [{ agg: 'sum', name: 'v' }] }, q), /needs a column/);
+  assert.throws(() => buildProjection('t', { measures: [{ agg: 'percentile', column: 'x', name: 'v' }] }, q), /percentile/);
+});

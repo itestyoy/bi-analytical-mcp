@@ -256,8 +256,10 @@ export function predicateDefs(catalog, project = null) {
 // knows nor can raise. Asking for more than this returns after the cap, with `clamped: true`.
 // Declared here because both the schema text and the engine's clamp must say the same number.
 export const MAX_WAIT_SECONDS = 30;
-/** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: the task keeps them all, the rest is a next_offset away. */
+/** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: its offset and limit are row numbers of the task's result, the rest is a next_offset away. */
 export const READ_PAGE = 50;
+/** How many rows of its result a query task keeps unless its `limit` says otherwise — what a read pages through and a card draws (a stored result keeps every row in its table). */
+export const KEPT_ROWS = 1000;
 /** How many contexts one context({ action: list }) page holds, unless it asks for another number. */
 export const CONTEXT_PAGE = 20;
 

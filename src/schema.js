@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, CONTEXT_PAGE, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
@@ -159,8 +159,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const pdefs = predicateDefs(catalog, project);
   const pipelineQueryFields = {
     transform: projection,
-    limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000).' },
-    offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging).' },
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the projection the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
   };
   // The read half of a query tool: { task_ids } waits for tasks of its side and returns each one.
   const taskRead = {
@@ -177,8 +176,12 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     form({ title: 'read tasks', required: ['task_ids'], properties: { ...pick(taskRead, ['task_ids', 'wait_seconds']), ...paging } }),
     form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
   ];
-  // a read pages what each task stored: the same offset/limit for each
-  const readPaging = (fields) => Object.fromEntries(['offset', 'limit'].map((k) => [k, { ...fields[k], description: k === 'offset' ? 'With task_ids: rows of each stored result to skip (paging).' : 'With task_ids: rows of each stored result to return.' }]));
+  // A READ PAGES each task's result: its rows from `offset` (a row number of the result, 0 its first) —
+  // the rows a task keeps, or the table it stored — READ_PAGE of them unless `limit` says otherwise
+  const readPaging = {
+    offset: { type: 'integer', minimum: 0, description: 'The row of each task\'s result the page starts at: 0 is its first row, next_offset where the previous page ended.' },
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of each task's result the page holds (default ${READ_PAGE}).` },
+  };
   const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `Several ${what} in one call, run side by side: each item takes a single query's fields (context_id stays at the top). All are checked first — one mistake refuses the batch. Returns task_ids, in order.`, items: item });
 
   const semanticQueryFields = {
@@ -198,9 +201,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       where: conditionList({ $ref: '#/$defs/predicate' }, 'Row filter applied before aggregation: conditions on dimensions / metric_time that all hold — an item may be { or: [...] }, any of its conditions holds (each a condition or { and: [...] }).'),
       order_by: { type: 'array', description: 'Sort order, by the names the rows come back with: a requested metric, or the result column of a group_by item ("users_country", "metric_time_day").', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
       time_range: METRIC_TIME_RANGE,
-      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
-      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
-      materialize: { type: 'boolean', description: 'Store the whole result as a table (what comes back is one page of it). A stored result survives a restart, pages with { task_ids, offset, limit }, can be drawn as a drill-down, and can start a pipeline (from_task).' },
+      limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
+      materialize: { type: 'boolean', description: 'Store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
       dry_run: { type: 'boolean', description: 'Return the compiled SQL without running it (it waits for the context\'s build only).' },
       include_plan: { type: 'boolean', description: 'With dry_run: also MetricFlow\'s dataflow plan — thousands of tokens; the SQL alone is usually what is wanted.' },
   };
@@ -209,7 +211,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     type: 'object',
     description: 'Start a metric query against a context (or several at once with queries) — or, with task_ids, read semantic tasks back.',
     $defs: pdefs,
-    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields, required: ['metrics'] }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: semanticQueryFields }, 'metric queries'), readPaging(semanticQueryFields)),
+    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields, required: ['metrics'] }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: semanticQueryFields }, 'metric queries'), readPaging),
   };
 
   const ctxRef = { type: 'object', additionalProperties: false, required: ['context_id'], description: 'Reference an existing context by id.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id } } };
@@ -256,7 +258,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       anyOf: queryModes(
         { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the context_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
         batchOf({ type: 'object', additionalProperties: false, properties: pipelineQueryFields }, 'queries over the built model'),
-        readPaging(pipelineQueryFields),
+        readPaging,
       ),
     },
     display_model_result: {

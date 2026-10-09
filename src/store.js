@@ -285,8 +285,10 @@ export class MemoryBackend {
 // whether it is KEPT by MCP_DB_RESET (curated memory and the error log are not re-derivable).
 const TABLES = [
   // `tool`: the tool that started a task, which says which query tool reads it back;
-  // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result
-  { name: 'jobs', key: ['id'], columns: ['id TEXT', 'context_id TEXT', 'table_name TEXT', 'status TEXT', 'error TEXT', 'started_at INTEGER', 'ready_at INTEGER', 'tool TEXT', 'drawn INTEGER', 'display TEXT'] },
+  // `drawn`: the task's one card was drawn — a card still open after a restart reads its own result;
+  // `kept_rows`: how many of a stored result's rows the task's answer holds — what a card draws of it
+  // after a restart too
+  { name: 'jobs', key: ['id'], columns: ['id TEXT', 'context_id TEXT', 'table_name TEXT', 'status TEXT', 'error TEXT', 'started_at INTEGER', 'ready_at INTEGER', 'tool TEXT', 'drawn INTEGER', 'display TEXT', 'kept_rows INTEGER'] },
   // Every index table is keyed by (SOURCE, property): each catalog source — an events fact, the users
   // dimension — owns its own index space, so two facts may carry the same property name.
   { name: 'prop_values', cache: true, key: ['source', 'property', 'value'], columns: ['source TEXT', 'property TEXT', 'value TEXT', 'freq INTEGER'] },
@@ -413,10 +415,10 @@ export class SqliteBackend {
       init() {
         // a job left 'running' across a restart can never complete -> terminal error.
         s._run("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'");
-        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, tool: r.tool, ...(r.drawn ? { drawn: true } : {}), ...(r.display ? { display: (() => { try { return JSON.parse(r.display); } catch { return undefined; } })() } : {}) }));
+        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, tool: r.tool, ...(r.kept_rows != null ? { keptRows: Number(r.kept_rows) } : {}), ...(r.drawn ? { drawn: true } : {}), ...(r.display ? { display: (() => { try { return JSON.parse(r.display); } catch { return undefined; } })() } : {}) }));
       },
       upsert(j) {
-        s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at, tool, drawn, display) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at, tool=excluded.tool, drawn=excluded.drawn, display=excluded.display', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null, j.tool ?? null, j.drawn ? 1 : null, j.display ? JSON.stringify(j.display) : null);
+        s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at, tool, drawn, display, kept_rows) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at, tool=excluded.tool, drawn=excluded.drawn, display=excluded.display, kept_rows=excluded.kept_rows', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null, j.tool ?? null, j.drawn ? 1 : null, j.display ? JSON.stringify(j.display) : null, j.keptRows ?? null);
       },
     };
 

@@ -7,45 +7,47 @@
 // are literal-escaped.
 
 import { comparison, conditionsSql, eachCondition } from './conditions.js';
+import { AGG_FNS, SKETCH_FNS, aggExpr } from './pipeline/sql.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-/** The aggregations a projection's measure (a read's transform, a drill-down) takes — the one list its schema offers. */
-export const AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance', 'median', 'percentile']);
-// the statistical ones are the warehouse's (the dialect writes them, as the pipeline's aggregate does)
-const STATS = new Set(['stddev', 'variance', 'median', 'percentile']);
+/**
+ * The aggregations a projection's measure (a read's transform, a drill-down) takes — the one list its
+ * schema offers: the aggregate stage's functions, but for those that PRODUCE a sketch (a read returns
+ * values; a sketch a pipeline stored is merged here with hll_merge).
+ */
+export const AGGS = new Set(AGG_FNS.filter((a) => !SKETCH_FNS.has(a)));
 /** The column a measure produces: its name. */
 export const aggName = (a) => a.name;
 
 // a dialect that writes names as they are — for checking a projection's shape, never for running it
-const PLAIN = { quoteIdent: (x) => x, statAggExpr: (fn, c) => `${fn}(${c})`, orderKey: (sql, direction, nulls) => `${sql} ${direction || 'asc'} nulls ${nulls || 'last'}` };
+const PLAIN = {
+  quoteIdent: (x) => x,
+  statAggExpr: (fn, c) => `${fn}(${c})`,
+  approxCountDistinct: (c) => `approx_count_distinct(${c})`,
+  hllMerge: (c) => `hll_merge(${c})`,
+  orderKey: (sql, direction, nulls) => `${sql} ${direction || 'asc'} nulls ${nulls || 'last'}`,
+};
 
 function ident(x) {
   if (!IDENT.test(String(x || ''))) throw new Error(`unsafe identifier: ${x}`);
   return x;
 }
 
-/** The SQL of one projection, written by the warehouse's dialect `d` (its quoteIdent, its statistics). */
+/** The SQL of one projection, written by the warehouse's dialect `d` (its quoteIdent, its functions). */
 function writer(d) {
   const col = (x) => d.quoteIdent(ident(x));
   const predicate = (c) => comparison(col(c.column), c.op, c.value);
+  // ONE WRITER PER FUNCTION: a measure here is the aggregate stage's, written by its aggExpr — what a
+  // read checks first is only what it says in its own words (the list it takes, a name, a column)
   const aggSql = (a) => {
     if (!AGGS.has(a.agg)) throw new Error(`unsupported agg: ${a.agg}`);
     if (!a.name) throw new Error(`${a.agg}: every measure names the column it produces (name)`);
     // only a count may go without a column (it counts rows); every other function folds one
     if (a.agg !== 'count' && !a.column) throw new Error(`${a.agg} needs a column to fold`);
-    // a CONDITIONAL aggregate folds only the rows its `where` holds for: the value becomes NULL on
-    // every other row, which every aggregate skips — sum(case when …), count(case when …) — the same
-    // on every warehouse
-    const cond = a.where?.length ? conditionsSql(a.where, predicate).join(' and ') : null;
-    const val = (expr) => (cond ? `case when ${cond} then ${expr} end` : expr);
-    // count(*) counts rows; count(<column>) counts NON-NULL values of that column. Honour the
-    // column when given (no column means row count) — otherwise a NULL check via
-    // { agg:'count', column } silently returns COUNT(*) and reports zero NULLs.
-    if (a.agg === 'count') return a.column ? `count(${val(col(a.column))})` : cond ? `count(${val('1')})` : 'count(*)';
-    if (a.agg === 'count_distinct') return `count(distinct ${val(col(a.column))})`;
     if (a.agg === 'percentile' && !(typeof a.percentile === 'number' && a.percentile > 0 && a.percentile < 1)) throw new Error('percentile needs `percentile` in (0,1)');
-    if (STATS.has(a.agg)) return d.statAggExpr(a.agg, val(col(a.column)), a.percentile);
-    return `${a.agg === 'average' ? 'avg' : a.agg}(${val(col(a.column))})`;
+    // a CONDITIONAL aggregate folds only the rows its `where` holds for
+    const cond = a.where?.length ? conditionsSql(a.where, predicate).join(' and ') : null;
+    return aggExpr(d, a.agg, a.column ? ident(a.column) : null, a.percentile, cond);
   };
   return { col, predicate, aggSql };
 }

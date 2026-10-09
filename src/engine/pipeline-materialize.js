@@ -357,7 +357,8 @@ export const pipelineMaterializeMethods = {
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    if (taskId) this.jobs.setTable(taskId, modelName);
+    // (a pipeline built in one call made its context here); its answer holds the table's first SHOWN_ROWS
+    if (taskId) this.jobs.setTable(taskId, modelName, { contextId: ctx.id, keptRows: SHOWN_ROWS });
     ctx.state.pipeline_model = { model: modelName, materialized, kind: 'pipeline', ...(taskId ? { task_id: taskId } : {}), columns: [...out.columns.keys()], ...(input.description ? { description: input.description } : {}), ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);

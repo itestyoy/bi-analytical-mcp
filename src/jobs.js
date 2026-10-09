@@ -41,9 +41,16 @@ export class JobManager {
     return this.live.has(id);
   }
 
-  setTable(id, table) {
+  /** The table a task leaves behind — with the context that holds it, for a task whose context was
+   *  created by its own work (a pipeline declared and built in one call), and how many of its rows the
+   *  task's answer holds (`keptRows`: what a card draws of it, after a restart too). */
+  setTable(id, table, { contextId = null, keptRows = null } = {}) {
     const j = this.jobs.get(id);
-    if (j) { j.table = table; this._persist(j); }
+    if (!j) return;
+    j.table = table;
+    if (contextId && !j.contextId) j.contextId = contextId;
+    if (keptRows != null) j.keptRows = keptRows;
+    this._persist(j);
   }
 
   ready(id) {

@@ -7,7 +7,7 @@
 // experiment is no task at all: its statistics come back with its call.
 
 import { MAX_WAIT_SECONDS } from '../schema.js';
-import { READ_PAGE } from '../schema/fields.js';
+import { READ_PAGE, KEPT_ROWS } from '../schema/fields.js';
 import { SELF_REFUSAL_TOOL } from '../self-refusal.js';
 import { defineTool } from './define.js';
 import { OUTPUTS } from '../schema/outputs.js';
@@ -40,7 +40,7 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'query_semantic_model',
     title: 'Query Semantic Model',
-    description: `Start a metric query on a context, or read semantic tasks back. The query is checked in the call — a mistake is refused with the fix — and returns { task_id } without waiting. Joins are applied for you: group or filter by { model, attribute } and the declared key is used, for a slowly-changing model the version valid at each row's time. { task_ids } waits up to ${MAX_WAIT_SECONDS}s and returns each result (call again while it is running); a page is ${READ_PAGE} rows unless limit says otherwise, and says whether the rows are in a stated order. materialize: true stores the whole result as a table: pageable, drawable as a drill-down, a start for a pipeline (from_task). Independent queries on one context go in one call ({ queries: [...] }) and run side by side. { task_ids, cancel: true } stops tasks. Each of the dbt project's own semantic models is a context named after it, queried by the project's names ({ semantic_model, dimension }, { entity }); preview_semantic_model lists what a metric there can be grouped by.`,
+    description: `Start a metric query on a context, or read semantic tasks back. The query is checked in the call — a mistake is refused with the fix — and returns { task_id } without waiting. Joins are applied for you: group or filter by { model, attribute } and the declared key is used, for a slowly-changing model the version valid at each row's time. { task_ids } waits up to ${MAX_WAIT_SECONDS}s and returns a page of each result (call again while it is running): ${READ_PAGE} rows from offset — a row number of the result, 0 its first — unless limit says otherwise, saying whether the rows are in a stated order. A query keeps its first limit rows (${KEPT_ROWS} by default); materialize: true stores every row as a table: paged to its last row, drawable as a drill-down, a start for a pipeline (from_task). Independent queries on one context go in one call ({ queries: [...] }) and run side by side. { task_ids, cancel: true } stops tasks. Each of the dbt project's own semantic models is a context named after it, queried by the project's names ({ semantic_model, dimension }, { entity }); preview_semantic_model lists what a metric there can be grouped by.`,
     // every call starts a task; materialize:true persists the result into the context — a write, never a removal
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'semantic',
@@ -52,7 +52,7 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'query_pipeline_model',
     title: 'Query Pipeline Model',
-    description: `Query a table build_pipeline_model built, or read pipeline tasks back. { context_id, transform? } starts a read-only projection over the stored table — where, group_by, measures, having, order_by, and a second level (then) over the grouped result — recomputing nothing upstream, and returns { task_id }. { task_ids } waits up to ${MAX_WAIT_SECONDS}s for a build or such a query and returns its rows (call again while it is running); a page is ${READ_PAGE} rows unless limit says otherwise. Several projections go in one call ({ queries: [...] }). { task_ids, cancel: true } stops tasks.`,
+    description: `Query a table build_pipeline_model built, or read pipeline tasks back. { context_id, transform? } starts a read-only projection over the stored table — where, group_by, measures, having, order_by, and a second level (then) over the grouped result — recomputing nothing upstream, and returns { task_id }. { task_ids } waits up to ${MAX_WAIT_SECONDS}s for a build or such a query and returns a page of its rows (call again while it is running): ${READ_PAGE} rows from offset — a row number of the result — unless limit says otherwise; a build's stored table pages to its last row, a query keeps its first limit rows (${KEPT_ROWS} by default). Several projections go in one call ({ queries: [...] }). { task_ids, cancel: true } stops tasks.`,
     // every call starts or reads a task; a query over a built model writes nothing to the warehouse
     annotations: { readOnlyHint: true, idempotentHint: false },
     side: 'pipeline',

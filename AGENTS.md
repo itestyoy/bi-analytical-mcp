@@ -306,9 +306,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
   every condition taking the same operators (`OPS`, src/conditions.js, written by its one
   `comparison`). Only what a condition compares differs by LEVEL: over a table's rows (a pipeline's
-  where, a funnel step, a read's where and having, a measure's where) a `column` or an expression
+  where, a funnel step, a pipeline measure's where) a `column` or an expression
   (`left`, never a bare column), against a constant `value` or an expression `right` — never both
-  (four closed forms, `CONDITION` in src/pipeline/sql.js); on
+  (four closed forms, `CONDITION` in src/pipeline/sql.js); over a stored result (a read's where and
+  having, its measures' where) a `column` against a constant `value` — the first of those forms, under
+  its title (src/schema/projection.js): an expression is a pipeline step's; on
   a semantic model's source a `field` (a column, a scalar payload property); in a metric query the
   field reference as group_by names it. A MEASURE is ONE form wherever rows are aggregated — a
   pipeline's aggregate stage, a pivot's cells (that measure without its name and its where — the
@@ -363,7 +365,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   side reads tasks back (the started answer names it in `read_with`) with ONE form, `{ task_ids }` —
   one id or several: it waits (≤ MAX_WAIT_SECONDS per call) and returns each one's result under
   `results`, in the order asked (`TaskRunner.readAnswer`; a read whose every task failed is a tool
-  error), `offset`/`limit` paging each stored table or the rows held in memory;
+  error), `offset`/`limit` paging each one's result by its row numbers (READ_PAGE rows unless
+  `limit` says) — a query keeps the first `limit` rows of its result (KEPT_ROWS by default), a stored
+  table (materialize, a pipeline build) pages to its last row; a start takes no `offset`;
   `{ task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
   refuses a task of the other side — before any wait — and it never draws. The side is

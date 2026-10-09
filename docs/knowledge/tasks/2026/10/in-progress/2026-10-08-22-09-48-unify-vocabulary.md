@@ -106,8 +106,30 @@ kept from an earlier version, carried over on read (src/pipeline/earlier.js); `n
     (`Catalog.semanticModelKeys`) and the project's semantic models;
   - texts: the overview's `enums` are keyed `{ agg, type, grain }` (agg: the task aggs); "Queried as
     <task>_<name>"; a semantic measure's name says it is read by metrics.
-- Later batches of the same job (readers and cards, catalog tools, experiment, retentioneering) are
-  recorded here as they land.
+- Batch D, reads, paging and cards:
+  - paging is the read's: neither query tool's start takes `offset`; a start's `limit` is how many
+    rows of its result the task keeps (`KEPT_ROWS`, 1000), a materialized query storing every row (its
+    `limit` then the rows the task keeps for a plain card — kept with the task, the jobs table's
+    `kept_rows`, so a card drawn after a restart draws as many; a build keeps the 50 it answers with);
+    a read's `offset`/`limit` are row numbers of the result (`READ_PAGE`, 50, unless `limit` says),
+    alike for rows held and a stored table — a stored task's held first answer included, a page past
+    it read from the table with the answer's order flag and where its rows come from (model,
+    provenance, a sample's note), not the build's SQL and notes; a page that starts past the end
+    counts the rows there are; a page past what a query kept says so, with no `next_offset`, and
+    points at a larger limit or `materialize`; a read of a stored result whose table is gone is
+    `result_gone` — every page and a card's read alike (the rows still held are not drawn); a
+    pipeline declared and built in one call records the context its work created on its task, so its
+    table pages, draws and starts a pipeline like any build's;
+  - a read's measure is written by the aggregate stage's `aggExpr` (one writer per function) over
+    `AGG_FNS` minus the sketch producers: `approx_count_distinct` and `hll_merge` join the read;
+  - a read's condition (where, having, a measure's where) is the column-and-constant form, titled as
+    the pipeline's first CONDITION form;
+  - display: a pivot value is written in the KPI tile's two closed format forms (a currency only with
+    `format: currency`); one card aggregation list (`CARD_AGGS`: a read's functions but percentile)
+    for `drill.agg` and pivot `values[].agg`; one `level` item for pivot and drill levels; a column is
+    described without listing spellings.
+- Later batches of the same job (catalog tools, experiment, retentioneering) are recorded here as
+  they land.
 
 ## Out Of Scope
 

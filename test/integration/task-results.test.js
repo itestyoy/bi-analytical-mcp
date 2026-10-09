@@ -178,6 +178,12 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
   const deleted = await one(engine.query_semantic_model({ task_ids: [built.task_id], limit: 10 }));
   assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
+  // …and a card of it reads the same, though the task still holds its first rows: they are not the
+  // result any more, so nothing is drawn from them
+  assert.ok(engine.raw._taskResults.has(built.task_id), 'the answer is still held');
+  const card = await engine.display_model_result({ task_id: built.task_id });
+  assert.deepEqual([card.ok, card.error?.code, card.drawn], [false, 'result_gone', undefined]);
+  assert.deepEqual(buildViewModel('display_model_result', card), { kind: 'none', reason: 'gone' });
   // …while a query that FAILED stays an error
   assert.equal(buildViewModel('display_model_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');
 });
@@ -208,6 +214,25 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const children = pivotRows(level, display, 1);
   assert.ok(children.length >= 1);
   assert.equal(children.reduce((a, c) => a + (c.values[0] ?? 0), 0), 35, 'the children of US add up to US');
+});
+
+// A LEVEL FOLDS WITH ANY FUNCTION A READ'S MEASURE TAKES (but the percentile): a median per country of
+// the stored rows under it — checked against the same rows read back and folded here.
+test('a pivot value folds its level with a median: each country is the median of its stored rows', opts, async (t) => {
+  if (skip(t)) return;
+  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  const stored = await q({ group_by: groupBy, materialize: true });
+  const rows = (await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 1000 }))).rows;
+  const median = (xs) => { const v = xs.filter((x) => x !== null && x !== undefined).map(Number).sort((a, b) => a - b); const h = Math.floor(v.length / 2); return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
+  const truth = {};
+  for (const r of rows) (truth[String(r.users_country)] ||= []).push(r.mon_revenue);
+  const display = { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue', agg: 'median', format: 'currency', currency: 'EUR' }] };
+  const top = await engine.display_model_result({ task_id: stored.task_id, display });
+  assert.equal(top.drawn, true, JSON.stringify(top.error || top.warnings));
+  const m = buildViewModel('display_model_result', top);
+  const shown = m.rows.filter((r) => truth[r.label]?.some((x) => x !== null));
+  assert.ok(shown.length >= 3, JSON.stringify(m.rows));
+  for (const r of shown) assert.equal(Number(r.values[0]), median(truth[r.label]), r.label);
 });
 
 // A CHART DRILL-DOWN: the chart is drawn from the stored table folded over its drill levels, and a

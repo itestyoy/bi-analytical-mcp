@@ -299,7 +299,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   words. What a result with rows IS is
   declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
-  fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several
+  fields, bounds, enums), so nothing about a form lives in prose: `line` (a trend; several
   `y`, or one `y` with a `series_column`, is a multi-line), `area` (a total split into parts over time,
   stacked), `bar` (a comparison: grouped by several `y` or a `series_column`, `stacked`, `horizontal` —
   the default past 8 categories), `pie` (shares of one total as a donut; past 6 slices the smallest
@@ -311,8 +311,10 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   table over a STORED result (a query run with `materialize: true`, or a pipeline build), `levels: [{ column, label }]`: the card gets the top level —
   the header names only that one, and an opened row names the level under it ("US · by Platform") —
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
-  a level; each level re-aggregates
-  with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
+  a level; `values: [{ column, agg, label, format }]`, each written as a KPI tile is — a number or a
+  percent, or `format: currency` with its `currency` — and re-aggregated per level with its agg, any
+  function a read's measure takes but the percentile, so sums, counts, min, max and `hll_merge` of a
+  stored sketch add up while distinct counts, averages, medians and ratios do not).
   `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
   stored result grouped by those columns too: the chart is drawn folded over them, a click on
   a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform

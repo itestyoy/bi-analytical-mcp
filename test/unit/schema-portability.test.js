@@ -278,6 +278,11 @@ test('the card declaration (display) is structural: each kind is a closed branch
     { kind: 'kpi', values: [{ column: 'revenue', format: 'currency', currency: 'EUR', good: 'up' }] },
     { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'n' },
     { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max', format: 'number' }] },
+    // a pivot value is written as a KPI tile is: a currency goes with format currency
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'revenue', format: 'currency', currency: 'EUR' }, { column: 'payers', agg: 'count_distinct', format: 'percent' }] },
+    // a view folds with what a read's measure takes, but for the percentile: a median, a sketch merged
+    { kind: 'bar', x: 'users_country', y: ['revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }], agg: 'median' } },
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'users_sketch', agg: 'hll_merge' }] },
   ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
   for (const [bad, why] of [
     [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
@@ -289,7 +294,11 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'kpi', values: [1, 2, 3, 4, 5].map((i) => ({ column: `c${i}` })) }, 'more than four tiles'],
     [{ kind: 'pie', label_column: 'a', value_column: 'b', stacked: true }, 'a field of another kind'],
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
-    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'percentile' }] }, 'a percentile names no quantile here'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'hll_init' }] }, 'a view returns values, not a sketch'],
+    [{ kind: 'bar', x: 'a', y: ['v'], drill: { levels: [{ column: 'b' }], agg: 'percentile' } }, 'a drill folds no percentile either'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', currency: 'EUR' }] }, 'a pivot value\'s currency without format currency'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', format: 'number', currency: 'EUR' }] }, 'a number takes no currency'],
   ]) assert.equal(check(bad).ok, false, why);
   // a split names ONE value column — refused at the call, by the rule, with the result's columns at hand
   const { displayProblems } = await import('../../src/display-check.js');

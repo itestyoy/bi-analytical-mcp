@@ -222,6 +222,137 @@ test('a stored result is paged with query_semantic_model({ task_id }): limit/off
   assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85);
 });
 
+// PAGING IS THE READ'S: a read's offset/limit are row numbers of the task's result. A query keeps the
+// first `limit` rows of it (a page past them is told it was not kept); a stored result pages to its
+// last row, its first answer included — a page past the rows the task holds is read from the table.
+test('a held result pages by its row numbers, and a page past the rows it kept says how to have them', opts, async (t) => {
+  if (skip(t)) return;
+  const order_by = [{ key: 'users_country', direction: 'asc' }];
+  const full = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by });
+  assert.ok(full.rows.length >= 3, `expected at least 3 country rows, got ${full.rows.length}`);
+  const countries = full.rows.map((r) => r.users_country);
+  // the task keeps its first 2 rows
+  const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by, limit: 2 });
+  await taskResult(engine.raw, started.task_id);
+  const second = await one(engine.query_semantic_model({ task_ids: [started.task_id], offset: 1, limit: 1 }));
+  assert.deepEqual(second.rows.map((r) => r.users_country), [countries[1]], 'offset 1 is the result\'s second row');
+  assert.equal(Number(second.rows[0].mon_revenue), Number(full.rows[1].mon_revenue));
+  assert.equal(second.page.offset, 1);
+  // a page that reaches past the 2 rows kept: the rows kept, more exist, and no row number reads them
+  const page = await one(engine.query_semantic_model({ task_ids: [started.task_id] }));
+  assert.deepEqual(page.rows.map((r) => r.users_country), countries.slice(0, 2));
+  assert.equal(page.page.has_more, true);
+  assert.equal(page.page.next_offset, undefined);
+  assert.equal(page.page.held_rows, 2);
+  assert.ok(page.warnings.some((w) => /larger limit/.test(w)), JSON.stringify(page.warnings));
+});
+
+test('a stored result pages to its last row: a page past the rows the task holds is read from its table', opts, async (t) => {
+  if (skip(t)) return;
+  const group_by = [{ model: 'users', attribute: 'country' }];
+  // the task holds 1 row of its result; the table stores them all
+  const m = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by, materialize: true, limit: 1 });
+  const held = await taskResult(engine.raw, m.task_id);
+  assert.equal(held.status, 'done', JSON.stringify(held.error));
+  const all = await one(engine.query_semantic_model({ task_ids: [m.task_id] }));
+  assert.ok(all.rows.length >= 3, 'the first page is the result\'s, not the one row held');
+  assert.equal(all.page.has_more, false);
+  assert.equal(all.page.total_rows, all.rows.length);
+  assert.equal(all.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85);
+  // row by row, by row number: the same rows as that page, in its order
+  const one1 = await one(engine.query_semantic_model({ task_ids: [m.task_id], offset: 1, limit: 1 }));
+  assert.deepEqual(one1.rows, [all.rows[1]]);
+  assert.equal(one1.page.next_offset, 2);
+  // a page that starts past the last row holds none, and counts the rows there are
+  const past = await one(engine.query_semantic_model({ task_ids: [m.task_id], offset: all.rows.length + 10 }));
+  assert.deepEqual([past.rows, past.page.total_rows, past.page.has_more], [[], all.rows.length, false]);
+  // a card draws the rows the task keeps
+  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'bar', x: 'users_country', y: ['mon_revenue'] } });
+  assert.equal(card.rows.length, 1);
+  // …once its answer is gone too (a restart): the task's 2 rows, read from the table, not a default
+  const two = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by, materialize: true, limit: 2 });
+  assert.equal((await taskResult(engine.raw, two.task_id)).status, 'done');
+  engine.raw._taskResults.delete(two.task_id);
+  const late = await engine.display_model_result({ task_id: two.task_id, display: { kind: 'bar', x: 'users_country', y: ['mon_revenue'] } });
+  assert.equal(late.drawn, true, JSON.stringify(late.error));
+  assert.equal(late.rows.length, 2);
+  for (const r of late.rows) assert.ok(all.rows.some((a) => a.users_country === r.users_country && num(a.mon_revenue) === num(r.mon_revenue)), JSON.stringify(r));
+});
+
+test('a pipeline build pages its stored table to the last row, and a projection keeps its first limit rows', opts, async (t) => {
+  if (skip(t)) return;
+  const truth = (await wh.query('select event_id from fct_analytics_events order by event_id')).rows.map((r) => r.event_id);
+  assert.ok(truth.length > 100, `expected more than two pages of events, got ${truth.length}`);
+  const started = await engine.raw.build_pipeline_model({ action: 'start', name: 'paged_events', source: 'events', stages: [{ stage: 'project', keep: ['event_id', 'event_name'] }, { stage: 'order_by', keys: [{ key: 'event_id' }] }], materialize: true });
+  const built = { task_id: started.materialize?.task_id, context_id: started.context_id };
+  assert.ok(built.task_id, JSON.stringify(started));
+  const first = await taskResult(engine.raw, built.task_id);
+  assert.equal(first.status, 'done', JSON.stringify(first.error));
+  // page through the build's task by next_offset: every event once, past the 50 rows its answer holds
+  const seen = []; const sizes = [];
+  let offset = 0;
+  for (let guard = 0; guard < 20; guard += 1) {
+    const page = await one(engine.query_pipeline_model({ task_ids: [built.task_id], offset }));
+    assert.equal(page.status, 'done', JSON.stringify(page.error));
+    assert.equal(page.page.offset, offset);
+    seen.push(...page.rows.map((r) => r.event_id)); sizes.push(page.rows.length);
+    if (!page.page.has_more) { assert.equal(page.page.total_rows, truth.length); break; }
+    offset = page.page.next_offset;
+  }
+  assert.deepEqual([...seen].sort(), [...truth].sort(), 'the pages hold every event exactly once');
+  assert.deepEqual(sizes.slice(0, -1).every((n) => n === 50), true, `pages of 50: ${sizes.join(', ')}`);
+  // a page across the end of the rows held is the table's, as a read of it again
+  const across = await one(engine.query_pipeline_model({ task_ids: [built.task_id], offset: 45, limit: 10 }));
+  assert.deepEqual(across.rows.map((r) => r.event_id), seen.slice(45, 55));
+  // …with where its rows come from, and not the build's own SQL, said once with its first page
+  assert.deepEqual([across.provenance?.tier, across.model_sql], ['pipeline', undefined]);
+  // a build that ends unsorted says so on every page — those read from its table past the rows held too —
+  // and its pages still hold every row once
+  const loose = await engine.raw.build_pipeline_model({ action: 'start', name: 'loose_events', source: 'events', stages: [{ stage: 'project', keep: ['event_id'] }], materialize: true });
+  assert.equal((await taskResult(engine.raw, loose.materialize?.task_id)).status, 'done');
+  const pages = [];
+  for (let off = 0; off != null && pages.length < 20;) {
+    const p = await one(engine.query_pipeline_model({ task_ids: [loose.materialize.task_id], offset: off }));
+    pages.push(p); off = p.page.next_offset;
+  }
+  assert.ok(pages.length > 1, 'more than one page');
+  assert.ok(pages.every((p) => p.page.ordered === false), JSON.stringify(pages.map((p) => p.page)));
+  assert.deepEqual(pages.flatMap((p) => p.rows.map((r) => r.event_id)).sort(), [...truth].sort());
+  await engine._deletePipelineModel({ context_id: loose.context_id });
+  // a projection over the built model keeps its first 60 rows: a read pages them by row number
+  const q = await engine.raw.query_pipeline_model({ context_id: built.context_id, transform: { order_by: [{ key: 'event_id' }] }, limit: 60 });
+  await taskResult(engine.raw, q.task_id);
+  const tail = await one(engine.query_pipeline_model({ task_ids: [q.task_id], offset: 50 }));
+  assert.deepEqual(tail.rows.map((r) => r.event_id), [...truth].sort().slice(50, 60));
+  assert.equal(tail.page.has_more, true);
+  assert.equal(tail.page.next_offset, undefined, 'rows past the 60 kept are not read by a row number');
+  await engine._deletePipelineModel({ context_id: built.context_id });
+});
+
+// A READ'S MEASURE is the aggregate stage's, written by the same writer: it merges a sketch a pipeline
+// stored, and counts distinct approximately (exact on DuckDB) — SEED_DATA: 7 distinct buyers over 3
+// products (3 + 3 + 2 per product: u1 bought twice).
+test('a read merges a stored sketch with hll_merge and counts with approx_count_distinct: 7 buyers, not 8', opts, async (t) => {
+  if (skip(t)) return;
+  const purchases = { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] };
+  const sketched = await engine._buildPipeline({ name: 'buyer_sketch', pipeline: { source: 'events', stages: [
+    purchases,
+    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', agg: 'hll_init', column: 'player_id_of_internal' }, { name: 'n', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+  ] } });
+  assert.equal(sketched.build?.ok, true, JSON.stringify(sketched.error || sketched.build));
+  const merged = await engine.query_pipeline_model({ context_id: sketched.context_id, transform: { measures: [{ name: 'buyers', agg: 'hll_merge', column: 'sk' }, { name: 'naive', agg: 'sum', column: 'n' }] } });
+  assert.equal(merged.ok !== false, true, JSON.stringify(merged.error));
+  assert.equal(num(merged.rows[0].buyers), 7);
+  assert.equal(num(merged.rows[0].naive), 8);
+  const raw = await engine._buildPipeline({ name: 'buyer_rows', pipeline: { source: 'events', stages: [purchases] } });
+  const approx = await engine.query_pipeline_model({ context_id: raw.context_id, transform: { measures: [{ name: 'buyers', agg: 'approx_count_distinct', column: 'player_id_of_internal' }, { name: 'exact', agg: 'count_distinct', column: 'player_id_of_internal' }] } });
+  assert.equal(num(approx.rows[0].buyers), 7);
+  assert.equal(num(approx.rows[0].exact), 7);
+  await engine._deletePipelineModel({ context_id: sketched.context_id });
+  await engine._deletePipelineModel({ context_id: raw.context_id });
+});
+
 // A description is metadata, and metadata must not be able to change a number. It travels into the
 // generated model's config banner (a SQL comment), so the way to prove it is inert is to build the
 // SAME pipeline twice — once labelled, once not — and compare the ROWS, not the SQL text.

@@ -559,7 +559,10 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   const a = await readDone(q.task_id, { detail: 'full' });
   assert.equal(a.status, 'done', JSON.stringify(a.error));
   assert.deepEqual(a.analyses.transition_graph.nodes.map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort(), 'T21: a fork of the earlier eventstream keeps reading its rows');
-  assert.deepEqual(sizes(a.analyses.segment_overview), perPlatform, 'T23: an overview of the keyword segment');
+  // a full read holds the library's own records: each level and, beside its metrics, its segment_size
+  const overview = a.analyses.segment_overview;
+  const segmentSize = overview.metrics.find((m) => m.metric === 'segment_size');
+  assert.deepEqual(Object.fromEntries(overview.levels.map((l, i) => [l, segmentSize.values[i]])), perPlatform, 'T23: an overview of the keyword segment');
   // …and the first build's task still says them
   const reread = await readDone(first.task_id);
   assert.equal(reread.events, first.events, 'T21: the first build\'s task still says its rows');

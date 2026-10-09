@@ -118,7 +118,7 @@ export function renderBaseModel(catalog, key) {
   const scd = !!m.scd;
   const pe = m.primary_entity;
   if (!pe) {
-    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
+    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one is reached through a pipeline join stage; it cannot be loaded into a semantic layer.`);
   }
   const peName = pe.name;
 

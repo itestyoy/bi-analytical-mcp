@@ -111,7 +111,7 @@ export class Dialect {
     const eq = this.joinKeyParts(op, (c) => `base.${c}`, (c) => `j.${c}`)
       .map((k) => `${k.left} = ${k.right}`).join(' AND ');
     const btw = op.between
-      ? ` AND ${this.validityWindow(`base.${this.quoteIdent(op.between.value)}`, `j.${this.quoteIdent(op.between.from)}`, `j.${this.quoteIdent(op.between.to)}`)}`
+      ? ` AND ${this.validityWindow(`base.${this.quoteIdent(op.between.column)}`, `j.${this.quoteIdent(op.between.from)}`, `j.${this.quoteIdent(op.between.to)}`)}`
       : '';
     const attrs = op.attrs.map((a) => `j.${this.quoteIdent(a.column)} AS ${this.quoteIdent(a.as)}`);
     return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
@@ -119,6 +119,31 @@ export class Dialect {
 
   isNumericType(type) { return isNumericType(type); }
   isTimeType(type) { return isTimeType(type); }
+
+  /**
+   * One sort key of an ORDER BY: the expression, its direction, and where its NULLs go — written
+   * explicitly, last unless asked first, since the warehouses' own defaults differ (DuckDB puts them
+   * last, BigQuery first in an ascending sort). The order_by stage and a read write theirs with it.
+   */
+  orderKey(sql, direction, nulls) {
+    return `${sql} ${direction === 'desc' ? 'DESC' : 'ASC'} NULLS ${nulls === 'first' ? 'FIRST' : 'LAST'}`;
+  }
+
+  /**
+   * A window's ORDER BY keys ([{ sql, direction, nulls }]) — of an aggregate of a frame (`aggregate`,
+   * with its `frame`) or of a rank / a neighbour. Here every key is an orderKey; a dialect whose window
+   * takes no NULLS clause somewhere writes the same order its own way.
+   */
+  windowOrder(keys, _opts = {}) {
+    return keys.map((k) => this.orderKey(k.sql, k.direction, k.nulls)).join(', ');
+  }
+
+  /**
+   * Whether this warehouse matches a funnel whose steps are the immediately next events
+   * (match_recognize between_steps: 'none'): a row-pattern match without fillers says it directly;
+   * the CTE lowering has no way to say "nothing in between".
+   */
+  get matchesAdjacentSteps() { return false; }
 
   // ── Abstract primitives (per-dialect) ──────────────────────────────────────
   castType(_type) { throw new Error('abstract castType'); }
@@ -139,7 +164,8 @@ export class Dialect {
   arrayLast(_column) { throw new Error('abstract arrayLast'); }
 
   // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
-  /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */
+  /** The WHOLE `unit`s (day|hour|minute|second) elapsed from fromExpr to toExpr, truncated toward
+   *  zero (an hour and 59 minutes is 1 hour; signed), as an integer — the same count on every warehouse. */
   dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
   /** The seconds from one timestamp to another, as a number (a funnel's time between steps). */
   secondsBetween(_fromExpr, _toExpr) { throw new Error('abstract secondsBetween'); }
@@ -156,7 +182,8 @@ export class Dialect {
   /** Whole 24-HOUR days between two timestamps (retention-day: floor of the span in 24h buckets,
    *  NOT calendar days). Signed; the caller clamps negatives / coalesces NULLs. */
   fullDaysBetween(_fromExpr, _toExpr) { throw new Error('abstract fullDaysBetween'); }
-  /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). */
+  /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). A week is the ISO
+   *  week, starting on Monday, on every warehouse (as MetricFlow's week is). */
   dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
 
   /**
@@ -166,7 +193,8 @@ export class Dialect {
    * the caller's own explicit truncation.
    */
   grainExpr(granularity, expr) { return this.dateTrunc(granularity, expr); }
-  /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number. */
+  /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number — dow the ISO
+   *  day of the week (Monday 1 … Sunday 7), week the ISO week number, on every warehouse. */
   datePart(_part, _expr) { throw new Error('abstract datePart'); }
   /** Current timestamp. */
   nowExpr() { throw new Error('abstract nowExpr'); }

@@ -30,12 +30,10 @@ const started = shape('The task the call started, and the query tool that reads 
 });
 
 export const OUTPUTS = {
-  time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'requested_seconds', 'cap_seconds', 'clamped', 'started_at', 'finished_at'], {
+  time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'cap_seconds', 'started_at', 'finished_at'], {
     ok: { const: true },
     waited_seconds: num,
-    requested_seconds: num,
     cap_seconds: num,
-    clamped: bool,
     cancelled: bool,
     started_at: str,
     finished_at: str,
@@ -75,29 +73,21 @@ export const OUTPUTS = {
     note: str,
   }),
 
-  // record: saved + id; list / search: notes; forget: forgotten + id
-  memory: shape('The note saved (record: `saved`, `id`), the notes found (list, search: `notes`), or the note removed (forget: `forgotten`, `id`).', [], {
+  // record: saved + notes (each with its id); forget: forgotten + id
+  memory: shape('The notes saved (record: `saved`, `notes`, each with its `id`), or the note removed (forget: `forgotten`, `id`).', [], {
     saved: bool,
+    notes: list(obj),
     forgotten: bool,
     id: str,
-    note: str,
-    linked_to: list(obj),
-    unresolved_terms: list(str),
-    aliases: list(str),
-    links: list(),
     next: str,
-    total: int,
-    query: str,
-    semantic: bool,
-    notes: list(obj),
   }),
 
   // a page of failures, or one in full
-  explore_errors: shape('A page of the failures kept, newest first (`errors`), or one in full ({ id }: `error`).', ['ok'], {
+  explore_errors: shape('A page of the failures kept, newest first (`errors`, and `next_offset` while more are kept), or one in full ({ id }: `error`).', ['ok'], {
     ok: bool,
     total: int,
     shown: int,
-    offset: int,
+    next_offset: int,
     errors: list(obj),
     by_source: list(obj),
     note: str,

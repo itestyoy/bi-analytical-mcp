@@ -40,20 +40,20 @@ test('memory record refuses a near-miss name inside its source, suggesting the r
   // typo: missing a 't' in "event". The source is written down, so the miss is a misspelling WITHIN
   // it — the schema refuses it with the nearest real name, never silently linked to one of them.
   await assert.rejects(
-    () => e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_even_data' }] }),
-    /targets\.0\.name` must be one of: .*Did you mean 'ad_type_of_event_data'/s,
+    () => e.memory({ action: 'record', notes: [{ note: 'ad format lives here', about: [{ source: 'events', property: 'ad_type_of_even_data' }] }] }),
+    /about\.0\.property` must be one of: .*Did you mean 'ad_type_of_event_data'/s,
   );
   // spelled correctly, it links — and surfaces on that property's view.
-  const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
-  assert.deepEqual(out.linked_to[0].target, { source: 'events', name: 'ad_type_of_event_data' });
+  const out = (await e.memory({ action: 'record', notes: [{ note: 'ad format lives here', about: [{ source: 'events', property: 'ad_type_of_event_data' }] }] })).notes[0];
+  assert.deepEqual(out.about[0], { source: 'events', property: 'ad_type_of_event_data' });
   const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === out.id), 'note surfaces on the linked property');
   // a phrase is written as one — and stays itself, searchable, linked to nothing
-  const t = await e.memory({ action: 'record', note: 'x', targets: [{ term: 'totally unrelated phrase 123' }] });
-  assert.equal(t.linked_to[0].kind, 'term');
+  const t = (await e.memory({ action: 'record', notes: [{ note: 'x', about: [{ term: 'totally unrelated phrase 123' }] }] })).notes[0];
+  assert.deepEqual(t.about[0], { term: 'totally unrelated phrase 123' });
   // an identifier the catalog does not have is a phrase too, and says so
-  const u = await e.memory({ action: 'record', note: 'y', targets: [{ term: 'zzz_nothing_like_this' }] });
-  assert.equal(u.linked_to[0].kind, 'term');
+  const u = (await e.memory({ action: 'record', notes: [{ note: 'y', about: [{ term: 'zzz_nothing_like_this' }] }] })).notes[0];
+  assert.deepEqual(u.about[0], { term: 'zzz_nothing_like_this' });
 });
 
 // п.5 DURABILITY: a dedicated memory db keeps findings across engine instances (the
@@ -64,11 +64,11 @@ test('memoryDbPath persists findings across engine instances', async () => {
   const cat = () => loadCatalog(CATALOG, {});
 
   const e1 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
-  const rec = await e1.memory({ action: 'record', note: 'durable finding about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
+  const rec = (await e1.memory({ action: 'record', notes: [{ note: 'durable finding about ads', about: [{ source: 'events', property: 'ad_type_of_event_data' }] }] })).notes[0];
   e1.close();
 
   const e2 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
-  const list = await e2.memory({ action: 'list' });
+  const list = await e2.semantic_index({ notes: true });
   assert.ok(list.notes.some((n) => n.id === rec.id && n.note === 'durable finding about ads'), 'finding persisted in the dedicated memory store');
   e2.close();
 });
@@ -78,7 +78,7 @@ test('overview exposes a machine-readable views manifest', async () => {
   const ov = await engine().semantic_index();
   assert.ok(Array.isArray(ov.views), 'views manifest present');
   const keys = new Set(ov.views.map((v) => v.view));
-  for (const k of ['model', 'event', 'property', 'search', 'guide', 'status']) assert.ok(keys.has(k), `views includes ${k}`);
+  for (const k of ['source', 'event', 'property', 'search', 'guide', 'status']) assert.ok(keys.has(k), `views includes ${k}`);
   assert.ok(ov.views.every((v) => v.view && v.when), 'each view entry has view + when');
 });
 

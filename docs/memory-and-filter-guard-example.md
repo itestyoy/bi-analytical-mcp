@@ -15,9 +15,9 @@
 вопрос пользователя
   → discover (semantic_index: overview → event → property → search)
   → resolve (нашли реальное поле/значение)
-  → memory.record (note + question + bilingual aliases + targets)
-  → в следующий раз: memory.search (RU/EN, лексика + семантика)
-                      ИЛИ инлайн в semantic_index({ source, property } / { source, event } / { model })
+  → memory record (notes: [{ note + question + bilingual aliases + about }])
+  → в следующий раз: semantic_index { search } (RU/EN, лексика + семантика), { notes: true }
+                      ИЛИ инлайн в semantic_index { source, property } / { source, event } / { source }
   → строим запрос
   → гард значений не даёт подставить непроверенное / не-то-регистра значение
 ```
@@ -33,27 +33,36 @@
 Пользователь спросил размыто про «формат рекламы». ИИ разобрался и сохранил находку:
 
 ```json
-memory({
+memory({ "request": {
   "action": "record",
-  "note": "'ad format' = the event_data property ad_type_of_event_data (only on ad_started/ad_finished); values rewarded/interstitial/banner",
-  "question": "which ad format drives the most rewarded revenue?",
-  "targets": ["ad_type_of_event_data", "ad_finished"],
-  "aliases": ["ad format", "формат рекламы", "тип рекламы"]
-})
+  "notes": [{
+    "note": "'ad format' = the event_data property ad_type_of_event_data (only on ad_started/ad_finished); values rewarded/interstitial/banner",
+    "question": "which ad format drives the most rewarded revenue?",
+    "about": [{ "source": "events", "property": "ad_type_of_event_data" }, { "source": "events", "event": "ad_finished" }],
+    "aliases": ["ad format", "формат рекламы", "тип рекламы"]
+  }]
+} })
 ```
 
-Ответ — находка **привязалась к реальным сущностям**:
+`notes` — список: одна находка — список из одной, несколько находок одного исследования
+сохраняются вместе (все или ни одной). Ответ — каждая находка **привязалась к реальным сущностям**:
 
 ```json
 {
   "saved": true,
-  "id": "e72a2eccead4",
-  "linked_to": [
-    { "kind": "property", "target": "ad_type_of_event_data", "surfaces_in": "semantic_index({ source: 'events', property: 'ad_type_of_event_data' })" },
-    { "kind": "event",    "target": "ad_finished",          "surfaces_in": "semantic_index({ source: 'events', event: 'ad_finished' })" }
-  ],
-  "aliases": ["ad format", "формат рекламы", "тип рекламы"],
-  "next": "Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search })…"
+  "notes": [{
+    "id": "519f5af8cac1",
+    "note": "'ad format' = the event_data property ad_type_of_event_data …",
+    "question": "which ad format drives the most rewarded revenue?",
+    "about": [{ "source": "events", "property": "ad_type_of_event_data" }, { "source": "events", "event": "ad_finished" }],
+    "surfaces_in": [
+      "semantic_index({ request: { source: 'events', property: 'ad_type_of_event_data' } })",
+      "semantic_index({ request: { source: 'events', event: 'ad_finished' } })"
+    ],
+    "aliases": ["ad format", "формат рекламы", "тип рекламы"],
+    "links": []
+  }],
+  "next": "Saved. A finding surfaces in semantic_index on the entities it is linked to, via semantic_index({ request: { search } }) — including its aliases — and in semantic_index({ request: { notes: true } })."
 }
 ```
 
@@ -61,13 +70,16 @@ memory({
 
 ## 2–3. Позже находим — и по-английски, и по-русски
 
+Память читается `semantic_index`: `{ search }` возвращает подходящие заметки в
+`memory_matches` рядом с совпадениями каталога, `{ notes: true }` — все заметки.
+
 ```
-memory.search "ad format"      → находит заметку  ✅
-memory.search "формат рекламы" → находит ту же заметку  ✅   (через RU-алиас)
+semantic_index { search: "ad format" }      → memory_matches: заметка  ✅
+semantic_index { search: "формат рекламы" } → memory_matches: та же заметка  ✅   (через RU-алиас)
 ```
 
 Это **лексический мост**: двуязычные алиасы делают заметку findable независимо от языка
-запроса — работает даже без эмбеддера (`semantic: false`). Fuzzy/подстрока сама по себе не
+запроса — работает даже без эмбеддера (`memory_semantic: false`). Fuzzy/подстрока сама по себе не
 перепрыгивает между кириллицей и латиницей, поэтому алиасы на обоих языках обязательны.
 
 ---
@@ -78,7 +90,7 @@ memory.search "формат рекламы" → находит ту же зам�
 по-русски **«низкая выручка»** — ни одного общего слова с заметкой:
 
 ```
-RU "низкая выручка" → semantic = true → нашёл EN-заметку  ✅
+RU "низкая выручка" → memory_semantic = true → нашёл EN-заметку  ✅
 ```
 
 Это работа **мультиязычной модели**: «выручка» и «IAP / payers» попадают в одну смысловую
@@ -93,9 +105,14 @@ RU "низкая выручка" → semantic = true → нашёл EN-заме�
 ```json
 "memory": [
   {
+    "id": "519f5af8cac1",
     "note": "'ad format' = the event_data property ad_type_of_event_data …",
     "question": "which ad format drives the most rewarded revenue?",
-    "aliases": ["ad format", "формат рекламы", "тип рекламы"]
+    "about": [
+      { "source": "events", "property": "ad_type_of_event_data" },
+      { "source": "events", "event": "ad_finished" }
+    ],
+    "recorded_at": "2026-10-08"
   }
 ]
 ```
@@ -109,8 +126,8 @@ RU "низкая выручка" → semantic = true → нашёл EN-заме�
 В базе значение хранится как `Organic`. ИИ пишет фильтр `where result_of_event_data = 'organic'`:
 
 ```
-REJECTED: filter value(s) not verified against the real data — check the exact value
-via semantic_index({ source, property }) and use it as stored:
+REJECTED: stages[0]: filter value(s) not verified against the real data — check the exact value
+via semantic_index({ request: { source, property } }) and use it as stored:
   where result_of_event_data: value 'organic' is not a real value —
   the column holds it with different casing. Did you mean: 'Organic'?
 ```
@@ -118,7 +135,7 @@ via semantic_index({ source, property }) and use it as stored:
 С правильным регистром — проходит:
 
 ```
-where result_of_event_data = 'Organic'  →  action = add_step  ✅
+where result_of_event_data = 'Organic'  →  action = add_steps  ✅
 ```
 
 Проверка идёт строго **из того источника**, к которому запрос (ключ value-индекса = именно
@@ -175,27 +192,28 @@ function stub() {
 const e = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx(), embedder: stub() });
 
 // 1) record
-const rec = await e.memory({ action: 'record',
+const rec = await e.memory({ action: 'record', notes: [{
   note: "'ad format' = ad_type_of_event_data (only on ad_started/ad_finished); rewarded/interstitial/banner",
   question: 'which ad format drives the most rewarded revenue?',
-  targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'events', name: 'ad_finished' }],
-  aliases: ['ad format', 'формат рекламы', 'тип рекламы'] });
+  about: [{ source: 'events', property: 'ad_type_of_event_data' }, { source: 'events', event: 'ad_finished' }],
+  aliases: ['ad format', 'формат рекламы', 'тип рекламы'] }] });
 
-// 2-3) search EN + RU
-await e.memory({ action: 'search', query: 'ad format' });
-await e.memory({ action: 'search', query: 'формат рекламы' });
+// 2-3) search EN + RU — .memory_matches
+await e.semantic_index({ search: 'ad format' });
+await e.semantic_index({ search: 'формат рекламы' });
 
 // 4) semantic cross-language
-await e.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
-await e.memory({ action: 'search', query: 'низкая выручка' });   // → находит EN-заметку
+await e.memory({ action: 'record', notes: [{ note: 'IAP purchases are failing for some payers', aliases: ['monetization'], about: [{ source: 'events', property: 'price_in_usd_of_event_data' }] }] });
+await e.semantic_index({ search: 'низкая выручка' });   // → .memory_matches находит EN-заметку
+await e.semantic_index({ notes: true });                // → все заметки
 
 // 5) surfaces in the property view
 await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });   // .memory = [...]
 
 // 6) filter-value guard
 const e2 = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx() });
-e2.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'Organic', freq: 10 }, { value: 'Paid', freq: 5 }] });
+e2.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'Organic', freq: 10 }, { value: 'Paid', freq: 5 }] });
 const d = await e2.build_pipeline_model({ action: 'start', name: 'guard_demo', source: 'events' });
-await e2.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'organic' }] } }); // → REJECTED, did you mean 'Organic'?
-await e2.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'Organic' }] } }); // → OK
+await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'organic' }] }] }).catch((err) => err.message); // → REJECTED, did you mean 'Organic'?
+await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'Organic' }] }] }); // → OK
 ```

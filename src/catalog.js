@@ -12,13 +12,13 @@ import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { isNumericType } from './dialects/base.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
-import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
+import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
-import { physicalColumnType } from './catalog/column-types.js';
+import { physicalColumnType, isArrayPropertyType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
-export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
+export { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
 
@@ -362,6 +362,15 @@ export class Catalog {
   }
 
   /**
+   * The models a semantic layer can load (yaml-render.js renderBaseModel): a fact, or a model with a
+   * primary entity — what MetricFlow addresses its dimensions through. A model without one (an
+   * experiments source) is reached through a pipeline join stage instead.
+   */
+  semanticModelKeys() {
+    return this.modelKeys().filter((k) => this.isFact(k) || !!this.models[k].primary_entity);
+  }
+
+  /**
    * The event `name` as seen from `fact`. Every source names its own events, so the name is
    * always bare here; it THROWS when this source does not declare it — naming which source
    * does, when one exists — so a cross-source mistake never degrades into a filter that
@@ -371,7 +380,7 @@ export class Catalog {
     if (this.eventNames(fact).includes(name)) return name;
     const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
     if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
-    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { model: '${fact}' } })`);
+    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { source: '${fact}' } })`);
   }
 
   /**
@@ -443,6 +452,11 @@ export class Catalog {
     return [...new Set(this.facts.flatMap((f) => this.scalarEventProps(f)))];
   }
 
+  /** The event properties declared as arrays (of scalars or of structs) — what an unnest explodes. */
+  arrayEventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.eventProps(f).filter((k) => isArrayPropertyType(this.eventPropertySpec(k, f)?.type))))];
+  }
+
   /** dbt column descriptions for a model: { columnName: description }. */
   columnDescriptions(key) {
     return this.getModel(key).column_descriptions || {};
@@ -492,7 +506,7 @@ export class Catalog {
    * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
    * for a groupable attribute of any model, null when the source does not carry it. THE one place
    * that answers "does this source have this attribute" — every resolver in the engine (value-index
-   * keys, the { source, property } view, memory targets) asks here, so a dimension is never asked for
+   * keys, the { source, property } view, what a memory note is about) asks here, so a dimension is never asked for
    * payload properties and no caller re-implements the rule.
    */
   attributeKind(source, name) {

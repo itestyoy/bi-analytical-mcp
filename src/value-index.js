@@ -100,10 +100,10 @@ export class ValueIndex {
    * or 'value', asc/desc, with limit/offset. `by`/`dir` are normalised to a closed set
    * here, so the backend never sees raw input in an ORDER BY position.
    */
-  listValues(source, property, { limit = 10, offset = 0, by = 'freq', dir } = {}) {
+  listValues(source, property, { limit = 10, offset = 0, by = 'freq', dir, tie = 'asc' } = {}) {
     const col = by === 'value' ? 'value' : 'freq';
     const direction = (dir === 'asc' || dir === 'desc') ? dir : (col === 'value' ? 'asc' : 'desc');
-    return this.store.values.page(source, property, { limit, offset, col, direction });
+    return this.store.values.page(source, property, { limit, offset, col, direction, tie: tie === 'desc' ? 'desc' : 'asc' });
   }
 
   /** { distinctCount, totalCount, indexedAt } | null. */

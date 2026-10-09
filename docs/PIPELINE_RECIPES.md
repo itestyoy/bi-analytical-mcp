@@ -6,8 +6,10 @@ declarative stages and the pipe-syntax it lowers to on BigQuery (DuckDB lowers
 the same op list to a chained CTE). Reference:
 [BigQuery pipe syntax by example](https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331).
 
-Stages: `where · derive · compute · unnest · join · aggregate · pivot · unpivot ·
-order_by · limit · project · match_recognize`. See `src/pipeline.js` (top-of-file
+Stages: `where · compute · unnest · join · aggregate · pivot · unpivot · sample ·
+order_by · limit · project · match_recognize`. A computed column — an event property
+read out of the payload, arithmetic, a CASE, a window function — is one `compute` stage
+with an expression (`expr`). See `src/pipeline.js` (top-of-file
 catalog) and each stage's `description` in the tool schema for the authoritative
 contract.
 
@@ -16,9 +18,9 @@ contract.
 ### Revenue by country
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
-  {stage:"derive", name:"price", op:"extract", source:"price_in_usd", type:"numeric"},
+  {stage:"compute", name:"price", expr:{ fn:"event_property", property:"price_in_usd_of_event_data", type:"numeric" }},
   {stage:"join",   with:"users", via:"user", attrs:[{ column: "country" }]},   // `via` = the relationship the schema declares; add
-  //                                                                 between:{value:"device_time",from:…,to:…} if the
+  //                                                                 between:{column:"device_time",from:…,to:…} if the
   //                                                                 install record is slowly-changing (validity window)
   {stage:"aggregate", group_by:["country"], measures:[{name:"revenue",agg:"sum",column:"price"}]} ]
 ```
@@ -27,7 +29,7 @@ contract.
 ### Price distribution (median / percentiles / spread)
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
-  {stage:"derive", name:"price", op:"extract", source:"price_in_usd", type:"numeric"},
+  {stage:"compute", name:"price", expr:{ fn:"event_property", property:"price_in_usd_of_event_data", type:"numeric" }},
   {stage:"aggregate", group_by:[], measures:[
      {name:"med",agg:"median",column:"price"},
      {name:"p90",agg:"percentile",column:"price",percentile:0.9},
@@ -36,10 +38,12 @@ contract.
 
 ### Revenue pivoted to per-country columns (dashboard matrix)
 ```jsonc
-[ …where+derive(price)+join(country)…,
-  {stage:"pivot", group_by:[], on:"country", agg:"sum", value_column:"price", values:["US","GB","BR"]} ]
+[ …where+compute(price)+join(country)…,
+  {stage:"pivot", group_by:[], on:"country", measure:{agg:"sum", column:"price"},
+   values:[{value:"US",name:"us"}, {value:"GB",name:"gb"}, {value:"BR",name:"br"}]} ]
 ```
-`|> PIVOT(SUM(price) FOR country IN ('US','GB','BR'))`
+`|> AGGREGATE SUM(CASE WHEN country = 'US' THEN price END) AS us, …` — each value one measure of the
+aggregate stage over its rows (a count counts them), named by the value's `name`.
 
 ### Days-since-install (retention-day building block)
 ```jsonc
@@ -68,7 +72,7 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
 
 ### Rolling N-day sum  (window RANGE frame + unix_date)
 ```jsonc
-[ …derive(amount)…,
+[ …compute(amount)…,
   {stage:"compute", name:"day", expr:{ fn: "unix_date", args: [{ column: "order_completed_at" }] }},
   {stage:"compute", name:"roll", expr:{ fn: "sum", args: [{ column: "amount" }], over: { partition_by: ["customer_id"], order_by: [{key:"day"}], frame: {mode:"range", preceding:10, following:0} } }} ]
 ```
@@ -89,7 +93,7 @@ to read a sketch's cardinality.
 ```jsonc
 // distinct buyers across products, deduped (merge), without rescanning raw events:
 [ {stage:"where", conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
-  {stage:"derive", name:"pid", op:"extract", source:"product_id", type:"string"},
+  {stage:"compute", name:"pid", expr:{ fn:"event_property", property:"product_id_of_event_data" }},
   {stage:"aggregate", group_by:["pid"], measures:[{name:"sk", agg:"hll_init", column:"appsflyer_id"}]},
   {stage:"aggregate", group_by:[],      measures:[{name:"buyers", agg:"hll_merge", column:"sk"}]} ]
 ```
@@ -99,7 +103,7 @@ then merge the trailing-N days' sketches.
 
 ### Price tiers (bucketing)  (CASE)
 ```jsonc
-[ …derive(price)…,
+[ …compute(price)…,
   {stage:"compute", name:"tier", expr:{ fn: "case", cases: [{when:[{column:"price",op:"lt",value:10}], then:{value:"low"}}], else: {value:"high"} }},
   {stage:"aggregate", group_by:["tier"], measures:[{name:"n",agg:"count"}]} ]
 ```
@@ -107,26 +111,28 @@ then merge the trailing-N days' sketches.
 ### Item / reward frequency  (unnest)
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"level_completed"}]},
-  {stage:"unnest", source:"words_collected", name:"word"},
+  {stage:"unnest", property:"words_collected", name:"word"},
   {stage:"aggregate", group_by:["word"], measures:[{name:"n",agg:"count"}]},
-  {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", n:10} ]
+  {stage:"order_by", keys:[{key:"n",direction:"desc"}]}, {stage:"limit", limit:10} ]
 ```
 
-### Multi-step funnel  (match_recognize — via build_pipeline_model)
+### Multi-step funnel  (match_recognize)
 ```jsonc
-{ sequence:{ partition_by:"user", mode:"ordered",
-  steps:[{name:"launch",event_name:["first_launch"]},
-         {name:"purchase",event_name:["iap_purchase_completed"]}],
-  metrics:[{name:"conv",type:"conversion",from:"launch",to:"purchase"}] } }
+[ {stage:"match_recognize", partition_by:[{entity:"user"}],   // between_steps: "any" (the default)
+   steps:[{name:"launch",event_name:["first_launch"]},
+          {name:"purchase",event_name:["iap_purchase_completed"]}]},
+  {stage:"aggregate", group_by:[], measures:[
+     {name:"started",agg:"count"},
+     {name:"converted",agg:"count",where:[{column:"reached_purchase",op:"eq",value:true}]}]} ]
 ```
-Lowers to a per-user CTE chain (DuckDB) / `|> MATCH_RECOGNIZE` (BigQuery); the
-resulting model is then sliced by user attributes through MetricFlow.
+Lowers to a per-user CTE chain (DuckDB) / `|> MATCH_RECOGNIZE` (BigQuery); a `join`
+with users before the `aggregate` slices the conversion by a user attribute.
 
 ---
 
 **Composition notes.** `unnest` expands grain; `aggregate`/`pivot`/`match_recognize`
 collapse it; references are validated against the live column set at each stage, so
 a later stage can only use columns that exist at that point. `compute` adds columns
-without changing grain — put `window`/`date_diff`/`case` before the `aggregate` that
+without changing grain — put window functions / `date_diff` / `case` before the `aggregate` that
 consumes them, and put a post-aggregate `where` after `aggregate` to filter on a
 computed measure.

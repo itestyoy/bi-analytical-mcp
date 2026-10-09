@@ -112,13 +112,12 @@ export class PipelineAdvisor {
     const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
     const eventTime = draft?.source ? this.catalog.getModel(draft.source)?.time?.column : null;
     const fix = (from && to && eventTime)
-      ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
-      : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
-    // The key may be named by the relationship (`via`) or restated inline (`on`) — say whichever
-    // the caller actually used, or the message reads "key 'undefined'".
-    const named = stage.via
-      ? `the declared relationship '${stage.via}'`
-      : `key '${Array.isArray(stage.on) ? stage.on.join(' + ') : stage.on}'`;
+      ? ` Add between: { column: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
+      : ' Add a `between` window (column = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
+    // The key is a declared relationship (via: '<name>') or columns both sides name alike
+    // (via: { on: [...] }) — say whichever the caller used, never the object itself.
+    const on = typeof stage.via === 'string' ? null : [].concat(stage.via?.on ?? stage.on ?? []);
+    const named = on ? `key '${on.join(' + ')}'` : `the declared relationship '${stage.via}'`;
     return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on ${named} with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
   }
 
@@ -292,22 +291,23 @@ export class PipelineAdvisor {
     const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const hits = [];
     eachCondition(stage.conditions, (c) => {
-      const col = c.column ?? c.left?.column;
+      const col = c.column;
       if (!timeCols.has(col)) return;
-      const value = c.value ?? c.right?.value;
+      const value = c.value;
       const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
       if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
     });
     return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
   }
 
-  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go. */
-  stepRecommendations(stage, available) {
+  /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.
+   *  `building`: the call that adds it also starts the build (materialize: true), so "materialize when done" is not said. */
+  stepRecommendations(stage, available, { building = false } = {}) {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...this.dateBoundWarnings(stage, available),
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
-      'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
+      ...(building ? [] : ['Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }
 }

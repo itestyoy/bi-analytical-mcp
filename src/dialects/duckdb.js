@@ -124,19 +124,17 @@ export class DuckDBDialect extends Dialect {
   // ORDER BY random() over the whole (small) result table: block sampling can return nothing there
   sampleQuery(ref, _percent, project) { return `select * from (${project(ref)}) _s order by random()`; }
 
+  // The whole units elapsed, truncated toward zero — as BigQuery's TIMESTAMP_DIFF counts them: the
+  // span in seconds divided by the unit, trunc'd (CAST alone would round), an integer.
   dateDiff(unit, from, to) {
-    switch (unit) {
-      case 'day': return `date_diff('day', CAST(${from} AS DATE), CAST(${to} AS DATE))`;
-      case 'hour': return `((${this._epoch(to)} - ${this._epoch(from)}) / 3600.0)`;
-      case 'minute': return `((${this._epoch(to)} - ${this._epoch(from)}) / 60.0)`;
-      case 'second': return `(${this._epoch(to)} - ${this._epoch(from)})`;
-      default: throw new Error(`dateDiff: bad unit ${unit}`);
-    }
+    const secs = { day: 86400, hour: 3600, minute: 60, second: 1 }[unit];
+    if (!secs) throw new Error(`dateDiff: bad unit ${unit}`);
+    return `CAST(trunc((${this._epoch(to)} - ${this._epoch(from)}) / ${secs}) AS BIGINT)`;
   }
 
   // Whole 24-HOUR days between two timestamps (retention-day style): floor of the elapsed span in
-  // 24h buckets — matches BigQuery's EXTRACT(DAY FROM datetime interval), NOT calendar days
-  // (dateDiff 'day' above is calendar). floor() handles the negative (pre-install) case.
+  // 24h buckets — matches BigQuery's EXTRACT(DAY FROM datetime interval), NOT calendar days.
+  // floor() (not dateDiff's trunc) puts a pre-install moment on day -1, not day 0.
   fullDaysBetween(from, to) {
     return `CAST(FLOOR((${this._epoch(to)} - ${this._epoch(from)}) / 86400.0) AS INTEGER)`;
   }
@@ -148,14 +146,17 @@ export class DuckDBDialect extends Dialect {
     return `date_trunc('${granularity}', CAST(${expr} AS TIMESTAMP))`;
   }
 
+  // (DuckDB's week is the ISO week: it starts on Monday)
   dateTrunc(granularity, expr) {
     if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);
     return `date_trunc('${granularity}', ${expr})`;
   }
 
+  // the ISO day of the week (isodow: Monday 1 … Sunday 7 — dow would count Sunday 0); week is DuckDB's ISO week
   datePart(part, expr) {
-    if (!['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'].includes(part)) throw new Error(`datePart: bad part ${part}`);
-    return `EXTRACT(${part} FROM ${expr})`;
+    const p = { dow: 'isodow', hour: 'hour', day: 'day', week: 'week', month: 'month', quarter: 'quarter', year: 'year', doy: 'doy' }[part];
+    if (!p) throw new Error(`datePart: bad part ${part}`);
+    return `EXTRACT(${p} FROM ${expr})`;
   }
 
   // a plain TIMESTAMP (now() is WITH TIME ZONE), comparable with the TIMESTAMP columns
@@ -233,35 +234,24 @@ export class DuckDBDialect extends Dialect {
         const sel = [...op.groupBy.map((c) => this.quoteIdent(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.quoteIdent(a.as)}`)];
         return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
       }
-      case 'pivot': {
-        // conditional aggregation; one output column per value.
-        const cols = op.values.map((v) => `${op.fn}(CASE WHEN ${this.quoteIdent(op.on)} = ${this.sqlLiteral(v)} THEN ${this.quoteIdent(op.valueCol)} END) AS ${pivotCol(v)}`);
-        return `SELECT ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}${op.groupBy.length ? ', ' : ''}${cols.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
-      }
       case 'unpivot': {
-        // one branch per unpivoted column — the same rows a LATERAL VALUES gives, in plain SQL
+        // one branch per unpivoted column — the same rows a LATERAL VALUES gives, in plain SQL: exactly
+        // `keep` + the two produced columns, a row for every folded value, NULL ones too
         const keep = op.keep.map((c) => this.quoteIdent(c));
-        const branches = op.columns.map((c) => `SELECT ${keep.join(', ')}${keep.length ? ', ' : ''}${this.sqlLiteral(c)} AS ${this.quoteIdent(op.nameAs)}, ${this.quoteIdent(c)} AS ${this.quoteIdent(op.valueAs)} FROM ${prev}`);
+        const branches = op.columns.map((c) => `SELECT ${keep.join(', ')}${keep.length ? ', ' : ''}${this.sqlLiteral(c)} AS ${this.quoteIdent(op.nameColumn)}, ${this.quoteIdent(c)} AS ${this.quoteIdent(op.valueColumn)} FROM ${prev}`);
         return branches.join('\n  UNION ALL\n  ');
       }
       case 'order_by':
-        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.quoteIdent(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => this.orderKey(this.quoteIdent(k.key), k.direction, k.nulls)).join(', ')}`;
       case 'sample':
         // a row-level (Bernoulli) sample that works at any stage (TABLESAMPLE needs a table)
-        return `SELECT * FROM ${prev} WHERE random() < ${Number(op.percent) / 100}`;
+        return `SELECT * FROM ${prev} WHERE random() < ${Number(op.share)}`;
       case 'limit':
-        return `SELECT * FROM ${prev} LIMIT ${Number(op.n)}`;
+        return `SELECT * FROM ${prev} LIMIT ${Number(op.limit)}`;
       case 'project':
         return `SELECT ${op.cols.map((c) => this.quoteIdent(c)).join(', ')} FROM ${prev}`;
       default:
         throw new Error(`duckdb: unknown pipeline op '${op.op}'`);
     }
   }
-}
-
-// A pivot output value -> a safe quoted column identifier.
-function pivotCol(value) {
-  const v = String(value);
-  if (!/^[A-Za-z0-9_]+$/.test(v)) throw new Error(`unsafe pivot value (must be alphanumeric/underscore): ${value}`);
-  return `"${v}"`;
 }

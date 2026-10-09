@@ -1,6 +1,6 @@
 // THE PIVOT — a drill-down table, each level read from the card's stored result when its row opens.
 
-import { pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
+import { pivotRows, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
 import { icon } from '../../shared/icons.js';
 import { el, badge, card } from '../../shared/ui.js';
 import { log, cardsSection, state } from './page.js';
@@ -91,7 +91,9 @@ export function renderPivot(model) {
     const at = [...path, row.key];
     let rows;
     try {
-      const got = payloadOf(await readResult({ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }));
+      // the row taken, level by level: the server makes the level from the card as it was drawn
+      const path = at.map((value, i) => ({ column: model.display.levels[i].column, value }));
+      const got = payloadOf(await readResult({ ...model.source, path, limit: PIVOT_LEVEL_ROWS }));
       if (got?.ok === false) {
         // the reason is said, so a failed level is diagnosable from the card itself
         rows = [note(got.error?.code === 'result_gone' ? 'This result is no longer available' : `Could not load this level${got.error?.message ? ` — ${String(got.error.message).split('\n')[0].slice(0, 160)}` : ''}`, depth + 1, 'pivot-error')];

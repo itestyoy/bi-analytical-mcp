@@ -37,9 +37,10 @@ available, search/read directly; otherwise open the links in a browser.
 - **An event / its parameters / when it fires**: read the master Events Schema (PA/2602991642)
   — it's the catalogue. For a game-specific spec, search that game's space for the event name
   (e.g. `space = JCS AND title ~ "currency"`).
-- **What's actually live here / exact field names + real values**: `semantic_index` —
-  `({ event })` for an event's properties, `({ property })` for values + cardinality,
-  `({ search })` to map a business term/value to its property and the event(s) carrying it.
+- **What's actually live here / exact field names + real values**:
+  `semantic_index({ request: { … } })` — `{ source, event }` for an event's properties,
+  `{ source, property }` for values + cardinality, `{ search }` to map a business term/value to
+  its property and the event(s) carrying it.
   This is the runtime source of truth that the Confluence pages describe.
 
 ## When you cite a number

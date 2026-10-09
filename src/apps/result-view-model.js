@@ -26,7 +26,7 @@ export function pivotTransform(display, path) {
   return {
     where: path.map((key, i) => (key === null ? { column: display.levels[i].column, op: 'is_null' } : { column: display.levels[i].column, op: 'eq', value: key })),
     group_by: [display.levels[path.length].column],
-    aggregations: display.values.map((v) => ({ agg: v.agg || 'sum', column: v.column, name: v.column })),
+    measures: display.values.map((v) => ({ agg: v.agg || 'sum', column: v.column, name: v.column })),
     // the largest first, an empty value last — the same on every warehouse
     order_by: [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
   };
@@ -49,7 +49,7 @@ export function drillView(display, path = [], step = null) {
   const agg = display.drill?.agg || 'sum';
   const ys = drillYs(display);
   const where = path.map((f) => (f.value === null ? { column: f.column, op: 'is_null' } : { column: f.column, op: 'eq', value: f.value }));
-  const aggregations = ys.map((y) => ({ agg, column: y, name: y }));
+  const measures = ys.map((y) => ({ agg, column: y, name: y }));
   const used = new Set(path.map((f) => f.column));
   // the levels left to step into from here
   const rest = (display.drill?.levels || []).filter((l) => !used.has(l.column) && (!step || l.column !== step.level.column));
@@ -59,19 +59,19 @@ export function drillView(display, path = [], step = null) {
     // the chart as declared: its own dimensions
     const group = [drillX(display), ...(display.series_column ? [display.series_column] : [])];
     const timeLike = display.kind === 'line' || display.kind === 'area';
-    return { transform: { where, group_by: group, aggregations, order_by: timeLike ? [{ key: display.x, direction: 'asc' }] : byValue }, display };
+    return { transform: { where, group_by: group, measures, order_by: timeLike ? [{ key: display.x, direction: 'asc' }] : byValue }, display };
   }
   const level = step.level.column;
   if (step.mode === 'trend' && (display.kind === 'line' || display.kind === 'area')) {
     // the same axis, one line (or band) per value of the level
     return {
-      transform: { where, group_by: [display.x, level], aggregations: aggregations.slice(0, 1), order_by: [{ key: display.x, direction: 'asc' }] },
+      transform: { where, group_by: [display.x, level], measures: measures.slice(0, 1), order_by: [{ key: display.x, direction: 'asc' }] },
       display: { kind: display.kind, x: display.x, y: [ys[0]], series_column: level, drill },
     };
   }
   // a breakdown by the level: a pie stays a pie (shares of what was chosen), anything else is bars
   return {
-    transform: { where, group_by: [level], aggregations, order_by: byValue },
+    transform: { where, group_by: [level], measures, order_by: byValue },
     display: display.kind === 'pie' ? { kind: 'pie', label_column: level, value_column: ys[0], drill } : { kind: 'bar', x: level, y: ys, drill },
   };
 }

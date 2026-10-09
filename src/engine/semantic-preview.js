@@ -25,7 +25,6 @@ export const semanticPreviewMethods = {
     this._validate('preview_semantic_model', input);
     const ctx = this._ctx(input.context_id);
     if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ request: { action: 'describe', context_id: '${ctx.id}' } }) lists its columns`, { stage: 'validate', field: 'context_id' });
-    if (input.time_range && !input.validate) throw new ToolError('time_range is the window validate runs the metrics over — pass validate: true with it', { stage: 'validate', field: 'time_range' });
     if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
     const project = ctx.state.engine === 'project';
     // the names asked for are checked in the call, against what the context declares
@@ -145,7 +144,7 @@ export const semanticPreviewMethods = {
         // for one metric
         cut = { ...(input.metric ? { attributes: groupable } : {}), ...time };
       }
-      // what this metric's query takes in group_by (and where / order_by), spelled as it takes it
+      // what this metric's query takes in group_by (and where), spelled as it takes it
       return { ...m, definition: def, group_by: cut };
     });
     const first = scope.metrics[0];

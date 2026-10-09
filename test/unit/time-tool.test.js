@@ -17,7 +17,6 @@ test('time: returns immediately for 0s', async () => {
   const r = await engine.time({ seconds: 0 });
   assert.equal(r.ok, true);
   assert.equal(r.waited_seconds, 0);
-  assert.equal(r.clamped, false);
   assert.ok(Date.now() - t0 < 500);
 });
 
@@ -37,29 +36,20 @@ test('time: reports the cap it enforces, and the schema names the same number', 
   const r = await engine.time({ seconds: 0 });
   assert.equal(r.cap_seconds, MAX_WAIT_SECONDS);
   assert.equal(MAX_WAIT_SECONDS, 30);
-  assert.equal(r.clamped, false);
-  assert.doesNotThrow(() => engine._validate('time', { seconds: 120 })); // a big ask is accepted, then clamped
+  // the answer says what was waited and the cap, nothing that is the same on every answer
+  assert.equal(r.requested_seconds, undefined);
+  assert.equal(r.clamped, undefined);
+  assert.doesNotThrow(() => engine._validate('time', { seconds: MAX_WAIT_SECONDS }));
   const schema = engine.schemas.time;
   assert.ok(schema.description.includes(String(MAX_WAIT_SECONDS)), 'the tool description names the cap');
   assert.ok(schema.properties.seconds.description.includes(String(MAX_WAIT_SECONDS)));
 });
 
-// The clamp itself, without waiting for it: setTimeout is replaced for the duration of the call, so
-// the requested delay is OBSERVED rather than slept through. A suite that actually waited half a
-// minute to learn this would be paid for on every run.
-test('time: a request above the cap is clamped — the delay asked of the timer is the cap', async () => {
-  const real = globalThis.setTimeout;
-  const asked = [];
-  globalThis.setTimeout = (fn, ms) => { asked.push(ms); return real(fn, 0); };
-  try {
-    const r = await engine.time({ seconds: MAX_WAIT_SECONDS + 30 });
-    assert.deepEqual(asked, [(MAX_WAIT_SECONDS) * 1000], 'the timer is asked for the cap, not the request');
-    assert.equal(r.waited_seconds, MAX_WAIT_SECONDS);
-    assert.equal(r.requested_seconds, MAX_WAIT_SECONDS + 30);
-    assert.equal(r.clamped, true);
-  } finally {
-    globalThis.setTimeout = real;
-  }
+// A wait longer than the cap is refused in the call, as a read's wait_seconds is — never accepted and
+// then cut short behind the caller's back.
+test('time: a request above the cap is refused, not clamped', async () => {
+  assert.throws(() => engine._validate('time', { seconds: MAX_WAIT_SECONDS + 30 }), /must be <= 30/);
+  await assert.rejects(() => engine.time({ seconds: MAX_WAIT_SECONDS + 0.5 }), /must be <= 30/);
 });
 
 test('time: validation rejects missing/negative seconds', () => {

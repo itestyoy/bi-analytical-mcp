@@ -141,7 +141,7 @@ export async function makeEngine(opts = {}) {
     }
   }
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
-  // configured (+ a key); otherwise null and memory({ request: { search } }) stays purely fuzzy.
+  // configured (+ a key); otherwise null and semantic_index({ request: { search } }) stays purely fuzzy.
   const embedder = createEmbedder();
   // Durability for the memory tool: by default findings share the store (and survive
   // MCP_DB_RESET), but the store lives on the container FS — point MCP_MEMORY_DB at a

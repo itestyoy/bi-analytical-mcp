@@ -97,12 +97,10 @@ test('every tool schema compiles for a model with no groupable dimension', () =>
 test('every tool schema compiles for an events source with no declared event vocabulary', () => {
   const { catalog, engine } = engineFor(NO_EVENT_NAMES); // constructing the Engine IS the compile
   assert.deepEqual(catalog.eventNames('events'), [], 'nothing is declared yet');
-  // Every event_name field stays a field — an OPEN string, since there is no vocabulary to offer.
+  // the semantic model of that source is still offered: its event is named by a condition's value
   const bsm = engine.schemas.build_semantic_model;
   const events = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'from').includes('events'));
-  const measure = field(bsm, field(bsm, events, 'measures').items, 'event_name');
-  assert.equal(deref(bsm, measure.items).type, 'string');
-  assert.equal(deref(bsm, measure.items).enum, undefined, 'no vocabulary → no closed list, not an empty one');
+  assert.ok(events, 'the events source can be declared');
   // and the funnel stage, which builds its own step vocabulary, is offered too
   assert.ok(field(engine.schemas.build_pipeline_model, engine.schemas.build_pipeline_model, 'stage'), 'the pipeline tool is still offered');
 });

@@ -91,8 +91,8 @@ async function settled(client, name, args) {
  */
 export async function runReference(client, ref) {
   const s = await settled(client, 'build_pipeline_model', { action: 'start', name: `ref_${Date.now().toString(36)}`, source: ref.source });
-  for (const stage of ref.stages) await settled(client, 'build_pipeline_model', { action: 'add_step', draft_id: s.draft_id, stage });
-  const built = await settled(client, 'build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
+  for (const stage of ref.stages) await settled(client, 'build_pipeline_model', { action: 'add_steps', context_id: s.context_id, stages: [stage] });
+  const built = await settled(client, 'build_pipeline_model', { action: 'materialize', context_id: s.context_id });
   const rows = built.rows || [];
   if (!rows.length) throw new Error('the reference pipeline returned no rows');
   if (ref.column) return numberOf(rows[0][ref.column], `reference ${ref.column}`);

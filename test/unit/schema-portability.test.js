@@ -132,7 +132,8 @@ test('semantic_index accepts one view at a time and refuses a name without its s
 
   for (const ok of [
     {},
-    { model: 'events' },
+    { source: 'events' },
+    { source: 'users' },
     { source: 'events', event: 'first_launch' },
     { source: 'events', property: 'level_id_of_event_data', limit: 5 },
     { search: 'retention' },
@@ -149,9 +150,9 @@ test('semantic_index accepts one view at a time and refuses a name without its s
 
   for (const bad of [
     { property: 'level_id_of_event_data' },            // same, for a column
-    { source: 'events' },                              // a source alone is not a view
-    { model: 'events', limit: 5 },                     // limit does not apply to { model }
-    { model: 'events', search: 'x' },                  // two views at once
+    { model: 'events' },                               // the model view is { source }
+    { source: 'events', fuzzy: true },                 // fuzzy does not apply to { source }
+    { source: 'events', search: 'x' },                 // two views at once
     { source: 'events', event: 'no_such_event' },      // a name that source does not declare
     { source: 'users', event: 'first_launch' },        // an events name on a non-events source
   ]) assert.equal(check(bad).ok, false, `should refuse ${JSON.stringify(bad)}`);
@@ -169,7 +170,7 @@ const BUDGET = { properties: 5000, depth: 10, enumValues: 1000, chars: 120000, b
 /** Instance nesting: only properties/items add a level; a union branch is an alternative, not a level. */
 const depthOf = (n, d = 0) => {
   if (!n || typeof n !== 'object') return d;
-  if (n.$ref) return d + 1; // a recursive $ref (py_block) counts one level, then repeats
+  if (n.$ref) return d + 1; // a $ref counts one level
   let max = d;
   for (const b of [...(n.anyOf || []), ...(n.oneOf || []), ...(n.allOf || [])]) max = Math.max(max, depthOf(b, d));
   if (n.then) max = Math.max(max, depthOf(n.then, d));
@@ -265,7 +266,7 @@ test('the tool list stays within its size budget on the production catalog', () 
   assert.ok(total < 260000, `the tool list is ${total} characters — it was ~206k with every form folded and the catalog's names closed per model; something is being dumped into every request again`);
 });
 
-test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
+test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', async () => {
   const validators = makeValidators(schemas);
   const check = (display) => validateInput(validators.display_model_result, { task_id: 'abc123abc123', display });
   for (const ok of [
@@ -278,10 +279,14 @@ test('the card declaration (display) is structural: each kind is a closed branch
     { kind: 'kpi', values: [{ column: 'revenue', format: 'currency', currency: 'EUR', good: 'up' }] },
     { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'n' },
     { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max', format: 'number' }] },
+    // a pivot value is written as a KPI tile is: a currency goes with format currency
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'revenue', format: 'currency', currency: 'EUR' }, { column: 'payers', agg: 'count_distinct', format: 'percent' }] },
+    // a view folds with what a read's measure takes, but for the percentile: a median, a sketch merged
+    { kind: 'bar', x: 'users_country', y: ['revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }], agg: 'median' } },
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'users_sketch', agg: 'hll_merge' }] },
   ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
   for (const [bad, why] of [
     [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
-    [{ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, 'a split with two value columns'],
     [{ kind: 'bar', x: 'c', y: 'revenue' }, 'y is always a list'],
     [{ kind: 'funnel', label_column: 'step', value_column: 'users' }, 'the row form lives under steps'],
     [{ kind: 'funnel', steps: [{ column: 'only_one' }] }, 'a funnel of one step'],
@@ -290,8 +295,15 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'kpi', values: [1, 2, 3, 4, 5].map((i) => ({ column: `c${i}` })) }, 'more than four tiles'],
     [{ kind: 'pie', label_column: 'a', value_column: 'b', stacked: true }, 'a field of another kind'],
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
-    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'percentile' }] }, 'a percentile names no quantile here'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'hll_init' }] }, 'a view returns values, not a sketch'],
+    [{ kind: 'bar', x: 'a', y: ['v'], drill: { levels: [{ column: 'b' }], agg: 'percentile' } }, 'a drill folds no percentile either'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', currency: 'EUR' }] }, 'a pivot value\'s currency without format currency'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', format: 'number', currency: 'EUR' }] }, 'a number takes no currency'],
   ]) assert.equal(check(bad).ok, false, why);
+  // a split names ONE value column — refused at the call, by the rule, with the result's columns at hand
+  const { displayProblems } = await import('../../src/display-check.js');
+  assert.match(displayProblems({ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, ['d', 'a', 'b', 'c']).join(' | '), /declare a single y/, 'a split with two value columns');
   // the declaration lives on display_model_result alone: no other tool takes one
   assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);

@@ -3,7 +3,8 @@
 // with its own recipes silently lost every shipped one, python ones included.
 //
 // Input-validation / surface guard (the allowed non-data kind): what is offered, to whom, and why
-// one is withheld. Nothing here runs a recipe — that is recipes-parse.test.js on the warehouse.
+// one is withheld. Nothing here runs a recipe on the warehouse — that is recipes-parse.test.js and
+// the tests test/helpers/recipe-coverage.js names; only the recipes that need none are checked at the end.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -78,4 +79,167 @@ test('a recipe is offered only where this deployment can run it', () => {
   assert.match(local.get('needs_python').unavailable_here, /no dbt python models/);
   assert.match(local.get('bq_only').unavailable_here, /this warehouse is duckdb/);
   assert.equal(local.get('anywhere').unavailable_here, undefined);
+});
+
+// A pipeline recipe's payload is the build_pipeline_model start request itself, handed over as it
+// stands: build_pipeline_model({ request: <pipeline_payload> }). Every shipped one is held to the
+// tool's own schema here (input validation — what they compute is recipes-parse.test.js's), on a
+// deployment that runs python models, so the python ones are offered their stage.
+test('every shipped pipeline_payload is a build_pipeline_model start request the tool accepts as it stands', async () => {
+  await import('../../src/engine.js'); // the engine registers the funnel and python stages, as a server does
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
+  const validators = makeValidators(buildSchemas(catalog));
+  const pipelines = loadRecipes(SYSTEM).list.filter((r) => r.pipeline_payload);
+  assert.ok(pipelines.length > 10, 'the shipped set has pipeline recipes');
+  for (const r of pipelines) {
+    const res = validateInput(validators.build_pipeline_model, r.pipeline_payload);
+    assert.equal(res.ok, true, `${r.id}: ${(res.errors || []).join(' | ')}`);
+    assert.equal(r.pipeline_payload.action, 'start', `${r.id}: a start request`);
+  }
+});
+
+// A deployment's file is not ours to rewrite: one written for an earlier version carries the
+// one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes. It is
+// served as the start request it stands for.
+test('a deployment recipe in the earlier { name, pipeline } shape is served as the start request', () => {
+  const stages = [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }];
+  const mine = deploymentFile([{ id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages } } }]);
+  assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
+});
+
+// Its stages and its semantic payload, written in an earlier spelling, are served in today's: the
+// recipe view hands the tool a request it accepts as it stands.
+test('a deployment recipe in earlier stage and semantic spellings is served as requests the tools accept', async () => {
+  await import('../../src/engine.js');
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+  const validators = makeValidators(buildSchemas(catalog));
+  const pipeline = { name: 'old_stages', pipeline: { source: 'events', stages: [{ stage: 'where', conditions: [{ left: { column: 'event_name' }, op: 'eq', value: 'first_launch' }] }, { stage: 'project', columns: ['event_name'] }, { stage: 'sample', percent: 10 }, { stage: 'limit', n: 5 }] } };
+  const semantic = {
+    name: 'old_sem', use_base_models: ['users'],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name', as_type: 'categorical' }], measures: [{ name: 'launches', agg: 'sum_boolean', where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { name: 'rows', agg: 'count' }] }],
+    metrics: [
+      { name: 'launches', type: 'simple', measure: { name: 'launches' } },
+      { name: 'rows', type: 'simple', measure: { name: 'rows' } },
+      { name: 'share', type: 'ratio', numerator: { name: 'launches' }, denominator: { name: 'rows' } },
+      { name: 'rest', type: 'derived', expr: 'a - b', metrics: [{ metric: 'rows', name: 'a' }, { metric: 'launches', name: 'b' }] },
+    ],
+  };
+  const mine = deploymentFile([{ id: 'old_stages', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: pipeline }, { id: 'old_sem', task_type: 't', title: 'old', when_to_use: '', hack: '', semantic_payload: semantic }]);
+  const recipes = loadRecipes(SYSTEM, mine);
+  const p = recipes.get('old_stages').pipeline_payload;
+  assert.deepEqual(p.stages, [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
+  const pr = validateInput(validators.build_pipeline_model, p);
+  assert.equal(pr.ok, true, (pr.errors || []).join(' | '));
+  const s = recipes.get('old_sem').semantic_payload;
+  assert.deepEqual(s.semantic_models.map((m) => m.from), ['events', 'users'], 'a model loaded for its attributes is a { from } item');
+  assert.deepEqual(s.semantic_models[0].measures[0], { name: 'launches', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] });
+  assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: 'rows - launches', metrics: ['rows', 'launches'] });
+  const sr = validateInput(validators.build_semantic_model, s);
+  assert.equal(sr.ok, true, (sr.errors || []).join(' | '));
+});
+
+// The same for an experiment block written for an earlier version: its columns are named by flat
+// `<field>_field` keys (the experiment tool's earlier field names), which the tool now refuses. It is
+// served with `arm` — the group as the tool takes it — and a row read through it is a group the
+// experiment tool accepts.
+test('a deployment recipe with the earlier flat experiment block is served with `arm`, and its rows are groups the tool accepts', async () => {
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { ContextManager } = await import('../../src/context-manager.js');
+  const { Engine } = await import('../../src/engine.js');
+  const { settle } = await import('../helpers/settle.js');
+  const { armFrom } = await import('../helpers/experiment-arm.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../../config/catalog.yml', import.meta.url)), { dialect: 'duckdb' });
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-ab-')) }) }));
+
+  const old = {
+    proportion: { action: 'analyze', metric: 'proportion', group_field: 'g', n_field: 'n', conversions_field: 'conv' },
+    mean: { action: 'analyze', metric: 'mean', group_field: 'g', n_field: 'n', mean_field: 'm', stddev_field: 'sd' },
+    cuped: { action: 'analyze', metric: 'cuped', group_field: 'g', n_field: 'n', sumY_field: 'sy', sumY2_field: 'sy2', sumX_field: 'sx', sumX2_field: 'sx2', sumXY_field: 'sxy' },
+    ratio: { action: 'analyze', metric: 'ratio', group_field: 'g', n_field: 'n', sumNum_field: 'sn', sumDen_field: 'sd', sumNum2_field: 'sn2', sumDen2_field: 'sd2', sumNumDen_field: 'snd' },
+    split: { action: 'check_split', group_field: 'g', n_field: 'n', expected_ratio: [1, 1] },
+  };
+  const mine = deploymentFile(Object.entries(old).map(([k, experiment]) => ({ id: `old_${k}`, task_type: 'experiment', title: k, when_to_use: '', hack: '', experiment })));
+  const served = (k) => loadRecipes(SYSTEM, mine).get(`old_${k}`).experiment;
+
+  assert.deepEqual(served('proportion'), { action: 'analyze', metric: 'proportion', group_field: 'g', arm: { n: 'n', conversions: 'conv' } });
+  assert.deepEqual(served('mean'), { action: 'analyze', metric: 'mean', group_field: 'g', arm: { n: 'n', mean: 'm', stddev: 'sd' } });
+  assert.deepEqual(served('cuped'), { action: 'analyze', metric: 'cuped', group_field: 'g', arm: { n: 'n', sum: 'sy', sum_squares: 'sy2', covariate: { sum: 'sx', sum_squares: 'sx2' }, sum_products: 'sxy' } });
+  assert.deepEqual(served('ratio'), { action: 'analyze', metric: 'ratio', group_field: 'g', arm: { n: 'n', numerator: { sum: 'sn', sum_squares: 'sn2' }, denominator: { sum: 'sd', sum_squares: 'sd2' }, sum_products: 'snd' } });
+  assert.deepEqual(served('split'), { action: 'check_split', group_field: 'g', expected_ratio: [1, 1], arm: { n: 'n' } });
+
+  // rows as a per-group pipeline gives them: control first, then the variant
+  const rows = {
+    proportion: [{ g: 'control', n: 1000, conv: 200 }, { g: 'B', n: 1000, conv: 250 }],
+    mean: [{ g: 'control', n: 500, m: 10, sd: 2 }, { g: 'B', n: 500, m: 12, sd: 2 }],
+    cuped: [{ g: 'control', n: 4, sy: 10, sy2: 30, sx: 8, sx2: 20, sxy: 24 }, { g: 'B', n: 4, sy: 14, sy2: 54, sx: 8, sx2: 20, sxy: 32 }],
+    ratio: [{ g: 'control', n: 4, sn: 6, sn2: 12, sd: 12, sd2: 40, snd: 21 }, { g: 'B', n: 4, sn: 8, sn2: 20, sd: 12, sd2: 40, snd: 28 }],
+  };
+  for (const [k, [control, ...variants]] of Object.entries(rows)) {
+    const map = served(k);
+    const r = engine.experiment({ action: map.action, metric: map.metric, control: armFrom(map, control), variants: variants.map((row) => armFrom(map, row)) });
+    assert.equal(r.ok, true, k);
+    assert.equal(r.results.length, 1, k);
+    assert.equal(r.results[0].variant, 'B', k);
+  }
+  const split = served('split');
+  const srm = engine.experiment({ action: split.action, groups: [{ g: 'control', n: 1000 }, { g: 'B', n: 1010 }].map((row) => armFrom(split, row)), expected_ratio: split.expected_ratio });
+  assert.equal(srm.srm_detected, false);
+
+  // a block already in the current shape is served as written
+  const current = { action: 'analyze', metric: 'proportion', group_field: 'g', arm: { n: 'n', conversions: 'conv' } };
+  const now = deploymentFile([{ id: 'now', task_type: 'experiment', title: 'now', when_to_use: '', hack: '', experiment: current }]);
+  assert.deepEqual(loadRecipes(SYSTEM, now).get('now').experiment, current);
+});
+
+// The shipped recipes whose checks never read the warehouse (moved here from
+// test/integration/recipes-parse.test.js). A REFERENCE entry (generated from an extracted fact sheet)
+// is not a payload to build: it is the library's own surface, offered by id so it can be fetched
+// mid-write. What can rot here is its content — an empty sheet, or a version it cannot name.
+for (const r of loadRecipes(SYSTEM).list.filter((x) => x.reference)) {
+  test(`recipe '${r.id}': a reference names its version, carries its lists and says how to use it`, () => {
+    assert.ok(r.reference.version, `${r.id}: a reference must name the version it was read from`);
+    assert.ok(Object.keys(r.reference).length > 3, `${r.id}: the reference carries no lists`);
+    assert.ok(r.approach && r.instead_of && r.hack, `${r.id}: a reference still says how to use it`);
+    assert.ok(!r.pipeline_payload, `${r.id}: a reference declares no model`);
+  });
+}
+
+// A tool-only recipe (no warehouse), e.g. power/sample-size planning: each declared tool call runs
+// and computes a successful result. (A python-model recipe is test/unit/python-stage.test.js's.)
+for (const r of loadRecipes(SYSTEM).list.filter((x) => !x.reference && x.requires !== 'python_models' && x.tool_calls)) {
+  test(`recipe '${r.id}': each declared tool call computes a successful result`, async () => {
+    const { loadCatalog } = await import('../../src/catalog.js');
+    const { ContextManager } = await import('../../src/context-manager.js');
+    const { Engine } = await import('../../src/engine.js');
+    const { settle } = await import('../helpers/settle.js');
+    const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+    const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-tool-')) }) }));
+    for (const call of r.tool_calls) {
+      const res = engine[call.tool](call.args);
+      assert.equal(res.ok, true, `${r.id}: tool ${call.tool} failed: ${JSON.stringify(res)}`);
+    }
+  });
+}
+
+// recipes-parse.test.js skips a recipe another integration test proves on its numbers
+// (test/helpers/recipe-coverage.js). Each one it skips must still be a shipped recipe — one removed
+// from config/recipes.json would otherwise leave a skip that hides nothing — and must name the test
+// file that holds it.
+test('every recipe the recipe suite leaves to another test is a shipped recipe, held by an existing test file', async () => {
+  const { existsSync } = await import('node:fs');
+  const { DATA_TESTED } = await import('../helpers/recipe-coverage.js');
+  const ids = loadRecipes(SYSTEM).ids();
+  assert.ok(Object.keys(DATA_TESTED).length > 0, 'the coverage map is loaded');
+  for (const [id, where] of Object.entries(DATA_TESTED)) {
+    assert.ok(ids.includes(id), `DATA_TESTED names '${id}', which config/recipes.json no longer ships`);
+    const file = where.slice(0, where.indexOf(':'));
+    assert.ok(existsSync(fileURLToPath(new URL(`../integration/${file}`, import.meta.url))), `'${id}' is said to be held by ${file}, which does not exist`);
+  }
 });

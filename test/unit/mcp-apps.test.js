@@ -111,11 +111,11 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   // exactly one tools/call site: drill_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'drill_result', arguments: { request: args } }");
-  // …reached for the card's OWN task only: its stored table's next view when a drill-down steps
-  // down (a pivot row, a chart mark — each read built by the view model)
+  // …reached for the card's OWN task only: the path taken and the level opened (a pivot row, a chart
+  // mark) — the view itself is made by the server from the card as it was drawn
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
-    '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
-    '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
+    '{ ...d.source, path, level: step.level.column, mode: step.mode, limit: DRILL_ROWS }',
+    '{ ...model.source, path, limit: PIVOT_LEVEL_ROWS }',
   ]);
 });
 
@@ -384,7 +384,7 @@ test('pivot: one level is the rows under a path, grouped by the next level; its 
   const t = pivotTransform(display, ['US', null]);
   assert.deepEqual(t.where, [{ column: 'country', op: 'eq', value: 'US' }, { column: 'platform', op: 'is_null' }]);
   assert.deepEqual(t.group_by, ['channel']);
-  assert.deepEqual(t.aggregations, [{ agg: 'sum', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
+  assert.deepEqual(t.measures, [{ agg: 'sum', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
   const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
   assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
 });
@@ -419,7 +419,7 @@ test('drill: a view is the stored rows under the path, grouped by what it draws;
   const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, agg: 'max' } };
   // the chart as declared: folded over the drill levels
   assert.deepEqual(drillView(bar).transform.group_by, ['country']);
-  assert.deepEqual(drillView(bar).transform.aggregations, [{ agg: 'max', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
+  assert.deepEqual(drillView(bar).transform.measures, [{ agg: 'max', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
   // a bar of US opened by Platform: filtered to US, one bar per platform, Channel left to step into
   const step = drillView(bar, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'breakdown' });
   assert.deepEqual(step.transform.where, [{ column: 'country', op: 'eq', value: 'US' }]);

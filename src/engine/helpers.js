@@ -3,6 +3,8 @@
 // `mixin` puts them on the Engine's prototype, as the class's own methods are — so `this` is the engine
 // in every one of them, and a method is reached as `engine.<name>` wherever it is written.
 
+import { aboutOf } from '../memory.js';
+
 /** Define each method (and getter) of `parts` on `Class.prototype`, non-enumerable like a class's own. A name defined twice is a mistake. */
 export function mixin(Class, ...parts) {
   for (const part of parts) {
@@ -13,14 +15,14 @@ export function mixin(Class, ...parts) {
   }
 }
 
-/** Presentation shape for a stored memory note: its note, targets, aliases and links, and its time. */
+/** Presentation shape for a stored memory note: its note, what it is about (as memory records it and semantic_index filters by it), aliases and links, and its time. */
 export function memoryView(e) {
-  const targets = [...(e.targets || [])];
+  const about = (e.targets || []).map(aboutOf);
   return {
     id: e.id,
     note: e.note,
     ...(e.question ? { question: e.question } : {}),
-    ...(targets.length ? { about: targets } : {}),
+    ...(about.length ? { about } : {}),
     ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
     ...(e.links && e.links.length ? { links: e.links } : {}),
     recorded_at: e.created_at ? new Date(e.created_at).toISOString() : null,
@@ -57,13 +59,13 @@ export function pageBlock({ offset = 0, limit, returned, has_more = false, total
  * sample: what it is safe for, what it is NOT, and how to get the exact answer. So the
  * caller is never misled into acting on a sampled number, and always has the choice.
  */
-export function samplingNote(percent) {
+export function samplingNote(share) {
   return {
     approximate: true,
-    sample_percent: percent,
-    why: `These rows were computed over a ~${percent}% RANDOM sample of the source for a FAST directional read — NOT the full population.`,
+    sample_share: share,
+    why: `These rows were computed over a random sample of about ${+(share * 100).toPrecision(6)}% of the source (share ${share}) for a FAST directional read — NOT the full population.`,
     safe_for: 'getting the shape/direction: top categories, rough proportions, whether a segment is non-trivial, sanity-checking a pipeline before a full run.',
     not_reliable_for: 'exact totals/counts, rates near 0 or 1, small segments, distinct counts, or ranking values that are close — sampling error can change or flip these.',
-    get_exact: 'For a number you will act on, re-run WITHOUT sampling (omit the sample stage, or pass sample:false) to compute over ALL the data.',
+    get_exact: 'For a number you will act on, re-run WITHOUT the sample stage to compute over ALL the data.',
   };
 }

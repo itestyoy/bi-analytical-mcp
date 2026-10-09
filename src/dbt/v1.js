@@ -6,12 +6,100 @@
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { inIsolatedTarget } from '../request-context.js';
 import { runProcess, runWithInput } from './process.js';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
+import yaml from 'js-yaml';
+
+const CUMULATIVE_FLAG = 'require_nested_cumulative_type_params';
+
+/**
+ * dbt_project.yml's text with `flags.require_nested_cumulative_type_params` set to false, and nothing
+ * else changed: the value of the key's line replaced, the key put first into the top-level `flags:`
+ * mapping (block or flow), or a `flags:` block appended. The TEXT is edited, never re-dumped — dbt
+ * reads the file as YAML 1.1 (yes/no are booleans, a date stays a date) and a YAML 1.2 dump would
+ * change those values. The edit is held to the text it came from: loaded, the two must be the same
+ * document but for that flag being false, or the text is returned as it was. Idempotent.
+ */
+export function withCumulativeWindowFlag(text) {
+  // duplicate keys are taken as dbt's loader takes them: the last one wins
+  const load = (t) => yaml.load(t, { json: true });
+  let before;
+  try { before = load(text); } catch { return text; }
+  if (before == null) before = {};
+  if (typeof before !== 'object' || Array.isArray(before)) return text;
+  if (before.flags != null && (typeof before.flags !== 'object' || Array.isArray(before.flags))) return text;
+  if (before.flags?.[CUMULATIVE_FLAG] === false) return text;
+  const has = !!before.flags && Object.hasOwn(before.flags, CUMULATIVE_FLAG);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split('\n');
+  const top = lines.findIndex((l) => /^(["']?)flags\1[ \t]*:(?=[ \t\r]|$)/.test(l));
+  let next = null;
+  if (top < 0) {
+    if (before.flags !== undefined) return text;
+    next = `${text}${text === '' || text.endsWith('\n') ? '' : eol}flags:${eol}  ${CUMULATIVE_FLAG}: false${eol}`;
+  } else {
+    const rest = lines[top].slice(lines[top].indexOf(':') + 1).replace(/\r$/, '');
+    const value = rest.replace(/(^|[ \t])#.*$/, '').trim();
+    if (value.startsWith('{')) {
+      // a flow mapping, on this line or over the next: the key's value replaced, or the key put first
+      const at = lines.slice(0, top).join('\n').length + (top ? 1 : 0) + lines[top].indexOf('{');
+      const head = text.slice(0, at + 1);
+      const tail = text.slice(at + 1);
+      if (has) next = head + tail.replace(new RegExp(`((["']?)${CUMULATIVE_FLAG}\\2[ \\t]*:[ \\t]*)[^,}\\s#]+`), '$1false');
+      else next = /^\s*}/.test(tail) ? `${head} ${CUMULATIVE_FLAG}: false ${tail.trimStart()}` : `${head} ${CUMULATIVE_FLAG}: false,${tail}`;
+    } else if (value === '') {
+      // a block mapping: its lines run to the next line at the left margin that is not a comment
+      let end = top + 1;
+      while (end < lines.length && !/^[^\s#]/.test(lines[end])) end++;
+      const child = lines.slice(top + 1, end).find((l) => /^[ \t]+[^\s#]/.test(l));
+      const indent = child ? child.match(/^[ \t]+/)[0] : '  ';
+      const cr = lines[top].endsWith('\r') ? '\r' : '';
+      const keyLine = new RegExp(`^(${indent}(["']?)${CUMULATIVE_FLAG}\\2[ \\t]*:)([ \\t]*)([^#\\r]*?)([ \\t]*(?:#.*)?\\r?)$`);
+      const out = [...lines];
+      if (has) {
+        const i = out.findIndex((l, k) => k > top && k < end && keyLine.test(l));
+        if (i < 0) return text;
+        out[i] = out[i].replace(keyLine, (_, key, _q, sp, _v, tail) => `${key}${sp || ' '}false${tail}`);
+      } else out.splice(top + 1, 0, `${indent}${CUMULATIVE_FLAG}: false${cr}`);
+      next = out.join('\n');
+    } else if (/^(?:~|null|Null|NULL)$/.test(value)) {
+      // `flags: ~` — an empty mapping written as null: the null taken off, the key the block's one line
+      const out = [...lines];
+      const cr = lines[top].endsWith('\r') ? '\r' : '';
+      out[top] = lines[top].replace(/:([ \t]*)(?:~|null|Null|NULL)/, ':$1');
+      out.splice(top + 1, 0, `  ${CUMULATIVE_FLAG}: false${cr}`);
+      next = out.join('\n');
+    } else return text;
+  }
+  try {
+    const after = load(next);
+    const want = { ...before, flags: { ...(before.flags || {}), [CUMULATIVE_FLAG]: false } };
+    return isDeepStrictEqual(after, want) ? next : text;
+  } catch { return text; }
+}
+
+/**
+ * dbt 1.12's parse of the LATEST spec writes a cumulative metric's window twice — into its
+ * cumulative_type_params and into the deprecated type_params.window — and its own validation then
+ * refuses the metric for the deprecated one (the `require_nested_cumulative_type_params` behavior
+ * flag, on by default): no cumulative metric with a window parses. The flag is read from
+ * dbt_project.yml alone, so the copy a context parses carries it off — whatever the project set,
+ * since the semantic YAML that copy parses is the server's (off, the deprecated field is a warning).
+ * Written only into the directory the parse runs in — a context's own copy of the project.
+ */
+function allowLatestCumulativeWindow(projectDir) {
+  const file = join(projectDir, 'dbt_project.yml');
+  try {
+    const text = readFileSync(file, 'utf8');
+    const next = withCumulativeWindowFlag(text);
+    if (next !== text) writeFileSync(file, next);
+  } catch { /* a project dbt cannot read is the parse's to report */ }
+}
 
 /**
  * The one correction a semantic manifest parsed from the LATEST spec needs: a percentile is written
@@ -94,6 +182,7 @@ export class DbtV1 {
   }
 
   async parse(projectDir) {
+    if (this.semanticSpec === 'latest') allowLatestCumulativeWindow(projectDir);
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
     const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (r.ok && this.semanticSpec === 'latest') restorePercentiles(file);

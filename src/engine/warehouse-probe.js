@@ -9,6 +9,17 @@ import { detached } from '../request-context.js';
 
 /** How far back freshness looks first on a partitioned source (days): late enough data still lands in it. */
 const FRESHNESS_LOOKBACK_DAYS = 7;
+/** How many tasks' tables keep their columns cached (the oldest read goes first). */
+const TABLE_CACHE_MAX = 256;
+
+/** A relation's columns as the dbt client reports them: their names lowercased, with each one's type as
+ *  the warehouse has it (`types`) — null when the warehouse did not answer. */
+function columnSet(r) {
+  if (!r?.ok || !Array.isArray(r.columns)) return null;
+  const set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+  set.types = new Map(r.columns.filter((c) => c.dtype).map((c) => [String(c.name).toLowerCase(), c.dtype]));
+  return set;
+}
 
 export class WarehouseProbe {
   constructor({ runner, ctxs, catalog, valueIndex, queryTimeoutMs, timeRangeConditions, now = () => Date.now() }) {
@@ -21,6 +32,7 @@ export class WarehouseProbe {
     this.timeRangeConditions = timeRangeConditions;
     this.inFlight = new Map(); // key → the one read every caller waiting on it shares
     this.columnCache = new Map(); // source → { set, gen }
+    this.tableCache = new Map(); // a task's table (owner:model:task) → { set, gen }
     this.freshnessCache = new Map(); // source → { value, gen }
   }
 
@@ -71,11 +83,28 @@ export class WarehouseProbe {
 
   /**
    * Physical column NAMES (lowercased Set) of a source's relation, via the same
-   * introspection semantic_index({ request: { model } }) uses — cached per source. null when it
+   * introspection semantic_index({ request: { source } }) uses — cached per source. null when it
    * cannot be known (no runner / relation not built / introspection failed / slower than
    * the grace), in which case the catalog's declared columns are used as-is (grounding
    * is skipped).
    */
+  /**
+   * What the warehouse says about a pipeline's columns: the source's physical columns (with their
+   * types), and those of every model its joins bring in — a joined column is compared in the type it
+   * HAS, as the source's own are (a flag stored as text, renamed by the join, is still text). A fresh
+   * set each call: the cached ones are never written on. Null when the source could not be asked.
+   */
+  async grounding(source, stages = []) {
+    const own = await this.physicalColumns(source);
+    if (!own) return null; // the warehouse could not be asked: the declared columns stand
+    const models = [...new Set((stages || []).filter((st) => st?.stage === 'join' && st.with && this.catalog.models[st.with]).map((st) => st.with))];
+    const g = new Set(own);
+    if (own.types) g.types = own.types;
+    g.joined = new Map();
+    for (const k of models) { const set = await this.physicalColumns(k); if (set) g.joined.set(k, set); }
+    return g;
+  }
+
   async physicalColumns(source) {
     if (!this.runner || !this.readDir()) return null;
     // a known set is kept; a lookup that could not know (the relation not built yet, the warehouse
@@ -85,15 +114,32 @@ export class WarehouseProbe {
     if (hit && (hit.set || hit.gen === gen)) return hit.set;
     return this.bestEffort(`columns:${source}:${gen}`, async () => {
       let set = null;
-      try {
-        const r = await this.runner.relationColumns(this.readDir(), this.catalog.getModel(source).dbt_model);
-        if (r.ok && Array.isArray(r.columns)) {
-          set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-          // …and each one's type as the warehouse has it: what a constant compared with it must be
-          set.types = new Map(r.columns.filter((c) => c.dtype).map((c) => [String(c.name).toLowerCase(), c.dtype]));
-        }
-      } catch { /* introspection unavailable → grounding skipped */ }
+      // …each with its type as the warehouse has it: what a constant compared with it must be
+      try { set = columnSet(await this.runner.relationColumns(this.readDir(), this.catalog.getModel(source).dbt_model)); } catch { /* introspection unavailable → grounding skipped */ }
       this.columnCache.set(source, { set, gen });
+      return set;
+    });
+  }
+
+  /**
+   * What the warehouse says about the columns of a TABLE A TASK STORED (a pipeline build, a query run
+   * with materialize: true), in the shape physicalColumns gives a source's: read from the relation in
+   * the context that owns it, whichever tool built it. Cached per task — a task's table is not rebuilt
+   * under it; a lookup that could not know is kept only until the next index scan, as a source's is.
+   * Null when it cannot be known (no runner, the owner or the relation gone, slower than the grace).
+   */
+  async tableColumns({ owner, model, task_id: taskId }) {
+    if (!this.runner?.relationColumns || !this.ctxs.has?.(owner)) return null;
+    const key = `${owner}:${model}:${taskId}`;
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
+    const hit = this.tableCache.get(key);
+    if (hit && (hit.set || hit.gen === gen)) return hit.set;
+    return this.bestEffort(`table-columns:${key}:${gen}`, async () => {
+      let set = null;
+      try { set = columnSet(await this.runner.relationColumns(this.ctxs.dir(owner), model)); } catch { /* introspection unavailable */ }
+      this.tableCache.delete(key);
+      this.tableCache.set(key, { set, gen });
+      if (this.tableCache.size > TABLE_CACHE_MAX) this.tableCache.delete(this.tableCache.keys().next().value);
       return set;
     });
   }

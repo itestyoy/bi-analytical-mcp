@@ -5,7 +5,7 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { targetKey, targetWords } from '../memory.js';
+import { targetKey, targetWords, aboutOf } from '../memory.js';
 import { memoryView } from './helpers.js';
 
 export class MemoryTool {
@@ -16,34 +16,39 @@ export class MemoryTool {
   }
 
   /**
-   * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
-   * semantic_index view. `{ source, name }` names an attribute, payload property or event of that
-   * source exactly; `{ source }` alone names the model; `{ term }` is a phrase the catalog has no
-   * entity for. There is no bare-name form: the source is always written, so nothing here has to
-   * be attributed to an owner, and a name that source does not carry is refused rather than
-   * fuzzily re-pointed at something else.
+   * Resolve what a note is ABOUT — written as semantic_index's views address it — to the target the
+   * store keeps. { source, property } a column or payload property of that source, { source, event }
+   * an event of an events source, { source } the model, { term } a phrase the catalog has no entity
+   * for. The key says which it is, so nothing is looked up to tell a property from an event; the
+   * schema's enums make an unknown name unwritable, and a source whose vocabulary is empty (an open
+   * string there) is refused here with its own nearest names.
    */
   resolveTarget(t) {
     const c = this.catalog;
-    if (t && typeof t === 'object' && t.term !== undefined) return memoryTarget('term', String(t.term).trim());
-    const source = String(t?.source ?? '').trim(); const name = t?.name == null ? null : String(t.name).trim();
-    if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
-    if (!name) return memoryTarget('model', source);
-    if (c.attributeKind(source, name)) return memoryTarget('property', source, name);
-    if (c.isFact(source) && c.eventNames(source).includes(name)) return memoryTarget('event', source, name);
-    // The source is known, so a miss is a misspelling WITHIN it: suggest its own nearest names
-    // rather than linking to something the caller did not write.
-    const own = [...c.propertyEnumFor(source), ...(c.isFact(source) ? c.eventNames(source) : [])];
-    const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
-    throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ request: { model: '${source}' } }) lists what it carries.`, { stage: 'validate', field: 'targets' });
+    if (t.term !== undefined) return memoryTarget('term', String(t.term).trim());
+    const source = t.source;
+    if (!c.models[source]) throw new ToolError(`memory about: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'about' });
+    const miss = (kind, name, own) => {
+      const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
+      return new ToolError(`memory about: '${name}' is not ${kind === 'event' ? 'an event' : 'a column or payload property'} of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ request: { source: '${source}' } }) lists what it carries.`, { stage: 'validate', field: `about.${kind}` });
+    };
+    if (t.event !== undefined) {
+      const event = String(t.event).trim();
+      if (!c.isFact(source) || !c.eventNames(source).includes(event)) throw miss('event', event, c.isFact(source) ? c.eventNames(source) : []);
+      return memoryTarget('event', source, event);
+    }
+    if (t.property !== undefined) {
+      const property = String(t.property).trim();
+      if (!c.attributeKind(source, property)) throw miss('property', property, c.propertyEnumFor(source));
+      return memoryTarget('property', source, property);
+    }
+    return memoryTarget('model', source);
   }
 
-  /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
-  surfaceHint({ kind, addressable: target }) {
-    if (kind === 'property') return `semantic_index({ request: { source: '${target.source}', property: '${target.name}' } })`;
-    if (kind === 'event') return `semantic_index({ request: { source: '${target.source}', event: '${target.name}' } })`;
-    if (kind === 'model') return `semantic_index({ request: { model: '${target.source}' } })`;
-    return `semantic_index({ request: { search: '${target.term}' } })`;
+  /** Where a resolved target's findings surface in semantic_index (a ready call to copy): the view its `about` names. */
+  surfaceHint({ about }) {
+    if (about.term !== undefined) return `semantic_index({ request: { search: ${JSON.stringify(about.term)} } })`;
+    return `semantic_index({ request: { ${Object.entries(about).map(([k, v]) => `${k}: '${v}'`).join(', ')} } })`;
   }
 
   /** Compact notes linked to any of these TARGETS, for attaching to a semantic_index view. */
@@ -53,12 +58,13 @@ export class MemoryTool {
 
   /**
    * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
-   * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ request: { action:
-   * 'list', target } }) returns EVERY linked finding in full. `drillTarget` is the singular target
-   * that view is about — { source, name } for a property/attribute/event, { source } for a model.
+   * each note truncated. Always leaves an explicit drill so nothing is lost —
+   * semantic_index({ request: { notes: true, about } }) returns EVERY linked finding in full, `about`
+   * being the entity this view is about, written as the filter takes it ({ source, property },
+   * { source, event }, { source }).
    */
-  attach(out, targets, drillTarget, { cap = 3 } = {}) {
-    const all = this.store.forTargets(targets.map(targetKey));
+  attach(out, target, { cap = 3 } = {}) {
+    const all = this.store.forTargets([targetKey(target)]);
     if (!all.length) return;
     const shown = all.slice(0, cap).map((e) => memoryCompact(e));
     out.memory = shown.map((s) => s.view);
@@ -67,7 +73,7 @@ export class MemoryTool {
     if (hiddenCount > 0) out.memory_more = hiddenCount;
     if (hiddenCount > 0 || truncatedAny) {
       (out.next_actions ||= []).push({
-        call: `memory({ request: { action: 'list', target: ${JSON.stringify(drillTarget)} } })`,
+        call: `semantic_index({ request: { notes: true, about: ${JSON.stringify(aboutOf(target))} } })`,
         why: hiddenCount > 0
           ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
@@ -78,48 +84,21 @@ export class MemoryTool {
   /**
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
-   * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
+   * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { source }/
    * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
-   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
-   *   action:'list'   → all notes, or those linked to one { target }
-   *   action:'search' → notes matching a word (text / alias / target)
+   *   action:'record' → save notes, one or several (each + what it is `about`, + aliases the user used, + links)
    *   action:'forget' → delete one note by id
+   * (the notes are read with semantic_index: { search }, { notes, about? } — see list() below)
    */
   async run(input = {}) {
     this.validate('memory', input);
     const action = input.action;
 
     if (action === 'record') {
-      const note = String(input.note ?? '').trim();
-      if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
-      const question = input.question ? String(input.question).trim() : null;
-      const resolved = (input.targets || []).map((t) => this.resolveTarget(t));
-      const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
-      const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.store.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
-      return {
-        saved: true,
-        id: entry.id,
-        note: entry.note,
-        ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
-        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
-        aliases, links,
-        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ request: { search } }) (and memory({ request: { action: "search" } })) — including the aliases/words above.',
-      };
-    }
-
-    if (action === 'list') {
-      if (input.target !== undefined) {
-        const r = this.resolveTarget(input.target);
-        return { target: r.addressable, kind: r.kind, notes: this.store.forTargets([targetKey(r.target)]).map(memoryView) };
-      }
-      return { total: this.store.counts().notes, notes: this.store.all({ limit: input.limit ?? 50 }).map(memoryView) };
-    }
-
-    if (action === 'search') {
-      const r = await this.store.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false });
-      return { query: input.query, semantic: r.semantic, ...(r.semantic_error ? { semantic_error: r.semantic_error } : {}), notes: r.notes.map(memoryView) };
+      const next = 'Saved. A finding surfaces in semantic_index on the entities it is linked to, via semantic_index({ request: { search } }) — including its aliases — and in semantic_index({ request: { notes: true } }).';
+      // every note is checked before any is saved: the notes are saved all or none
+      const findings = (input.notes || []).map((n, i) => this._finding(n, input.notes.length > 1 ? `notes[${i}]` : null));
+      return { saved: true, notes: findings.map((f) => this._save(f)), next };
     }
 
     if (action === 'forget') {
@@ -129,35 +108,80 @@ export class MemoryTool {
 
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
+
+  /** A finding as given, its targets resolved — refused before anything is saved. */
+  _finding(n, at = null) {
+    const note = String(n.note ?? '').trim();
+    if (!note) throw new ToolError(`${at ? `${at}: ` : ''}note is required and must be a non-empty finding`, { stage: 'validate', field: at ? `${at}.note` : 'note' });
+    const resolved = (n.about || []).map((t) => {
+      try { return this.resolveTarget(t); } catch (e) { throw at ? new ToolError(`${at}: ${e.message}`, { stage: 'validate', field: `${at}.${e.field || 'about'}` }) : e; }
+    });
+    return {
+      note, question: n.question ? String(n.question).trim() : null, resolved,
+      aliases: [...new Set((n.aliases || []).map((a) => String(a).trim()).filter(Boolean))],
+      links: (n.links || []).map((l) => ({ url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) })),
+    };
+  }
+
+  /** Store one checked finding; what the answer says about it. */
+  _save({ note, question, resolved, aliases, links }) {
+    const entry = this.store.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
+    const terms = resolved.filter((r) => r.kind === 'term').map((r) => r.about.term);
+    return {
+      id: entry.id,
+      note: entry.note,
+      ...(question ? { question } : {}),
+      // what the note is about, each written as the { notes, about } filter takes it, and — in the
+      // same order — the view each one surfaces in
+      ...(resolved.length ? { about: resolved.map((r) => r.about), surfaces_in: resolved.map((r) => this.surfaceHint(r)) } : {}),
+      ...(terms.length ? { unresolved_terms: terms } : {}),
+      aliases, links,
+    };
+  }
+
+  /**
+   * The notes, newest first — every one, or those about one entity, a page at a time:
+   * semantic_index({ request: { notes: true, about?, limit?, offset? } }). `about` is answered as it was
+   * asked, with how many notes are about it.
+   */
+  list({ limit = 50, offset = 0, about } = {}) {
+    const page = (total, notes) => ({ total, notes: notes.map(memoryView), ...(offset + notes.length < total ? { next_offset: offset + notes.length } : {}) });
+    if (about !== undefined) {
+      const r = this.resolveTarget(about);
+      const all = this.store.forTargets([targetKey(r.target)]);
+      return { about: r.about, ...page(all.length, all.slice(offset, offset + limit)) };
+    }
+    return page(this.store.counts().notes, this.store.all({ limit, offset }));
+  }
 }
 
 
 /**
- * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is
- * the same thing as the tool speaks it back — what you hand to memory({ request: { action: 'list', target } })
+ * A resolved memory target: `target` is what gets STORED (the kind and its parts), `about` is the
+ * same thing as the tools write it ({ source, property } / { source, event } / { source } / { term })
  * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
  */
 function memoryTarget(kind, source, name = null) {
-  const addressable = kind === 'term' ? { term: source } : (name == null ? { source } : { source, name });
-  return { kind, target: { kind, ...addressable }, addressable, label: targetWords({ kind, ...addressable }) };
+  const target = kind === 'term' ? { kind, term: source } : (name == null ? { kind, source } : { kind, source, name });
+  return { kind, target, about: aboutOf(target), label: targetWords(target) };
 }
 
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
-// memory({ request: { action: 'list', target } }) — so the view stays light without losing the finding.
+// semantic_index({ request: { notes: true, about } }) — so the view stays light without losing the finding.
 function memoryCompact(e, maxLen = 220) {
   const note = String(e.note || '');
   const truncated = note.length > maxLen;
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
-  // via memory({ request: { action: 'list', target } }).
-  const targets = [...(e.targets || [])];
+  // via semantic_index({ request: { notes: true, about } }).
+  const about = (e.targets || []).map(aboutOf);
   return {
     view: {
       id: e.id,
       note: truncated ? `${note.slice(0, maxLen)}…` : note,
       ...(e.question ? { question: e.question } : {}),
-      ...(targets.length ? { about: targets } : {}),
+      ...(about.length ? { about } : {}),
       ...(e.created_at ? { recorded_at: new Date(e.created_at).toISOString().slice(0, 10) } : {}),
     },
     truncated,

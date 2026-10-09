@@ -21,8 +21,11 @@ test('JobManager persists jobs to SQLite and reloads them (survives restart)', (
   const dbPath = join(mkdtempSync(join(tmpdir(), 'jobs-')), 'jobs.sqlite');
   const jm1 = new JobManager({ dbPath });
   const id = jm1.create({ contextId: 'ctxA' });
-  jm1.setTable(id, `qr_${id}`);
+  jm1.setTable(id, `qr_${id}`, { keptRows: 7 });
   jm1.ready(id);
+  // a task whose own work made its context: the table and that context, kept count unsaid
+  const built = jm1.create({});
+  jm1.setTable(built, 'pm_x', { contextId: 'ctxB' });
 
   // new manager, same db file -> reloads persisted jobs
   const jm2 = new JobManager({ dbPath });
@@ -31,4 +34,6 @@ test('JobManager persists jobs to SQLite and reloads them (survives restart)', (
   assert.equal(j.status, 'ready');
   assert.equal(j.contextId, 'ctxA');
   assert.equal(j.table, `qr_${id}`);
+  assert.equal(j.keptRows, 7, 'how many rows its answer holds outlives the answer');
+  assert.deepEqual([jm2.get(built).contextId, jm2.get(built).table, jm2.get(built).keptRows], ['ctxB', 'pm_x', undefined]);
 });

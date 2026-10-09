@@ -26,7 +26,7 @@ Design docs:
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
-| `build_pipeline_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
+| `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
 
@@ -68,7 +68,8 @@ AI ──► query_semantic_model (enum-constrained)
   `error: { stage: 'validate'|'compile'|'parse'|'query', message, field }`,
   with dbt/MetricFlow output cleaned (ANSI + log timestamps stripped, the
   meaningful Error/Database Error/Parsing Error portion surfaced). Path/metric
-  validation errors are actionable (e.g. "add use_base_models including 'users'").
+  validation errors are actionable (e.g. a group_by on a model the context does not read names
+  the update that loads it: `semantic_models: [{ from: 'users' }]`).
 
 ## Recipes
 

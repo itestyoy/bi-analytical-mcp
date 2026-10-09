@@ -71,6 +71,7 @@ export function manifestLayer(manifest) {
     // the legacy spec's aggregations; the latest spec has none (a simple metric carries its own)
     measures: (sm.measures || []).map((me) => compact({
       name: me.name, agg: me.agg, expr: me.expr ?? me.name,
+      label: me.label || undefined,
       percentile: me.agg === 'percentile' ? me.agg_params?.percentile : undefined,
       agg_time_dimension: me.agg_time_dimension || undefined,
       non_additive_dimension: me.non_additive_dimension ? compact({ dimension: me.non_additive_dimension.name, window: me.non_additive_dimension.window_choice, group_by: me.non_additive_dimension.window_groupings }) : undefined,

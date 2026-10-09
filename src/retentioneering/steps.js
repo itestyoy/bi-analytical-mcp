@@ -15,6 +15,7 @@ import { byText } from './view-model.js';
 import { BUILD, QUERY } from './names.js';
 import { serially, basePaths } from './contexts.js';
 import { pathKey, sampleOf, eventstreamOf, opParams } from './query.js';
+import { currentStep } from './earlier.js';
 
 /** How many levels of a segment the summary lists in full; a segment with more is known by its count. */
 export const LEVEL_CAP = 1000;
@@ -108,11 +109,11 @@ export function shapeAtEnd(es) {
   return shapeBefore(es, (es.steps || []).length + 1);
 }
 
-/** One step in the library's own form: `path` as the library's path column, a reshaped parameter
- *  translated back (RESHAPED). */
+/** One step in the library's own form: `path` as the library's path column (a path column of the
+ *  eventstream, named as it is there), a reshaped parameter translated back (RESHAPED). */
 export function toLibrary(step, field) {
   const { path, ...rest } = step;
-  if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = path === 'users' ? ES_COLUMNS.user : path === 'sessions' ? ES_COLUMNS.session : path;
+  if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = path;
   for (const [name, r] of Object.entries(RESHAPED)) if (rest[name] != null) rest[name] = r.toLibrary(rest[name], `${field}.${name}`);
   // a parameter this tool adds goes to the library as the one it stands for
   for (const [name, a] of Object.entries(ADDED[step.type] || {})) {
@@ -138,7 +139,8 @@ export const NOT_CHECKED = 'not checked: the library\'s own check could not run 
 /** Steps `from`..end of `view` checked by the library on the shape before `from` → one entry per
  *  step: { step, library, checked, shape | problem | note }. */
 export async function checkSteps(feature, view, from, fieldOf) {
-  const list = view.steps.slice(from - 1);
+  // a step kept from an earlier version is checked — and kept from now on — in today's spelling
+  const list = view.steps.slice(from - 1).map((s) => ({ ...s, step: currentStep(s.step) }));
   const library = list.map((s, i) => toLibrary(s.step, fieldOf(from + i)));
   const entries = list.map((s, i) => ({ step: s.step, library: library[i], checked: false, shape: null }));
   const shape = shapeBefore(view, from);
@@ -206,7 +208,6 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   let list = es.steps.slice();
   let from = null;
   let fieldOf = () => 'step';
-  if (action === 'add_step') { list.push({ step: input.step }); from = list.length; }
   if (action === 'add_steps') { from = n + 1; list.push(...input.steps.map((step) => ({ step }))); fieldOf = (i) => `steps[${i - from}]`; }
   if (action === 'edit_step') { inRange(input.index, n, 'index'); list[input.index - 1] = { step: input.step }; from = input.index; }
   if (action === 'insert_step') { inRange(input.index, n + 1, 'index'); list.splice(input.index - 1, 0, { step: input.step }); from = input.index; }
@@ -226,7 +227,7 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
     if (bad >= 0) {
       const i = from + bad;
       const which = `step ${i} (${checked[bad].step.type})`;
-      const own = action === 'add_step' || action === 'edit_step' || action === 'insert_step' ? i === from : action === 'add_steps';
+      const own = action === 'edit_step' || action === 'insert_step' ? i === from : action === 'add_steps';
       throw new ToolError(`${own ? `the library refuses ${which}` : `after this ${action}, the library refuses ${which}`}: ${checked[bad].problem} — nothing changed (the eventstream still has ${n} step${n === 1 ? '' : 's'}). Checked by the library itself on what the eventstream holds at that step; nothing ran.`, { stage: 'validate', field: fieldOf(i) });
     }
     checked.forEach((e, j) => { list[from - 1 + j] = e; });
@@ -234,14 +235,16 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   es.steps = list;
   if (dropped) { es.checkpoint = null; es.model = es.base.model; es.summary = es.base.summary; }
   engine.ctxs.touch(ctx.id);
-  const at = action === 'add_steps' ? n + input.steps.length : action === 'truncate' || action === 'delete_step' ? null : from;
+  // the step an edit or an insert put in place; added steps are each listed under `added`, with what
+  // each changed and why one was not checked
+  const at = action === 'edit_step' || action === 'insert_step' ? from : null;
   const entry = at ? es.steps[at - 1] : null;
   const pending = es.steps.length - (es.checkpoint?.upto || 0);
   const unchecked = es.steps.map((s, i) => (s.checked ? null : i + 1)).filter(Boolean);
   return {
     ok: true, context_id: ctx.id, eventstream: name, action, steps: es.steps.length,
     ...(entry ? { step: { index: at, type: entry.step.type, checked: entry.checked, ...(entry.note ? { note: entry.note } : {}) } } : {}),
-    ...(action === 'add_steps' ? { added: checked.map((e, j) => ({ index: from + j, type: e.step.type, checked: e.checked, ...(shapeChange(shapeBefore(view, from + j), e.shape) ? { changed: shapeChange(shapeBefore(view, from + j), e.shape) } : {}) })) } : {}),
+    ...(action === 'add_steps' ? { added: checked.map((e, j) => ({ index: from + j, type: e.step.type, checked: e.checked, ...(e.note ? { note: e.note } : {}), ...(shapeChange(shapeBefore(view, from + j), e.shape) ? { changed: shapeChange(shapeBefore(view, from + j), e.shape) } : {}) })) } : {}),
     ...(entry && shapeChange(shapeBefore(es, at), entry.shape) ? { changed: shapeChange(shapeBefore(es, at), entry.shape) } : {}),
     shape: describeShape(shapeAtEnd(es)),
     ...(unchecked.length ? { unchecked_steps: unchecked } : {}),
@@ -259,7 +262,7 @@ export function preview(ctx, name, es) {
     ok: true, context_id: ctx.id, eventstream: name, action: 'preview',
     // (an eventstream a former version of the server stored may carry no base: said, not thrown)
     base: es.base ? { model: es.base.model, ...(es.base.summary ? { events: es.base.summary.events, users: es.base.summary.users } : { building: es.base.task_id }) } : { missing: 'this eventstream was stored without its base table — start it again' },
-    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: s.step, library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
+    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: currentStep(s.step), library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
     materialized_through: upto,
     ...(es.checkpoint ? { table: es.checkpoint.model } : {}),
     shape: describeShape(shapeAtEnd(es)),
@@ -286,7 +289,7 @@ export function fork(engine, ctx, input) {
     ok: true, context_id: ctx.id, eventstream: input.name, action: 'fork', forked_from: child.forked_from, steps: after,
     materialized_through: child.checkpoint?.upto || 0,
     shape: describeShape(shapeAtEnd(child)),
-    next: `shape '${input.name}' with its own steps (add_step, edit_step, …) — '${parentName}' is not touched`,
+    next: `shape '${input.name}' with its own steps (add_steps, edit_step, …) — '${parentName}' is not touched`,
   };
 }
 
@@ -296,7 +299,7 @@ export const ROLES_COL = 'es_roles';
 
 export async function materializeSteps(engine, feature, ctx, name, es) {
   const upto = es.checkpoint?.upto || 0;
-  if (!es.steps.length) throw new ToolError(`eventstream '${name}' has no steps — it is built already; add the library's steps with ${BUILD}({ request: { action: 'add_step', … } }), or run analyses on it as it is`, { stage: 'validate', field: 'eventstream' });
+  if (!es.steps.length) throw new ToolError(`eventstream '${name}' has no steps — it is built already; add the library's steps with ${BUILD}({ request: { action: 'add_steps', steps: [...], … } }), or run analyses on it as it is`, { stage: 'validate', field: 'eventstream' });
   if (upto === es.steps.length) throw new ToolError(`every step of eventstream '${name}' is materialized already (1..${upto}) — its table (${es.checkpoint.model}) is what the analyses read`, { stage: 'validate', field: 'eventstream' });
   if (es.building) throw new ToolError(`a materialize of eventstream '${name}' is already in flight (task ${es.building.task_id}) — read it with ${QUERY}({ request: { task_ids: ['${es.building.task_id}'] } })`, { stage: 'validate', field: 'eventstream' });
   const inputShape = shapeBefore(es, upto + 1) || await builtShape(engine, name, es, ctx);

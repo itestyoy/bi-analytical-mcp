@@ -7,6 +7,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { formatDbtError, dbtFailure } from '../dbt/index.js';
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from '../python-model.js';
 import { renderPipeline, sqlRunHints } from '../pipeline.js';
+import { currentSpelling } from '../pipeline/earlier.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { samplingNote, pageBlock } from './helpers.js';
 import { READ_PAGE } from '../schema/fields.js';
@@ -129,36 +130,66 @@ export const pipelineMaterializeMethods = {
     throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
   },
 
+  /**
+   * The cost guardrail (catalog require_time_range): a pipeline over a source that demands a window
+   * scans its whole history unless a time_range or a stage bounds it.
+   */
+  _unboundedInTime(source, timeRange, stages) {
+    if (timeRange && (timeRange.start || timeRange.end)) return false;
+    return this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages);
+  },
+
+  /** The refusal of an unbounded pipeline — named in the fields build_pipeline_model takes. */
+  _unboundedPipelineError(source) {
+    const m = this.catalog.getModel(source);
+    const bounds = [m.time?.column, m.partition_column].filter(Boolean).map((c) => `'${c}'`).join(' or ');
+    return new ToolError(
+      `this catalog requires a bounded time window (require_time_range) for '${source}': start the draft with time_range { start, end } `
+      + `(build_pipeline_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (insert_step at index 1). Unbounded scans over '${m.dbt_model}' are blocked.`,
+      { stage: 'validate', field: 'time_range' },
+    );
+  },
+
   async _draftMaterialize(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
-      throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'draft_id', code: RESULT_GONE });
+      throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });
     }
-    // A build of THIS draft already in flight is never started twice. A retried call is the same
-    // pipeline, and a second run would write the same model files under the first one's feet.
+    // A build of THIS draft already in flight is never started twice: a second run would write the
+    // same model files under the first one's feet. A retried call is the same pipeline; a draft that
+    // grew or was edited since the build started is not, and is built once that one ends.
     if (draft.building) {
+      const b = draft.building;
+      const read = b.task_id ? `query_pipeline_model({ request: { task_ids: ['${b.task_id}'] } })` : 'query_pipeline_model and the task_id its call returned';
+      // the same steps: as many, and none edited at or before them (an edit retires the build's checkpoint)
+      const same = draft.stages.length === b.steps && (!b.task_id || (draft.checkpoints || []).some((cp) => cp.task_id === b.task_id));
       throw new ToolError(
-        `a build of this draft is already in flight (started ${draft.building.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. `
-        + `${draft.building.task_id ? `Read it with query_pipeline_model({ request: { task_ids: ['${draft.building.task_id}'] } })` : 'Read it with query_pipeline_model and the task_id its call returned'}; the result table is ${draft.building.model}.`,
-        { stage: 'validate', field: 'draft_id' },
+        same
+          ? `a build of this draft is already in flight (started ${b.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. Read it with ${read}; the result table is ${b.model}.`
+          : `a build of this draft is still running (started ${b.started_at}, steps 1..${b.steps}), and one build runs on a draft at a time — a second would write over it. The draft has changed since that build started, so materialize again once it ends: read it with ${read} (its table is ${b.model}).`,
+        { stage: 'validate', field: 'context_id' },
       );
     }
     // Build only what is NOT already a table: with a live checkpoint the run starts from it and
     // only the steps after it are rendered. Each build gets its own model name, so a rebuild never
     // overwrites the very table it is reading (nor one a fork inherited).
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
+    // the cost guardrail the build would apply, applied in the call: a build that starts from a table
+    // (a checkpoint, a task's) was bounded when that table was made
+    if (!plan.from && this._unboundedInTime(draft.source, draft.time_range, draft.stages)) throw this._unboundedPipelineError(draft.source);
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
-      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'draft_id' });
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_steps first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_ids: ['${plan.checkpoint.task_id}'] } })` : ''}`, { stage: 'validate', field: 'context_id' });
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
     const stages = draft.stages.map((s) => JSON.parse(JSON.stringify(s)));
     // the in-flight marker goes up BEFORE anything awaits, so a second call made meanwhile is refused
-    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null };
+    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null, steps: stages.length };
     let columns;
     try {
-      columns = this._draftColumns(draft, await this.probe.physicalColumns(draft.source));
+      // the list the checkpoint keeps: each column's type with the warehouse's word on it (physical)
+      columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages), { stored: true });
     } catch (e) { delete draft.building; throw e; }
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
     const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {
@@ -199,11 +230,11 @@ export const pipelineMaterializeMethods = {
         (result.warnings ||= []).push(`${modelName} is a VIEW, so the steps you add next re-run its SQL instead of reading a computed prefix — nothing is saved. Start the draft with materialized:'table' when the point of materializing is to stop recomputing.`);
       }
       (result.assumptions ||= []).push(
-        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_step continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from '${draft.source}'.`
+        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_steps continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from '${draft.source}'.`
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;
-    }, { input: { action: 'materialize', draft_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
+    }, { input: { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
     draft.building.task_id = taskId;
     this.jobs.setTable(taskId, modelName); // the table this task leaves behind (paged, drawn, started from)
     // The built table STANDS FOR the first `stages.length` steps from now on: record the checkpoint
@@ -218,7 +249,7 @@ export const pipelineMaterializeMethods = {
     // Snapshot the built pipeline (with its checkpoints) so it can still be forked after a discard.
     ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, ...(draft.base ? { base: JSON.parse(JSON.stringify(draft.base)) } : {}), stages: stages.map((s) => JSON.parse(JSON.stringify(s))), checkpoints: draft.checkpoints.map((cp) => JSON.parse(JSON.stringify(cp))) };
     this.ctxs.touch(ctx.id);
-    return this._taskStarted(taskId, { context_id: ctx.id, draft_id: ctx.id, model: modelName });
+    return this._taskStarted(taskId, { context_id: ctx.id, model: modelName });
   },
 
   /**
@@ -244,24 +275,18 @@ export const pipelineMaterializeMethods = {
       if (!this.catalog.getModel(source).time?.column) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
       const conditions = this._timeRangeConditions(source, tr);
       if (conditions) stages = [{ stage: 'where', conditions }, ...stages];
-    } else if (this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages)) {
-      // Cost guardrail (catalog require_time_range): an unbounded pipeline over the fact
-      // would scan the whole history — demand a window unless a stage already bounds it.
-      throw new ToolError(
-        `this catalog requires a bounded time window (require_time_range): pass pipeline.time_range { start, end } `
-        + `or add a leading where on the time/partition column. Unbounded scans over '${this.catalog.getModel(source).dbt_model}' are blocked.`,
-        { stage: 'validate', field: 'time_range' },
-      );
+    } else if (this._unboundedInTime(source, null, stages)) {
+      throw this._unboundedPipelineError(source);
     }
     // Render ONLY the active warehouse dialect — every response is in the dialect the
     // pipeline actually runs on, never a mix. Grounded to the physical relation so a
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
-    const physSet = await this.probe.physicalColumns(source);
+    const physSet = await this.probe.grounding(source, stages);
     // Sampling is a property of the WHOLE declaration, not of the slice this build renders: a
     // `sample` baked into the materialized prefix still makes every number downstream approximate,
     // and dropping the flag would hand back a 1%-sampled figure as if it were exact.
-    const sampled = (input.pipeline.stages || []).find((st) => st.stage === 'sample') || null;
+    const sampled = (input.pipeline.stages || []).map((st) => currentSpelling(st)).find((st) => st?.stage === 'sample') || null;
     // a declaration that does not render is REFUSED (the caller reads it from the task as a compile error)
     const render = (modelName) => {
       try { return renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName, from: from ? { model: from.model, columns: from.columns } : null }); }
@@ -332,7 +357,8 @@ export const pipelineMaterializeMethods = {
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    if (taskId) this.jobs.setTable(taskId, modelName);
+    // (a pipeline built in one call made its context here); its answer holds the table's first SHOWN_ROWS
+    if (taskId) this.jobs.setTable(taskId, modelName, { contextId: ctx.id, keptRows: SHOWN_ROWS });
     ctx.state.pipeline_model = { model: modelName, materialized, kind: 'pipeline', ...(taskId ? { task_id: taskId } : {}), columns: [...out.columns.keys()], ...(input.description ? { description: input.description } : {}), ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
@@ -372,7 +398,7 @@ export const pipelineMaterializeMethods = {
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
       provenance: { tier: 'pipeline', source, data_freshness: await this.probe.dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
-      ...(sampled ? { sampling: samplingNote(sampled.percent ?? 10) } : {}),
+      ...(sampled ? { sampling: samplingNote(sampled.share) } : {}),
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]

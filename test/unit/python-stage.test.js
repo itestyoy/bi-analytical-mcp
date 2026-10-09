@@ -16,7 +16,14 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js';
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes, stepEffect } from '../helpers/settle.js';
+
+/** An import form's `package` field — folded into $defs when the two forms share it, so followed there. */
+const packageField = (root, py) => {
+  const node = py.properties.imports.items.anyOf[0].properties.package;
+  return node.$ref ? { ...root.$defs[node.$ref.split('/').pop()], ...node } : node;
+};
+const packageEnum = (root, py) => packageField(root, py).enum;
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -32,7 +39,7 @@ const engine = () => {
   return settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY }));
 };
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
-const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] };
+const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" };
 const PY_STAGE = { stage: 'python', imports: [{ package: 'numpy' }], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
 const decl = (over = {}) => ({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] }, ...over });
 const pipeFiles = (e, id) => readdirSync(e.ctxs.generatedDir(id)).filter((f) => f.startsWith('pipe_')).sort();
@@ -95,8 +102,8 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   if (skipNoPy(t)) return;
   const e = engine();
   const PY_OUT = { ...PY_STAGE, output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
-  const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: ['return df'] }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
-  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', n: 10 }] } });
+  const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: "return df" }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
+  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', limit: 10 }] } });
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [
     [`${r.model}_s1`, 'python', 'fct_analytics_events'],   // python FIRST → dbt.ref of the source itself
     [`${r.model}_s2`, 'sql', `${r.model}_s1`],              // the aggregate reads the Python model
@@ -121,9 +128,10 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = stageBranch(e.contracts['build_pipeline_model.pipeline'], 'python', 'stages');
-  assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
-  assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
+  const root = e.contracts['build_pipeline_model.pipeline'];
+  const items = stageBranch(root, 'python', 'stages');
+  assert.deepEqual(packageEnum(root, items), [...importAllowlist().keys()], 'the enum IS the allowlist');
+  assert.ok(packageEnum(root, items).includes('sklearn'));
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
   // a bare string is no longer an import declaration
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
@@ -141,7 +149,7 @@ test('python stage: a step must call a declared function with exactly its parame
 test('python stage: the static gate refuses imports in bodies, dbt/session access, eval and dunders — naming function and line', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const bad = { name: 'bad', params: ['df'], body: ['import os', "x = eval('1')", "df['t'] = dbt.this", 'return df.__class__'] };
+  const bad = { name: 'bad', params: ['df'], body: "import os\nx = eval('1')\ndf['t'] = dbt.this\nreturn df.__class__" };
   const err = await e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [bad], steps: [{ call: 'bad' }] }] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /bad line 1 \(import os\): an import inside a function body/);
@@ -150,22 +158,22 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
   assert.match(err.message, /bad line 4 .*: attribute '__class__' is private/);
   // The gate allowlists NAMES, so a dunder spelled through getattr (or any other builtin that
   // fetches by name) has no spelling either — the hole a blocklist of literal dunders leaves open.
-  const sneaky = { name: 'sneaky', params: ['df'], body: ['sess = getattr(getattr(df, "__class__"), "__init__")', 'return df'] };
+  const sneaky = { name: 'sneaky', params: ['df'], body: "sess = getattr(getattr(df, \"__class__\"), \"__init__\")\nreturn df" };
   await assert.rejects(
     () => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [sneaky], steps: [{ call: 'sneaky' }] }] } })),
     /sneaky line 1 .*: 'getattr' is not available here/,
   );
   // …and so does a name the declaration never bound (no `imports` entry for it).
-  const undeclared = { name: 'undeclared', params: ['df'], body: ["df['c'] = os.getcwd()", 'return df'] };
+  const undeclared = { name: 'undeclared', params: ['df'], body: "df['c'] = os.getcwd()\nreturn df" };
   await assert.rejects(
     () => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [undeclared], steps: [{ call: 'undeclared' }] }] } })),
     /undeclared line 1 .*: 'os' is not available here/,
   );
   // a syntax error is caught here, not on the warehouse runtime
-  const syn = { name: 'syn', params: ['df'], body: ['return df['] };
+  const syn = { name: 'syn', params: ['df'], body: "return df[" };
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1 \(return df\[\): syntax error/);
   // a function that never returns the frame is refused too
-  const noret = { name: 'noret', params: ['df'], body: ["df['x'] = 1"] };
+  const noret = { name: 'noret', params: ['df'], body: "df['x'] = 1" };
   await assert.rejects(() => e._buildPipeline(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [noret], steps: [{ call: 'noret' }] }] } })), /must `return` the frame/);
   // nothing was written by a refused declaration
   assert.equal(e.ctxs.list().length, 0);
@@ -194,71 +202,74 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
-  const pkgEnum = () => stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
-    .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
+  const pkgEnum = () => packageEnum(e.contracts['build_pipeline_model.pipeline'], stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
+    .find((x) => x.properties?.stage?.enum?.[0] === 'python'));
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
   const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
   assert.equal(r.python[0].runtime, 'pyspark', 'the model is compiled for the same runtime the schema described');
 });
 
-test('incremental builder: add_step python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
+test('incremental builder: add_steps python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const p = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: PY_STAGE });
-  assert.deepEqual(p.columns_added.map((c) => c.name), ['revenue_z']);
-  const pv = await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
-  assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
-  assert.equal(pv.models[1].input, `pipe_seg_${s.draft_id}_s1`, 'the python model reads the SQL model before it');
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [AGG] });
+  const p = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [PY_STAGE] });
+  assert.deepEqual(stepEffect(p).columns_added.map((c) => c.name), ['revenue_z']);
+  const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
+  assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.context_id}_s1`, 'sql'], [`pipe_seg_${s.context_id}`, 'python']]);
+  assert.equal(pv.models[1].input, `pipe_seg_${s.context_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
-  assert.equal(after.step_index, 3);
-  const m = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
-  assert.equal(m.model, `pipe_seg_${s.draft_id}`);
-  assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
+  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }] });
+  assert.equal(stepEffect(after).step_index, 3);
+  const m = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  assert.equal(m.model, `pipe_seg_${s.context_id}`);
+  assert.deepEqual(pipeFiles(e, s.context_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
 });
 
-// The body is STRUCTURE: nesting is indentation, so the shape itself has to be valid Python shape.
-test('python stage: body structure — nesting is indentation, headers open blocks, no spaces-as-indent', async (t) => {
+// The body is the function's TEXT: Python decides whether it is Python. The gate parses it as the
+// stage is added, so a syntax error comes back then, with its line — not from the warehouse.
+test('python stage: the body is text — a margin it shares is taken off, a syntax error is refused with its line', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
   const withBody = (body) => e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body }], steps: [{ call: 'f', args: { k: 2 } }] }] } }));
-  // a real nested body renders as indented Python the gate accepts
-  // (that nesting becomes the RIGHT indentation is proven by running such a body — the branches
-  // pick different values, and the rows say which one ran: test/integration/python-stage.test.js)
-  const ok = await withBody(['if k > 1:', ["df['seg'] = 1", 'for c in df.columns:', ['df[c] = df[c]']], 'else:', ["df['seg'] = 0"], 'return df']);
-  assert.equal(ok.dry_run, true);
-  // a block with no header before it
-  await assert.rejects(() => withBody(['x = 1', ["df['seg'] = 1"], 'return df']), /nested block must follow a line that opens it .*the line before is "x = 1"/);
-  // a header with no block after it
-  await assert.rejects(() => withBody(['if k > 1:', 'return df']), /"if k > 1:" opens a block, so the next item must be a nested array/);
-  // indentation by spaces is refused — nesting is the only way
-  await assert.rejects(() => withBody(['if k > 1:', ['    return df']]), /must not start with whitespace|must match pattern/);
-  // an empty block, a newline inside a line, a text blob instead of an array
-  await assert.rejects(() => withBody(['if k > 1:', [], 'return df']), /empty block|at least 1 item/);
-  await assert.rejects(() => withBody(['x = 1\nreturn df']), /must not contain a newline|pattern/);
-  await assert.rejects(() => withBody('return df'), /body/);
+  // blocks indented as Python reads them; the same body pasted indented under its def reads the same
+  const body = "if k > 1:\n    df['seg'] = 1\n    for c in df.columns:\n        df[c] = df[c]\nelse:\n    df['seg'] = 0\nreturn df";
+  assert.equal((await withBody(body)).dry_run, true);
+  assert.equal((await withBody(`\n${body.split('\n').map((l) => `        ${l}`).join('\n')}\n\n`)).dry_run, true);
+  // what Python refuses is refused, with the line it names
+  await assert.rejects(() => withBody('if k > 1:\nreturn df'), /f line 2 .*syntax error/);
+  await assert.rejects(() => withBody("if k > 1:\n    df['seg'] = 1\n  return df"), /f line 3 .*syntax error/);
+  // an empty body is no function
+  await assert.rejects(() => withBody('  \n '), /body/);
   assert.equal(e.ctxs.list().length, 0);
 });
 
-// The recursion lives in ONE definition at the tool root — no unrolled copies, no depth cap.
-test('python stage: the body schema is a recursive $ref to $defs.py_block hoisted to each tool root', async (t) => {
+// A body no longer needs a recursive schema: it is a string, at every place a stage is offered.
+test('python stage: the body schema is a string', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
   for (const tool of ['build_pipeline_model', 'build_pipeline_model.pipeline']) {
     const root = e.schemas[tool] || e.contracts[tool];
-    assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
-    assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
     const py = stageBranch(root, 'python', tool === 'build_pipeline_model' ? 'stage' : 'stages');
-    assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
+    assert.equal(py.properties.functions.items.properties.body.type, 'string');
   }
-  // twelve levels deep validates and renders — deeper than any unrolled schema allowed
-  const deep = (n) => (n === 0 ? ['return df'] : [`if k > ${n}:`, deep(n - 1), 'else:', ['return df']]);
-  const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
-  assert.equal(r.dry_run, true); // and such a body RUNS (integration: twelve levels deep, by rows)
+  // twelve levels deep validates and renders (integration: such a body runs, by rows)
+  const deep = (n, d = 0) => (n === 0 ? [`${'    '.repeat(d)}return df`] : [`${'    '.repeat(d)}if k > ${n}:`, ...deep(n - 1, d + 1), `${'    '.repeat(d)}else:`, `${'    '.repeat(d + 1)}return df`]);
+  const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12).join('\n') }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
+  assert.equal(r.dry_run, true);
+});
+
+// A draft kept from an earlier version holds its bodies as nested arrays of lines: it builds as the
+// text they stood for.
+test('python stage: a body kept in the earlier nested form is carried over as its text', async (t) => {
+  if (skipNoPy(t)) return;
+  const stage = { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: ['if k > 1:', ["df['seg'] = 1"], 'else:', ["df['seg'] = 0"], 'return df'] }], steps: [{ call: 'f', args: { k: 2 } }] };
+  const compiled = compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}) });
+  const gate = await runAstGate(PY, compiled.functions, compiled.bindings);
+  assert.equal(gate.ok, true, JSON.stringify(gate.errors));
 });
 
 // ── Availability: the stage exists only where dbt can run Python models — decided from the profile ──
@@ -299,7 +310,6 @@ test('python stage: offered only where the dbt profile can run Python models; re
     const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
     const stagesPg = stageNames(ePg.schemas.build_pipeline_model);
     assert.ok(!stagesPg.includes('python'), `no python stage on redshift: ${stagesPg.join(', ')}`);
-    assert.ok(!ePg.schemas.build_pipeline_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
     await assert.rejects(() => ePg._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*redshift.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
     // the overview says so
@@ -310,7 +320,6 @@ test('python stage: offered only where the dbt profile can run Python models; re
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
     assert.ok(stageNames(eDuck.schemas.build_pipeline_model).includes('python'));
-    assert.ok(eDuck.schemas.build_pipeline_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -334,7 +343,7 @@ test('python stage: the profile decides the runtime and what it may import', () 
   assert.ok(!importAllowlist({}).has('bigframes'), 'no platform package without a runtime');
   // and the compiled model records the runtime it was compiled for
   const compiled = compilePythonStage(
-    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] },
+    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] },
     { modelName: 'm', inputModel: 'm_prep', allow: importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'bigframes' })), profile: profileOf({ runtime: 'bigquery', method: 'bigframes' }) },
   );
   assert.equal(compiled.runtime, 'bigframes');
@@ -350,7 +359,7 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice/);
-    assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
+    assert.ok(packageEnum(e.schemas.build_pipeline_model, py).includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
 
@@ -388,7 +397,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
     assert.match(py.description, /Rules for bigframes/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
     assert.match(py.properties.functions.items.properties.body.description, /converts itself with df\.to_pandas\(\)/);
-    assert.match(py.properties.imports.items.properties.package.description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
+    assert.match(packageField(e.schemas.build_pipeline_model, py).description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
     assert.ok(!py.description.includes('PYSPARK') && !py.description.includes('SNOWPARK'), 'only this platform\'s rules');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -426,16 +435,16 @@ test('a chain with several python stages is gated in one run, and errors name th
   const realSpawn = (await import('node:child_process')).spawn;
   assert.ok(realSpawn);
   const py = { ...PY_STAGE };
-  const second = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: ["df['t'] = 1", 'return df'] }], steps: [{ call: 'tag' }], output: { columns: ['player_id_of_internal', 'revenue_z', 't'] } };
+  const second = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: "df['t'] = 1\nreturn df" }], steps: [{ call: 'tag' }], output: { columns: ['player_id_of_internal', 'revenue_z', 't'] } };
   // count the gate's interpreter runs by wrapping the engine's own gate entry point
   const gate = e._gateCompiled.bind(e);
   e._gateCompiled = async (units) => { if (units.length) runs += 1; return gate(units); };
-  const ok = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, second] } }));
+  const ok = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', limit: 5 }, second] } }));
   assert.equal(ok.python.length, 2, 'two python models in the chain');
   assert.equal(runs, 1, 'gated in a single run');
   // and a body that is refused in the SECOND stage is reported against that stage's model
-  const bad = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: ["df['t'] = getattr(df, 'x')", 'return df'] }], steps: [{ call: 'tag' }] };
-  const err = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
+  const bad = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: "df['t'] = getattr(df, 'x')\nreturn df" }], steps: [{ call: 'tag' }] };
+  const err = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', limit: 5 }, bad] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /pipe_seg: tag line 1 .*'getattr' is not available here/, 'the model whose body was refused is named (here the chain\'s last, which carries the pipeline name)');
 });
@@ -621,7 +630,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
       assert.ok(body.reference.version, `${id} must name the version it was read from`);
       assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
     } else {
-      assert.ok(body.pipeline_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.pipeline_payload?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
       assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
     }
   }
@@ -640,9 +649,9 @@ test('the stage description and the guide send the caller to this deployment\'s 
 
 // A python stage at the size a real analysis reaches — six functions, ~150 lines, nested blocks —
 // went in as `step 2: unknown pipeline stage: undefined`, which reads like a schema problem and
-// sent the caller to shrink the payload. The schema's own limits (30 functions, 400 body lines per
-// function, 500 chars per line, 50 steps, 20 imports) are nowhere near that, so a payload this size
-// must simply pass: through add_step, through add_steps, and through the all-at-once register.
+// sent the caller to shrink the payload. The schema's own limits (30 functions, 40,000 characters of
+// body per function, 50 steps, 20 imports) are nowhere near that, so a payload this size
+// must simply pass: through add_steps and through the all-at-once register.
 // Whatever produced that message, it was not a limit here, and this test is what would catch it
 // becoming one.
 test('a python stage of six functions / ~150 lines is accepted by every entry point', async (t) => {
@@ -655,25 +664,20 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
       `# stage ${i}: a block with nesting, a loop and a branch`,
       'total = df[column].sum()',
       'if total > 0:',
-      [
-        'df["share"] = df[column] / total',
-        'for k in range(3):',
-        [
-          'if k > 1:',
-          [line(i * 10 + 1)],
-          'else:',
-          [line(i * 10 + 2)],
-        ],
-      ],
+      '    df["share"] = df[column] / total',
+      '    for k in range(3):',
+      '        if k > 1:',
+      `            ${line(i * 10 + 1)}`,
+      '        else:',
+      `            ${line(i * 10 + 2)}`,
       'else:',
-      ['df["share"] = 0'],
+      '    df["share"] = 0',
       ...Array.from({ length: 22 }, (_, j) => line(i * 100 + j)),
       'return df',
-    ],
+    ].join('\n'),
   });
   const functions = [1, 2, 3, 4, 5, 6].map(fn);
-  const count = (block) => block.reduce((n, item) => n + (Array.isArray(item) ? count(item) : 1), 0);
-  const lines = functions.reduce((n, f) => n + count(f.body), 0);
+  const lines = functions.reduce((n, f) => n + f.body.split('\n').length, 0);
   assert.ok(lines >= 150, `the payload must be at the reported size (got ~${lines} lines)`);
   const big = {
     stage: 'python',
@@ -686,14 +690,14 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'bigpy', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: big });
-  assert.equal(added.step?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [AGG] });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [big] });
+  assert.equal(added.steps_added[added.steps_added.length - 1]?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
   const s2 = await e2.build_pipeline_model({ action: 'start', name: 'bigpy2', source: 'events' });
-  const many = await e2.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [AGG, big] });
+  const many = await e2.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [AGG, big] });
   assert.equal(many.added, 2, JSON.stringify(many.error || many).slice(0, 300));
 
   // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
@@ -709,14 +713,14 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
 // (a model scoring every event), and from here there is no way to tell those apart.
 test('a python stage with no preparation before it is told so; one after an SQL stage is not', async (t) => {
   if (skipNoPy(t)) return;
-  const nudge = (res) => (res.recommendations || res.warnings || []).filter((w) => /reads .* as it is/.test(w));
+  const nudge = (res) => (res.step_effects ? stepNotes(res) : res.warnings || []).filter((w) => /reads .* as it is/.test(w));
 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
   const raw = await e.build_pipeline_model({ action: 'start', name: 'raw_py', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: raw.draft_id, stage: PY_STAGE });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: raw.context_id, stages: [PY_STAGE] });
   const [said] = nudge(added);
-  assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(added.recommendations || [])}`);
+  assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(stepNotes(added))}`);
   assert.match(said, /'events'/, 'it names the source being read raw');
   assert.match(said, /aggregating to the grain/, 'and what belongs in a stage before it');
   assert.match(said, /device_time/, 'including the time column of that source');
@@ -724,15 +728,15 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 2. the same stage after an aggregate → nothing to say
   const prepared = await e.build_pipeline_model({ action: 'start', name: 'prep_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: AGG });
-  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: PY_STAGE });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, stages: [AGG] });
+  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
   const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: AGG });
-  const scopedPy = await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: PY_STAGE });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [AGG] });
+  const scopedPy = await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)
@@ -789,3 +793,30 @@ test('the preparation nudge does not fire where the stage reads a table rather t
   // a time_range is preparation (a leading WHERE on the source's time column)
   assert.deepEqual(nudges([PY_STAGE], { timeRange: { start: '2026-01-01' } }), []);
 });
+
+// Every shipped recipe for a PYTHON model (moved here from test/integration/recipes-parse.test.js: it
+// never read the warehouse). A python recipe cannot run where the warehouse runs no dbt python models
+// (the DuckDB fixtures). It is still checked where it can rot — the payload must COMPILE for a
+// deployment that does run them: the stages render, the chain is laid out, the function bodies pass
+// the static gate and the declared output columns propagate to the SQL stages after it. (A generated
+// REFERENCE entry is no payload to build: test/unit/recipes-layers.test.js holds it.)
+const PY_RECIPES = (await import('../../src/recipes.js')).loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url)))
+  .list.filter((r) => r.requires === 'python_models' && !r.reference);
+for (const r of PY_RECIPES) {
+  test(`recipe '${r.id}' compiles for a deployment that runs python models: every stage gated, the chain laid out`, async (t) => {
+    if (skipNoPy(t)) return;
+    const pyCatalog = loadCatalog(CATALOG, {});
+    pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
+    const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY }));
+    // the start request as it is served: every stage checked (the bodies through the static gate),
+    // then the preview lays out the chain of models a build would run
+    const started = await pyEngine.build_pipeline_model(r.pipeline_payload);
+    assert.equal(started.steps_count, r.pipeline_payload.stages.length, `${r.id}: every stage is on the draft`);
+    const out = await pyEngine.build_pipeline_model({ action: 'preview', context_id: started.context_id });
+    assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
+    const declared = r.pipeline_payload.stages.flatMap((st) => st.output?.columns || []);
+    for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
+    assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
+    assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
+  });
+}

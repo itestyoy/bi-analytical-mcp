@@ -22,10 +22,9 @@
 //
 //   where      |> WHERE      filter rows by column conditions.
 //                            Solves: scope to an event / segment / time window.
-//   derive     |> EXTEND     add ONE scalar column FROM an event_data JSON property
-//                            (extract a scalar; array_length / contains / struct_field
-//                            for complex props). Solves: surface a payload field as a column.
-//   compute    |> EXTEND     add ONE column FROM existing columns + literals:
+//   compute    |> EXTEND     add ONE column FROM existing columns, event properties + literals:
+//                            event_property (a scalar, or one field of a JSON object) /
+//                            array_length / array_contains — a payload field as a column;
 //                            const (literal number/string/bool), arithmetic (+ - * /),
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
@@ -46,11 +45,12 @@
 //                            approx_count_distinct (HLL++), stddev/variance/median/
 //                            percentile(q). Solves: totals, rates, distributions,
 //                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.
-//   pivot      |> PIVOT      turn listed values of a column into columns.
-//                            Solves: dashboard-ready matrices (revenue per country column).
+//   pivot      |> AGGREGATE  turn listed values of a column into columns: one conditional
+//                            measure per value. Solves: dashboard-ready matrices (revenue per
+//                            country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
-//   sample     |> TABLESAMPLE  keep ~N% of rows for a FAST approximate first estimate
+//   sample     |> TABLESAMPLE  keep a share of the rows for a FAST approximate first estimate
 //                            on large data (BigQuery TABLESAMPLE SYSTEM; DuckDB random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
@@ -112,33 +112,46 @@ function sourceColumns(catalog, key, physicalCols = null) {
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
 // silently mix one fact's payload into another fact's pipeline.
-function buildOps(catalog, d, baseColumns, stages, source) {
+function buildOps(catalog, d, baseColumns, stages, source, physical = null, spelled = null) {
   let cols = new Map(baseColumns);
   const ops = [];
-  for (const st of stages) {
-    const def = STAGES[st.stage];
+  for (const stored of stages) {
+    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
+    // its stage too, which an earlier version may have named otherwise — resolved against the columns
+    // before it, and reported (`spelled`) so a draft keeps it in that spelling from now on
+    const st = currentSpelling(stored, { cols, catalog, source });
+    spelled?.set(stored, st);
+    const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never
       // arrived. Say that, because the usual cause is on the way in (a large payload cut short by
       // the client), and "unknown stage: undefined" sends the reader to the schema instead.
       if (st?.stage === undefined) {
-        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_step`);
+        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_steps`);
       }
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js)
-    const res = def.build({ d, catalog, cols, source }, currentSpelling(st));
+    const res = def.build({ d, catalog, cols, source, physical }, st);
     ops.push(res.op);
     cols = res.cols;
   }
   return { ops, cols };
 }
 
-/** A tracked column set from a stored column list ([{ name, type }]) or an existing Map. */
+/** A tracked column set from a stored column list ([{ name, type, physical? }]) or an existing Map. */
 export function columnMap(columns) {
   if (columns instanceof Map) return new Map(columns);
-  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
+  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown', ...(c.physical ? { physical: true } : {}) }]));
+}
+
+/**
+ * A tracked column set as a list to store (a checkpoint's, a task's table) — what columnMap reads
+ * back. `physical` (the type is the warehouse's own) is kept, so a constant compared with a column of
+ * that table is written as it was against the source: a flag stored as text stays text.
+ */
+export function columnList(columns) {
+  return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown', ...(c?.physical ? { physical: true } : {}) }));
 }
 
 /**
@@ -156,7 +169,7 @@ function boundPartitions(m, stages, cols) {
   const out = [];
   let leading = true;
   for (const st of stages) {
-    if (leading && !STAGES[st.stage]?.keepsSourceRows) leading = false;
+    if (leading && !stageDef(currentSpelling(st)?.stage)?.keepsSourceRows) leading = false;
     if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
     const extra = [];
     for (const c of st.conditions || []) {
@@ -189,14 +202,17 @@ function boundPartitions(m, stages, cols) {
  * ones that still have to run — the prefix is the table. `source` is still the catalog source the
  * stages resolve their event/property semantics against; a stage that needs a column the built
  * relation no longer carries fails as a normal "unknown column".
- * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
+ * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql, current }
  *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
- *   pipeline when there is no python stage).
+ *   pipeline when there is no python stage); `current` = each stage given (by identity) → the same
+ *   stage in this version's spelling, as it was built (src/pipeline/earlier.js).
  */
 export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe', from = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
+  const given = stages;
   if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols));
+  const spelled = new Map();
   // Cut the stage list at every python stage.
   const segments = []; let cur = [];
   for (const st of stages) {
@@ -210,7 +226,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     seg.input = input;
     const baseRelation = `{{ ref('${input}') }}`;
     if (seg.kind === 'sql') {
-      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source, physicalCols, spelled);
       // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
       // CTEs on DuckDB — whether it reads the source or the model a python stage produced.
       seg.sql = d.renderPipeline(baseRelation, ops);
@@ -219,10 +235,14 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
       const def = STAGES[seg.stage.stage];
       if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : 'the python stage is not available on this warehouse');
       cols = def.build({ d, catalog, cols, source }, seg.stage).cols;
+      spelled.set(seg.stage, currentSpelling(seg.stage));
     }
     seg.columns = cols;
     input = seg.model;
   });
   const lastSql = [...segments].reverse().find((seg) => seg.kind === 'sql');
-  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null };
+  // each given stage in this version's spelling — a where the partition bound was added to as written
+  // (the bound is the render's, not the step's), respelled on its own: a where reads no columns to resolve
+  const current = new Map(given.map((st, i) => [st, stages[i] === st ? (spelled.get(st) ?? st) : currentSpelling(st, { catalog, source })]));
+  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null, current };
 }

@@ -24,10 +24,15 @@ const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 
 let wh; let engine;
+// The context the first test declares; the ordering and cancel tests run on it rather than declaring
+// TASK again (what they prove does not depend on a fresh context). A run that skips the first test
+// declares one for itself.
+let monCtx;
+const monContext = async () => monCtx ?? (monCtx = (await engine.build_semantic_model(TASK)).context_id);
 const TASK = {
-  name: 'mon', use_base_models: ['users'],
-  semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
-  metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+  name: 'mon',
+  semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+  metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
 };
 const byCountry = [{ model: 'users', attribute: 'country' }];
 const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_country), num(r.mon_revenue)]));
@@ -62,6 +67,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
   if (skip(t)) return;
   // the declaration is still being parsed when the batch is started
   const created = await engine.raw.build_semantic_model(TASK);
+  monCtx = created.context_id;
   const started = await engine.raw.query_semantic_model({
     context_id: created.context_id,
     queries: [
@@ -94,16 +100,16 @@ test('a batch started right after the declaration waits for its parse, runs ever
 test('a batch of projections over a built pipeline model: count, non-NULL count and sums read back together', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'priced', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' } });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const started = await engine.raw.query_pipeline_model({
-    context_id: s.draft_id,
+    context_id: s.context_id,
     queries: [
-      { transform: { aggregations: [{ agg: 'count', name: 'rows' }] } },
-      { transform: { aggregations: [{ agg: 'count', column: 'price', name: 'priced' }] } },
-      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], aggregations: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
-      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], aggregations: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
+      { transform: { measures: [{ agg: 'count', name: 'rows' }] } },
+      { transform: { measures: [{ agg: 'count', column: 'price', name: 'priced' }] } },
+      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], measures: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
+      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], measures: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');
@@ -117,9 +123,9 @@ test('a batch of projections over a built pipeline model: count, non-NULL count 
 
 test('a query issued after a batch runs once the whole batch is done, and reads the same data', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model(TASK);
-  const batch = await engine.raw.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
-  const after = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  const context_id = await monContext();
+  const batch = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
+  const after = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
   // by the time the later query is done, every member of the batch is too
   const peek = await engine.raw.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
   assert.equal(peek.status, 'done');
@@ -132,13 +138,13 @@ test('a query issued after a batch runs once the whole batch is done, and reads 
 
 test('a cancelled query ends as cancelled and the context goes on: the next query reads the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model(TASK);
-  const doomed = await engine.raw.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
+  const context_id = await monContext();
+  const doomed = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
   const out = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, cancel: true });
   assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
   const read = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
   assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled']);
-  const next = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  const next = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
   const g = revenueBy(next.rows);
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
 });

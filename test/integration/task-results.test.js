@@ -14,7 +14,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, DRILL_ROWS, pivotRows, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
 import { settle, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
@@ -34,9 +34,9 @@ before(async () => {
   backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
-    name: 'mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    name: 'mon',
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   ctxId = out.context_id;
@@ -49,8 +49,11 @@ const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: [
 const byCountry = [{ model: 'users', attribute: 'country' }];
 const paying = [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }];
 
-test('a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse\'s rows', opts, async (t) => {
+// ONE UNGROUPED TASK carries what a single-row result is asked: started at once and read back; the
+// declarations a single row cannot take refused (refused is not drawn); then drawn, once, as a KPI.
+test('one ungrouped revenue task: started at once and read back with show_to_user; a missing-column funnel and a single-value pie refused; then drawn as a KPI tile of 85', opts, async (t) => {
   if (skip(t)) return;
+  // [a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse's rows]
   const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
   assert.ok(isStartedTask(started), JSON.stringify(started));
   assert.match(started.task_id, /^[a-f0-9]{12}$/);
@@ -58,15 +61,56 @@ test('a metric query answers with its task at once; the same tool, given the tas
   assert.equal(done.status, 'done', 'one wait is enough for a query this size');
   assert.ok(done.waited_seconds === undefined, 'a finished task answers with its result, not a wait report');
   assert.equal(done.tool, 'query_semantic_model');
-  assert.equal(Number(done.rows[0].mon_revenue), 85);
+  assert.equal(Number(done.rows[0].mon_revenue), 85, '[read back] the warehouse total');
   assert.equal(done.show_to_user?.tool, 'display_model_result', 'and says how to show it');
+  // [a declaration naming a column the result does not have is refused, with the columns it has]
+  await assert.rejects(
+    engine.display_model_result({ task_id: started.task_id, display: { kind: 'funnel', steps: [{ column: 'mon_revenue' }, { column: 'no_such_step' }] } }),
+    (e) => e.field === 'display' && /mon_revenue/.test(e.message),
+  );
+  // [a pie of a single value is refused] one row is a number, not a pie
+  await assert.rejects(engine.display_model_result({ task_id: started.task_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
+  // [refused is not drawn: the task can still be shown, once] — [a KPI tile over the warehouse total shows its number]
+  const card = await engine.display_model_result({ task_id: started.task_id, display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } });
+  assert.equal(card.drawn, true, '[refused is not drawn] the task is still drawn after both refusals');
+  const m = buildViewModel('display_model_result', card);
+  assert.equal(m.kind, 'kpi');
+  assert.deepEqual(m.tiles.map((x) => [x.label, x.value]), [['IAP revenue', 85]], '[KPI tile] the warehouse total');
 });
 
-test('a query task keeps its grouping and the caller-facing column names', opts, async (t) => {
+// ONE TASK BY COUNTRY (ascending, as the bar draws it) carries what a grouped result is asked, in the
+// order a task allows — it is drawn at most once: its grouping, the declaration a many-row result cannot
+// take refused, the one draw, then a second draw refused and a read that draws nothing.
+// THE CARD DECLARATION (`display`) lives on display_model_result: the caller says what the result is,
+// the card draws exactly that — and the card's numbers are the warehouse's.
+test('one revenue-by-country task: its grouping, a refused KPI over many rows, the bar drawn in row order, a second draw refused, a read that draws nothing', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry });
+  const done = await q({ group_by: byCountry, order_by: [{ key: 'mon_revenue', direction: 'asc' }] });
+  // [a query task keeps its grouping and the caller-facing column names]
   const by = Object.fromEntries(done.rows.map((r) => [String(r.users_country), Number(r.mon_revenue)]));
-  assert.deepEqual([by.US, by.GB, by.BR], [35, 25, 25]);
+  assert.deepEqual([by.US, by.GB, by.BR], [35, 25, 25], '[grouping] revenue by country');
+  // [a KPI tile over many rows needs an axis] a row per country and no axis: refused, and the reply says why
+  await assert.rejects(engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } }), (e) => e.field === 'display' && /ONE row/.test(e.message));
+  assert.equal(done.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85, '[many rows] they add up to the warehouse total');
+  // [a declared bar chart draws the warehouse's numbers in row order]
+  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: ['mon_revenue'] };
+  const card = await engine.display_model_result({ task_id: done.task_id, display });
+  assert.equal(card.drawn, true, '[bar] drawn after the refused KPI');
+  assert.deepEqual(card.display, display);
+  const m = buildViewModel('display_model_result', card);
+  assert.equal(m.kind, 'chart');
+  assert.equal(m.title, 'Revenue by country');
+  // bars in the order the rows came back (ascending revenue; the country with none sorts last)
+  assert.deepEqual(m.chart.bars.map((b) => b.label), done.rows.map((r) => String(r.users_country)), '[bar] in row order');
+  assert.deepEqual(m.chart.bars.map((b) => b.value), [25, 25, 35, 0], '[bar] the warehouse\'s numbers');
+  assert.equal(m.chart.bars[2].label, 'US');
+  // [a task is drawn once: a second display_model_result is refused, and reading it again draws nothing]
+  // ONE RESULT, ONE CARD — by construction: display_model_result draws a task once, and nothing else draws.
+  await assert.rejects(engine.display_model_result({ task_id: done.task_id, display }), /shown already/);
+  const again = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
+  assert.equal(again.drawn, undefined, 'a read is never a card');
+  assert.equal(again.show_to_user, undefined, 'and no longer suggests showing it');
+  assert.equal(again.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85, '[read again] the same rows');
 });
 
 test('a query that FAILS in the warehouse is a task that ended in error', opts, async (t) => {
@@ -76,24 +120,6 @@ test('a query that FAILS in the warehouse is a task that ended in error', opts, 
   if (done.refused) return; // refused before running is fine too
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');
-});
-
-// THE CARD DECLARATION (`display`) lives on display_model_result: the caller says what the result is, the
-// card draws exactly that — and the card's numbers are the warehouse's.
-test('a declared bar chart draws the warehouse\'s numbers in row order', opts, async (t) => {
-  if (skip(t)) return;
-  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: ['mon_revenue'] };
-  const done = await q({ group_by: byCountry, order_by: [{ key: 'mon_revenue', direction: 'asc' }] });
-  const card = await engine.display_model_result({ task_id: done.task_id, display });
-  assert.equal(card.drawn, true);
-  assert.deepEqual(card.display, display);
-  const m = buildViewModel('display_model_result', card);
-  assert.equal(m.kind, 'chart');
-  assert.equal(m.title, 'Revenue by country');
-  // bars in the order the rows came back (ascending revenue; the country with none sorts last)
-  assert.deepEqual(m.chart.bars.map((b) => b.label), done.rows.map((r) => String(r.users_country)));
-  assert.deepEqual(m.chart.bars.map((b) => b.value), [25, 25, 35, 0]);
-  assert.equal(m.chart.bars[2].label, 'US');
 });
 
 test('a declared funnel follows the declared steps, not the column names', opts, async (t) => {
@@ -107,19 +133,7 @@ test('a declared funnel follows the declared steps, not the column names', opts,
   assert.equal(m.funnels[0].overall, 25 / 35);
 });
 
-test('a declaration naming a column the result does not have is refused, with the columns it has — and nothing is drawn', opts, async (t) => {
-  if (skip(t)) return;
-  const done = await q({});
-  await assert.rejects(
-    engine.display_model_result({ task_id: done.task_id, display: { kind: 'funnel', steps: [{ column: 'mon_revenue' }, { column: 'no_such_step' }] } }),
-    (e) => e.field === 'display' && /mon_revenue/.test(e.message),
-  );
-  // refused is not drawn: the task can still be shown, once
-  const card = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } });
-  assert.equal(card.drawn, true);
-});
-
-test('a declared pie carries each country\'s share of the warehouse total; a pie of a single value is refused', opts, async (t) => {
+test('a declared pie carries each country\'s share of the warehouse total', opts, async (t) => {
   if (skip(t)) return;
   const done = await q({ group_by: byCountry, where: paying });
   const m = buildViewModel('display_model_result', await engine.display_model_result({ task_id: done.task_id, display: { kind: 'pie', label_column: 'users_country', value_column: 'mon_revenue' } }));
@@ -129,34 +143,6 @@ test('a declared pie carries each country\'s share of the warehouse total; a pie
   assert.deepEqual([m.chart.slices[0].label, m.chart.slices[0].share], ['US', 35 / 85]);
   assert.deepEqual(m.chart.slices.slice(1).map((x) => x.label).sort(), ['BR', 'GB']);
   assert.deepEqual(m.chart.slices.slice(1).map((x) => x.share), [25 / 85, 25 / 85]);
-  // one row is a number, not a pie
-  const one = await q({});
-  await assert.rejects(engine.display_model_result({ task_id: one.task_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
-});
-
-test('a KPI tile over the warehouse total shows its number; over many rows it needs an axis', opts, async (t) => {
-  if (skip(t)) return;
-  const done = await q({});
-  const m = buildViewModel('display_model_result', await engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } }));
-  assert.equal(m.kind, 'kpi');
-  assert.deepEqual(m.tiles.map((x) => [x.label, x.value]), [['IAP revenue', 85]]);
-  // a row per country and no axis: refused, and the reply says why
-  const many = await q({ group_by: byCountry });
-  await assert.rejects(engine.display_model_result({ task_id: many.task_id, display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } }), (e) => e.field === 'display' && /ONE row/.test(e.message));
-  assert.equal(many.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
-});
-
-// ONE RESULT, ONE CARD — by construction: display_model_result draws a task once, and nothing else draws.
-test('a task is drawn once: a second display_model_result is refused, and reading it again draws nothing', opts, async (t) => {
-  if (skip(t)) return;
-  const done = await q({ group_by: byCountry });
-  const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'] };
-  assert.equal((await engine.display_model_result({ task_id: done.task_id, display })).drawn, true);
-  await assert.rejects(engine.display_model_result({ task_id: done.task_id, display }), /shown already/);
-  const again = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
-  assert.equal(again.drawn, undefined, 'a read is never a card');
-  assert.equal(again.show_to_user, undefined, 'and no longer suggests showing it');
-  assert.equal(again.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
 });
 
 // A result that EXISTED and is no longer there says so structurally (error.code result_gone), and a
@@ -178,6 +164,12 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
   const deleted = await one(engine.query_semantic_model({ task_ids: [built.task_id], limit: 10 }));
   assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
+  // …and a card of it reads the same, though the task still holds its first rows: they are not the
+  // result any more, so nothing is drawn from them
+  assert.ok(engine.raw._taskResults.has(built.task_id), 'the answer is still held');
+  const card = await engine.display_model_result({ task_id: built.task_id });
+  assert.deepEqual([card.ok, card.error?.code, card.drawn], [false, 'result_gone', undefined]);
+  assert.deepEqual(buildViewModel('display_model_result', card), { kind: 'none', reason: 'gone' });
   // …while a query that FAILED stays an error
   assert.equal(buildViewModel('display_model_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');
 });
@@ -201,12 +193,32 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const byC = Object.fromEntries(m.rows.map((r) => [r.label, r.values[0]]));
   assert.deepEqual([byC.US, byC.GB, byC.BR], [35, 25, 25]);
   assert.equal(m.rows[0].label, 'US', 'the largest first');
-  // open US: the card's own read
+  // open US: the card's own read — the row taken, as a path; the server opens the next level
   const us = m.rows.find((r) => r.label === 'US');
-  const level = await engine.drill_result({ ...m.source, transform: pivotTransform(display, [us.key]), limit: PIVOT_LEVEL_ROWS });
+  const level = await engine.drill_result({ ...m.source, path: [{ column: 'users_country', value: us.key }], limit: PIVOT_LEVEL_ROWS });
+  assert.equal(level.ok, true, JSON.stringify(level.error));
   const children = pivotRows(level, display, 1);
   assert.ok(children.length >= 1);
   assert.equal(children.reduce((a, c) => a + (c.values[0] ?? 0), 0), 35, 'the children of US add up to US');
+});
+
+// A LEVEL FOLDS WITH ANY FUNCTION A READ'S MEASURE TAKES (but the percentile): a median per country of
+// the stored rows under it — checked against the same rows read back and folded here.
+test('a pivot value folds its level with a median: each country is the median of its stored rows', opts, async (t) => {
+  if (skip(t)) return;
+  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  const stored = await q({ group_by: groupBy, materialize: true });
+  const rows = (await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 1000 }))).rows;
+  const median = (xs) => { const v = xs.filter((x) => x !== null && x !== undefined).map(Number).sort((a, b) => a - b); const h = Math.floor(v.length / 2); return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
+  const truth = {};
+  for (const r of rows) (truth[String(r.users_country)] ||= []).push(r.mon_revenue);
+  const display = { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue', agg: 'median', format: 'currency', currency: 'EUR' }] };
+  const top = await engine.display_model_result({ task_id: stored.task_id, display });
+  assert.equal(top.drawn, true, JSON.stringify(top.error || top.warnings));
+  const m = buildViewModel('display_model_result', top);
+  const shown = m.rows.filter((r) => truth[r.label]?.some((x) => x !== null));
+  assert.ok(shown.length >= 3, JSON.stringify(m.rows));
+  for (const r of shown) assert.equal(Number(r.values[0]), median(truth[r.label]), r.label);
 });
 
 // A CHART DRILL-DOWN: the chart is drawn from the stored table folded over its drill levels, and a
@@ -229,7 +241,8 @@ test('a drillable bar is drawn folded over its drill level, and a bar drills int
   const i = m.chart.labels.indexOf('US');
   const path = [{ column: 'users_country', value: m.chart.drill.keys[i] }];
   const view = drillView(display, path, { level: { column: 'users_platform' }, mode: 'breakdown' });
-  const got = await engine.drill_result({ ...m.chart.drill.source, transform: view.transform, limit: DRILL_ROWS });
+  const got = await engine.drill_result({ ...m.chart.drill.source, path, level: 'users_platform', mode: 'breakdown', limit: DRILL_ROWS });
+  assert.equal(got.ok, true, JSON.stringify(got.error));
   const next = buildViewModel('display_model_result', { ...got, display: view.display, drill_source: m.chart.drill.source, drill_path: path });
   assert.equal(next.chart.x, 'users_platform');
   assert.equal(next.chart.bars.reduce((a, b) => a + b.value, 0), 35, 'US by platform adds up to US');

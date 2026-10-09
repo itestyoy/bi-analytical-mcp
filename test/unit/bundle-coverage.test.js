@@ -100,8 +100,8 @@ test('bundle is integrated as a helper across the index views', async () => {
   assert.ok(ov.next_actions.some((a) => /bundle: '/.test(a.call) && /source: '/.test(a.call)), 'overview next_actions includes the bundle view, with its source');
   assert.ok(ov.recommendations.some((r) => /semantic_index\(\{ request: \{ source: '[a-z_]+', bundle:/.test(r)), 'overview recommends the bundle view per source');
 
-  // { model } (events): surfaces the app/bundle column + a pointer.
-  const ev = await e.semantic_index({ model: 'events' });
+  // { source } (events): surfaces the app/bundle column + a pointer.
+  const ev = await e.semantic_index({ source: 'events' });
   assert.equal(ev.bundle_column, 'bundle_id');
   assert.ok(/bundle/i.test(ev.bundle_note));
   assert.ok(ev.recommendations.some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');

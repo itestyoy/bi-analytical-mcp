@@ -22,7 +22,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
-const stage = (st) => ({ action: 'add_step', draft_id: 'ctxabc123456', stage: st });
+const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', stages: [st] });
 
 test("a pipeline stage refuses `avg` and says it is spelled `average` here", () => {
   const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'avg', column: 'price' }] }));
@@ -38,7 +38,7 @@ test("a governed measure refuses `avg` and says it is spelled `average` here", (
   const payload = (agg) => ({
     name: 'spell_task',
     semantic_models: [{ from: 'events', measures: [{ name: 'm', agg, field: 'price_in_usd_of_event_data' }] }],
-    metrics: [{ name: 'm', type: 'simple', measure: { name: 'm' } }],
+    metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
   const res = check('build_semantic_model', payload('avg'));
   assert.equal(res.ok, false);
@@ -55,7 +55,7 @@ test('the quantile is `percentile` on both paths, and SQL\'s `q` / `fn` / `as` a
   const gov = check('build_semantic_model', {
     name: 'spell_pct',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'p90', agg: 'percentile', field: 'cost', q: 0.9 }] }],
-    metrics: [{ name: 'p90', type: 'simple', measure: { name: 'p90' } }],
+    metrics: [{ name: 'p90', type: 'simple', measure: 'p90' }],
   });
   assert.equal(gov.ok, false);
   assert.match(text(gov), /here that field is called 'percentile'/);
@@ -63,7 +63,7 @@ test('the quantile is `percentile` on both paths, and SQL\'s `q` / `fn` / `as` a
   const fn = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }));
   assert.equal(fn.ok, false);
   assert.match(text(fn), /here that field is called 'agg'/);
-  const as = check('build_pipeline_model', stage({ stage: 'unnest', source: 'items', as: 'item' }));
+  const as = check('build_pipeline_model', stage({ stage: 'unnest', column: 'items', as: 'item' }));
   assert.equal(as.ok, false);
   assert.match(text(as), /here that field is called 'name'/);
 });
@@ -75,11 +75,45 @@ test('a name with no counterpart in this path gets the plain list, with no inven
   assert.ok(!/is spelled/.test(text(res)), 'nothing is suggested for a function this server does not have');
 });
 
+// `sum_boolean` has no word-for-word counterpart: a count of a column counts its non-NULL rows, not
+// its true ones, so naming `count` alone would hand back another number under the same reading. The
+// refusal lists the functions; the measure's where (and recipe boolean_condition_as_measure) teach
+// count + where.
+test('sum_boolean is refused with the list of functions, and no word-for-word advice, on both paths', () => {
+  const pipe = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'payers', agg: 'sum_boolean', column: 'is_payer' }] }));
+  const semantic = check('build_semantic_model', { name: 'spell_task', semantic_models: [{ from: 'events', measures: [{ name: 'm', agg: 'sum_boolean' }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  for (const res of [pipe, semantic]) {
+    assert.equal(res.ok, false);
+    assert.match(text(res), /must be one of/);
+    assert.ok(!/is spelled/.test(text(res)), text(res));
+  }
+});
+
 test("a read's projection explains '*': count rows by leaving `column` out", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count', column: '*' }] } });
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', column: '*', name: 'n' }] } });
   assert.equal(res.ok, false);
   assert.match(text(res), /'\*' is not a column — leave `column` out to count rows/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { aggregations: [{ agg: 'count' }] } }).ok, true);
+  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', name: 'n' }] } }).ok, true);
+});
+
+// A list of measures is `measures` wherever rows are aggregated — a stage, a read, a semantic model —
+// and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
+// name in the refusal (a hint, not an alias).
+test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], aggregations: [{ agg: 'count', name: 'n' }] } });
+  assert.equal(res.ok, false);
+  assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
+  const then = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'count', name: 'groups' }] } } });
+  assert.match(text(then), /'aggregations' — here that field is called 'measures'/);
+});
+
+test('a pipeline step names its context with context_id; `draft_id` is refused with that name', () => {
+  const res = check('build_pipeline_model', { action: 'materialize', draft_id: 'ctxabc123456' });
+  assert.equal(res.ok, false);
+  assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
+  assert.equal(check('build_pipeline_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
+  // a start may omit its action (the default) and name a context to start the draft in
+  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; in a stage the rows are counted by leaving `column` out. The refusal
@@ -90,8 +124,7 @@ test("a stage explains '*': count rows by omitting `column`", () => {
     () => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', column: '*' }] }], { physicalCols: new Set(cols.keys()) }),
     (e) => {
       assert.match(e.message, /'\*' is not a column/);
-      assert.match(e.message, /omitting `column`/);
-      assert.match(e.message, /governed path/);
+      assert.match(e.message, /leaving `column` out/);
       return true;
     },
   );

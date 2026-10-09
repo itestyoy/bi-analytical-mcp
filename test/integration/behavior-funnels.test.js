@@ -5,6 +5,12 @@
 // events + event_data property values. Exact numbers come from
 // test/integration/fixtures/SEED_DATA.md.
 //
+// What is here is what no other suite asserts: the media_source split, nested / OR where,
+// order_by + limit, a metric window over a partitioned source, time_range, week / month grains,
+// the level funnel keyed by an event property, and the visit -> purchase conversion as a pipeline.
+// The semantic monetization / progression / DAU numbers (country, platform and acquisition_type
+// cuts, per-level starts / completes / rates) are analytics-tasks.test.js's, built from the recipes.
+//
 // HARD RULE: assertions are DATA-ONLY — res.ok / res.row_count and the numeric
 // values keyed out of res.rows. No SQL/jinja/command/column-name string checks.
 //
@@ -62,62 +68,28 @@ before(async () => {
   // Monetization: revenue / payers / purchases / arppu / aov, with a 1-hop join
   // to user attributes and a local product_id event-property dimension.
   await create({
-    name: 'mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
-      dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
-      measures: [
-        { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
-        { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' },
-        { name: 'purchases', agg: 'count', field: '*' },
-      ] }],
+    name: 'mon',
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
     metrics: [
-      { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
-      { name: 'payers', type: 'simple', measure: { name: 'payers' } },
-      { name: 'purchases', type: 'simple', measure: { name: 'purchases' } },
-      { name: 'arppu', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'payers' } },
-      { name: 'aov', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'purchases' } },
+      { name: 'revenue', type: 'simple', measure: 'revenue' },
+      { name: 'payers', type: 'simple', measure: 'payers' },
+      { name: 'purchases', type: 'simple', measure: 'purchases' },
+      { name: 'arppu', type: 'ratio', numerator: 'revenue', denominator: 'payers' },
+      { name: 'aov', type: 'ratio', numerator: 'revenue', denominator: 'purchases' },
     ],
   });
 
-  // Level progression: starts / completes per level_id (event-property dim).
+  // Level funnel: event_name=level_started, the step keyed by the level_id property (1 -> 2 -> 3).
   await create({
-    name: 'prog',
-    semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level_id_of_event_data' }],
-      measures: [
-        { name: 'starts', agg: 'count', field: '*', event_name: ['level_started'] },
-        { name: 'completes', agg: 'count', field: '*', event_name: ['level_completed'] },
-      ] }],
+    name: 'lvlf',
+    semantic_models: [{ from: 'events', measures: [{ name: 'l1', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'l2', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }, { name: 'l3', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 3 }] }, { name: 'u1', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'u2', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }] }],
     metrics: [
-      { name: 'starts', type: 'simple', measure: { name: 'starts' } },
-      { name: 'completes', type: 'simple', measure: { name: 'completes' } },
-      { name: 'completion_rate', type: 'ratio', numerator: { name: 'completes' }, denominator: { name: 'starts' } },
-    ],
-  });
-
-  // Visitors and buyers as governed counts (the conversion itself is a pipeline, below).
-  await create({
-    name: 'conv', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [
-      { name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
-      { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['iap_purchase_completed'] },
-    ] }],
-    metrics: [
-      { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
-      { name: 'buyers', type: 'simple', measure: { name: 'buyers' } },
-    ],
-  });
-
-  // Behavioral cohort: active users + a did-purchase boolean, split via Metric()
-  // in the warm backend --where.
-  await create({
-    name: 'beh',
-    semantic_models: [{ from: 'events', measures: [
-      { name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
-      { name: 'purch', agg: 'sum_boolean', event_name: ['iap_purchase_completed'] },
-    ] }],
-    metrics: [
-      { name: 'active', type: 'simple', measure: { name: 'active' } },
-      { name: 'purch', type: 'simple', measure: { name: 'purch' } },
+      { name: 's1', type: 'simple', measure: 'l1' },
+      { name: 's2', type: 'simple', measure: 'l2' },
+      { name: 's3', type: 'simple', measure: 'l3' },
+      { name: 'p1', type: 'simple', measure: 'u1' },
+      { name: 'p2', type: 'simple', measure: 'u2' },
+      { name: 'conv_1_2', type: 'ratio', numerator: 'u2', denominator: 'u1' },
     ],
   });
 }, opts);
@@ -127,43 +99,19 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 // ───────────────────────── Monetization + 1-hop JOINs ─────────────────────────
 
-test('monetization: total revenue = 85, payers = 7, purchases = 8', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue', 'mon_payers', 'mon_purchases'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const row = r.rows[0];
-  assert.equal(num(row.mon_revenue), 85);
-  assert.equal(num(row.mon_payers), 7);
-  assert.equal(num(row.mon_purchases), 8);
-});
-
-test('monetization: ARPPU == revenue/payers and AOV == revenue/purchases', opts, async (t) => {
+// The totals and the two ratios come back side by side in one query (the totals were a test of their
+// own, 'monetization: total revenue = 85, payers = 7, purchases = 8', and payers = 7 another).
+test('monetization: revenue 85 / payers 7 / purchases 8; ARPPU == revenue/payers and AOV == revenue/purchases', opts, async (t) => {
   if (skip(t)) return;
   const r = await q('mon', { metrics: ['mon_revenue', 'mon_payers', 'mon_purchases', 'mon_arppu', 'mon_aov'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
+  assert.equal(num(row.mon_revenue), 85, '[totals] revenue 85');
+  assert.equal(num(row.mon_payers), 7, '[totals] payers 7 (distinct buyers across the whole month)');
+  assert.equal(num(row.mon_purchases), 8, '[totals] purchases 8');
   const rev = num(row.mon_revenue); const pay = num(row.mon_payers); const pur = num(row.mon_purchases);
-  assert.ok(Math.abs(num(row.mon_arppu) - rev / pay) < 1e-6, `arppu=${row.mon_arppu}`);
-  assert.ok(Math.abs(num(row.mon_aov) - rev / pur) < 1e-6, `aov=${row.mon_aov}`);
-});
-
-test('monetization: revenue by users.country = US 35 / GB 25 / BR 25 (sums to 85)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'users_country', 'mon_revenue');
-  assert.equal(by.US, 35); assert.equal(by.GB, 25); assert.equal(by.BR, 25);
-  assert.ok(!Number.isFinite(by.DE) || by.DE === 0, `DE=${by.DE}`);
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
-});
-
-test('monetization: revenue by users.platform = ios 65 / android 20 (sums to 85)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'platform' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'users_platform', 'mon_revenue');
-  assert.equal(by.ios, 65); assert.equal(by.android, 20);
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
+  assert.ok(Math.abs(num(row.mon_arppu) - rev / pay) < 1e-6, `[ARPPU] arppu=${row.mon_arppu}`);
+  assert.ok(Math.abs(num(row.mon_aov) - rev / pur) < 1e-6, `[AOV] aov=${row.mon_aov}`);
 });
 
 test('monetization: revenue by users.media_source = meta 25 / organic 30 / google 20 / applovin 10', opts, async (t) => {
@@ -173,22 +121,6 @@ test('monetization: revenue by users.media_source = meta 25 / organic 30 / googl
   const by = mapCol(r.rows, 'users_media_source', 'mon_revenue');
   assert.equal(by.meta, 25); assert.equal(by.organic, 30); assert.equal(by.google, 20); assert.equal(by.applovin, 10);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
-});
-
-test('monetization: revenue by users.acquisition_type = paid 55 / organic 30', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'acquisition_type' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'users_acquisition_type', 'mon_revenue');
-  assert.equal(by.paid, 55); assert.equal(by.organic, 30);
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
-});
-
-test('monetization: payers = 7 (distinct buyers across the whole month)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_payers'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].mon_payers), 7);
 });
 
 test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 50', opts, async (t) => {
@@ -206,13 +138,9 @@ test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) =
   assert.equal(sumCol(r.rows, 'mon_revenue'), 60);
 });
 
-test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limit top = 40', opts, async (t) => {
+// (the plain revenue by product_id, p1 15 / p2 30 / p3 40, is analytics-tasks' ratio_metric task)
+test('monetization: revenue by product_id, order_by + limit 1: the top product = 40', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'events_product_id_of_event_data', 'mon_revenue');
-  assert.equal(by.p1, 15); assert.equal(by.p2, 30); assert.equal(by.p3, 40);
-
   const top = await q('mon', {
     metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }],
     where: [{ field: { model: 'events', attribute: 'product_id_of_event_data' }, op: 'is_not_null' }],
@@ -230,9 +158,9 @@ test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limi
 test('a metric window on a partitioned source: the numbers of the rows, the same with the partition declared as without it', opts, async (t) => {
   if (skip(t)) return;
   const decl = (name) => ({
-    name, use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'events', type: 'simple', measure: { name: 'events' } }],
+    name,
+    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'events', type: 'simple', measure: 'events' }],
   });
   const window = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
   const run = async (name) => {
@@ -269,80 +197,46 @@ test('monetization: time_range 2026-01-04..05 (day grain) -> 10+5+20+10 = 45', o
   assert.equal(sumCol(r.rows, 'mon_revenue'), 45);
 });
 
-test('monetization: revenue by day/week/month all sum to 85', opts, async (t) => {
+// (revenue by metric_time day, summing to 85, is analytics-tasks' ratio_metric task)
+test('monetization: revenue by week/month sums to 85, in a single month', opts, async (t) => {
   if (skip(t)) return;
-  const day = await q('mon', { metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const week = await q('mon', { metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'week' }] });
   const month = await q('mon', { metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'month' }] });
-  for (const r of [day, week, month]) assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(sumCol(day.rows, 'mon_revenue'), 85);
-  assert.equal(sumCol(week.rows, 'mon_revenue'), 85);
-  assert.equal(sumCol(month.rows, 'mon_revenue'), 85);
+  for (const r of [week, month]) assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(sumCol(week.rows, 'mon_revenue'), 85, '[week] sums to 85');
+  assert.equal(sumCol(month.rows, 'mon_revenue'), 85, '[month] sums to 85');
   // single month in the seed
-  assert.equal(month.row_count, 1);
+  assert.equal(month.row_count, 1, '[month] a single month in the seed');
 });
 
-// ───────────────────────── Level progression (per level_id) ─────────────────────────
+// ───────────────────────── Level funnel (event + level_id) ─────────────────────────
 
-test('progression: per-level starts = 12/6/3 and completes = 12/4/3 (levels 1-3)', opts, async (t) => {
+// One query carries both of the level funnel's former tests (multistep-funnel.test.js).
+test('level funnel: per-level starts 12 / 6 / 3 and the L1->L2 player share', opts, async (t) => {
   if (skip(t)) return;
-  const s = await q('prog', { metrics: ['prog_starts'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
-  const c = await q('prog', { metrics: ['prog_completes'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
-  assert.equal(s.ok, true, JSON.stringify(s.error));
-  assert.equal(c.ok, true, JSON.stringify(c.error));
-  const sBy = mapCol(s.rows, 'events_level_id_of_event_data', 'prog_starts');
-  const cBy = mapCol(c.rows, 'events_level_id_of_event_data', 'prog_completes');
-  assert.equal(sBy['1'], 12); assert.equal(sBy['2'], 6); assert.equal(sBy['3'], 3);
-  assert.equal(cBy['1'], 12); assert.equal(cBy['2'], 4); assert.equal(cBy['3'], 3);
-});
-
-test('progression totals: starts = 28, completes = 25 (completers <= starters)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('prog', { metrics: ['prog_starts', 'prog_completes'] });
+  const r = await q('lvlf', { metrics: ['lvlf_s1', 'lvlf_s2', 'lvlf_s3', 'lvlf_p1', 'lvlf_p2', 'lvlf_conv_1_2'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
-  assert.equal(num(row.prog_starts), 28);
-  assert.equal(num(row.prog_completes), 25);
-  assert.ok(num(row.prog_completes) <= num(row.prog_starts));
-});
-
-test('progression: completion_rate per level in [0,1]; L1=1.0; L6=0.0', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('prog', { metrics: ['prog_completion_rate'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'events_level_id_of_event_data', 'prog_completion_rate');
-  for (const v of Object.values(by)) if (Number.isFinite(v)) assert.ok(v >= 0 && v <= 1.0000001, `rate ${v}`);
-  assert.ok(Math.abs(by['1'] - 1) < 1e-9, `L1=${by['1']}`);
-  // level 6: 1 start, 0 completes -> rate 0
-  assert.ok(by['6'] === 0 || !Number.isFinite(by['6']), `L6=${by['6']}`);
-});
-
-test('progression: overall completion_rate = 25/28 in (0,1)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('prog', { metrics: ['prog_completion_rate'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const v = num(r.rows[0].prog_completion_rate);
-  assert.ok(Math.abs(v - 25 / 28) < 1e-9, `rate=${v}`);
-  assert.ok(v > 0 && v < 1);
+  // 'level funnel: level_started counts by level_id = 12 / 6 / 3 (monotonic)'
+  assert.equal(num(row.lvlf_s1), 12, '[level counts] L1');
+  assert.equal(num(row.lvlf_s2), 6, '[level counts] L2');
+  assert.equal(num(row.lvlf_s3), 3, '[level counts] L3');
+  assert.ok(num(row.lvlf_s1) >= num(row.lvlf_s2) && num(row.lvlf_s2) >= num(row.lvlf_s3), '[level counts] monotonic');
+  // 'level funnel: the L1->L2 share of players is the L2 players over the L1 players, in (0,1)'
+  const v = num(row.lvlf_conv_1_2);
+  assert.ok(num(row.lvlf_p2) > 0 && num(row.lvlf_p2) < num(row.lvlf_p1), `[L1->L2 share] 0 < L2 players < L1 players: ${JSON.stringify(row)}`);
+  assert.ok(Math.abs(v - num(row.lvlf_p2) / num(row.lvlf_p1)) < 1e-9, `[L1->L2 share] conv_1_2=${v}`);
 });
 
 // ───────────────────────── Visit -> purchase conversion ─────────────────────────
 
-test('conversion: 12 visitors, 7 buyers', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('conv', { metrics: ['conv_visitors', 'conv_buyers'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].conv_visitors), 12);
-  assert.equal(num(r.rows[0].conv_buyers), 7);
-});
-
 // A conversion is a PIPELINE: one row per visitor from the first session, whether a purchase followed —
 // the semantic layer declares no conversion metric (MetricFlow would filter its base side only).
 const CONVERSION = [
-  { stage: 'match_recognize', partition_by: [{ entity: 'user' }], mode: 'ordered', steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
+  { stage: 'match_recognize', partition_by: [{ entity: 'user' }], steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
 ];
 // users is slowly changing: the country a visitor had at the first visit, not every version of it
-const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
+const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { column: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
 const converted = { name: 'buyers', agg: 'count', where: [{ column: 'completed', op: 'eq', value: true }] };
 
 test('conversion: visit->purchase — 7 of the 12 visitors bought after a session', opts, async (t) => {
@@ -359,29 +253,4 @@ test('conversion by users.country: the countries add up to the whole, each a sha
   assert.ok(out.rows.length > 1, 'more than one country');
   assert.deepEqual([out.rows.reduce((a, r) => a + num(r.visitors), 0), out.rows.reduce((a, r) => a + num(r.buyers), 0)], [12, 7]);
   for (const r of out.rows) assert.ok(num(r.buyers) <= num(r.visitors), JSON.stringify(r));
-});
-
-// ───────────────── Behavioral cohort (did / didn't purchase, Metric() filter) ─────────────────
-
-test('behavioral: total active users = 12', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q('beh', { metrics: ['beh_active'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].beh_active), 12);
-});
-
-test('behavioral cohort: active users who PURCHASED = 7 (Metric() in --where)', opts, async (t) => {
-  if (skip(t)) return;
-  const dir = engine.ctxs.dir(ctxOf.beh);
-  const r = await backend.query(dir, { metrics: ['beh_active'], where: ["{{ Metric('beh_purch', group_by=['user']) }} > 0"] });
-  assert.equal(r.ok, true, r.stderr);
-  assert.equal(num(r.rows[0].beh_active), 7);
-});
-
-test('behavioral cohort: active users who did NOT purchase = 5 (complement)', opts, async (t) => {
-  if (skip(t)) return;
-  const dir = engine.ctxs.dir(ctxOf.beh);
-  const r = await backend.query(dir, { metrics: ['beh_active'], where: ["{{ Metric('beh_purch', group_by=['user']) }} = 0"] });
-  assert.equal(r.ok, true, r.stderr);
-  assert.equal(num(r.rows[0].beh_active), 5);
 });

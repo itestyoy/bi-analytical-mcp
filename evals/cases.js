@@ -43,7 +43,7 @@ export const CASES = [
       source: 'events',
       stages: [
         { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+        { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
         { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
       ],
       column: 'revenue',
@@ -84,7 +84,7 @@ export const CASES = [
     ref: {
       source: 'crashlytics',
       stages: [
-        { stage: 'derive', name: 'fatal', op: 'extract', source: 'is_fatal_of_event_data', type: 'string' },
+        { stage: 'compute', name: 'fatal', expr: { fn: 'event_property', property: 'is_fatal_of_event_data', type: 'string' } },
         { stage: 'where', conditions: [{ column: 'fatal', op: 'eq', value: 'true' }] },
         { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
       ],
@@ -136,8 +136,8 @@ export const CASES = [
       source: 'events',
       stages: [
         { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'derive', name: 'product', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
-        { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+        { stage: 'compute', name: 'product', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
+        { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
         { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
       ],
       key: 'product',
@@ -191,9 +191,9 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: [
+        { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [
           { name: 'launch', event_name: ['first_launch'] },
-          { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+          { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
         ] },
         { stage: 'where', conditions: [{ column: 'reached_tut1', op: 'eq', value: true }] },
         { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
 
 // Allowed non-data test: this asserts a NUDGE/recommendation (a UX affordance surfaced in the
 // pipeline response), not query correctness and not generated SQL text. A key-only join to an
@@ -57,10 +57,10 @@ const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.t
 test('key-only join to an SCD-2 dimension → response warns the join is incomplete (fan-out)', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
-  const r = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: ['player_id'], attrs: [{ column: 'country' }] } });
-  assert.ok(hasIncompleteJoin(r.recommendations), `expected an incomplete-join warning, got: ${JSON.stringify(r.recommendations)}`);
+  const r = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }] }] });
+  assert.ok(hasIncompleteJoin(stepNotes(r)), `expected an incomplete-join warning, got: ${JSON.stringify(stepNotes(r))}`);
   // the warning names the exact fix (event time + the validity columns)
-  const w = r.recommendations.find((x) => /INCOMPLETE JOIN/.test(x));
+  const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.match(w, /between/);
   assert.match(w, /install_time_valid_from/);
   assert.match(w, /install_time_valid_until/);
@@ -71,8 +71,7 @@ test('SCD-2 join WITH a point-in-time between window → no incomplete-join warn
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
   const r = await e.build_pipeline_model({
-    action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'join', with: 'users', on: ['player_id'], attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
-  });
-  assert.ok(!hasIncompleteJoin(r.recommendations), `no warning expected once between is present, got: ${JSON.stringify(r.recommendations)}`);
+    action: 'add_steps', context_id: s.context_id,
+    stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+  assert.ok(!hasIncompleteJoin(stepNotes(r)), `no warning expected once between is present, got: ${JSON.stringify(stepNotes(r))}`);
 });

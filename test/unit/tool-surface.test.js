@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -11,8 +12,9 @@ import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
 import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
-import { settle } from '../helpers/settle.js';
+import { settle, stepNotes } from '../helpers/settle.js';
 import { deref, field } from '../helpers/schema-nav.js';
+import { mcp } from '../helpers/catalog-doc.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -78,22 +80,22 @@ test('context lists and describes, delete_context removes — and a read never r
   // start a draft to create a context.
   const s = await e.build_pipeline_model({ action: 'start', name: 'ctxtool', source: 'events' });
   const list = await e.context({ action: 'list' });
-  assert.ok(list.contexts.some((c) => c.context_id === s.draft_id), 'list shows the created context');
-  const desc = await e.context({ action: 'describe', context_id: s.draft_id });
-  assert.equal(desc.context_id ?? desc.id ?? s.draft_id, desc.context_id ?? desc.id ?? s.draft_id); // describe returns the context shape
+  assert.ok(list.contexts.some((c) => c.context_id === s.context_id), 'list shows the created context');
+  const desc = await e.context({ action: 'describe', context_id: s.context_id });
+  assert.equal(desc.context_id ?? desc.id ?? s.context_id, desc.context_id ?? desc.id ?? s.context_id); // describe returns the context shape
   // strict: describe requires context_id; list forbids it.
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
-  await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
+  await assert.rejects(() => e.context({ action: 'list', context_id: s.context_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
   // context only reads: an action that would remove is not one of its actions
-  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /must be one of: list, describe/);
-  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.context_id }), /must be one of: list, describe/);
+  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.context_id), 'a read removed nothing');
   // delete_context: semantic_model needs its model; context forbids the model's fields
-  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);
-  await assert.rejects(() => e.delete_context({ context_id: s.draft_id, cascade: true }), /invalid input/);
-  await e.delete_context({ context_id: s.draft_id });
+  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.context_id }), /invalid input/);
+  await assert.rejects(() => e.delete_context({ context_id: s.context_id, cascade: true }), /invalid input/);
+  await e.delete_context({ context_id: s.context_id });
   const after = await e.context({ action: 'list' });
-  assert.ok(!after.contexts.some((c) => c.context_id === s.draft_id), 'dropped context is gone');
+  assert.ok(!after.contexts.some((c) => c.context_id === s.context_id), 'dropped context is gone');
 });
 
 // Recipes folded into semantic_index: overview lists them; { recipe: id } returns one.
@@ -115,17 +117,17 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
 test('a sampled pipeline flags the result approximate with guidance', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'sampled', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'sample', percent: 10 } });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'sample', share: 0.1 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const out = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
-  assert.equal(out.sampling.sample_percent, 10);
+  assert.equal(out.sampling.sample_share, 0.1);
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'exact', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] } });
-  const out2 = await e.build_pipeline_model({ action: 'materialize', draft_id: s2.draft_id });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
+  const out2 = await e.build_pipeline_model({ action: 'materialize', context_id: s2.context_id });
   assert.equal(out2.provenance.approximate, undefined);
   assert.equal(out2.sampling, undefined);
 });
@@ -139,7 +141,7 @@ test('recipes have no standalone tool; _recipe payload is framed as a building b
 });
 
 // #3 gotcha: referencing an event-specific property without scoping its event(s) reads NULL.
-test('add_step warns when an event-specific property is used without its event scope', async () => {
+test('add_steps warns when an event-specific property is used without its event scope', async () => {
   const e = engine();
   // Applicability is DATA-DERIVED from the value index: seed coverage showing ad_type is populated
   // only on ad_started/ad_finished (NULL on first_launch) — the nudge reads this, not a declared list.
@@ -150,18 +152,18 @@ test('add_step warns when an event-specific property is used without its event s
   ] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
-  const a = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-  assert.ok(a.recommendations.some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(a.recommendations));
+  const a = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  assert.ok(stepNotes(a).some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(stepNotes(a)));
   // with an upstream where scoping event_name to those events → no NULL warning.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'scoped', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
-  const a2 = await e.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-  assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] }] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+  assert.ok(!stepNotes(a2).some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
   const warnFor = async (cond) => {
     const d = await e.build_pipeline_model({ action: 'start', name: 'scoped2', source: 'events' });
-    await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [cond] } });
-    const r = await e.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] } });
-    return (r.recommendations || []).find((x) => x.includes('populated only on event'));
+    await e.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [cond] }] });
+    const r = await e.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', agg: 'count' }] }] });
+    return (stepNotes(r) || []).find((x) => x.includes('populated only on event'));
   };
   // a scope WITHIN the field's events is the right choice: every row it keeps carries the field
   assert.equal(await warnFor({ column: 'event_name', op: 'eq', value: 'ad_started' }), undefined);
@@ -191,7 +193,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   // overview points at the guide; guide is a mutually-exclusive view.
   const ov = await e.semantic_index();
   assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
-  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /must be exactly one of: .*\{ guide \}/);
+  await assert.rejects(() => e.semantic_index({ guide: true, source: 'events' }), /must be exactly one of: .*\{ guide \}/);
 });
 
 // Without recipes configured, the recipe view + overview list are simply absent.
@@ -206,52 +208,94 @@ test('semantic_index recipe view is absent when no recipes configured', async ()
 // A governed path is served by the semantic model of the model it ends on. A task built from one
 // events source does not load the other's, so a path onto that fact's own attributes is refused
 // here with the fix — instead of reaching MetricFlow as an unknown entity.
-test('a group-by path onto an unloaded FACT is refused with the use_base_models fix', async () => {
+test('a group-by path onto an unloaded FACT is refused with the fix: an item { from } that loads it', async () => {
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
     () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
-    /needs model 'crashlytics'.*use_base_models/s,
+    /needs model 'crashlytics'.*semantic_models: \[\{ from: 'crashlytics' \}\]/s,
   );
+});
+
+// A structured reference names only what is there: an attribute the model lacks, the events
+// source's session key (no join key is an attribute by name) and a `via` that is not a relationship
+// onto that model are each refused by the schema, listing what the model does have — before
+// anything runs.
+test('a group-by attribute or via the model does not have is refused, listing the real ones', async () => {
+  const e = engine();
+  const evu = await e.build_semantic_model({
+    name: 'evu',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+  });
+  const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, metrics: [metric], group_by: [ref] });
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'users', attribute: 'shoe_size' }),
+    /`group_by.0.attribute` must be one of: .*country/s, 'an attribute the model does not have is refused, listing the ones it has');
+  assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'events', attribute: 'session_number' }),
+    /`group_by.0.attribute` must be one of/, 'the session key is not a groupable path of the events source');
+  // the crash source OWNS ad_funnel here (type: unique): ad_funnel is a relationship onto it, 'session' is not
+  const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
+  const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
+  mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
+  mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
+  const at = join(mkdtempSync(join(tmpdir(), 'surf-own-')), 'catalog.yml');
+  writeFileSync(at, yaml.dump(doc));
+  const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  const own = await owner.build_semantic_model({
+    name: 'own',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+  });
+  await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { model: 'crashlytics', attribute: 'app_version', via: 'session' }),
+    /`group_by.0.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
 });
 
 // The relationship a model OWNS is reported as owned — its governed path ends here — not as
 // "pipeline only" (the two conditions used to be tested in the wrong order).
-test('semantic_index({ model }) reports an owned relationship as owned, with a governed path', async () => {
+test('semantic_index({ source }) reports an owned relationship as owned, with a governed path', async () => {
   const e = engine();
-  const users = await e.semantic_index({ model: 'users' });
+  const users = await e.semantic_index({ source: 'users' });
   const rel = users.relationships.find((r) => r.entity === 'user');
   assert.equal(rel.owned_here, true);
   assert.match(rel.use, /^owned here — other models point at it/);
   assert.ok(!/No model owns 'user'/.test(users.join_note || ''), users.join_note);
-  const events = await e.semantic_index({ model: 'events' });
-  assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
+  const events = await e.semantic_index({ source: 'events' });
+  const evUser = events.relationships.find((r) => r.entity === 'user');
+  assert.equal(evUser.use, 'metric query + pipeline');
+  assert.equal(evUser.joins, 'users', 'the events side points at the model that owns the relationship');
 });
 
-// A target is the PAIR the tool itself emits. A name on its own has no spelling at all — so a name
-// two sources carry can never be attached to the wrong one, and never has to be disambiguated.
-test('memory targets: { source, name } resolves; a bare name is not a target', async () => {
+// What a note is about is the PAIR the tool itself emits. A name on its own has no spelling at all — so
+// a name two sources carry can never be attached to the wrong one, and never has to be disambiguated.
+test('memory about: { source, property } and { source, event } resolve; a bare name is no entity', async () => {
   const e = engine();
-  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] });
-  assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
+  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', about: [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }] }] })).notes[0];
+  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }]);
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
+  // …and on the qualified crash property it is about as well
+  const crashProp = await e.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
+  assert.ok((crashProp.memory || []).some((m) => /fires once per completed impression/.test(m.note)), `the finding surfaces on the crash property: ${JSON.stringify(crashProp.memory)}`);
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
-  const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
-  assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/);
+  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', about: [{ source: 'users', property: 'app_version' }, { source: 'crashlytics', property: 'app_version' }] }] })).notes[0];
+  assert.deepEqual(both.about.map((a) => a.source), ['users', 'crashlytics']);
 });
 
 // Attributes that live only on an events source are searchable by name like any other.
 test('semantic_index({ search }) finds a dimension that exists only on an events source', async () => {
   const e = engine();
   const r = await e.semantic_index({ search: 'bundle_id' });
-  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.column === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.property === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  // a match is named as the view that opens it takes it
+  const m = r.dimension_matches.find((d) => d.property === 'bundle_id');
+  assert.equal((await e.semantic_index({ source: m.source, property: m.property })).property, 'bundle_id');
   const r2 = await e.semantic_index({ search: 'device_model' });
   assert.ok(r2.dimension_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
 });
@@ -262,8 +306,8 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   const e = engine();
   const g = await e.semantic_index({ guide: true });
   const t = g.routing_triggers.find((x) => /alternative columns/.test(x.if));
-  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
-  assert.ok(!g.routing_triggers.some((x) => /crash/.test(x.if)), 'no domain-specific crash trigger');
+  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_interstitial/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
+  assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
   for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
   const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
@@ -279,17 +323,15 @@ test('a task dimension is reported under its declared attribute even when one ta
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [
-      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
-  const out = await e.build_semantic_model({ action: 'update',
+  // a second task beside the first: a declaration into the same context
+  const out = await e.build_semantic_model({
     context_id: first.context_id,
-    semantic_model: 'users',
-    task: 'ret_v2',
-    add_dimensions: [{ source: 'model_column', column: 'country' }],
+    name: 'ret_v2',
+    semantic_models: [{ from: 'users', dimensions: [{ field: 'country' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'ret_n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual([...(ctx.state.tasks || [])].sort(), ['ret', 'ret_v2'], JSON.stringify(ctx.state.tasks));
@@ -316,12 +358,12 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
   const branches = deref(bpm, field(bpm, st, 'partition_by').items).anyOf.map((b) => deref(bpm, b));
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
-  assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
+  assert.deepEqual(deref(bpm, entityBranch.properties.entity).enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
   assert.ok(branches.some((b) => b.type === 'string'), 'a plain column is still a column');
 
   const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
   const start = await e.build_pipeline_model({ action: 'start', name: 'fnl_part', source: 'events' });
-  const add = (partition_by) => e.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage: { stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) } });
+  const add = (partition_by) => e.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, stages: [{ stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) }] });
   // a relationship written as a bare word is not a column — and the message says what to write
   await assert.rejects(() => add(['user']), /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/);
   // a relationship keyed by several columns cannot be a partition column at all

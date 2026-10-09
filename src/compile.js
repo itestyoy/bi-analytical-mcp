@@ -4,12 +4,13 @@
 
 import { isNumericType } from './dialects/base.js';
 import { getDialect } from './dialects/index.js';
-import { NUMERIC_AGGS } from './catalog.js';
+import { NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog.js';
 import { comparison, conditionsSql } from './conditions.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
-const NS = (task, name) => `${task}_${name}`;
+// Exported so an update names what it removes by the same rule (src/engine/semantic-build.js).
+export const NS = (task, name) => `${task}_${name}`;
 
 /** Throw a compile error that CARRIES the input field it refers to — the engine
  *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
@@ -25,32 +26,42 @@ function factProp(catalog, modelKey, name, field) {
   try { return catalog.propertyFor(modelKey, name, { hint: HINT }); } catch (e) { return fail(e.message, field); }
 }
 
-/** SQL predicate for a list of event names on an events FACT, or null. */
-export function namesToScope(catalog, modelKey, names) {
-  if (!catalog.isFact(modelKey) || !names?.length) return null;
-  const col = catalog.getModel(modelKey).event_name.column;
-  const vals = names.map((n) => factName(catalog, modelKey, n, 'event_name'));
-  return vals.length === 1 ? comparison(col, 'eq', vals[0]) : comparison(col, 'in', vals);
-}
-
 /** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
 function propExpr(catalog, modelKey, name) {
   return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
-/** SQL for a single event_data property condition (used for funnel-step scoping). */
-function propCond(catalog, modelKey, cond) {
-  const found = factProp(catalog, modelKey, cond.property, 'where.property');
-  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'where.property');
-  const lhs = propExpr(catalog, modelKey, found.name);
-  try { return comparison(lhs, cond.op, cond.value); } catch (e) { return fail(e.message, 'where.op'); }
+/** The operators whose constants ARE events — a pattern's (like, contains, …) is text, not an event. */
+const EVENT_VALUE_OPS = new Set(['eq', 'neq', 'in', 'not_in']);
+
+/**
+ * SQL for one condition of a semantic model on a `field` — a column of the model (its event name
+ * spelled as the source stores it), or a scalar payload property read where it is stored.
+ */
+function fieldCond(catalog, modelKey, cond) {
+  const m = catalog.getModel(modelKey);
+  const columns = new Set(catalog.modelColumns(modelKey).map((c) => c.name));
+  let lhs; let value = cond.value;
+  if (catalog.isFact(modelKey) && cond.field === m.event_name?.column) {
+    lhs = cond.field;
+    // an event of the source, as it stores it — one that is not its own is refused, naming the owner
+    if (EVENT_VALUE_OPS.has(cond.op) && value !== undefined && value !== null) value = Array.isArray(value) ? value.map((v) => factName(catalog, modelKey, v, 'where.value')) : factName(catalog, modelKey, value, 'where.value');
+  } else if (catalog.isFact(modelKey) && catalog.scalarEventProps(modelKey).includes(cond.field)) {
+    const found = factProp(catalog, modelKey, cond.field, 'where.field');
+    lhs = propExpr(catalog, modelKey, found.name);
+  } else if (columns.has(cond.field)) lhs = cond.field;
+  else fail(`where: '${cond.field}' is not a column or scalar property of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists them`, 'where.field');
+  try { return comparison(lhs, cond.op, value); } catch (e) { return fail(e.message, 'where.op'); }
 }
 
-/** Combine event_name scope + property conditions into one boolean (or null). */
+/** A semantic model's conditions (its own, or a measure's) as one boolean (or null). */
+function conditionsOf(catalog, modelKey, list) {
+  return conditionsSql(list, (c) => fieldCond(catalog, modelKey, c)).join(' AND ') || null;
+}
+
+/** The rows a measure folds: the semantic model's `where` AND the measure's own. */
 function measureScope(catalog, modelKey, decl, smScope) {
-  const evScope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
-  const propParts = conditionsSql(decl.where, (c) => propCond(catalog, modelKey, c));
-  return [evScope, ...propParts].filter(Boolean).join(' AND ') || null;
+  return [smScope, conditionsOf(catalog, modelKey, decl.where)].filter(Boolean).join(' AND ') || null;
 }
 
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
@@ -63,24 +74,20 @@ function applyScope(valueExpr, scope) {
 /** Resolve a measure declaration to a dbt measure object (name, agg, expr, ...). */
 function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
-  // a per-measure event_name (+ optional property `where`) overrides the SM-level
-  // scope — this is how a funnel step is defined as "event + property value".
+  // the model's where AND the measure's own — a funnel step is a measure whose where names the
+  // event and a property value
   const scope = measureScope(catalog, modelKey, decl, smScope);
-
-  // sum_boolean: sum a boolean per row (e.g. "did event X") — the scope IS the boolean.
-  if (decl.agg === 'sum_boolean') {
-    return { name, agg: 'sum_boolean', expr: scope || 'true' };
-  }
+  // the functions a task chooses from (the schema offers no other): a count of the rows where a
+  // condition holds is a count with that where
+  if (!TASK_MEASURE_AGGS.has(decl.agg)) fail(`measure '${decl.name}': agg must be one of ${[...TASK_MEASURE_AGGS].join(', ')} — a count of the rows where a condition holds is agg: 'count' with that where`, 'measures.agg');
 
   let agg = decl.agg;
   let valueExpr;
   let found = null; // the event property, when `field` names one (resolved once)
 
   const field = decl.field;
-  if (field === '*' || field === undefined) {
-    if (decl.agg !== 'count' && decl.agg !== 'sum') {
-      fail(`measure '${decl.name}': field '*' is only valid with agg count/sum`, 'measures.field');
-    }
+  if (field === undefined) {
+    if (decl.agg !== 'count') fail(`measure '${decl.name}': ${decl.agg} needs a field to fold — only a count counts rows without one`, 'measures.field');
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
   } else if (catalog.isFact(modelKey) && (found = factProp(catalog, modelKey, field, 'measures.field'))) {
@@ -106,13 +113,13 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // the tool cannot offer a field this then rejects.
     const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
-      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
+      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }
     valueExpr = field;
   }
   if (decl.cast) valueExpr = getDialect(catalog.dialect).castExpr(valueExpr, decl.cast);
 
-  const m = { name, agg, expr: applyScope(valueExpr, scope) };
+  const m = { name, agg, expr: applyScope(valueExpr, scope), ...(decl.label ? { label: decl.label } : {}) };
   if (decl.agg === 'percentile') {
     if (typeof decl.percentile !== 'number') fail(`measure '${decl.name}': percentile required`, 'measures.percentile');
     m.agg = 'percentile';
@@ -127,21 +134,29 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
  * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
  * stripped before the manifest is written (see yaml-render). Recovering them from the generated
  * identifier instead would mis-split the moment one task name is a prefix of another.
+ *
+ * What the dimension IS comes from the catalog, never from the caller: a column the catalog types as
+ * time is a time dimension, at `grain` (default: the catalog's granularity for it); anything else — a
+ * column, a scalar payload property — is categorical.
  */
 function compileDimension(catalog, task, modelKey, decl) {
-  if (decl.source === 'event_property') {
-    if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
-    const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'dimensions.property');
-    if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _attribute: found.name };
+  const label = decl.label ? { label: decl.label } : {};
+  const isColumn = catalog.modelDimensionColumns(modelKey).includes(decl.field);
+  const isProperty = catalog.isFact(modelKey) && catalog.scalarEventProps(modelKey).includes(decl.field);
+  const known = (catalog.getModel(modelKey).dimensions || {})[decl.field];
+  if (isColumn && known?.type === 'time') {
+    // `expr` stays the bare column: the render reads it as the base model's own time dimensions are
+    // read (the dialect's semanticTimeExpr, yaml-render.js renderContext) — for a context stored
+    // earlier too, whose additions hold the column as it was compiled then
+    return { name: NS(task, decl.field), type: 'time', expr: decl.field, type_params: { time_granularity: decl.grain || known.granularity || 'day' }, ...label, _attribute: decl.field };
   }
-  if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _attribute: decl.column };
-    if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
-    return dim;
+  if (decl.grain !== undefined) fail(`dimension '${decl.field}' is categorical — a grain goes with a time column of '${modelKey}'`, 'dimensions.grain');
+  if (isColumn && !isProperty) return { name: NS(task, decl.field), type: 'categorical', expr: decl.field, ...label, _attribute: decl.field };
+  if (isProperty) {
+    const found = factProp(catalog, modelKey, decl.field, 'dimensions.field');
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name };
   }
-  fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
+  fail(`dimension '${decl.field}' is not a groupable column or scalar property of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists them`, 'dimensions.field');
 }
 
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure. */
@@ -152,7 +167,7 @@ function ownMeasures(metric) {
 }
 
 /** The metrics a compiled metric is built from: a ratio's numerator and denominator, a derived metric's inputs. */
-function inputMetrics(metric) {
+export function inputMetrics(metric) {
   const tp = metric?.type_params || {};
   const name = (v) => (typeof v === 'string' ? v : v?.name);
   return [tp.numerator, tp.denominator, ...(tp.metrics || [])].map(name).filter(Boolean);
@@ -180,33 +195,51 @@ export function measureRefs(metric, metrics = []) {
 /**
  * Compile a full declaration. Returns resolved additions per model, metric
  * specs (incl. auto-created simple metrics for ratio), used models, and the
- * declared measure/metric names (namespaced).
+ * declared measure/metric names (namespaced). What the context declared into already holds (an
+ * update's, or a declaration beside a task already there): `measures`, the stored names of its
+ * measures, which a metric reads by the name it was declared under or the stored one; `metrics`,
+ * its compiled metrics, which a derived metric may be built from and a ratio may read through;
+ * `models`, the models it reads already (an update compiles against them, so metrics or removals
+ * alone have a source). Neither measures nor metrics may be declared again under the same stored
+ * name: the context would keep one of the two.
  */
-export function compileDeclaration(catalog, decl) {
+export function compileDeclaration(catalog, decl, { measures = [], metrics: contextMetrics = [], models = [] } = {}) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
 
   const additions = {}; // modelKey -> { measures:[], dimensions:[] }
+  const existingMeasures = new Set(measures); // namespaced, declared before this call
   const declaredMeasures = new Set(); // namespaced
   const ensure = (k) => (additions[k] ||= { measures: [], dimensions: [] });
+  // what a refusal lists, each name said as what it is: declared in this call, or already in the context
+  const inScope = (kind, inCall, inContext) => [
+    inCall.length ? `Declared in this call: ${inCall.join(', ')}.` : `This call declares no ${kind}.`,
+    inContext.length ? `Already in this context: ${inContext.join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
 
   // The models this task READS — taken from the payload, never assumed. A context carries only
-  // the sources it was asked for, so a task on one events source does not drag in another.
-  const usedModels = new Set();
-  for (const k of decl.use_base_models || []) {
-    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(k) || ''}`, 'use_base_models');
-    usedModels.add(k);
-  }
+  // the sources it was asked for, so a task on one events source does not drag in another. An item
+  // of semantic_models loads its model: one with only `from` loads it for its attributes alone.
+  const usedModels = new Set(models);
 
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.from;
-    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
+    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${catalog.semanticModelKeys().join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
+    // a model with no primary entity has nothing MetricFlow could address its dimensions through
+    if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.from: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows are joined in a pipeline instead: build_pipeline_model with a join stage { stage: 'join', with: '${modelKey}', … }. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.from');
+    // an item's where scopes the measures declared beside it — with none, it would scope nothing
+    if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or put each measure's own condition in its where; { from: '${modelKey}' } alone loads the model for its attributes`, 'semantic_models.where');
     usedModels.add(modelKey);
-    // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
-    const scope = namesToScope(catalog, modelKey, sm.event_scope?.event_name);
+    // Each semantic model scopes its OWN measures: its where is baked into every measure expr below.
+    const scope = conditionsOf(catalog, modelKey, sm.where);
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);
+      // two measures of one name would both be written, and dbt refuses the duplicate at parse
+      if (declaredMeasures.has(cm.name)) fail(`measure '${m.name}' is declared twice in this call (stored as '${cm.name}')`, 'measures.name');
+      if (existingMeasures.has(cm.name)) {
+        fail(`measure '${m.name}' is already in this context, as '${cm.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { measures: ['${cm.name}'] }, semantic_models: [...] } }) — with cascade: true when metrics read it`, 'measures.name');
+      }
       declaredMeasures.add(cm.name);
       ensure(modelKey).measures.push(cm);
     }
@@ -215,77 +248,138 @@ export function compileDeclaration(catalog, decl) {
   const baseMeasureRefs = new Set(catalog.baseMeasureRefs());
   const resolveMeasure = (ref) => {
     const nsName = NS(task, ref);
-    if (declaredMeasures.has(nsName)) return nsName;
+    if (declaredMeasures.has(nsName) || existingMeasures.has(nsName)) return nsName;
+    // …or by the stored name a context describes it under ('ret_n'), as remove takes it too
+    if (declaredMeasures.has(ref) || existingMeasures.has(ref)) return ref;
     if (baseMeasureRefs.has(ref)) { // base measure (already a global name) — load its own model
       const owner = catalog.modelOwningMeasure(ref);
       if (owner) usedModels.add(owner);
       return ref;
     }
-    fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
+    // listed as stored — a name a metric takes as it is, beside the one it was declared under
+    fail(`metric references unknown measure '${ref}'. ${inScope('measure', [...declaredMeasures], [...existingMeasures])}`, 'metrics.measure');
   };
 
+  const existingMetrics = new Map(contextMetrics.map((m) => [m.name, m]));
   const metrics = [];
   const metricNames = new Set();
+  const declaredMetrics = new Set(); // the ones the caller named, beside those a ratio made
+  const derivedInputs = []; // derived metrics, their inputs resolved once every metric is known
   const simpleByMeasure = new Map(); // measureName -> simple metric name
   const addMetric = (m) => {
-    if (metricNames.has(m.name)) return;
-    if (!m.label) m.label = m.name; // dbt 1.11+ requires a label on every metric
+    if (!m.label) m.label = m.name; // dbt 1.11+ requires a label on every metric (the caller's, or its name)
     metricNames.add(m.name);
     metrics.push(m);
   };
-  // ensure a simple metric wraps a measure (for ratio operands)
-  const ensureSimpleFor = (measureName) => {
+  // a metric a ratio may read a measure through: a simple metric over exactly that measure
+  const simpleOver = (m, measureName) => m?.type === 'simple' && ownMeasures(m)[0] === measureName;
+  const described = (m) => `a ${m.type} metric${ownMeasures(m).length ? ` over measure '${ownMeasures(m)[0]}'` : ''}`;
+  // A metric the caller declares takes a name nothing else holds: of two definitions under one name
+  // the context would keep one and drop the other without a word.
+  const declareMetric = (m, md) => {
+    if (existingMetrics.has(m.name)) {
+      fail(`metric '${md.name}' is already in this context, as '${m.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { metrics: ['${m.name}'] }, metrics: [...] } }) — with cascade: true when other metrics are built from it`, 'metrics.name');
+    }
+    if (declaredMetrics.has(m.name)) fail(`metric '${md.name}' is declared twice in this call (stored as '${m.name}')`, 'metrics.name');
+    declaredMetrics.add(m.name);
+    const made = metrics.findIndex((x) => x.name === m.name); // made by a ratio above, to read a measure through
+    if (made < 0) return addMetric(m);
+    if (!simpleOver(m, ownMeasures(metrics[made])[0])) {
+      fail(`metric '${md.name}' is stored as '${m.name}', the name of the simple metric over measure '${ownMeasures(metrics[made])[0]}' that a ratio of this call reads it through. Give the metric another name`, 'metrics.name');
+    }
+    if (!m.label) m.label = m.name;
+    metrics[made] = m; // the same reading: the ratio reads the caller's definition (its fill_nulls_with)
+  };
+  // a ratio reads each measure through a simple metric over it: one already declared over that
+  // measure, else one named as the measure is — never a different metric that holds that name
+  const ensureSimpleFor = (measureName, ref, md) => {
     if (simpleByMeasure.has(measureName)) return simpleByMeasure.get(measureName);
     const name = measureName; // simple metric shares the measure's name
-    addMetric({ name, type: 'simple', type_params: { measure: { name: measureName } } });
+    const holder = metrics.find((x) => x.name === name) || existingMetrics.get(name);
+    if (holder && !simpleOver(holder, measureName)) {
+      const inContext = !metricNames.has(name);
+      fail(`ratio '${md.name}' reads measure '${ref}' through a simple metric named '${name}', and '${name}' is already ${described(holder)} ${inContext ? 'in this context' : 'of this call'}. Declare a simple metric over measure '${ref}' under another name before the ratio, and the ratio reads that one${inContext ? `; or remove '${name}' in the update that declares the ratio` : ''}`, 'metrics.name');
+    }
+    if (!holder) addMetric({ name, type: 'simple', type_params: { measure: { name: measureName } } });
     simpleByMeasure.set(measureName, name);
     return name;
   };
 
+  // what a metric reads is named by a string — a measure as `measure`, `numerator`, `denominator`;
+  // a derived metric's inputs as the items of `metrics`
   for (const md of decl.metrics || []) {
     const name = NS(task, md.name);
+    // the caller's label goes with the metric (addMetric defaults a missing one to its name)
+    const label = md.label ? { label: md.label } : {};
     if (md.type === 'simple') {
-      const measureName = resolveMeasure(md.measure.name);
+      const measureName = resolveMeasure(md.measure);
       const tp = { measure: { name: measureName } };
       if (typeof md.fill_nulls_with === 'number') tp.measure.fill_nulls_with = md.fill_nulls_with;
-      addMetric({ name, type: 'simple', type_params: tp });
+      declareMetric({ name, type: 'simple', ...label, type_params: tp }, md);
       simpleByMeasure.set(measureName, name);
     } else if (md.type === 'ratio') {
-      const num = ensureSimpleFor(resolveMeasure(md.numerator.name));
-      const den = ensureSimpleFor(resolveMeasure(md.denominator.name));
-      addMetric({ name, type: 'ratio', type_params: { numerator: { name: num }, denominator: { name: den } } });
+      const num = ensureSimpleFor(resolveMeasure(md.numerator), md.numerator, md);
+      const den = ensureSimpleFor(resolveMeasure(md.denominator), md.denominator, md);
+      declareMetric({ name, type: 'ratio', ...label, type_params: { numerator: { name: num }, denominator: { name: den } } }, md);
     } else if (md.type === 'cumulative') {
+      // all history, a trailing window, or to date within a grain — the schema's two forms keep a
+      // window and a grain_to_date apart, as MetricFlow refuses them together
+      if (md.window && md.grain_to_date) fail(`cumulative metric '${md.name}': window and grain_to_date are two kinds of accumulation — give one`, 'metrics.grain_to_date');
       const ctp = {};
       if (md.window) ctp.window = md.window;
       if (md.grain_to_date) ctp.grain_to_date = md.grain_to_date;
       if (md.period_agg) ctp.period_agg = md.period_agg;
-      addMetric({ name, type: 'cumulative', type_params: { measure: { name: resolveMeasure(md.measure.name) }, cumulative_type_params: ctp } });
+      declareMetric({ name, type: 'cumulative', ...label, type_params: { measure: { name: resolveMeasure(md.measure) }, cumulative_type_params: ctp } }, md);
     } else if (md.type === 'derived') {
-      // derived expr is a formula over the input metric aliases only. Enforce a
-      // safe grammar: allowed charset (no quotes/semicolons), and every
-      // identifier must be a declared input metric alias or a safe math fn.
+      // derived expr is a formula over the input metrics, written as they are listed. Enforce a
+      // safe grammar: allowed charset (no quotes/semicolons), and every identifier must be a listed
+      // input metric or a safe math fn.
       const expr = md.expr || '';
       if (!/^[A-Za-z0-9_+\-*/().,\s]+$/.test(expr)) {
         fail(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`, 'metrics.expr');
       }
-      const aliases = new Set((md.metrics || []).map((x) => x.name || x.metric));
+      const aliases = new Set(md.metrics || []);
       const SAFE_FNS = new Set(['nullif', 'coalesce', 'abs', 'round', 'least', 'greatest', 'floor', 'ceil', 'ceiling', 'power', 'sqrt', 'ln', 'log', 'exp', 'mod']);
       for (const tok of expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []) {
         if (!aliases.has(tok) && !SAFE_FNS.has(tok)) {
           fail(`derived metric '${md.name}': expr references unknown identifier '${tok}' (only input metric names + safe math functions allowed)`, 'metrics.expr');
         }
       }
-      // input metrics are namespaced; alias each to the raw name so the user's
-      // `expr` (written with raw metric names) resolves correctly in MetricFlow.
-      const inputs = md.metrics.map((x) => ({ name: NS(task, x.metric), alias: x.name || x.metric }));
-      addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
+      // An input is named as it was declared ('n') or as it is stored ('ret_n'), as a measure is; it is
+      // resolved once every metric of this declaration is known, so the order they are written in is free
+      const derived = { name, type: 'derived', ...label, type_params: { expr: md.expr, metrics: [] } };
+      derivedInputs.push({ derived, md });
+      declareMetric(derived, md);
     } else {
       fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }
   }
 
+  // Each input resolves to the metric it names, and the formula — written over the inputs as they
+  // are listed — is rewritten over those stored names. No aliases reach MetricFlow: it refuses one
+  // that equals an input's name, and one shorter than two characters.
+  const derivedFrom = new Map(); // a derived metric of this declaration → the metrics it reads
+  for (const { derived, md } of derivedInputs) {
+    const from = [...metricNames].filter((n) => n !== derived.name); // a metric is not built from itself
+    const storedOf = new Map();
+    for (const x of md.metrics) {
+      const stored = [NS(task, x), x].find((n) => from.includes(n) || existingMetrics.has(n));
+      if (!stored) fail(`derived metric '${md.name}': no metric named '${x}' or '${NS(task, x)}' to build it from. ${inScope('metric', from, [...existingMetrics.keys()])}`, 'metrics.metrics');
+      storedOf.set(x, stored);
+    }
+    derived.type_params.expr = derived.type_params.expr.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (tok) => storedOf.get(tok) ?? tok);
+    derived.type_params.metrics = [...new Set(storedOf.values())].map((n) => ({ name: n }));
+    derivedFrom.set(derived.name, [...new Set(storedOf.values())]);
+  }
+  // two derived metrics of one declaration built from each other have no value to compute
+  const cycle = (n, path = []) => (path.includes(n) ? [...path, n] : (derivedFrom.get(n) || []).map((m) => cycle(m, [...path, n])).find(Boolean));
+  for (const n of derivedFrom.keys()) {
+    const c = cycle(n);
+    if (c) fail(`derived metrics built from each other: ${c.join(' → ')} — one of them has to read other metrics`, 'metrics.metrics');
+  }
+
   if (!usedModels.size) {
-    fail('this task reads no source: declare at least one semantic_models entry (from: <source>) or use_base_models', 'semantic_models');
+    fail('this task reads no source: declare at least one semantic_models item ({ from: <source>, … })', 'semantic_models');
   }
 
   return {

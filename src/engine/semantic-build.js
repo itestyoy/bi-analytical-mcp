@@ -3,17 +3,29 @@
 // into a context. Methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
-import { compileDeclaration, measureRefs } from '../compile.js';
+import { compileDeclaration, measureRefs, inputMetrics, NS } from '../compile.js';
 import { renderContext } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { clone } from './helpers.js';
 
+/** What a semantic declaration keeps in a context's state — all an update changes. */
+const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
+
+/** The call that loads `model` into a context for its attributes: an item of semantic_models with only `from`. */
+export const loadModelCall = (contextId, model) => `build_semantic_model({ request: { action: 'update', context_id: '${contextId}', semantic_models: [{ from: '${model}' }] } }) — or, in a declaration, an item { from: '${model}' } in its semantic_models`;
+
+/** What a context already holds, which a declaration into it reads and may not declare again (compileDeclaration). */
+const heldBy = (state) => ({
+  measures: Object.values(state.additions || {}).flatMap((a) => a.measures.map((m) => m.name)),
+  metrics: state.metrics || [],
+});
+
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
-  _compile(input) {
+  _compile(input, options) {
     try {
-      return compileDeclaration(this.catalog, input);
+      return compileDeclaration(this.catalog, input, options);
     } catch (e) {
       if (e instanceof ToolError) throw e;
       // compile.js attaches the offending INPUT FIELD to the error — surface it so the
@@ -32,8 +44,8 @@ export const semanticBuildMethods = {
     if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
-      `'${model}.${ref.attribute}' needs model '${model}', which is not loaded in this context. `
-        + `Recreate/update the task with use_base_models including '${model}'.`,
+      `'${model}.${ref.attribute}' needs model '${model}', which this context does not read. `
+        + `Load it: ${loadModelCall(ctx.id, model)}.`,
       { stage: 'validate', field: 'model' },
     );
   },
@@ -46,6 +58,7 @@ export const semanticBuildMethods = {
    */
   async _buildPipeline(input) {
     this._validate('build_pipeline_model.pipeline', input);
+    this._refuseOperandSpelling({ pipeline: { stages: input.pipeline?.stages } });
     // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_ids } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
@@ -86,7 +99,10 @@ export const semanticBuildMethods = {
     // already in a context. They share this schema (and therefore its vocabularies, which is the
     // whole reason they are one tool) but not their bodies.
     if (input.action === 'update') return this._updateSemanticModel(input);
-    const compiled = this._compile(input);
+    // a declaration beside the task already in a context compiles against what that context holds, so
+    // a measure or metric it would declare a second time is refused here, not written twice
+    const into = input.context_id && this.ctxs.has(input.context_id) ? this._ctx(input.context_id).state : null;
+    const compiled = this._compile(input, into ? heldBy(into) : undefined);
 
     if (input.dry_run) {
       const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
@@ -130,7 +146,7 @@ export const semanticBuildMethods = {
       groupable,
       ...(afterLoading.length ? {
         groupable_after_loading: afterLoading,
-        groupable_after_loading_note: `These attributes are reachable in the catalog but their model is not loaded in this context — add it with use_base_models: ['${afterLoading[0].model}'] (create/update) before naming them in group_by/where.`,
+        groupable_after_loading_note: `These attributes are reachable in the catalog but this context does not read their model — load it before naming them in group_by/where: ${loadModelCall(ctx.id, afterLoading[0].model)}.`,
       } : {}),
       parse,
       assumptions: this._assumptions(ctx),
@@ -139,62 +155,96 @@ export const semanticBuildMethods = {
       next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
       recommendations: [
         `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
-        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_model, ... } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
+        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
   },
 
-  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }). */
+  /** The INCREMENTAL path on an existing task: build_semantic_model({ request: { action: 'update', … } }) —
+   *  additions written as a declaration writes them, removals by the names they were added under. */
   async _updateSemanticModel(input) {
     const ctx = this._ctxToWrite(input.context_id);
-    const modelKey = input.semantic_model;
-    // dry_run must NOT mutate the context (state or files): work on a clone.
-    const state = input.dry_run ? clone(ctx.state) : ctx.state;
-    const add = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
+    // The update is made on a COPY of the state, which replaces the context's only once every check
+    // below has passed: a refused update leaves the context as it was, and a dry run never touches it.
+    const state = clone(ctx.state);
+    // the task changed is one the context holds: a name it does not hold is a new task, which is a
+    // declaration beside it (create with context_id), not an update
+    const tasks = state.tasks || [];
+    if (input.task && !tasks.includes(input.task)) {
+      throw new ToolError(`context '${ctx.id}' holds no task '${input.task}'. ${tasks.length ? `It holds: ${tasks.join(', ')}.` : 'It holds none.'} To add a task beside ${tasks.length ? 'them' : 'what it holds'}, declare one: build_semantic_model({ request: { name: '${input.task}', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } })`, { stage: 'validate', field: 'task' });
+    }
+    const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
+    for (const sm of input.semantic_models || []) state.additions[sm.from] ||= { measures: [], dimensions: [] };
+    const task = input.task || tasks[0] || 'task';
+    const measureNames = () => heldBy(state).measures;
 
-    // synthesize a declaration fragment for the add_* parts and compile it
-    const task = input.task || state.tasks[0] || 'task';
-    const frag = { name: task, semantic_models: [{ from: modelKey, dimensions: input.add_dimensions || [], measures: input.add_measures || [] }], metrics: input.add_metrics || [] };
-    const compiled = this._compile(frag);
-
-    // removals (with dependency checks for measures)
-    if (input.remove_metrics) state.metrics = state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
-    if (input.remove_measures) {
-      for (const rm of input.remove_measures) {
-        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(rm));
+    // Removals first (so one update can replace a measure). A measure or metric is named as it was
+    // declared ('n') or as it is stored, task-namespaced ('ret_n'); a name that matches nothing is
+    // refused rather than reported removed.
+    const rm = input.remove || {};
+    const stored = (kind, names, have) => names.map((n) => {
+      const found = [NS(task, n), n].find((x) => have.includes(x));
+      if (found) return found;
+      throw new ToolError(`cannot remove ${kind} '${n}': this context has no ${kind} named '${n}' or '${NS(task, n)}'.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: `remove.${kind}s` });
+    });
+    if (rm.metrics) {
+      const names = stored('metric', rm.metrics, state.metrics.map((m) => m.name));
+      // a ratio or a derived metric built from a removed one would read a metric that is gone
+      const byName = new Map(state.metrics.map((m) => [m.name, m]));
+      const builtOn = (m, seen = new Set()) => inputMetrics(m).some((n) => names.includes(n) || (!seen.has(n) && seen.add(n) && builtOn(byName.get(n), seen)));
+      const dependents = state.metrics.filter((m) => !names.includes(m.name) && builtOn(m));
+      if (dependents.length && !input.cascade) {
+        throw new ToolError(`cannot remove metric${names.length > 1 ? 's' : ''} ${names.map((n) => `'${n}'`).join(', ')}; metrics are built from ${names.length > 1 ? 'them' : 'it'}: ${dependents.map((d) => d.name).join(', ')} (cascade removes them too)`, { stage: 'validate', field: 'remove.metrics' });
+      }
+      state.metrics = state.metrics.filter((m) => !names.includes(m.name) && !builtOn(m));
+    }
+    if (rm.measures) {
+      const names = stored('measure', rm.measures, measureNames());
+      // a metric reads a measure itself or through the metrics it is built from (measureRefs)
+      const reads = (m) => [...measureRefs(m, state.metrics)].some((x) => names.includes(x));
+      for (const name of names) {
+        const dependents = state.metrics.filter((m) => measureRefs(m, state.metrics).has(name));
         if (dependents.length && !input.cascade) {
-          throw new ToolError(`cannot remove measure '${rm}'; metrics depend on it: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate', field: rm });
+          throw new ToolError(`cannot remove measure '${name}'; metrics read it: ${dependents.map((d) => d.name).join(', ')} (cascade removes them too)`, { stage: 'validate', field: 'remove.measures' });
         }
       }
-      add.measures = add.measures.filter((m) => !input.remove_measures.includes(m.name));
+      state.metrics = state.metrics.filter((m) => !reads(m)); // cascade: they go with the measure
+      for (const add of Object.values(state.additions)) add.measures = add.measures.filter((m) => !names.includes(m.name));
     }
-    if (input.remove_dimensions) {
-      // A dimension is named by its ATTRIBUTE — the name `groupable` offers and `add_dimensions`
-      // takes. What is STORED is the task-namespaced copy ('ret_country'), a name the caller is
-      // never shown, so matching on it made every removal a silent no-op that still reported
-      // success. Match on the attribute the dimension declares, and refuse a name that matches
-      // nothing rather than pretending to have removed it.
-      for (const name of input.remove_dimensions) {
-        if (!add.dimensions.some((d) => d._attribute === name || d.name === name)) {
-          const have = [...new Set(add.dimensions.map((d) => d._attribute))];
-          throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
-        }
+    for (const d of rm.dimensions || []) {
+      // A dimension is named by its FIELD — the name `groupable` offers and a declaration takes. What
+      // is STORED is the task-namespaced copy ('ret_country'), a name the caller is never shown; a
+      // name that matches nothing is refused rather than reported removed.
+      const dims = state.additions[d.from]?.dimensions || [];
+      if (!dims.some((x) => x._attribute === d.field || x.name === d.field)) {
+        const have = [...new Set(dims.map((x) => x._attribute))];
+        throw new ToolError(`cannot remove dimension '${d.field}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
       }
-      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d._attribute) && !input.remove_dimensions.includes(d.name));
+      state.additions[d.from].dimensions = dims.filter((x) => x._attribute !== d.field && x.name !== d.field);
     }
+
+    // the additions are a declaration fragment, compiled as a declaration is, against the measures the
+    // task keeps — so a metric added alone reads them by the names they were declared under
+    // (the context's models come along, so metrics alone — or removals alone — compile against them)
+    const frag = { name: task, semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
+    const compiled = this._compile(frag, { ...heldBy(state), models: state.usedModels || [] });
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
     if (input.dry_run) {
-      const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
+      const out = { context_id: ctx.id, semantic_models: models, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
+    // every check passed: the update is the context's now. Only the semantic part is written back —
+    // the live state stays the same object, which a build running on the context's draft or
+    // eventstream holds while it waits
+    for (const k of SEMANTIC_STATE) if (state[k] !== undefined) ctx.state[k] = state[k];
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
       return {
-        context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
+        context_id: ctx.id, semantic_models: models, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
         next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
       };

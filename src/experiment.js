@@ -15,6 +15,13 @@ function meanFromSums(g) {
   return { ...rest, mean, stddev: Math.sqrt(variance) };
 }
 
+// A group's sums as the tool takes them (the mean test's { sum, sum_squares }, nested per value) and
+// as the statistics read them (src/stats.js) — translated here, at the edge, and nowhere else.
+/** A ratio group → the delta method's sums: Σnum, Σden, Σnum², Σden², Σnum·den. */
+const ratioSums = (g) => ({ n: g.n, sumNum: g.numerator.sum, sumDen: g.denominator.sum, sumNum2: g.numerator.sum_squares, sumDen2: g.denominator.sum_squares, sumNumDen: g.sum_products });
+/** A CUPED group → its sums of the tested value Y and the covariate X: ΣY, ΣY², ΣX, ΣX², ΣXY. */
+const cupedSums = (g, label) => ({ label, n: g.n, sumY: g.sum, sumY2: g.sum_squares, sumX: g.covariate.sum, sumX2: g.covariate.sum_squares, sumXY: g.sum_products });
+
 /**
  * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
  * that joins the experiments source, windows events to the assignment period,
@@ -55,16 +62,15 @@ export function abTest(input) {
 
   let results; const extra = {};
   if (metric === 'cuped') {
-    const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];
+    const suff = ['sum', 'sum_squares', 'covariate', 'sum_products'];
     need(control, suff); for (const v of input.variants) need(v, suff);
-    const pick = (g, label) => ({ label, n: g.n, sumY: g.sumY, sumY2: g.sumY2, sumX: g.sumX, sumX2: g.sumX2, sumXY: g.sumXY });
-    const groups = [pick(control, labelOf(control, -1)), ...input.variants.map((v, i) => pick(v, labelOf(v, i)))];
+    const groups = [cupedSums(control, labelOf(control, -1)), ...input.variants.map((v, i) => cupedSums(v, labelOf(v, i)))];
     const out = cupedTest({ groups, alternative, confidence });
     extra.theta = out.theta; results = out.results;
   } else if (metric === 'ratio') {
-    const suff = ['sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen'];
+    const suff = ['numerator', 'denominator', 'sum_products'];
     need(control, suff); for (const v of input.variants) need(v, suff);
-    results = input.variants.map((v, i) => ({ variant: labelOf(v, i), ...ratioDeltaTest({ control, variant: v, alternative, confidence }) }));
+    results = input.variants.map((v, i) => ({ variant: labelOf(v, i), ...ratioDeltaTest({ control: ratioSums(control), variant: ratioSums(v), alternative, confidence }) }));
   } else {
     results = input.variants.map((v, i) => {
       let r; let delta; let variance;
@@ -102,7 +108,7 @@ export function abTest(input) {
 
   // Correct the p-values across the variant family (FWER via Holm, or FDR via BH)
   // so several arms don't inflate false positives; raw `significant` is kept too.
-  // family_p_values: p-values of OTHER metrics in the same experiment readout —
+  // family_p_values: p-values of other metrics in the same experiment readout —
   // included in the family so a 10-metric scorecard doesn't fish significance.
   const familyExtra = (input.family_p_values || []).filter((p) => Number.isFinite(p));
   if (correction !== 'none' && results.length > 0) {
@@ -142,7 +148,7 @@ export function srmCheck(input) {
 
 /**
  * Power / sample-size planning (no warehouse). Given a baseline (proportion) or
- * stddev (mean) plus a target effect, returns the required sample size PER GROUP;
+ * stddev (mean) plus a target effect, returns the required sample size per group;
  * given a sample size, returns the minimum detectable effect (MDE). Use it to size
  * a test up front and to tell "no effect" apart from "underpowered".
  */

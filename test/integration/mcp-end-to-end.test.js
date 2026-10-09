@@ -12,6 +12,11 @@
 // without recomputing. Every assertion is a number or a set of ids from the database — per the
 // project rule, never the text of a generated query.
 //
+// It is also the one home of the join scenarios declared-joins.test.js would otherwise repeat on the
+// engine: the validity window present / absent (#3), the governed spend by install country (#1), the
+// three ad formats and k1's funnels kept apart (#4), the attrs rename built (#5), three sources on
+// metric_time (#7), and the chain grouped by media_source with its spend and impressions (#9).
+//
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
 import { test, before, after } from 'node:test';
@@ -23,7 +28,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
-import { settleMcp } from '../helpers/settle.js';
+import { settleMcp, stepNotes } from '../helpers/settle.js';
 import { forms, pinned } from '../helpers/schema-nav.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
@@ -38,7 +43,7 @@ const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [Str
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
 const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
 /** The validity window of the install record, stated per the calling source's own time column. */
-const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -85,11 +90,11 @@ async function callErr(name, args) {
   return out;
 }
 
-/** A whole pipeline over MCP: start → add_step per stage → materialize. */
+/** A whole pipeline over MCP: start → add_steps → materialize. */
 async function mcpPipeline(source, stages, name) {
   const s = await call('build_pipeline_model', { action: 'start', name: name || `e2e_${seq++}`, source });
-  for (const stage of stages) await call('build_pipeline_model', { action: 'add_step', draft_id: s.draft_id, stage });
-  const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
+  for (const stage of stages) await call('build_pipeline_model', { action: 'add_steps', context_id: s.context_id, stages: [stage] });
+  const built = await call('build_pipeline_model', { action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return built;
 }
@@ -121,7 +126,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   const models = JSON.stringify(overview.models || overview);
   for (const m of ['events', 'crashlytics', 'acquisition', 'users']) assert.match(models, new RegExp(m));
   // …drilling the spend source shows which of its fields are AMOUNTS, with no function fixed…
-  const acq = await call('semantic_index', { model: 'acquisition' });
+  const acq = await call('semantic_index', { source: 'acquisition' });
   const amounts = (acq.aggregatable || []).map((a) => a.field);
   for (const f of ['cost', 'impressions', 'clicks']) assert.ok(amounts.includes(f), `${f} is offered as an amount`);
   assert.ok(!(acq.dimensions || []).some((d) => d.name === 'cost'), 'an amount is not a groupable attribute');
@@ -134,9 +139,8 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // version valid on the spend day.
   const ctx = await mcpTask({
     name: 'e2e_ua',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'users' }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -195,10 +199,9 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   // …and the step that omits it says so, before anything is built.
   const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
   const step = await call('build_pipeline_model', {
-    action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] },
-  });
-  const recs = JSON.stringify(step.recommendations || []);
+    action: 'add_steps', context_id: s.context_id,
+    stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
+  const recs = JSON.stringify(stepNotes(step));
   assert.match(recs, /INCOMPLETE JOIN/);
   assert.match(recs, /install_time_valid_from/, 'and names the real window columns');
 });
@@ -221,7 +224,7 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
     const built = await mcpPipeline('crashlytics', [
       { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-      { stage: 'project', columns: ['event_id'] },
+      { stage: 'project', keep: ['event_id'] },
     ]);
     return new Set(built.rows.map((r) => String(r.event_id)));
   };
@@ -234,20 +237,18 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
 
 test('5. the attrs contract, enforced at the protocol boundary', opts, async (t) => {
   if (skip(t)) return;
-  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).draft_id;
+  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).context_id;
 
   // (a) no attrs → refused, and the error lists what the model actually offers.
   const missing = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: await start(),
-    stage: { stage: 'join', with: 'acquisition', via: 'user' },
-  });
+    action: 'add_steps', context_id: await start(),
+    stages: [{ stage: 'join', with: 'acquisition', via: 'user' }] });
   assert.match(missing.error.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
   const dup = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: await start(),
-    stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] },
-  });
+    action: 'add_steps', context_id: await start(),
+    stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }] });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
   assert.match(dup.error.message, /name: 'events_event_name'/);
 
@@ -266,11 +267,10 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] } });
+  await call('build_pipeline_model', { action: 'add_steps', context_id: s, stages: [{ stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] }] });
   const unlisted = await callErr('build_pipeline_model', {
-    action: 'add_step', draft_id: s,
-    stage: { stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] },
-  });
+    action: 'add_steps', context_id: s,
+    stages: [{ stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: 'tracking_id' }] }] });
   assert.match(unlisted.error.message, /unknown column 'tracking_id'/);
 });
 
@@ -281,10 +281,9 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
   const built = await mcpPipeline('events', [
     { stage: 'match_recognize',
       partition_by: ['player_id_of_internal'],
-      mode: 'ordered',
       steps: [
         { name: 'launch', event_name: ['first_launch'] },
-        { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+        { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
       ] },
     // after the funnel the per-event time is gone; `first_seen_at` (the funnel's first event) is
     // the instant to attribute the player by.
@@ -309,15 +308,11 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
   if (skip(t)) return;
   const ctx = await mcpTask({
     name: 'e2e_mix',
-    semantic_models: [
-      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
-      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
-      { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] },
-    ],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count' }] }],
     metrics: [
-      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
-      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
-      { name: 'crashes', type: 'simple', measure: { name: 'crashes' } },
+      { name: 'cost', type: 'simple', measure: 'cost' },
+      { name: 'evts', type: 'simple', measure: 'evts' },
+      { name: 'crashes', type: 'simple', measure: 'crashes' },
     ],
   });
   const r = await call('query_semantic_model', {
@@ -379,27 +374,34 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
 
 // ═══════════ 9. a stored result, re-sliced without recomputing ═══════════
 
+// The slice groups by an attribute of the third model and measures that model's AMOUNTS (spend and
+// impressions) beside a count of the first — declared-joins.test.js's 45, folded in here.
 test('9. materialize once, then re-slice the stored result from its task: meta 18 / organic 2 / applovin 2', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('crashlytics', [
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
-    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }] },
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }, { column: 'impressions' }] },
   ], `e2e_store_${seq++}`);
   assert.equal(num(built.row_count), 22, 'the row-level result is stored as a table');
 
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, stages) => {
     const d = await call('build_pipeline_model', { action: 'start', name, from_task: built.task_id });
-    await call('build_pipeline_model', { action: 'add_steps', draft_id: d.draft_id, stages });
-    return call('build_pipeline_model', { action: 'materialize', draft_id: d.draft_id });
+    await call('build_pipeline_model', { action: 'add_steps', context_id: d.context_id, stages });
+    return call('build_pipeline_model', { action: 'materialize', context_id: d.context_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
-    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] },
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }, { name: 'impressions', agg: 'sum', column: 'impressions' }] },
   ]);
   const n = mapCol(sliced.rows, 'media_source', 'n');
   const spend = mapCol(sliced.rows, 'media_source', 'spend');
   assert.deepEqual(n, { meta: 18, organic: 2, applovin: 2 });
   assert.ok(near(spend.meta, 20.0) && near(spend.organic, 0.0) && near(spend.applovin, 5.0), JSON.stringify(spend));
+  // '45. group by a joined attribute, measure joined amounts' (declared-joins.test.js): its impressions
+  const imp = mapCol(sliced.rows, 'media_source', 'impressions');
+  assert.equal(imp.meta, 1420, '[45] meta impressions');
+  assert.equal(imp.organic, 0, '[45] organic impressions');
+  assert.equal(imp.applovin, 360, '[45] applovin impressions');
 
   // a filter over the stored result is just as cheap.
   const meta = await slice(`e2e_slice_${seq++}`, [
@@ -419,7 +421,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const ctx = await mcpTask({
     name: 'e2e_grow',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const before = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
@@ -433,9 +435,8 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const grown = await call('build_semantic_model', {
     action: 'update',
     context_id: ctx,
-    semantic_model: 'acquisition',
-    add_measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }],
-    add_metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }] }],
+    metrics: [{ name: 'clicks', type: 'simple', measure: 'clicks' }],
   });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 

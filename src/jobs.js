@@ -41,9 +41,16 @@ export class JobManager {
     return this.live.has(id);
   }
 
-  setTable(id, table) {
+  /** The table a task leaves behind — with the context that holds it, for a task whose context was
+   *  created by its own work (a pipeline declared and built in one call), and how many of its rows the
+   *  task's answer holds (`keptRows`: what a card draws of it, after a restart too). */
+  setTable(id, table, { contextId = null, keptRows = null } = {}) {
     const j = this.jobs.get(id);
-    if (j) { j.table = table; this._persist(j); }
+    if (!j) return;
+    j.table = table;
+    if (contextId && !j.contextId) j.contextId = contextId;
+    if (keptRows != null) j.keptRows = keptRows;
+    this._persist(j);
   }
 
   ready(id) {
@@ -51,10 +58,11 @@ export class JobManager {
     if (j) { j.status = 'ready'; j.readyAt = Date.now(); this._persist(j); }
   }
 
-  /** The task's one card was drawn (display_model_result) — kept with the task, so it outlives a restart. */
-  markDrawn(id) {
+  /** The task's one card was drawn (display_model_result), as `display` — kept with the task, so the
+   *  card reads its views after a restart too, and only the views of what it drew. */
+  markDrawn(id, display = null) {
     const j = this.jobs.get(id);
-    if (j) { j.drawn = true; this._persist(j); }
+    if (j) { j.drawn = true; if (display) j.display = display; this._persist(j); }
   }
 
   fail(id, error) {

@@ -6,7 +6,8 @@
 //   run(projectDir, select, { empty })    → { ok, stdout, stderr, error?, cancelled? }  (empty: --empty, no data read)
 //   seed(projectDir)                      → { ok, stdout, stderr, error? }
 //   show(projectDir, sql, limit, timeout) → { ok, rows, columns, stdout?, stderr?, error? }
-//   relationColumns(projectDir, model)    → { ok, columns: [{ name, dtype }] }
+//   relationColumns(projectDir, model)    → { ok, columns: [{ name, dtype }] }  (the project's mcp_relation_columns
+//                                           macro; dtype an array's own type — ARRAY<…> — not its element's)
 //   query(projectDir, opts)               → { ok, command, columns, rows } | explain: { ok, sql, plan? }
 //   validate(projectDir)                  → { ok, stdout, stderr }
 //   warehouse(projectDir)                 → { adapter, singleWriter, turn }

@@ -13,7 +13,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
-import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
+import { settle, isStartedTask, taskResult, stepEffect } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => settle(new Engine({
@@ -119,7 +119,7 @@ test('a pipeline build never holds its call: even a lone python model returns a 
   }));
   const py = {
     stage: 'python',
-    functions: [{ name: 'tag', params: ['df'], body: ['df["tag"] = 1', 'return df'] }],
+    functions: [{ name: 'tag', params: ['df'], body: "df[\"tag\"] = 1\nreturn df" }],
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
@@ -174,10 +174,9 @@ models:
     stage: 'match_recognize',
     partition_by: [{ entity: 'user' }],
     steps: [
-      { name: 's1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
-      { name: 's2', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_2' }] },
+      { name: 's1', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_1' }] },
+      { name: 's2', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_2' }] },
     ],
-    metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
   };
   const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
@@ -196,12 +195,12 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   }));
   const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
-  const joinStage = out.pipeline_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
+  const joinStage = out.pipeline_payload.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
   const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
   const to = Object.entries(u.dimensions).find(([, d]) => d.validity === 'end')[0];
-  assert.deepEqual(joinStage.between, { value: e.catalog.getModel('events').time.column, from, to });
+  assert.deepEqual(joinStage.between, { column: e.catalog.getModel('events').time.column, from, to });
   assert.ok(out.fitted_to_catalog?.some((f) => f.includes("join with 'users'")), JSON.stringify(out.fitted_to_catalog));
 });
 
@@ -218,7 +217,7 @@ test('_buildPipeline warns about an incomplete SCD join, like the step builder d
   // with the window stated, there is nothing to warn about
   const ok = await e._buildPipeline({
     name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
   });
   assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
 });
@@ -231,21 +230,18 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [
-      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
-      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
-    ],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
-    /cannot remove dimension 'nope'.*It has: country/s,
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'platform' }] } }),
+    /cannot remove dimension 'platform'.*It has: country/s,
   );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it
@@ -262,14 +258,14 @@ test('groupable and the example only name models this context loaded', async () 
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const loaded = new Set(out.joined_models);
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
   assert.ok((out.groupable || []).every((g) => loaded.has(g.model)), JSON.stringify(out.groupable));
   assert.ok((out.groupable_after_loading || []).some((g) => g.model === 'users'), 'and the rest is offered separately');
-  assert.match(out.groupable_after_loading_note || '', /use_base_models/);
+  assert.match(out.groupable_after_loading_note || '', /semantic_models: \[\{ from: '\w+' \}\]/);
   // whatever is published as groupable is accepted by the query path
   const ctx = e.ctxs.get(out.context_id);
   for (const g of out.groupable || []) {
@@ -299,7 +295,7 @@ test('the resolved submission method is written into the model, not just reporte
   assert.equal(rt.method_declared, false, 'the profile never declared it — which is why it must be written down');
 
   const profile = frameProfile(rt, rt.config || {});
-  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] };
+  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] };
   const compiled = compilePythonStage(stage, {
     modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile),
     config: rt.config || {}, profile, submission: rt.method,
@@ -376,7 +372,7 @@ test('the submission is read from dbt_project.yml first, and its source is repor
   const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
   const profile = frameProfile(declared, {});
   const compiled = compilePythonStage(
-    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] },
+    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: "return df" }], steps: [{ call: 'f' }] },
     { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile), config: {}, profile, submission: declared.method },
   );
   assert.equal(compiled.config.submission_method, 'serverless');
@@ -466,9 +462,8 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   // relationship to it (two facts do not point at each other).
   const out = await e.build_semantic_model({
     name: 'evonly',
-    use_base_models: ['crashlytics', 'users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
     () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
@@ -514,20 +509,20 @@ models:
 });
 
 // ── unnest read a payload column without checking it is still there ─────────────────────────
-// `derive` gained that check; `unnest` did not, so after a stage that changed the grain it emitted
+// an event-property read gained that check; `unnest` did not, so after a stage that changed the grain it emitted
 // a lateral join over a column the relation no longer has — a raw warehouse error at materialize
-// instead of a stage-time refusal at add_step.
+// instead of a stage-time refusal at add_steps.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } });
-  assert.equal(ok.step_index, 1);
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] });
+  assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] } });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', name: 'word' } }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

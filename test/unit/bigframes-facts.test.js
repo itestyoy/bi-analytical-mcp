@@ -56,7 +56,7 @@ test('nothing in the guide or the recipes prescribes a parameter the library doe
     ...(guide.examples || []).flatMap((ex) => ex.do || []),
     ...recipes.list.filter((r) => r.runtime === 'bigframes').flatMap((r) => [
       r.approach, r.hack,
-      ...(r.pipeline_payload?.pipeline?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => JSON.stringify(f.body))),
+      ...(r.pipeline_payload?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => JSON.stringify(f.body))),
     ]),
   ].join('\n');
   assert.ok(!/std\(ddof/.test(prescribed), `ddof is still prescribed: ${/[^\n]*std\(ddof[^\n]*/.exec(prescribed)?.[0]}`);
@@ -89,7 +89,7 @@ test('distinct values: drop_duplicates works, bare unique() is the one that rais
 
 test('an estimator returns its own frame — the prediction is not assigned back', () => {
   const ml = recipes.get('bf_ml_predict_as_column');
-  const fn = ml.pipeline_payload.pipeline.stages.find((s) => s.stage === 'python').functions[0];
+  const fn = ml.pipeline_payload.stages.find((s) => s.stage === 'python').functions[0];
   const body = JSON.stringify(fn.body);
   assert.match(body, /model\.predict\(df\)/, 'predict is called on the frame…');
   assert.match(body, /return out/, '…and its result is what the stage returns');
@@ -123,13 +123,13 @@ test('the runtime hints send a failed run to the form that works', () => {
 // each one prepares its table in SQL stages and leaves the python stage with the part SQL cannot
 // say. A recipe that handed the raw source to python would teach the opposite of the guide.
 test('every bigframes recipe prepares its table in SQL before the python stage', () => {
-  const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'pivot', 'unpivot', 'window', 'order_by']);
+  const REDUCES = new Set(['where', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'pivot', 'unpivot', 'window', 'order_by']);
   // a REFERENCE entry (the generated signature/method sheets) declares no pipeline — it is the
   // library's own surface, not a model to build
   const bf = recipes.list.filter((r) => r.runtime === 'bigframes' && !r.reference);
   assert.ok(bf.length >= 10, 'precondition: the bigframes family is shipped');
   for (const r of bf) {
-    const stages = r.pipeline_payload.pipeline.stages;
+    const stages = r.pipeline_payload.stages;
     const at = stages.findIndex((s) => s.stage === 'python');
     assert.ok(at > 0, `${r.id}: the python stage is first — nothing prepares its input`);
     const before = stages.slice(0, at).map((s) => s.stage);
@@ -159,7 +159,7 @@ test('the ml constructor signatures are extracted, and nothing prescribes a keyw
     ...(guide.examples || []).flatMap((ex) => ex.do || []),
     ...recipes.list.filter((r) => r.runtime === 'bigframes').flatMap((r) => [
       r.approach, r.hack,
-      ...(r.pipeline_payload?.pipeline?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => (f.body || []))),
+      ...(r.pipeline_payload?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => (f.body || []))),
     ]),
   ].filter(Boolean).join('\n');
 

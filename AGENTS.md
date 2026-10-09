@@ -123,7 +123,7 @@ Completed task notes should not be treated as source of truth. Search archived t
 
 - Run the smallest useful check for the affected area.
 - If checks are skipped or unavailable, say so clearly in the final message.
-- This repository's checks: `npm run lint:names` and `npm test` (unit), `npm run test:integration` (DuckDB + dbt + MetricFlow, on the named dbt environments), `npm run eval:check` (every eval case's SQL against the fixture warehouse). Tests assert on data, never on generated text — see [Testing](#testing-hard-rule).
+- This repository's checks: while working, `npm run test:quick` (lint:names, the unit tests and the integration files with the most coverage per minute, about 5 min) and `npm run test:integration -- <name>` for the integration files of the area touched (those whose file name contains `<name>`); once at the end, the full set — `npm run lint:names` and `npm test` (unit), `npm run test:integration` (every DuckDB + dbt + MetricFlow file on the named dbt environments, heaviest first, four side by side: `scripts/run-tests.mjs`), `npm run eval:check` (every eval case's SQL against the fixture warehouse). Tests assert on data, never on generated text — see [Testing](#testing-hard-rule).
 
 ## Git
 
@@ -183,10 +183,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `meta.mcp.measures: { <name>: { expr, ... } }` for an aggregatable expression.
   NEITHER fixes an aggregation: a task names the field in a measure's `field` and
   chooses `agg` per question (sum | average | min | max | count | count_distinct |
-  sum_boolean | median | percentile, validated at catalog load) — the same column is
-  summed for one question and read at a p90 for the next. Adding `agg` to a
-  declaration is the OPT-IN exception: it additionally publishes a governed measure
-  whose function is fixed for everyone; the free choice over the raw field remains.
+  median | percentile; the rows where a condition holds are counted by `count` with
+  that `where`) — the same column is summed for one question and read at a p90 for
+  the next. Adding `agg` to a declaration is the OPT-IN exception: it additionally
+  publishes a governed measure whose function is fixed for everyone (any of dbt's,
+  sum_boolean included, validated at catalog load); the free choice over the raw
+  field remains.
   Do NOT special-case a measure, a column name or a role in `src/` — if a new source
   needs something, it becomes a schema key that every source can use. Two opt-outs
   go with it: `meta.mcp.dimension: false` (a real column that is not a groupable
@@ -235,7 +237,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   are dropped with a warning (count on an events source instead).
 - A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js) over
   per-group aggregates (proportion → z-test; mean →
-  Welch t-test).
+  Welch t-test; ratio → delta method; cuped → variance reduction). A group's sums of one value are
+  `{ sum, sum_squares }` wherever a test reads them — a mean group's, a ratio's numerator and
+  denominator, a CUPED group's own and its covariate's — with `sum_products` beside a pair; they are
+  mapped onto src/stats.js's internals at the edge (src/experiment.js) and nowhere else.
 - A FACT ABOUT AN EXTERNAL LIBRARY IS GENERATED FROM THAT LIBRARY, NEVER WRITTEN IN PROSE (HARD
   RULE). Signatures, which methods raise, what a class returns: extracted by a script into a
   checked-in sheet (`scripts/bigframes-facts.py` → `config/bigframes-facts.json`), and every text
@@ -303,8 +308,31 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   read with `task_ids`, and every `where` is ONE condition grammar — a list that all hold, an item a
   condition or `{ or: [...] }` (its items may be `{ and: [...] }`; src/schema-kit.js `conditionList`),
   every condition taking the same operators (`OPS`, src/conditions.js, written by its one
-  `comparison`). Only what a condition compares differs by place: a column, an event property, or —
-  in a metric query — the field as group_by names it. A computed column is ONE expression —
+  `comparison`). Only what a condition compares differs by LEVEL: over a table's rows (a pipeline's
+  where, a funnel step, a pipeline measure's where) a `column` or an expression
+  (`left`, never a bare column), against a constant `value` or an expression `right` — never both
+  (four closed forms, `CONDITION` in src/pipeline/sql.js); over a stored result (a read's where and
+  having, its measures' where) a `column` against a constant `value` — the first of those forms, under
+  its title (src/schema/projection.js): an expression is a pipeline step's; on
+  a semantic model's source a `field` (a column, a scalar payload property); in a metric query the
+  field reference as group_by names it. A MEASURE is ONE form wherever rows are aggregated — a
+  pipeline's aggregate stage, a pivot's cells (that measure without its name and its where — the
+  cell's condition is `on` = the value — one per listed value),
+  a read's transform, a semantic model — `{ name, agg, column|field?,
+  percentile?, where? }`, closed forms by `agg` (`measureSchema`, src/pipeline/sql.js): a count
+  without its column counts rows, events are scoped by a `where`. What a semantic metric reads is
+  named by a string — a simple or cumulative metric's `measure`, a ratio's `numerator` and
+  `denominator`, a derived metric's `metrics` (its `expr` written over them as listed) — and a model
+  is loaded into a task by an item of `semantic_models` (`{ from }` alone loads it for its
+  attributes), in a declaration and an update alike. A SORT KEY over a table's rows (the
+  order_by stage, a window's order, a read) is ONE item `{ key, direction?, nulls? }` (`SORT_KEY`),
+  NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
+  funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a time window is
+  `time_range` `{ start, end, timezone }` (ONE builder, `timeRange` in src/schema-kit.js, read by
+  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a catalog
+  entity is addressed `{ source }`, `{ source, property }` or `{ source, event }` — semantic_index's views
+  and what a memory note is `about` alike; a week is the ISO
+  week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE expression —
   `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
   is added there once, its schema form and its SQL beside each other; a window function takes `over`,
@@ -312,7 +340,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   where each goes, written quoted by the server — POSITIONAL: a word of its text spelled exactly as a
   column of the step is refused, with no list of words beside it; the rest goes as written). Every column
   name the server writes into SQL is quoted by the warehouse's dialect, in every stage and every read. A caller who brings another tool's spelling
-  (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
+  (`avg`, `q`, `fn`, `as`, `targets`, `text`) is told this server's (src/validate.js). The retentioneering steps keep
   the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
@@ -322,10 +350,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   every tool is `visibility: ["model"]` except `drill_result` (`["model", "app"]` — hosts refused a
   card's call to an app-only tool; the server answers it only for a DRAWN task), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
   server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
-  row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its task's stored
-  table, filtered to the path taken and grouped by the dimension chosen, each read built by the view
-  model's one definition of a view (no other tools/call, resource, model message, link or network)
-  — a test holds its sources to that; the server serves it only for a task that was drawn.
+  row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): the card sends the
+  path taken and the level chosen ({ task_id, path, level?, mode? }), and the SERVER makes the read —
+  its task's stored table filtered to the path and grouped by the level — by the view model's one
+  definition of a view over the display the card was DRAWN with (kept with the task), so a card reads
+  only the views of what it drew (no other tools/call, resource, model message, link or network) — a
+  test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
 - BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
   tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
@@ -333,7 +363,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   pipeline materialize) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — explain / dry_run — which waits for the context's build alone). A query tool also takes a
+  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — dry_run — which waits for the context's build alone). A query tool also takes a
   BATCH — `{ context_id, queries: [...] }`, of any size — which checks EVERY query before
   any starts (one mistake refuses the batch), starts one task per query and returns ONLY
   `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process
@@ -342,7 +372,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   side reads tasks back (the started answer names it in `read_with`) with ONE form, `{ task_ids }` —
   one id or several: it waits (≤ MAX_WAIT_SECONDS per call) and returns each one's result under
   `results`, in the order asked (`TaskRunner.readAnswer`; a read whose every task failed is a tool
-  error), `offset`/`limit` paging each stored table or the rows held in memory;
+  error), `offset`/`limit` paging each one's result by its row numbers (READ_PAGE rows unless
+  `limit` says) — a query keeps the first `limit` rows of its result (KEPT_ROWS by default), a stored
+  table (materialize, a pipeline build) pages to its last row; a start takes no `offset`;
   `{ task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
   refuses a task of the other side — before any wait — and it never draws. The side is
@@ -404,7 +436,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   PIPELINE — `start` declares the eventstream, rendered in SQL through the pipeline's own stages (scope,
   the declared relationship for segments, point-in-time for a slowly-changing model), materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
-  (`add_step` / `add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
+  (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
   (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
   in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
@@ -431,9 +463,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
   What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
-  src/retentioneering/schema.js — today `filter_events.where`, a condition tree on the eventstream's
-  columns, written into the library's `sql` with every name and constant quoted, a column compared as its
-  constant's kind and a missing value matching nothing — so a negation keeps it, as the library's drop does). The path-pattern
+  src/retentioneering/schema.js — today `filter_events.where`, the one condition grammar (a list that all
+  hold, `{ or: [...] }`, the operators of `OPS`) on the eventstream's columns, written into the library's
+  `sql` with every name and constant quoted, a column compared as its constant's kind and a missing value
+  matching nothing — so a negation (neq, not_in, not_like) keeps it, as the library's drop does). The path-pattern
   language (path_pattern, an anchor's pattern, matches_pattern) is the library's parser's own, extracted
   into the sheet (`path_patterns`) and rendered in the guide; the library's relative doc links are made
   absolute in the sheet.
@@ -585,8 +618,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   query_semantic_model({ context_id: "<semantic model>" }) — `{ semantic_model, dimension, grain? }`,
   `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
   the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
-  one spelling per item — and `{ entity }` in group_by / where / order_by: what a dimension is and
-  where it lives. MetricFlow makes every join; what it needs is its own name for the
+  one spelling per item — and `{ entity }` in group_by / where: what a dimension is and
+  where it lives (order_by names the result column a group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
   item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
   with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
   RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's
@@ -639,9 +672,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   adapters, the library and the numerical packages that decide its results, all pinned), and a dbt
   client of its own over it, so turning the feature on changes nothing the core runs; its test file
   (test/integration/retentioneering.test.js) runs on it and skips when it is not built.
-- The integration tests query through the dbt client production runs (`testDbt`, test/helpers/
-  dbt-env.js → `createDbt`): the numbers they prove come from `mf query` and `dbt show` as the server
-  calls them. Do NOT add a query backend only the tests use.
+- The integration tests query through the server's own dbt client contract (`testDbt`, test/helpers/
+  dbt-env.js → `createDbt` over `TEST_ENV`): the numbers they prove come from `mf query` and `dbt show`
+  as the server calls them — on the test environment's dbt, so the client of another major version
+  (production's `DEFAULT_ENV`) is proven only by a run with DBT_ENV naming it. Do NOT add a query
+  backend only the tests use.
 - THE EVALS ARE THE PRODUCTION SURFACE WITH A MODEL IN IT (evals/): golden questions — direct,
   indirect, negative — put to a model through the listed tools over MCP, on the engine production
   builds (`makeEngine`) over the fixture warehouse, EACH CASE IN A WORLD OF ITS OWN (a fresh engine and
@@ -654,8 +689,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   never a number in a test. The fixture world (`buildWarehouse`, `connectMcp`,
   test/integration/warehouse-harness.js) and the task-following call (`settleMcp`, test/helpers/
   settle.js) have one definition, shared by the integration tests and the evals.
-- Tests run on the server's default environment (`DEFAULT_ENV` — for now `dbt-v1`; DBT_ENV picks
-  another); the python stage's file runs on `dbt-v1` (dbt 1.x) whatever it is, since v2 runs no Python
+- Tests run on `dbt-v2` (test/helpers/dbt-env.js `TEST_ENV`; DBT_ENV picks another), not on the
+  server's `DEFAULT_ENV`, which stays `dbt-v1` only for BigQuery's sake: on the DuckDB fixtures v2
+  answers each dbt call several times faster, and a server a test builds runs on the same
+  environment; the python stage's file runs on `dbt-v1` (dbt 1.x) whatever it is, since v2 runs no Python
   models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 
 ### Testing (HARD RULE)

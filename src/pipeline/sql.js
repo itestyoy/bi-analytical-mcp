@@ -6,7 +6,7 @@
 import { getDialect } from '../dialects/index.js';
 import { isNumericType, isTimeType } from '../dialects/base.js';
 import { COMPARE_SQL, OPS, comparison, typedLiteral } from '../conditions.js';
-import { form, conditionList, CONSTANT } from '../schema-kit.js';
+import { form, conditionList, anyOfOr, strEnum, CONSTANT } from '../schema-kit.js';
 // (compute.js imports this module too: exprSql is read when a condition is written, never as the module loads)
 import { exprSql } from './compute.js';
 
@@ -21,6 +21,40 @@ export const AGG_FNS = ['sum', 'average', 'min', 'max', 'count', 'count_distinct
 export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sketch column
 
 export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
+
+/** The functions for which the column is optional: a count counts rows without it (a sketch, like every other function, reads one). */
+const COLUMN_OPTIONAL = ['count'];
+
+/**
+ * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform, a
+ * semantic model: { name, agg, <key>?, percentile?, where? }, in closed forms told apart by `agg` —
+ * the functions that fold a column (it is required), those for which it is optional (a count of
+ * rows), and the percentile (column and quantile required). `aggs` is what the place can compute;
+ * `key` what it calls what is aggregated (a table's `column`, a source's `field`) and `column` its
+ * schema; `where` the conditions a conditional measure folds the rows of; `pattern` what a produced
+ * name may be and `nameDescription` what that name is there; `extra` the place's own optional
+ * fields; `numeric` ({ aggs, extra }) fields only the functions that fold a number take — those
+ * functions get a form of their own that carries them, so the others refuse them. `named: false` is
+ * the measure where the place names what it produces itself (a pivot names a column per value): the
+ * same forms without `name`.
+ */
+export function measureSchema({ aggs, column, where, description, pattern = NAME, nameDescription = 'The name of the column it produces.', key = 'column', optional = COLUMN_OPTIONAL, extra = {}, numeric = null, named = true }) {
+  const name = named ? { type: 'string', pattern, description: nameDescription } : undefined;
+  const needs = aggs.filter((a) => a !== 'percentile' && !optional.includes(a));
+  const opt = aggs.filter((a) => optional.includes(a));
+  const own = Object.fromEntries(Object.entries({ name, where, ...extra }).filter(([, v]) => v !== undefined));
+  const num = numeric ? { ...own, ...numeric.extra } : own;
+  const isNum = (a) => !!numeric && numeric.aggs.includes(a);
+  const req = (...keys) => [...(named ? ['name'] : []), ...keys];
+  // the functions that need a column, split by whether they fold a number (and take its fields)
+  const groups = [needs.filter(isNum), needs.filter((a) => !isNum(a))].filter((g) => g.length);
+  const forms = [
+    ...groups.map((g) => form({ title: `agg: ${g.join(' | ')}`, tag: ['agg', g], required: req(key), properties: { ...(isNum(g[0]) ? num : own), [key]: column } })),
+    ...(opt.length ? [form({ title: `agg: ${opt.join(' | ')} (${key} optional)`, tag: ['agg', opt], required: req(), properties: { ...own, [key]: column } })] : []),
+    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: req(key, 'percentile'), properties: { ...(isNum('percentile') ? num : own), [key]: column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
+  ];
+  return { type: 'object', ...(description ? { description } : {}), anyOf: forms };
+}
 
 /**
  * What THIS warehouse's statistical aggregates are: exact, or a sketch. The dialect declares it
@@ -39,19 +73,129 @@ export function statAccuracyNote(catalog) {
 // expressions), defined once in the stage schemas' $defs and referenced from every place that takes one.
 export const EXPR = { $ref: '#/$defs/expr' };
 
-// One comparison, used identically by `where` and `case` branches. Either side is
-// a column / constant / now: shorthand `{column, op, value}` (column vs constant)
-// or `{left, op, right}` (column-vs-column, constant-vs-column, …). in/not_in take
-// an array via `value` or `right.value`.
+// One comparison, used identically by every where, a measure's where, a CASE branch and a funnel
+// step. Its LEFT side is a column named outright (`column`) or another expression (`left`: a function,
+// now, a constant — a column is written `column`); its RIGHT side a constant (`value`; a list for
+// in/not_in, [low, high] for between, none for is_null/is_not_null) or an expression (`right`). Four
+// closed forms, told apart by the two keys each requires, so `value` and `right` never meet.
+const CMP_VALUE = { ...CONSTANT, description: 'The constant compared with: a list for in / not_in, [low, high] for between, none for is_null / is_not_null.' };
+const CMP_LEFT = { ...EXPR, description: 'An expression that is not a bare column — a function ({ fn, args }), { now: true } or a constant { value }; a column is compared as { column }.' };
+const CMP_RIGHT = { ...EXPR, description: 'The expression compared with — a column ({ column }), { now: true } or a function; eq … lte only. A constant compared with is `value`.' };
 export const CONDITION = {
   type: 'object',
-  description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
-  // the left side is a column named outright or an operand — one of the two, never both
+  description: 'A comparison: the left side a `column` or a `left` expression, the right side a constant `value` or a `right` expression.',
   anyOf: [
-    form({ title: 'a column compared — { column, op, value } or { column, op, right: { column } }', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
-    form({ title: 'an operand compared — { left: { column } | { value } | { now: true } | { fn, args }, op, right: { … } or value }', required: ['left', 'op'], properties: { left: EXPR, op: { enum: CMP }, value: CONSTANT, right: EXPR } }),
+    form({ title: 'a column and a constant — { column, op, value }', required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: CMP_VALUE } }),
+    form({ title: 'a column and an expression — { column, op, right }', required: ['column', 'op', 'right'], properties: { column: { type: 'string' }, op: { enum: CMP }, right: CMP_RIGHT } }),
+    form({ title: 'an expression and a constant — { left, op, value }', required: ['left', 'op'], properties: { left: CMP_LEFT, op: { enum: CMP }, value: CMP_VALUE } }),
+    form({ title: 'an expression and an expression — { left, op, right }', required: ['left', 'op', 'right'], properties: { left: CMP_LEFT, op: { enum: CMP }, right: CMP_RIGHT } }),
   ],
 };
+
+/** A condition whose column is written as left: { column } — the spelling a column does not take. */
+export const columnAsLeft = (c) => OPS.includes(c?.op) && !!c.left && typeof c.left === 'object' && !Array.isArray(c.left) && c.left.column !== undefined && c.left.fn === undefined;
+
+/** A condition whose constant is written as right: { value } — the spelling a constant does not take
+ *  there: a constant compared with is `value`. */
+export const constantAsRight = (c) => OPS.includes(c?.op) && !!c.right && typeof c.right === 'object' && !Array.isArray(c.right) && Object.hasOwn(c.right, 'value') && c.right.fn === undefined;
+
+/** How a condition's operand written in the spelling it does not take is told its own — null when
+ *  both sides are written as the closed forms write them. */
+export function operandSpelling(c) {
+  if (columnAsLeft(c)) return `compares the column '${c.left.column}' as left: { column } — a column is compared as { column: '${c.left.column}', op, … }: write { column } instead of left: { column } (left is for an expression: a function, now, a constant)`;
+  if (constantAsRight(c)) return `compares with the constant ${JSON.stringify(c.right.value)} as right: { value } — a constant compared with is \`value\`: write value: ${JSON.stringify(c.right.value)} instead of right: { value } (right is for an expression: a column, now, a function)`;
+  return null;
+}
+
+/**
+ * The conditions in a request's stages that write an operand in a spelling it does not take — a
+ * column as left: { column }, a constant as right: { value } — as [path, what to write] pairs. The
+ * schema cannot tell those operands from another (`left` and `right` are expressions, and a column and
+ * a constant are ones), so a new step is checked here before it is built: a column is `column`, a
+ * constant `value`, and only a step a draft kept from an earlier version is carried over in the other
+ * spelling (src/pipeline/earlier.js).
+ */
+export function operandsMisspelled(value, at = '') {
+  const found = [];
+  const walk = (x, path) => {
+    if (Array.isArray(x)) { x.forEach((v, i) => walk(v, `${path}.${i}`)); return; }
+    if (!x || typeof x !== 'object') return;
+    const told = operandSpelling(x);
+    if (told) found.push([path, told]);
+    for (const [k, v] of Object.entries(x)) walk(v, path ? `${path}.${k}` : k);
+  };
+  walk(value, at);
+  return found;
+}
+
+/**
+ * ONE TYPE WORD — what a value is read or converted as: compute's cast, a JSON / array read, an
+ * unnested element, a raw expression's result, a CASE's; a semantic measure's `cast` takes its
+ * number types (TYPES without string).
+ */
+export const TYPES = ['int', 'numeric', 'float', 'string'];
+export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read, an unnested element or a raw expression yields, a CASE result.' };
+
+/**
+ * ONE SORT KEY — the order_by stage's keys, a window's over.order_by and a read's order_by: a column,
+ * its direction, and where its NULLs go. An omitted `nulls` is last on every warehouse (each writes it
+ * explicitly: their own defaults differ), so a top-N or a row_number over a nullable key is the same rows
+ * everywhere.
+ */
+export const SORT_KEY = {
+  type: 'object', additionalProperties: false, required: ['key'],
+  properties: {
+    key: { type: 'string', description: 'The column to sort by.' },
+    direction: { enum: ['asc', 'desc'], description: 'asc (default) or desc.' },
+    nulls: { enum: ['first', 'last'], description: 'Where NULLs go: last (default) or first — the same on every warehouse.' },
+  },
+};
+
+/** Every relationship name the events sources declare — what a partition's { entity } may name. */
+function relationshipNames(catalog) {
+  if (!catalog?.facts) return [];
+  return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
+}
+
+/**
+ * ONE PARTITION ITEM — what a funnel's sequence and a window's rows restart per: a column available
+ * here, or { entity }, a relationship the source declares, whose key column is used. A catalog whose
+ * sources declare no relationship offers the column alone.
+ */
+export function partitionItem(catalog) {
+  const rel = relationshipNames(catalog);
+  return anyOfOr([
+    { title: 'a column', type: 'string', description: 'A column available here.' },
+    ...(rel.length ? [{
+      title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
+      description: 'A relationship the source declares — its key column is used.',
+      properties: { entity: strEnum(rel) },
+    }] : []),
+  ]);
+}
+
+/**
+ * The column a partition item names: a column as it is, or { entity } — the key column of that
+ * relationship of the pipeline's source, which has to be ONE real column (a composite key, or a part
+ * truncated to a grain, is an expression: the caller partitions by the columns it means). A bare name
+ * that is a relationship and no column here is told to say { entity }. `where` names it in a refusal.
+ */
+export function partitionColumn({ catalog, source, cols }, p, where) {
+  const model = catalog && source ? catalog.getModel(source) : null;
+  const declared = Object.keys(model?.entities || {});
+  if (p !== null && typeof p === 'object') {
+    const e = model?.entities?.[p.entity];
+    if (!e) throw new Error(`${where}: '${source}' declares no relationship '${p.entity}' (declared: ${declared.join(', ') || 'none'})`);
+    const parts = e.key || [];
+    if (parts.length !== 1 || parts[0].grain) {
+      throw new Error(`${where}: relationship '${p.entity}' of '${source}' is keyed by ${parts.map((x) => x.column).join(' + ') || 'nothing'}${parts.some((x) => x.grain) ? ' (truncated to a grain)' : ''}, which is an expression, not a column — partition by the column(s) you mean`);
+    }
+    return parts[0].column;
+  }
+  const s = String(p);
+  if (!cols?.has(s) && declared.includes(s)) throw new Error(`${where}: '${s}' is a RELATIONSHIP of '${source}', not a column — write { entity: '${s}' } to partition by its key column`);
+  return s;
+}
 
 export const OPSYM = COMPARE_SQL;
 
@@ -127,41 +271,55 @@ export function unquotedSql(sql) {
 const TEXT_TRUE = ['true', '1', 't'];
 const TEXT_FALSE = ['false', '0', 'f'];
 
-// One comparison. Each side may be a column, a constant (value), or now:
-//   { column, op, value }        — column vs constant (shorthand)
-//   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
-//                                     constant vs column, etc.)
+/** A boolean compared with a TEXT column of the warehouse holding a flag: matched against every way
+ *  text spells it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at
+ *  the spelling — whichever side of the condition the constant is written on. */
+function textFlag(d, sql, op, value, name) {
+  const values = [].concat(value);
+  if (!['eq', 'neq', 'in', 'not_in'].includes(op) || !values.every((v) => typeof v === 'boolean')) {
+    throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+  }
+  const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((x) => d.sqlLiteral(x));
+  return `LOWER(TRIM(${sql})) ${op === 'neq' || op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
+}
+const isTextFlag = (side, value) => side.physical && side.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean');
+
+// One comparison, in the four closed forms of CONDITION:
+//   { column, op, value? }  — a column vs a constant
+//   { column, op, right }   — a column vs an expression (a column, now, a function)
+//   { left, op, value? }    — an expression vs a constant
+//   { left, op, right }     — an expression vs an expression (a constant on the left, a column on the right, …)
 /** One condition's SQL. `opts` passes on to the expressions it compares (src/pipeline/compute.js exprSql:
  *  a where's condition takes no window function). */
 export function condPred(d, cols, c, opts = {}) {
   // the left side: a column named outright, or an expression — with the type its constants are written in
+  // (a column is `column`, and the right side a constant or an expression, never both: the closed forms
+  // of CONDITION, held here too for a condition that did not come through the schema)
+  const misspelled = operandSpelling(c);
+  if (misspelled) throw new Error(`a condition ${misspelled}`);
+  if (c.value !== undefined && c.right !== undefined) throw new Error('a condition compares with a constant (`value`) or with an expression (`right`), not both');
   let left;
   if (c.left !== undefined) left = exprSql(d, cols, c.left, 'left', opts);
   else if (c.column !== undefined) { requireCol(cols, c.column); left = { sql: d.quoteIdent(c.column), type: cols.get(c.column)?.type || null, physical: !!cols.get(c.column)?.physical }; }
   else throw new Error('condition needs `column` or `left`');
   const name = c.column ?? c.left?.column ?? 'the left side';
   const right = c.right;
-  // a constant on the right (`value`, or right: { value }) — the one comparison writer, in the left side's type
-  if (right === undefined || (Object.hasOwn(right, 'value') && right.fn === undefined)) {
-    const value = right ? right.value : c.value;
+  // a constant on the right (`value`) — the one comparison writer, in the left side's type
+  if (right === undefined) {
+    const value = c.value;
     if (value === undefined && c.op !== 'is_null' && c.op !== 'is_not_null') throw new Error('condition needs `value` or `right`');
-    // a TEXT column of the warehouse holding a flag: a boolean is compared with every way text spells
-    // it (true / 1 / t, false / 0 / f), so neither STRING = BOOL in the run nor a guess at the spelling
-    if (left.physical && left.type === 'string' && [].concat(value).some((v) => typeof v === 'boolean')) {
-      const values = [].concat(value);
-      if (!['eq', 'ne', 'in', 'not_in'].includes(c.op) || !values.every((v) => typeof v === 'boolean')) {
-        throw new Error(`'${name}' is a text column in the warehouse: a boolean is compared with it by eq / ne / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
-      }
-      const spellings = values.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((s) => d.sqlLiteral(s));
-      return `LOWER(TRIM(${left.sql})) ${c.op === 'ne' || c.op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;
-    }
+    if (isTextFlag(left, value)) return textFlag(d, left.sql, c.op, value, name);
     return comparison(left.sql, c.op, value, { lit: (v) => typedLiteral(left.type, v, `'${name}'`) });
   }
   // an expression on the right (a column, now, a function): a plain comparison of the two
   if (!OPSYM[c.op]) throw new Error(`'${c.op}' compares with a constant (value), not with an expression`);
   const r = exprSql(d, cols, right, 'right', opts);
   // a constant on the left compared with a column on the right is written in that column's type
-  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) return `${typedLiteral(r.type, c.left.value, `'${right.column ?? 'the right side'}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  if (c.left && Object.hasOwn(c.left, 'value') && c.left.fn === undefined) {
+    const rname = `${right.column ?? 'the right side'}`;
+    if (isTextFlag(r, c.left.value)) return textFlag(d, r.sql, c.op, c.left.value, rname);
+    return `${typedLiteral(r.type, c.left.value, `'${rname}'`)} ${OPSYM[c.op]} ${r.sql}`;
+  }
   // a moment compared with an expression: a number or a boolean is never one — refused here, not as
   // DATE >= INT64 in the run; anything else meets it as a timestamp on both sides, so a DATE column
   // and a TIMESTAMP expression (a raw TIMESTAMP_SUB, now) compare as the warehouse cannot otherwise
@@ -198,6 +356,8 @@ export function aggExpr(d, fn, column, q, cond = null) {
   // a CONDITIONAL aggregate folds only the rows `cond` holds for: the value is NULL on every other
   // row, which every aggregate skips — count(case when …), sum(case when …) — the same on every warehouse
   if (fn === 'count' && !column) return cond ? `count(CASE WHEN ${cond} THEN 1 END)` : 'count(*)';
+  // (the schema asks for it; a step kept from an earlier version is told so here, not by the identifier guard)
+  if (!column) throw new Error(`pipeline: a measure with agg '${fn}' needs \`column\` — only a count counts rows without one`);
   const c = cond ? `CASE WHEN ${cond} THEN ${d.quoteIdent(column)} END` : d.quoteIdent(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
   if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
@@ -220,11 +380,11 @@ export function addCol(cols, name, type) {
 
 export function requireCol(cols, name) {
   if (cols.has(name)) return;
-  // '*' is the GOVERNED path's spelling for "the rows themselves" (measures take field: '*').
+  // '*' is SQL's spelling for "the rows themselves"; here every measure counts rows by leaving its column out.
   // A stage counts rows by leaving `column` out entirely, so say that instead of listing every
   // column and leaving the caller to guess what a SQL habit translates to here.
   if (name === '*') {
-    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, agg: 'count' }); `field: '*'` is the governed path's spelling (build_semantic_model measures)");
+    throw new Error("pipeline: '*' is not a column — a measure counts ROWS by leaving `column` out ({ name, agg: 'count' })");
   }
   throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }

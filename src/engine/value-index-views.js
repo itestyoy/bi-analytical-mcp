@@ -20,11 +20,18 @@ export class ValueIndexViews {
     const st = this.valueIndex.stats(source, key);
     const dc = st?.distinctCount ?? null;
     const total = st?.totalCount ?? null;
-    const orderBy = input.order_by === 'value' ? 'value' : 'freq';
-    const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
+    // order_by: [{ key, direction? }] — the first item orders the values, a second one the values the
+    // first one ties (only the value itself can: each value occurs once, with one frequency)
+    const keys = (input.order_by?.length ? input.order_by : [{ key: 'freq' }]).map((o) => ({ key: o.key, direction: o.direction || (o.key === 'value' ? 'asc' : 'desc') }));
+    if (keys.length > 1 && keys[0].key === keys[1].key) throw new ToolError(`order_by names '${keys[0].key}' twice — a second item orders what the first one ties, so it takes the other key`, { stage: 'validate', field: 'order_by' });
+    if (keys.length > 1 && keys[0].key === 'value') throw new ToolError("order_by: the values are distinct, so nothing after 'value' has a tie to order — give one item", { stage: 'validate', field: 'order_by' });
+    const orderBy = keys[0].key;
+    const dir = keys[0].direction;
+    // ties on the frequency are ordered by the value: ascending unless a second item says otherwise
+    const tie = orderBy === 'freq' ? (keys[1]?.direction || 'asc') : null;
     const limit = input.limit ?? 10;
     const offset = input.offset ?? 0;
-    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir });
+    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir, tie });
     const has_more = fetched.length > limit;
     const samples = has_more ? fetched.slice(0, limit) : fetched;
     // top_value is the single most frequent value; share = its fraction of indexed rows.
@@ -40,7 +47,7 @@ export class ValueIndexViews {
       top_share: top && total ? Math.round((top.freq / total) * 1000) / 1000 : null,
       indexed: !!st, indexed_at: st?.indexedAt ?? null,
       // values stored are capped (top-by-frequency); paging past them returns [].
-      returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
+      returned: samples.length, limit, offset, order_by: tie ? [keys[0], { key: 'value', direction: tie }] : [keys[0]],
       has_more,
       indexed_value_count: storedValues, values_capped: valuesCapped,
     };

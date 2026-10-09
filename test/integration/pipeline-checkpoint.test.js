@@ -45,7 +45,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 // carries no event columns — exactly the case worth proving.
 const STEPS = [
   { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-  { stage: 'derive', name: 'score', op: 'extract', source: 'daily_level_score_of_event_data', type: 'numeric' },
+  { stage: 'compute', name: 'score', expr: { fn: 'event_property', property: 'daily_level_score_of_event_data', type: 'numeric' } },
   { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', agg: 'count' }, { name: 'total_score', agg: 'sum', column: 'score' }] },
   { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] },
 ];
@@ -54,71 +54,97 @@ const byPlayer = (rows) => Object.fromEntries(rows.map((r) => [String(r.player_i
 
 /** Build a draft from `steps`, materializing after each index listed in `pointsAt` (1-based). */
 async function build(name, steps, pointsAt = []) {
-  const { draft_id } = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
+  const { context_id } = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
   let last = null;
   for (let i = 0; i < steps.length; i += 1) {
-    await engine.build_pipeline_model({ action: 'add_step', draft_id, stage: steps[i] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id, stages: [steps[i]] });
     if (pointsAt.includes(i + 1)) {
-      last = await engine.build_pipeline_model({ action: 'materialize', draft_id });
+      last = await engine.build_pipeline_model({ action: 'materialize', context_id });
       assert.notEqual(last.ok, false, JSON.stringify(last.error));
     }
   }
   if (!pointsAt.includes(steps.length)) {
-    last = await engine.build_pipeline_model({ action: 'materialize', draft_id });
+    last = await engine.build_pipeline_model({ action: 'materialize', context_id });
     assert.notEqual(last.ok, false, JSON.stringify(last.error));
   }
-  return { draft_id, result: last };
+  return { context_id, result: last };
 }
 
-test('a pipeline continued on a materialized prefix returns the same rows as one built in one go', opts, async (t) => {
-  if (skip(t)) return;
-  const whole = await build('cp_whole', STEPS);
-  const continued = await build('cp_split', STEPS, [3]); // checkpoint after the aggregate, then step 4
-  assert.equal(continued.result.from_checkpoint.at, 3);
-  assert.equal(continued.result.steps_recomputed, 1, 'only the step after the prefix was built');
-  assert.ok(whole.result.row_count > 0, 'the pipeline returns rows at all');
-  assert.deepEqual(byPlayer(continued.result.rows), byPlayer(whole.result.rows));
-});
-
+// The draft materialized at 3 and then at 4 IS a pipeline continued on a materialized prefix: before
+// its edit it is held to the same pipeline built in one go (that was a test of its own, which built
+// a second split draft for it).
 test('editing a step AFTER the prefix keeps it: the numbers still match a full recompute', opts, async (t) => {
   if (skip(t)) return;
   // Two checkpoints (after 3 and after 4), then step 4 is edited: only the second is retired.
-  const { draft_id, result: before } = await build('cp_edit', STEPS, [3, 4]);
+  const { context_id, result: before } = await build('cp_edit', STEPS, [3, 4]);
   assert.equal(before.from_checkpoint.at, 3);
+  // 'a pipeline continued on a materialized prefix returns the same rows as one built in one go'
+  const whole = await build('cp_whole', STEPS);
+  assert.equal(before.steps_recomputed, 1, '[continued = whole] only the step after the prefix was built');
+  assert.ok(whole.result.row_count > 0, '[continued = whole] the pipeline returns rows at all');
+  assert.deepEqual(byPlayer(before.rows), byPlayer(whole.result.rows), '[continued = whole] the same rows as one built in one go');
   const edited = { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 3 }] };
-  const ed = await engine.build_pipeline_model({ action: 'edit_step', draft_id, index: 4, stage: edited });
+  const ed = await engine.build_pipeline_model({ action: 'edit_step', context_id, index: 4, stage: edited });
   assert.equal(ed.from_checkpoint.at, 3, 'the prefix survived an edit below it');
-  const after = await engine.build_pipeline_model({ action: 'materialize', draft_id });
+  const after = await engine.build_pipeline_model({ action: 'materialize', context_id });
   assert.notEqual(after.ok, false, JSON.stringify(after.error));
   assert.equal(after.steps_recomputed, 1);
   const fresh = await build('cp_edit_ref', [...STEPS.slice(0, 3), edited]);
   assert.deepEqual(byPlayer(after.rows), byPlayer(fresh.result.rows));
 });
 
-test('the prefix is READ, not recomputed: changing the data in its table changes the continuation', opts, async (t) => {
+// ONE materialized prefix serves what two tests each built it for: 'the prefix is READ, not
+// recomputed: changing the data in its table changes the continuation' and 'a fork inherits the
+// prefix: same numbers as an independent recompute, and the table is only read'. In order: a fork
+// against an independent recompute (the data untouched), ONE change to the prefix's own table, then
+// the parent's continuation and a second fork both read the changed row.
+test('one materialized prefix: a fork of it equals an independent recompute; after its table is tampered (victim 99 / 4242) both the parent\'s continuation and a second fork read the tampered row, and the prefix table is left alone', opts, async (t) => {
   if (skip(t)) return;
-  const { draft_id, result: built } = await build('cp_reuse', STEPS.slice(0, 3), [3]);
+  const { context_id, result: built } = await build('cp_parent', STEPS.slice(0, 3), [3]);
   const before = byPlayer(built.rows);
   const players = Object.keys(before);
   assert.ok(players.length >= 2, 'several players in the prefix');
+
+  // [fork] a fork inherits the prefix: same numbers as an independent recompute
+  const fork = await engine.build_pipeline_model({ action: 'fork', context_id, after: 3, name: 'cp_fork' });
+  assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] inherits the checkpoint');
+  const tail = { stage: 'where', conditions: [{ column: 'total_score', op: 'gte', value: 1 }] };
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: fork.context_id, stages: [tail] });
+  const forked = await engine.build_pipeline_model({ action: 'materialize', context_id: fork.context_id });
+  assert.notEqual(forked.ok, false, JSON.stringify(forked.error));
+  assert.equal(forked.from_checkpoint.model, built.model, "[fork] the fork read the parent's table");
+  const independent = await build('cp_fork_ref', [...STEPS.slice(0, 3), tail]);
+  assert.deepEqual(byPlayer(forked.rows), byPlayer(independent.result.rows), '[fork] the same numbers as an independent recompute');
+
   // Rewrite the prefix's OWN table: one player's totals become unmistakable values. Recomputing
   // from the source would wipe this out; reading the table carries it through.
   const victim = players.sort()[0];
   await wh.query(`UPDATE main.${built.model} SET levels = 99, total_score = 4242 WHERE player_id_of_internal = '${victim}'`);
-  const cont = await engine.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] } });
-  assert.equal(cont.from_checkpoint.at, 3);
-  const out = await engine.build_pipeline_model({ action: 'materialize', draft_id });
+
+  // [prefix is read] the parent's continuation reads the changed row
+  const cont = await engine.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] }] });
+  assert.equal(cont.from_checkpoint.at, 3, '[prefix is read] the continuation stands on the checkpoint');
+  const out = await engine.build_pipeline_model({ action: 'materialize', context_id });
   assert.notEqual(out.ok, false, JSON.stringify(out.error));
   const rows = byPlayer(out.rows);
-  assert.deepEqual(rows[victim], [99, 4242], 'the continuation read the materialized prefix');
+  assert.deepEqual(rows[victim], [99, 4242], '[prefix is read] the continuation read the materialized prefix');
   // every other player keeps the real numbers the prefix computed
-  for (const p of players.filter((x) => x !== victim && before[x][0] >= 2)) assert.deepEqual(rows[p], before[p]);
+  for (const p of players.filter((x) => x !== victim && before[x][0] >= 2)) assert.deepEqual(rows[p], before[p], `[prefix is read] ${p} unchanged`);
   // …and the prefix itself was NOT re-materialized: its table still holds exactly what it held
   // before the continuation ran (a recompute would have restored the real totals).
-  const prefix = await readTable(engine, draft_id, built.model);
+  const prefix = await readTable(engine, context_id, built.model);
   assert.equal(prefix.ok, true, JSON.stringify(prefix.error));
-  assert.deepEqual(byPlayer(prefix.rows)[victim], [99, 4242], 'the prefix table was left alone');
-  assert.notEqual(out.model, built.model, 'the continuation built its own model');
+  assert.deepEqual(byPlayer(prefix.rows)[victim], [99, 4242], '[prefix is read] the prefix table was left alone');
+  assert.notEqual(out.model, built.model, '[prefix is read] the continuation built its own model');
+
+  // [fork] the inherited model is NOT rebuilt in a fork: a second fork branched over the changed
+  // table carries the change into its own result.
+  const fork2 = await engine.build_pipeline_model({ action: 'fork', context_id, after: 3, name: 'cp_fork2' });
+  assert.deepEqual(fork2.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] the second fork inherits the same checkpoint');
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: fork2.context_id, stages: [tail] });
+  const tampered = await engine.build_pipeline_model({ action: 'materialize', context_id: fork2.context_id });
+  assert.notEqual(tampered.ok, false, JSON.stringify(tampered.error));
+  assert.equal(byPlayer(tampered.rows)[victim][1], 4242, '[fork] the inherited table was read, never rebuilt');
 });
 
 // A prefix that only FILTERED events still carries the source's own columns, so the stages that read
@@ -142,36 +168,10 @@ test('a funnel and a payload read run on top of a materialized event slice, with
   assert.ok(Object.keys(tally(whole.result)).length > 0, 'the funnel returns rows at all');
   assert.deepEqual(tally(split.result), tally(whole.result));
 
-  // The payload column survived the slice too, so a derive on top of the prefix reads it.
+  // The payload column survived the slice too, so an event_property read on top of the prefix reads it.
   const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }]);
   const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }], [1]);
   assert.equal(splitScore.result.from_checkpoint.at, 1);
   assert.equal(num(splitScore.result.rows[0].total), num(wholeScore.result.rows[0].total));
   assert.ok(num(wholeScore.result.rows[0].total) > 0, 'the payload actually carried values');
-});
-
-test('a fork inherits the prefix: same numbers as an independent recompute, and the table is only read', opts, async (t) => {
-  if (skip(t)) return;
-  const { draft_id, result: built } = await build('cp_parent', STEPS.slice(0, 3), [3]);
-  const fork = await engine.build_pipeline_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork' });
-  assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: draft_id }]);
-  const tail = { stage: 'where', conditions: [{ column: 'total_score', op: 'gte', value: 1 }] };
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: fork.draft_id, stage: tail });
-  const forked = await engine.build_pipeline_model({ action: 'materialize', draft_id: fork.draft_id });
-  assert.notEqual(forked.ok, false, JSON.stringify(forked.error));
-  assert.equal(forked.from_checkpoint.model, built.model, "the fork read the parent's table");
-  const independent = await build('cp_fork_ref', [...STEPS.slice(0, 3), tail]);
-  assert.deepEqual(byPlayer(forked.rows), byPlayer(independent.result.rows));
-
-  // And the inherited model is NOT rebuilt in the fork: change the DATA in the parent's table, then
-  // branch a second fork over it. Recomputing the prefix would wipe the change out; reading the
-  // inherited table carries it into the fork's own result.
-  const victim = Object.keys(byPlayer(built.rows)).sort()[0];
-  await wh.query(`UPDATE main.${built.model} SET total_score = 7777 WHERE player_id_of_internal = '${victim}'`);
-  const fork2 = await engine.build_pipeline_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork2' });
-  assert.deepEqual(fork2.inherited_checkpoints, [{ at: 3, model: built.model, owner: draft_id }]);
-  await engine.build_pipeline_model({ action: 'add_step', draft_id: fork2.draft_id, stage: tail });
-  const tampered = await engine.build_pipeline_model({ action: 'materialize', draft_id: fork2.draft_id });
-  assert.notEqual(tampered.ok, false, JSON.stringify(tampered.error));
-  assert.equal(byPlayer(tampered.rows)[victim][1], 7777, 'the inherited table was read, never rebuilt');
 });

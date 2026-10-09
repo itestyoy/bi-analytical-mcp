@@ -675,8 +675,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   never a number in a test. The fixture world (`buildWarehouse`, `connectMcp`,
   test/integration/warehouse-harness.js) and the task-following call (`settleMcp`, test/helpers/
   settle.js) have one definition, shared by the integration tests and the evals.
-- Tests run on the server's default environment (`DEFAULT_ENV` — for now `dbt-v1`; DBT_ENV picks
-  another); the python stage's file runs on `dbt-v1` (dbt 1.x) whatever it is, since v2 runs no Python
+- Tests run on `dbt-v2` (test/helpers/dbt-env.js `TEST_ENV`; DBT_ENV picks another), not on the
+  server's `DEFAULT_ENV`, which stays `dbt-v1` only for BigQuery's sake: on the DuckDB fixtures v2
+  answers each dbt call several times faster, and a server a test builds runs on the same
+  environment; the python stage's file runs on `dbt-v1` (dbt 1.x) whatever it is, since v2 runs no Python
   models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 
 ### Testing (HARD RULE)

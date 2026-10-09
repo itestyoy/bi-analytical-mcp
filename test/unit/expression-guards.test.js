@@ -94,9 +94,9 @@ test('a step stored by an earlier version is built in this version\'s spelling �
   assert.deepEqual(unnested([parsed, { stage: 'unnest', source: 'arr', name: 'w' }]), unnested([parsed, { stage: 'unnest', column: 'arr', name: 'w' }]));
   // the render reports each kept step in today's spelling — what a draft keeps from its next accepted
   // edit — and a draft's steps are shown in it, so one copied into edit_step is one the tool takes
-  const kept = [parsed, { stage: 'unnest', source: 'arr', name: 'w' }, { stage: 'limit', n: 5 }];
-  const built = renderPipeline(catalog, catalog.dialect, 'events', kept, { physicalCols: new Set([...COLS, 'event_data']) });
-  assert.deepEqual(kept.map((s) => built.current.get(s)), [parsed, { stage: 'unnest', column: 'arr', name: 'w' }, { stage: 'limit', limit: 5 }]);
+  const keptSteps = [parsed, { stage: 'unnest', source: 'arr', name: 'w' }, { stage: 'limit', n: 5 }];
+  const built = renderPipeline(catalog, catalog.dialect, 'events', keptSteps, { physicalCols: new Set([...COLS, 'event_data']) });
+  assert.deepEqual(keptSteps.map((s) => built.current.get(s)), [parsed, { stage: 'unnest', column: 'arr', name: 'w' }, { stage: 'limit', limit: 5 }]);
   assert.equal(built.current.get(parsed), parsed, 'a step in today\'s spelling is kept as it is');
   assert.deepEqual(Engine.prototype._draftSteps.call({ catalog }, { source: 'events', stages: [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, { stage: 'unnest', source: 'arr', name: 'v' }] }), [
     { index: 1, stage: 'limit', limit: 5 },

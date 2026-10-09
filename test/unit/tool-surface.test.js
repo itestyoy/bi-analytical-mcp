@@ -206,16 +206,16 @@ test('semantic_index recipe view is absent when no recipes configured', async ()
 // A governed path is served by the semantic model of the model it ends on. A task built from one
 // events source does not load the other's, so a path onto that fact's own attributes is refused
 // here with the fix — instead of reaching MetricFlow as an unknown entity.
-test('a group-by path onto an unloaded FACT is refused with the use_base_models fix', async () => {
+test('a group-by path onto an unloaded FACT is refused with the fix: an item { from } that loads it', async () => {
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
     () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
-    /needs model 'crashlytics'.*use_base_models/s,
+    /needs model 'crashlytics'.*semantic_models: \[\{ from: 'crashlytics' \}\]/s,
   );
 });
 
@@ -280,12 +280,14 @@ test('a task dimension is reported under its declared attribute even when one ta
   const first = await e.build_semantic_model({
     name: 'ret',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
-  const out = await e.build_semantic_model({ action: 'update',
+  // a second task beside the first: a declaration into the same context
+  const out = await e.build_semantic_model({
     context_id: first.context_id,
-    task: 'ret_v2',
+    name: 'ret_v2',
     semantic_models: [{ from: 'users', dimensions: [{ field: 'country' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'ret_n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual([...(ctx.state.tasks || [])].sort(), ['ret', 'ret_v2'], JSON.stringify(ctx.state.tasks));

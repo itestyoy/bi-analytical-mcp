@@ -55,12 +55,12 @@ before(async () => {
     name: 'lvlf',
     semantic_models: [{ from: 'events', measures: [{ name: 'l1', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'l2', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }, { name: 'l3', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 3 }] }, { name: 'u1', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 1 }] }, { name: 'u2', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }, { field: 'level_id_of_event_data', op: 'eq', value: 2 }] }] }],
     metrics: [
-      { name: 's1', type: 'simple', measure: { name: 'l1' } },
-      { name: 's2', type: 'simple', measure: { name: 'l2' } },
-      { name: 's3', type: 'simple', measure: { name: 'l3' } },
-      { name: 'p1', type: 'simple', measure: { name: 'u1' } },
-      { name: 'p2', type: 'simple', measure: { name: 'u2' } },
-      { name: 'conv_1_2', type: 'ratio', numerator: { name: 'u2' }, denominator: { name: 'u1' } },
+      { name: 's1', type: 'simple', measure: 'l1' },
+      { name: 's2', type: 'simple', measure: 'l2' },
+      { name: 's3', type: 'simple', measure: 'l3' },
+      { name: 'p1', type: 'simple', measure: 'u1' },
+      { name: 'p2', type: 'simple', measure: 'u2' },
+      { name: 'conv_1_2', type: 'ratio', numerator: 'u2', denominator: 'u1' },
     ],
   });
 }, opts);

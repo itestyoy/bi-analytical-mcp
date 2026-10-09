@@ -34,7 +34,7 @@ function orderedRunner() {
 }
 
 const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tasks-')) }), runner });
-const TASK = { name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }] };
+const TASK = { name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
 const tick = () => new Promise((r) => { setTimeout(r, 5); });
 
 test('a call that starts work answers with its task only, and a query on the same context waits for the parse', async () => {
@@ -349,7 +349,7 @@ function heldQueries() {
   };
   return r;
 }
-const TWO = { ...TASK, metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }, { name: 'cnt2', type: 'simple', measure: { name: 'cnt' } }] };
+const TWO = { ...TASK, metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }, { name: 'cnt2', type: 'simple', measure: 'cnt' }] };
 
 test('a batch answers with its task_ids only; its members run side by side, and a query issued after it waits for all of them', async () => {
   const runner = heldQueries();

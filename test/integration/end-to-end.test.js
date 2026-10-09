@@ -253,9 +253,9 @@ test('3c. commit equals the all-at-once _buildPipeline path (fidelity 12/8/5/3)'
 test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR25, total 85', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
-    name: 'e2e_mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    name: 'e2e_mon',
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
@@ -278,7 +278,7 @@ test('4b. build_semantic_model action update adds a payers metric; re-query = 7 
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
     semantic_models: [{ from: 'events', measures: [{ name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
-    metrics: [{ name: 'payers', type: 'simple', measure: { name: 'payers' } }],
+    metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
   assert.ok(upd.metrics.includes('e2e_mon_payers'), 'new metric registered');
@@ -297,19 +297,19 @@ test('4b. build_semantic_model action update adds a payers metric; re-query = 7 
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 
-test('4b2. derived metrics added by an update read the task\'s metrics by stored name, by declared name and under a short name alike: 85 / 7', opts, async (t) => {
+test('4b2. derived metrics added by an update read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
     metrics: [
-      { name: 'per_payer_stored', type: 'derived', expr: 'e2e_mon_revenue / e2e_mon_payers', metrics: [{ metric: 'e2e_mon_revenue' }, { metric: 'e2e_mon_payers' }] },
-      { name: 'per_payer_declared', type: 'derived', expr: 'revenue / payers', metrics: [{ metric: 'revenue' }, { metric: 'payers' }] },
-      { name: 'per_payer_short', type: 'derived', expr: 'r / p', metrics: [{ metric: 'revenue', name: 'r' }, { metric: 'payers', name: 'p' }] },
+      { name: 'per_payer_stored', type: 'derived', expr: 'e2e_mon_revenue / e2e_mon_payers', metrics: ['e2e_mon_revenue', 'e2e_mon_payers'] },
+      { name: 'per_payer_declared', type: 'derived', expr: 'revenue / payers', metrics: ['revenue', 'payers'] },
+      { name: 'per_payer_mixed', type: 'derived', expr: 'e2e_mon_revenue / payers', metrics: ['e2e_mon_revenue', 'payers'] },
     ],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
 
-  const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_short'];
+  const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
   const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: names });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);

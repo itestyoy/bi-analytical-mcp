@@ -3,10 +3,10 @@
 // into the project's own layer), the predicate grammar, and the limits every tool quotes (how long a
 // read waits, how many queries a batch holds). The tools are put together in src/schema.js.
 
-import { MEASURE_AGGS, GRAINS } from '../catalog.js';
+import { TASK_MEASURE_AGGS, NUMERIC_AGGS, GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
-import { measureSchema } from '../pipeline/sql.js';
+import { measureSchema, TYPES } from '../pipeline/sql.js';
 import { OPS } from '../conditions.js';
 import { CONTEXT_ID } from '../context-manager.js';
 
@@ -18,7 +18,8 @@ export const CTX = CONTEXT_ID;
 
 export const TASK_ID = TASK_ID_PATTERN;
 
-export const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
+// a trailing window MetricFlow reads: a count and a unit of the grains metric_time is offered at
+export const WINDOW = '^[0-9]+ (day|week|month|quarter|year)s?$';
 
 // Reusable property-description strings (kept consistent across tools).
 export const D = {
@@ -56,43 +57,60 @@ const measureFields = (catalog, modelKey) => [...new Set([
   ...catalog.aggregatableFields(modelKey).map((a) => a.name),
 ])].sort();
 
-/** A measure of a semantic model: the measure every place aggregates with, over the model's fields. */
+/** A measure of a semantic model: the measure every place aggregates with, over the model's fields —
+ *  the functions a task chooses from (TASK_MEASURE_AGGS), and `cast` only where a number is folded. */
 function measureItemSchema(catalog, modelKey) {
   return measureSchema({
-    aggs: [...MEASURE_AGGS],
+    aggs: [...TASK_MEASURE_AGGS],
     key: 'field',
     column: strEnum(measureFields(catalog, modelKey)),
     pattern: NAME,
+    nameDescription: 'The measure\'s name; metrics read it by this name (stored as <task>_<name>).',
     optional: ['count'],
-    none: ['sum_boolean'],
-    where: fieldConditions(catalog, modelKey, 'The rows this measure folds: all of them hold (with the model\'s own where). A funnel step is a measure whose where names the event and a property value.'),
-    extra: {
-      cast: { enum: ['numeric', 'int', 'float'], description: 'Read the field as a number first — for a text field that holds numbers.' },
-      label: { type: 'string', description: D.label },
+    where: fieldConditions(catalog, modelKey, 'The rows this measure folds: all of them hold (with the model\'s own where). A funnel step is a measure whose where names the event and a property value; a count of the rows where a condition holds is a count with that where.'),
+    extra: { label: { type: 'string', description: D.label } },
+    numeric: {
+      aggs: [...NUMERIC_AGGS],
+      extra: { cast: { enum: TYPES.filter((t) => t !== 'string'), description: 'Read the field as a number first — for a text field that holds numbers (a value that does not convert is NULL).' } },
     },
   });
 }
 
-/** A dimension of a semantic model: a column (a time one takes a grain) or a scalar property. */
+/** The fields a dimension of `modelKey` may name: its groupable columns and, on an events source,
+ *  its scalar payload properties — what a declaration adds and an update removes. */
+export function dimensionFields(catalog, modelKey) {
+  return [...new Set([...catalog.modelDimensionColumns(modelKey), ...(catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : [])])].sort();
+}
+
+/** The model's columns the catalog types as time: a dimension of one is a time dimension, read at a grain. */
+export function timeDimensionFields(catalog, modelKey) {
+  const dims = catalog.getModel(modelKey).dimensions || {};
+  return catalog.modelDimensionColumns(modelKey).filter((c) => dims[c]?.type === 'time').sort();
+}
+
+/**
+ * A dimension of a semantic model, in closed forms by what its field is: a column the catalog types
+ * as time is a time dimension at `grain` (default: the catalog's granularity for it), everything
+ * else — a column, a scalar payload property — is categorical and takes no grain.
+ */
 function dimensionItemSchema(catalog, modelKey) {
-  const fields = [...new Set([...catalog.modelDimensionColumns(modelKey), ...(catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : [])])].sort();
+  const fields = dimensionFields(catalog, modelKey);
   if (!fields.length) return undefined;
-  return {
-    type: 'object', additionalProperties: false, required: ['field'],
-    properties: {
-      field: strEnum(fields),
-      as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'time makes a column a time dimension, read at `grain` (a payload property is always categorical).' },
-      grain: { enum: catalog.timeGranularities() },
-      label: { type: 'string', description: D.label },
-    },
-  };
+  const time = timeDimensionFields(catalog, modelKey);
+  const other = fields.filter((f) => !time.includes(f));
+  const label = { type: 'string', description: D.label };
+  const forms = [
+    ...(time.length ? [form({ title: 'a time column', tag: ['field', time], properties: { grain: { enum: catalog.timeGranularities(), description: 'The bucket its values are read at (default: the column\'s own granularity in the catalog).' }, label } })] : []),
+    ...(other.length ? [form({ title: 'a categorical field', tag: ['field', other], properties: { label } })] : []),
+  ];
+  return forms.length === 1 ? forms[0] : { type: 'object', anyOf: forms };
 }
 
 export function semanticModelBranch(catalog, modelKey) {
   const dimItem = dimensionItemSchema(catalog, modelKey);
   const props = withoutEmpty({
     from: { const: modelKey },
-    where: fieldConditions(catalog, modelKey, 'Rows every measure of this semantic model folds: all of them hold (e.g. { field: "event_name", op: "in", value: [...] } when the task concerns some events).'),
+    where: fieldConditions(catalog, modelKey, 'Rows every measure of this item folds: all of them hold (e.g. { field: "event_name", op: "in", value: [...] } when the task concerns some events). It scopes the measures declared beside it, so an item with a where declares measures.'),
     dimensions: dimItem && { type: 'array', items: dimItem },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey) },
   });
@@ -100,34 +118,33 @@ export function semanticModelBranch(catalog, modelKey) {
 }
 
 export function metricSchema(catalog) {
-  const measureRef = {
-    type: 'object',
-    additionalProperties: false,
-    required: ['name'],
-    description: 'Reference to a measure by name.',
-    properties: { name: { type: 'string', description: 'Name of a measure defined in this task.' } },
-  };
+  // what a metric reads is named as a string — a measure or a metric of this call or already in the
+  // context, as it was declared ('n') or as it is stored ('ret_n'), or a governed measure of the
+  // catalog — so no pattern: a stored name is longer than a declared one
+  const ref = (description) => ({ type: 'string', minLength: 1, description });
   const fields = {
-    name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as task_<name>.' },
+    name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as <task>_<name>.' },
     label: { type: 'string', description: D.label },
-    measure: { ...measureRef, description: 'The single measure this metric exposes.' },
+    measure: ref('The measure it reads, by name: one declared in this call or already in the context (as declared, or as stored: <task>_<name>), or a governed measure of the catalog.'),
     fill_nulls_with: { type: 'number', description: 'Value to substitute for NULL results (e.g. 0) so gaps in a time series render as zeros.' },
-    numerator: { ...measureRef, description: 'The measure on top of the division.' },
-    denominator: { ...measureRef, description: 'The measure on the bottom of the division.' },
+    numerator: ref('The measure on top of the division, by name (as `measure` names one).'),
+    denominator: ref('The measure on the bottom of the division, by name (as `measure` names one).'),
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
-    expr: { type: 'string', description: 'Arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
-    metrics: { type: 'array', minItems: 1, description: 'The input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['metric'], properties: { metric: { type: 'string', pattern: NAME, description: 'An input metric of this task, by its name.' }, name: { type: 'string', pattern: NAME, description: 'The name `expr` uses for it (default: the metric\'s own name).' } } } },
+    window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },
+    expr: { type: 'string', description: 'Arithmetic over the metrics listed in `metrics`, each written as it is listed there, e.g. "coins_in - coins_out". Restricted to a safe grammar: those names, numbers, + - * / ( ) and basic math functions.' },
+    metrics: { type: 'array', minItems: 1, uniqueItems: true, items: ref('A metric of this call or already in the context, by name (as declared, or as stored: <task>_<name>).'), description: 'The metrics `expr` is computed from, each named as `expr` writes it.' },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
-  const kind = (type, title, required, optional, own = {}) => form({ title, tag: ['type', type], required: ['name', ...required], properties: { ...pick(fields, ['name', 'label', ...required, ...optional]), ...own } });
+  const kind = (type, title, required, optional) => form({ title, tag: ['type', type], required: ['name', ...required], properties: pick(fields, ['name', 'label', ...required, ...optional]) });
   return {
     type: 'object',
-    description: 'A metric: simple wraps one measure; ratio = numerator / denominator; cumulative accumulates a measure over time; derived computes an expression over other metrics. A conversion (B within a window of A) is a pipeline, not a metric: semantic_index({ request: { recipe: "conversion_metric_window" } }).',
+    description: 'A metric: simple wraps one measure; ratio = numerator / denominator; cumulative accumulates a measure over time — over all history or a trailing window, or to date within a grain; derived computes an expression over other metrics. A conversion (B within a window of A) is a pipeline, not a metric: semantic_index({ request: { recipe: "conversion_metric_window" } }).',
     anyOf: [
       kind('simple', 'simple: one measure', ['measure'], ['fill_nulls_with']),
       kind('ratio', 'ratio: numerator / denominator', ['numerator', 'denominator'], []),
-      kind('cumulative', 'cumulative: a measure accumulated over time', ['measure'], ['grain_to_date', 'period_agg'], { window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days") instead of all history.' } }),
+      kind('cumulative', 'cumulative: over all history or a trailing window', ['measure'], ['window', 'period_agg']),
+      kind('cumulative', 'cumulative: to date within a grain', ['measure', 'grain_to_date'], ['period_agg']),
       kind('derived', 'derived: an expression over other metrics', ['expr', 'metrics'], []),
     ],
   };
@@ -208,7 +225,7 @@ export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
 /** A metric_time window, as a metric query and a preview's validation take it. */
 export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
 
-/** The metric time axis at a grain — as group_by, order_by and where name it. */
+/** The metric time axis at a grain — as group_by and where name it. */
 export const timeRef = (catalog) => ({ type: 'object', additionalProperties: false, required: ['time'], title: 'the metric time axis', description: 'The metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } });
 
 /**

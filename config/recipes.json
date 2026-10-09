@@ -42,16 +42,12 @@
           {
             "name": "dau",
             "type": "simple",
-            "measure": {
-              "name": "active_users"
-            }
+            "measure": "active_users"
           },
           {
             "name": "events",
             "type": "simple",
-            "measure": {
-              "name": "event_volume"
-            }
+            "measure": "event_volume"
           }
         ]
       },
@@ -116,9 +112,6 @@
       ],
       "semantic_payload": {
         "name": "rev_segment",
-        "use_base_models": [
-          "users"
-        ],
         "semantic_models": [
           {
             "from": "events",
@@ -141,32 +134,27 @@
                 "value": "iap_purchase_completed"
               }
             ]
+          },
+          {
+            "from": "users"
           }
         ],
         "metrics": [
           {
             "name": "revenue",
             "type": "simple",
-            "measure": {
-              "name": "revenue"
-            }
+            "measure": "revenue"
           },
           {
             "name": "payers",
             "type": "simple",
-            "measure": {
-              "name": "payers"
-            }
+            "measure": "payers"
           },
           {
             "name": "arppu",
             "type": "ratio",
-            "numerator": {
-              "name": "revenue"
-            },
-            "denominator": {
-              "name": "payers"
-            }
+            "numerator": "revenue",
+            "denominator": "payers"
           }
         ]
       },
@@ -228,7 +216,7 @@
         }
       ],
       "notes": "The attribute model must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where on { model, attribute } filters through the same join.",
-      "hack": "Declare use_base_models: [\"<model>\"] and group_by { model, attribute }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any attribute of any joined model, always this form."
+      "hack": "Load the model with a semantic_models item { from: \"<model>\" } and group_by { model, attribute }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any attribute of any joined model, always this form."
     },
     {
       "id": "funnel_from_event_property_steps",
@@ -310,43 +298,29 @@
           {
             "name": "step1",
             "type": "simple",
-            "measure": {
-              "name": "s1"
-            }
+            "measure": "s1"
           },
           {
             "name": "step2",
             "type": "simple",
-            "measure": {
-              "name": "s2"
-            }
+            "measure": "s2"
           },
           {
             "name": "step3",
             "type": "simple",
-            "measure": {
-              "name": "s3"
-            }
+            "measure": "s3"
           },
           {
             "name": "conv_1_2",
             "type": "ratio",
-            "numerator": {
-              "name": "s2"
-            },
-            "denominator": {
-              "name": "s1"
-            }
+            "numerator": "s2",
+            "denominator": "s1"
           },
           {
             "name": "conv_2_3",
             "type": "ratio",
-            "numerator": {
-              "name": "s3"
-            },
-            "denominator": {
-              "name": "s2"
-            }
+            "numerator": "s3",
+            "denominator": "s2"
           }
         ]
       },
@@ -519,9 +493,6 @@
       ],
       "semantic_payload": {
         "name": "cohort_grid",
-        "use_base_models": [
-          "users"
-        ],
         "semantic_models": [
           {
             "from": "events",
@@ -544,22 +515,21 @@
                 "value": "iap_purchase_completed"
               }
             ]
+          },
+          {
+            "from": "users"
           }
         ],
         "metrics": [
           {
             "name": "revenue",
             "type": "simple",
-            "measure": {
-              "name": "revenue"
-            }
+            "measure": "revenue"
           },
           {
             "name": "buyers",
             "type": "simple",
-            "measure": {
-              "name": "buyers"
-            }
+            "measure": "buyers"
           }
         ]
       },
@@ -591,13 +561,13 @@
           ]
         }
       ],
-      "notes": "The cohort axis comes from the dimension model, so it needs use_base_models; the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
+      "notes": "The cohort axis comes from the dimension model, so the task loads it (a semantic_models item { from: \"users\" }); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
       "hack": "Group by a TIME attribute of the joined model (the cohort) and by metric_time (the activity) at once — the grid is just two time dimensions in one group_by. Swap either axis (any cohort attribute, any grain) and the shape holds."
     },
     {
       "id": "boolean_condition_as_measure",
       "task_type": "metric_types",
-      "title": "A condition as a measure (sum_boolean)",
+      "title": "A condition as a measure (a count with a where)",
       "when_to_use": "Counting rows that satisfy a condition, or splitting the population by \"did X\" — a behavioural cohort (purchasers vs non-purchasers) without a cohort table.",
       "required_events": [
         "iap_purchase_completed",
@@ -616,7 +586,7 @@
             "measures": [
               {
                 "name": "purchases",
-                "agg": "sum_boolean",
+                "agg": "count",
                 "where": [
                   {
                     "field": "event_name",
@@ -643,16 +613,12 @@
           {
             "name": "purchases",
             "type": "simple",
-            "measure": {
-              "name": "purchases"
-            }
+            "measure": "purchases"
           },
           {
             "name": "sessions",
             "type": "simple",
-            "measure": {
-              "name": "sessions"
-            }
+            "measure": "sessions"
           }
         ]
       },
@@ -674,8 +640,8 @@
           ]
         }
       ],
-      "notes": "sum_boolean counts ROWS, not entities: for \"how many users did X\" pair it with count_distinct of the entity, or build the flag per entity in a pipeline first. The expression is evaluated on the fact, so a payload column in it needs an event scope.",
-      "hack": "agg: \"sum_boolean\" over a boolean expression counts the rows where it holds, so a flag becomes a measure you can ratio, segment and put on a time axis. Any \"did X\" population is a boolean measure plus a ratio against the total."
+      "notes": "A count with a where counts ROWS, not entities: for \"how many users did X\" use count_distinct of the user key with the same where, or build the flag per entity in a pipeline first. The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
+      "hack": "agg: \"count\" with a where counts the rows where the conditions hold, so a flag becomes a measure you can ratio, segment and put on a time axis. Any \"did X\" population is such a measure plus a ratio against the total."
     },
     {
       "id": "agg_chosen_per_question",
@@ -748,33 +714,23 @@
           {
             "name": "starts",
             "type": "simple",
-            "measure": {
-              "name": "starts"
-            }
+            "measure": "starts"
           },
           {
             "name": "completes",
             "type": "simple",
-            "measure": {
-              "name": "completes"
-            }
+            "measure": "completes"
           },
           {
             "name": "completion_rate",
             "type": "ratio",
-            "numerator": {
-              "name": "completes"
-            },
-            "denominator": {
-              "name": "starts"
-            }
+            "numerator": "completes",
+            "denominator": "starts"
           },
           {
             "name": "avg_time",
             "type": "simple",
-            "measure": {
-              "name": "avg_time"
-            }
+            "measure": "avg_time"
           }
         ]
       },
@@ -827,9 +783,6 @@
       ],
       "semantic_payload": {
         "name": "monetization",
-        "use_base_models": [
-          "users"
-        ],
         "semantic_models": [
           {
             "from": "events",
@@ -861,42 +814,33 @@
                 "value": "iap_purchase_completed"
               }
             ]
+          },
+          {
+            "from": "users"
           }
         ],
         "metrics": [
           {
             "name": "revenue",
             "type": "simple",
-            "measure": {
-              "name": "revenue"
-            }
+            "measure": "revenue"
           },
           {
             "name": "payers",
             "type": "simple",
-            "measure": {
-              "name": "payers"
-            }
+            "measure": "payers"
           },
           {
             "name": "arppu",
             "type": "ratio",
-            "numerator": {
-              "name": "revenue"
-            },
-            "denominator": {
-              "name": "payers"
-            }
+            "numerator": "revenue",
+            "denominator": "payers"
           },
           {
             "name": "aov",
             "type": "ratio",
-            "numerator": {
-              "name": "revenue"
-            },
-            "denominator": {
-              "name": "purchases"
-            }
+            "numerator": "revenue",
+            "denominator": "purchases"
           }
         ]
       },
@@ -1002,26 +946,18 @@
           {
             "name": "ad_revenue",
             "type": "simple",
-            "measure": {
-              "name": "ad_revenue"
-            }
+            "measure": "ad_revenue"
           },
           {
             "name": "impressions",
             "type": "simple",
-            "measure": {
-              "name": "impressions"
-            }
+            "measure": "impressions"
           },
           {
             "name": "rev_per_imp",
             "type": "ratio",
-            "numerator": {
-              "name": "ad_revenue"
-            },
-            "denominator": {
-              "name": "impressions"
-            }
+            "numerator": "ad_revenue",
+            "denominator": "impressions"
           }
         ]
       },
@@ -1123,28 +1059,20 @@
           {
             "name": "coins_in",
             "type": "simple",
-            "measure": {
-              "name": "coins_in"
-            }
+            "measure": "coins_in"
           },
           {
             "name": "coins_out",
             "type": "simple",
-            "measure": {
-              "name": "coins_out"
-            }
+            "measure": "coins_out"
           },
           {
             "name": "net_coins",
             "type": "derived",
             "expr": "coins_in - coins_out",
             "metrics": [
-              {
-                "metric": "coins_in"
-              },
-              {
-                "metric": "coins_out"
-              }
+              "coins_in",
+              "coins_out"
             ]
           }
         ]
@@ -1220,9 +1148,7 @@
           {
             "name": "active_users",
             "type": "simple",
-            "measure": {
-              "name": "active_users"
-            }
+            "measure": "active_users"
           }
         ]
       },
@@ -1431,16 +1357,12 @@
           {
             "name": "running_revenue",
             "type": "cumulative",
-            "measure": {
-              "name": "revenue"
-            }
+            "measure": "revenue"
           },
           {
             "name": "mtd_revenue",
             "type": "cumulative",
-            "measure": {
-              "name": "revenue"
-            },
+            "measure": "revenue",
             "grain_to_date": "month"
           }
         ]
@@ -1527,28 +1449,20 @@
           {
             "name": "iap_revenue",
             "type": "simple",
-            "measure": {
-              "name": "iap_revenue"
-            }
+            "measure": "iap_revenue"
           },
           {
             "name": "ad_revenue_cents",
             "type": "simple",
-            "measure": {
-              "name": "ad_revenue_cents"
-            }
+            "measure": "ad_revenue_cents"
           },
           {
             "name": "total_revenue",
             "type": "derived",
             "expr": "iap_revenue + ad_revenue_cents / 100",
             "metrics": [
-              {
-                "metric": "iap_revenue"
-              },
-              {
-                "metric": "ad_revenue_cents"
-              }
+              "iap_revenue",
+              "ad_revenue_cents"
             ]
           }
         ]
@@ -4868,9 +4782,6 @@
       ],
       "semantic_payload": {
         "name": "ua_spend",
-        "use_base_models": [
-          "users"
-        ],
         "semantic_models": [
           {
             "from": "acquisition",
@@ -4902,53 +4813,42 @@
                 "percentile": 0.9
               }
             ]
+          },
+          {
+            "from": "users"
           }
         ],
         "metrics": [
           {
             "name": "cost",
             "type": "simple",
-            "measure": {
-              "name": "cost"
-            }
+            "measure": "cost"
           },
           {
             "name": "clicks",
             "type": "simple",
-            "measure": {
-              "name": "clicks"
-            }
+            "measure": "clicks"
           },
           {
             "name": "max_daily_cost",
             "type": "simple",
-            "measure": {
-              "name": "max_daily_cost"
-            }
+            "measure": "max_daily_cost"
           },
           {
             "name": "avg_daily_cost",
             "type": "simple",
-            "measure": {
-              "name": "avg_daily_cost"
-            }
+            "measure": "avg_daily_cost"
           },
           {
             "name": "p90_daily_cost",
             "type": "simple",
-            "measure": {
-              "name": "p90_daily_cost"
-            }
+            "measure": "p90_daily_cost"
           },
           {
             "name": "cost_per_click",
             "type": "ratio",
-            "numerator": {
-              "name": "cost"
-            },
-            "denominator": {
-              "name": "clicks"
-            }
+            "numerator": "cost",
+            "denominator": "clicks"
           }
         ]
       },
@@ -5021,9 +4921,6 @@
       ],
       "semantic_payload": {
         "name": "gov",
-        "use_base_models": [
-          "users"
-        ],
         "semantic_models": [
           {
             "from": "acquisition",
@@ -5032,15 +4929,16 @@
                 "field": "media_source"
               }
             ]
+          },
+          {
+            "from": "users"
           }
         ],
         "metrics": [
           {
             "name": "total_spend",
             "type": "simple",
-            "measure": {
-              "name": "total_spend"
-            }
+            "measure": "total_spend"
           }
         ]
       },
@@ -5141,16 +5039,12 @@
           {
             "name": "launches",
             "type": "simple",
-            "measure": {
-              "name": "launches"
-            }
+            "measure": "launches"
           },
           {
             "name": "fatal",
             "type": "simple",
-            "measure": {
-              "name": "fatal"
-            }
+            "measure": "fatal"
           }
         ]
       },

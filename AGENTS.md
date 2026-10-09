@@ -183,10 +183,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `meta.mcp.measures: { <name>: { expr, ... } }` for an aggregatable expression.
   NEITHER fixes an aggregation: a task names the field in a measure's `field` and
   chooses `agg` per question (sum | average | min | max | count | count_distinct |
-  sum_boolean | median | percentile, validated at catalog load) — the same column is
-  summed for one question and read at a p90 for the next. Adding `agg` to a
-  declaration is the OPT-IN exception: it additionally publishes a governed measure
-  whose function is fixed for everyone; the free choice over the raw field remains.
+  median | percentile; the rows where a condition holds are counted by `count` with
+  that `where`) — the same column is summed for one question and read at a p90 for
+  the next. Adding `agg` to a declaration is the OPT-IN exception: it additionally
+  publishes a governed measure whose function is fixed for everyone (any of dbt's,
+  sum_boolean included, validated at catalog load); the free choice over the raw
+  field remains.
   Do NOT special-case a measure, a column name or a role in `src/` — if a new source
   needs something, it becomes a schema key that every source can use. Two opt-outs
   go with it: `meta.mcp.dimension: false` (a real column that is not a groupable
@@ -313,7 +315,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   cell's condition is `on` = the value — one per listed value),
   a read's transform, a semantic model — `{ name, agg, column|field?,
   percentile?, where? }`, closed forms by `agg` (`measureSchema`, src/pipeline/sql.js): a count
-  without its column counts rows, events are scoped by a `where`. A SORT KEY over a table's rows (the
+  without its column counts rows, events are scoped by a `where`. What a semantic metric reads is
+  named by a string — a simple or cumulative metric's `measure`, a ratio's `numerator` and
+  `denominator`, a derived metric's `metrics` (its `expr` written over them as listed) — and a model
+  is loaded into a task by an item of `semantic_models` (`{ from }` alone loads it for its
+  attributes), in a declaration and an update alike. A SORT KEY over a table's rows (the
   order_by stage, a window's order, a read) is ONE item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
   funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a week is the ISO
@@ -600,8 +606,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   query_semantic_model({ context_id: "<semantic model>" }) — `{ semantic_model, dimension, grain? }`,
   `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
   the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
-  one spelling per item — and `{ entity }` in group_by / where / order_by: what a dimension is and
-  where it lives. MetricFlow makes every join; what it needs is its own name for the
+  one spelling per item — and `{ entity }` in group_by / where: what a dimension is and
+  where it lives (order_by names the result column a group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
   item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
   with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
   RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's

@@ -77,8 +77,37 @@ kept from an earlier version, carried over on read (src/pipeline/earlier.js); `n
   - unnest `{ property }` (an enum of the catalog's array properties) | `{ column }`; sample `share`
     (0 < share ≤ 1); a join window's `between.column`; project `{ keep } | { drop }`; limit `{ limit }`;
     a window's `partition_by` takes a column or `{ entity }`; one TYPE schema.
-- Later batches of the same job (semantic build, readers and cards, catalog tools, experiment,
-  retentioneering) are recorded here as they land.
+- Batch C, semantic build, query and preview:
+  - `use_base_models` is gone: an item of `semantic_models` loads its model, `{ from }` alone for its
+    attributes, in a declaration and an update alike; an item with a `where` and no measures is
+    refused (its where scopes nothing); every hint names `semantic_models: [{ from }]`; only a model
+    a semantic layer can load is offered there and in `remove.dimensions` (`Catalog.semanticModelKeys`:
+    a fact, or a model with a primary entity — experiments is a pipeline join's), and compile refuses
+    another on `semantic_models.from`;
+  - what a metric reads is a string: `measure`, `numerator`, `denominator`, a derived metric's
+    `metrics: [names]` (no alias; `expr` is written over the names as listed, declared or stored);
+  - `label` on a dimension, a measure and a metric reaches the manifest;
+  - a dimension's type comes from the catalog (`as_type` is gone): a time column is a time dimension
+    at `grain` (default the catalog's granularity), anything else categorical and takes no grain; a
+    group_by on a time attribute asks MetricFlow for it at its grain, so its column is
+    `<model>_<attribute>` (it came back as MetricFlow's `<path>__<grain>`);
+  - a task measure's `agg` has no `sum_boolean` (a count with a where; governed catalog measures keep
+    it; no `sum_boolean → count` refusal hint — a count of a column counts its non-NULL rows, a
+    different number), and `cast` sits only on the forms that fold a number (sum, average, median, min, max,
+    percentile), its enum the compute TYPES without string;
+  - cumulative is two forms (all history / a trailing `window` in days…years, or `grain_to_date`);
+  - update's `task` is a task the context holds (another name is refused, pointing at a declaration
+    with context_id); `remove.dimensions` is one closed form per model with its fields as an enum;
+  - query_semantic_model: no `task`; the single query requires `metrics`; `group_by` items unique;
+    an `order_by` key is a result column (the `metric_time` alias and the object-key branch are
+    gone); `materialize` with `dry_run` is refused; a dry run compiles with the caller's own limit;
+  - preview_semantic_model: two forms — show, and validate over a window (`validate: true` with
+    `time_range`); `semantic_model` is an enum of the models a semantic layer loads
+    (`Catalog.semanticModelKeys`) and the project's semantic models;
+  - texts: the overview's `enums` are keyed `{ agg, type, grain }` (agg: the task aggs); "Queried as
+    <task>_<name>"; a semantic measure's name says it is read by metrics.
+- Later batches of the same job (readers and cards, catalog tools, experiment, retentioneering) are
+  recorded here as they land.
 
 ## Out Of Scope
 
@@ -118,6 +147,13 @@ A pipeline built again after this job can return different numbers than before, 
   - `date_part` dow is 1–7 with Monday = 1 (was 0–6 with Sunday = 0);
   - unchanged on DuckDB: the week (already ISO) and the NULL placement (already last).
 
+A semantic task declared again after Batch C:
+
+- a dimension declared over a column the catalog types as time (users.install_date, …) is a time
+  dimension at its grain (it was categorical unless `as_type: time`), and a group_by on a time
+  attribute returns its column as `<model>_<attribute>` (it was MetricFlow's `<path>__<grain>`);
+- a dry run's SQL carries the caller's limit (it carried limit + offset + 1, or 1001 by default).
+
 ## Verification
 
 Recorded per batch in the job's run (lint:names, unit tests, the touched integration files).
@@ -128,6 +164,11 @@ Recorded per batch in the job's run (lint:names, unit tests, the touched integra
   materialize, crashlytics-fact, pipeline-checkpoint, audit-regressions, retentioneering,
   batch-queries, analytics-tasks, end-to-end, acquisition-source, task-results, python-stage;
   `npm run eval:check` 14/14 cases hold. BigQuery not run (see Out Of Scope).
+- Batch C: `npm run lint:names` clean; `npm test` 669/669; integration 378/378 over recipes-parse,
+  end-to-end, cumulative-window, declared-joins, project-semantics, analytics-tasks,
+  audit-regressions, behavior-funnels, batch-queries, crashlytics-fact, ab-test, scd-e2e,
+  mcp-end-to-end, task-results, materialize, acquisition-source, duckdb-dbt, jinja-inert,
+  multistep-funnel, condition-grammar, value-index; `npm run eval:check` 14/14 cases hold.
 
 ## Source Of Truth
 

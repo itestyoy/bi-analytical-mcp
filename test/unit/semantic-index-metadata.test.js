@@ -56,7 +56,7 @@ test('event drill-down rows carry the unit per property', async () => {
 test('compile errors name the offending field', () => {
   const declWith = (metrics) => ({ name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics });
   try {
-    compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: { name: 'nope' } }]));
+    compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: 'nope' }]));
     assert.fail('expected unknown-measure error');
   } catch (e) {
     assert.match(e.message, /unknown measure 'nope'/);
@@ -64,12 +64,12 @@ test('compile errors name the offending field', () => {
     assert.equal(e.field, 'metrics.measure');
   }
   try {
-    compileDeclaration(catalog, { name: 't', use_base_models: ['nope'] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'nope' }] });
     assert.fail('expected unknown-model error');
   } catch (e) {
     assert.match(e.message, /unknown model 'nope'/);
     assert.match(e.message, /users/); // lists the known models
-    assert.equal(e.field, 'use_base_models');
+    assert.equal(e.field, 'semantic_models.from');
   }
   try {
     compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', agg: 'sum', field: 'complete_time_of_event_data' }] }] });
@@ -84,7 +84,7 @@ test('overview carries join_note + value_index_status; payload-less event is not
   const e = engine();
   const out = await e.semantic_index({});
   assert.ok(/model: 'users', attribute:/.test(out.join_note), 'join_note shows the structured attribute reference');
-  assert.ok(out.join_note.includes("use_base_models"), 'join_note names the declaration');
+  assert.ok(out.join_note.includes("{ from: 'users' }"), 'join_note names the declaration that loads the model');
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');
   // Applicability is DATA-DERIVED: seed coverage so every event property is observed on some event

@@ -49,7 +49,6 @@ before(async () => {
   // the same `cost` field is summed here, maxed there, and read at a percentile below.
   const out = await engine.build_semantic_model({
     name: 'uacq',
-    use_base_models: ['users'],
     semantic_models: [{
       from: 'acquisition',
       measures: [
@@ -61,16 +60,17 @@ before(async () => {
         { name: 'p90_daily_cost', agg: 'percentile', field: 'cost', percentile: 0.9 },
         { name: 'avg_cost_per_click', agg: 'average', field: 'cost_per_click' },
       ],
-    }],
+    },
+    { from: 'users' }],
     metrics: [
-      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
-      { name: 'impressions', type: 'simple', measure: { name: 'impressions' } },
-      { name: 'clicks', type: 'simple', measure: { name: 'clicks' } },
-      { name: 'max_daily_cost', type: 'simple', measure: { name: 'max_daily_cost' } },
-      { name: 'avg_daily_cost', type: 'simple', measure: { name: 'avg_daily_cost' } },
-      { name: 'p90_daily_cost', type: 'simple', measure: { name: 'p90_daily_cost' } },
-      { name: 'avg_cost_per_click', type: 'simple', measure: { name: 'avg_cost_per_click' } },
-      { name: 'cpc', type: 'ratio', numerator: { name: 'cost' }, denominator: { name: 'clicks' } },
+      { name: 'cost', type: 'simple', measure: 'cost' },
+      { name: 'impressions', type: 'simple', measure: 'impressions' },
+      { name: 'clicks', type: 'simple', measure: 'clicks' },
+      { name: 'max_daily_cost', type: 'simple', measure: 'max_daily_cost' },
+      { name: 'avg_daily_cost', type: 'simple', measure: 'avg_daily_cost' },
+      { name: 'p90_daily_cost', type: 'simple', measure: 'p90_daily_cost' },
+      { name: 'avg_cost_per_click', type: 'simple', measure: 'avg_cost_per_click' },
+      { name: 'cpc', type: 'ratio', numerator: 'cost', denominator: 'clicks' },
     ],
   });
   assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);
@@ -233,9 +233,8 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // it wants to slice by.
   const out = await engine.build_semantic_model({
     name: 'gov',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'media_source' }] }],
-    metrics: [{ name: 'total_spend', type: 'simple', measure: { name: 'total_spend' } }],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'media_source' }] }, { from: 'users' }],
+    metrics: [{ name: 'total_spend', type: 'simple', measure: 'total_spend' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'] });

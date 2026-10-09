@@ -12,8 +12,8 @@ Governed metric path. Define once, query by time grain.
    scoped to the relevant event by a `where`;
    or use the governed *Cumulative Sessions* / *Session Duration* definitions.
 2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
-   series `order_by: [{ key: "metric_time" }]` (a key is a result column's name — here
-   `metric_time_day` names the same column).
+   series `order_by: [{ key: "metric_time_day" }]` (a key is a result column's name — the
+   time axis at a day is the column `metric_time_day`).
 - **Gotcha:** "last week/month" = last **complete** period; DAU ≤ MAU; distinct players,
   not rows. Sessions follow AppsFlyer logic ([Cumulative Sessions](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4503207971)).
 

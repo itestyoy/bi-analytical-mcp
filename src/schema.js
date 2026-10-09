@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, CONTEXT_PAGE, attributeRefForms, timeRef } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, CONTEXT_PAGE, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
@@ -45,12 +45,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     }
     : { type: 'string', pattern: CTX, description });
   const modelKeys = catalog.modelKeys();
+  // the models a semantic layer can load: an item of semantic_models, and the dimensions an update
+  // removes, are offered only over them (a model with no primary entity is a pipeline join's)
+  const semanticKeys = catalog.semanticModelKeys();
   const createFields = {
     context_id: { type: 'string', pattern: CTX, description: D.context_id },
     name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
     description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
-    use_base_models: { type: 'array', uniqueItems: true, items: { type: 'string', enum: catalog.modelKeys() }, description: 'Models to load only so their attributes become groupable / filterable as { model, attribute } (e.g. "users" for { model: "users", attribute: "country" }). Every source in semantic_models[].from is loaded already. A slowly-changing model is joined point-in-time automatically.' },
-    semantic_models: { type: 'array', items: { anyOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One per source model: { from, where?, dimensions?, measures? }. Every name in it is a `field` of that model — a column, a scalar payload property, a declared amount. A measure is { name, agg, field?, percentile?, where?, cast?, label? }: count without field counts rows.' },
+    semantic_models: { type: 'array', items: { anyOf: semanticKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One or more per source model: { from, where?, dimensions?, measures? }; each item\'s where scopes its own measures. An item with only `from` loads that model, so its attributes can be grouped and filtered as { model, attribute } (e.g. { from: "users" } for { model: "users", attribute: "country" }; a slowly-changing model is joined point-in-time). Every name in an item is a `field` of its model — a column, a scalar payload property, a declared amount. A measure is { name, agg, field?, percentile?, where?, cast?, label? }: count without field counts rows.' },
     metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above).' },
     dry_run: { type: 'boolean', description: 'If true, validate and return the definition without writing files or building anything.' },
     include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
@@ -60,14 +62,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // what it removes is named the way it was added.
   const updateFields = {
     context_id: { type: 'string', pattern: CTX, description: 'The context whose task to change.' },
-    task: { type: 'string', description: 'The task to change (default: the context\'s first).' },
-    semantic_models: { ...createFields.semantic_models, description: 'What to add to each semantic model: its dimensions, its measures (a `where` here is not applied to the measures already there).' },
+    task: { type: 'string', pattern: TASK, description: 'The task to change, one the context holds (default: its first). To add a task beside it, declare one: { name, context_id, … } without action.' },
+    semantic_models: { ...createFields.semantic_models, description: 'What to add, per source model: dimensions and measures (an item\'s where scopes the measures declared beside it, never those already there). An item with only `from` loads a model this context does not read yet, so its attributes can be grouped and filtered as { model, attribute }.' },
     metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'Metrics to add.' },
     remove: {
       type: 'object', additionalProperties: false,
       description: 'What to remove, by the names it was added under. Removals come first, so one update replaces a measure or a metric by removing it and declaring it again.',
       properties: {
-        dimensions: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['from', 'field'], properties: { from: { enum: modelKeys }, field: { type: 'string' } } } },
+        dimensions: { type: 'array', minItems: 1, items: { anyOf: semanticKeys.filter((k) => dimensionFields(catalog, k).length).map((k) => form({ title: k, tag: ['from', k], required: ['field'], properties: { field: { enum: dimensionFields(catalog, k), description: `A dimension this context declared on ${k}, by its field.` } } })) }, description: 'Dimensions to remove: { from, field }, as they were declared.' },
         measures: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a metric reads one, unless cascade.' },
         metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a ratio or derived metric is built from one, unless cascade.' },
       },
@@ -170,7 +172,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // batch (context_id + queries), read tasks (task_ids), cancel them. Told apart by the fields each
   // requires; each takes only its own.
   const queryModes = (startFields, batch, paging) => [
-    form({ title: 'start a query', required: ['context_id'], properties: { context_id: startFields.context_id, ...startFields.fields } }),
+    form({ title: 'start a query', required: ['context_id', ...(startFields.required || [])], properties: { context_id: startFields.context_id, ...startFields.fields } }),
     form({ title: 'start a batch', required: ['context_id', 'queries'], properties: { context_id: startFields.context_id, queries: batch } }),
     form({ title: 'read tasks', required: ['task_ids'], properties: { ...pick(taskRead, ['task_ids', 'wait_seconds']), ...paging } }),
     form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
@@ -180,11 +182,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `Several ${what} in one call, run side by side: each item takes a single query's fields (context_id stays at the top). All are checked first — one mistake refuses the batch. Returns task_ids, in order.`, items: item });
 
   const semanticQueryFields = {
-      task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
       metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
-        description: `How to break the metrics down, one result column per item, in order. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context an attribute is { model, attribute }: the join comes from the schema, and the model must be in use_base_models (column <model>_<attribute>).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own) — and { entity }; preview_semantic_model({ request: { context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
+        uniqueItems: true,
+        description: `How to break the metrics down, one result column per item, in order. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context an attribute is { model, attribute }: the join comes from the schema, and the context has to read the model — a semantic_models item of the build, { from: <model> } alone to load it (column <model>_<attribute>).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own) — and { entity }; preview_semantic_model({ request: { context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
         items: {
           anyOf: [
             timeRef(catalog),
@@ -194,7 +196,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         },
       },
       where: conditionList({ $ref: '#/$defs/predicate' }, 'Row filter applied before aggregation: conditions on dimensions / metric_time that all hold — an item may be { or: [...] }, any of its conditions holds (each a condition or { and: [...] }).'),
-      order_by: { type: 'array', description: 'Sort order, by the names the rows come back with: a requested metric, a result column ("users_country", "metric_time_day"), or "metric_time".', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
+      order_by: { type: 'array', description: 'Sort order, by the names the rows come back with: a requested metric, or the result column of a group_by item ("users_country", "metric_time_day").', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
@@ -207,7 +209,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     type: 'object',
     description: 'Start a metric query against a context (or several at once with queries) — or, with task_ids, read semantic tasks back.',
     $defs: pdefs,
-    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: semanticQueryFields }, 'metric queries'), readPaging(semanticQueryFields)),
+    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields, required: ['metrics'] }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: semanticQueryFields }, 'metric queries'), readPaging(semanticQueryFields)),
   };
 
   const ctxRef = { type: 'object', additionalProperties: false, required: ['context_id'], description: 'Reference an existing context by id.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id } } };
@@ -277,17 +279,24 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       },
     },
     // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
-    preview_semantic_model: {
-      type: 'object', additionalProperties: false, required: ['context_id'],
-      description: 'Three ways to call it: context_id alone shows the context\'s whole semantic layer; with metric, one metric in full (its inputs and everything its group_by takes); with semantic_model, one semantic model and the metrics that read it. Add validate: true (and time_range to read the warehouse) to check it by running it instead — that starts a task.',
-      properties: {
+    preview_semantic_model: (() => {
+      const fields = {
         context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
-        semantic_model: { type: 'string', description: 'Narrow the answer to one semantic model of the context (as its semantic_models name them) and the metrics that read it — mostly for a task\'s context, which can hold several.' },
+        // a task's context names its semantic models after the catalog's models it loads; the project's are its own
+        semantic_model: { type: 'string', enum: [...new Set([...semanticKeys, ...(project ? project.semantic_models.map((m) => m.name) : [])])].sort(), description: 'Narrow the answer to one semantic model of the context and the metrics that read it — mostly for a task\'s context, which can hold several. With metric too, the metric\'s semantic models are narrowed to this one.' },
         metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as query_semantic_model\'s group_by takes it.' },
-        validate: { type: 'boolean', description: 'Check the layer by running it: MetricFlow compiles each metric in view, naming one it cannot build; with time_range the warehouse also runs each metric over that window and reads each semantic model\'s dimensions and entities, naming what fails. A task: it returns { task_id }, read with query_semantic_model.' },
-        time_range: { ...METRIC_TIME_RANGE, description: 'Only with validate: the metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it. Without it, validate compiles only and reads nothing.' },
-      },
-    },
+        validate: { type: 'boolean', description: 'Check the layer by running it: MetricFlow compiles each metric in view, naming one it cannot build. A task: it returns { task_id }, read with query_semantic_model.' },
+        time_range: { ...METRIC_TIME_RANGE, description: 'The metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it.' },
+      };
+      return {
+        type: 'object',
+        description: 'context_id alone shows the context\'s whole semantic layer; with metric, one metric in full (its inputs and everything its group_by takes); with semantic_model, one semantic model and the metrics that read it. validate: true checks it by running it instead — a task; with a time_range the warehouse also runs each metric over that window and reads each semantic model\'s dimensions and entities.',
+        anyOf: [
+          form({ title: 'show the layer', required: ['context_id'], properties: pick(fields, ['context_id', 'semantic_model', 'metric', 'validate']) }),
+          form({ title: 'validate over a window', tag: ['validate', true], required: ['context_id', 'time_range'], properties: pick(fields, ['context_id', 'semantic_model', 'metric', 'time_range']) }),
+        ],
+      };
+    })(),
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],

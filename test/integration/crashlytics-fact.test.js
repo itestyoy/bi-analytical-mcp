@@ -51,11 +51,10 @@ before(async () => {
   // inside it the source's own events and properties are named as-is.
   const crash = await engine.build_semantic_model({
     name: 'stab',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', agg: 'count' }, { name: 'crashed_users', agg: 'count_distinct', field: 'player_id_of_internal' }], where: [{ field: 'event_name', op: 'eq', value: 'fatal_crash' }] }],
+    semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', agg: 'count' }, { name: 'crashed_users', agg: 'count_distinct', field: 'player_id_of_internal' }], where: [{ field: 'event_name', op: 'eq', value: 'fatal_crash' }] }, { from: 'users' }],
     metrics: [
-      { name: 'fatal', type: 'simple', measure: { name: 'fatal' } },
-      { name: 'crashed_users', type: 'simple', measure: { name: 'crashed_users' } },
+      { name: 'fatal', type: 'simple', measure: 'fatal' },
+      { name: 'crashed_users', type: 'simple', measure: 'crashed_users' },
     ],
   });
   assert.equal(crash.parse.ok, true, `parse failed: ${JSON.stringify(crash.parse)}`);
@@ -67,8 +66,8 @@ before(async () => {
     name: 'mix',
     semantic_models: [{ from: 'events', measures: [{ name: 'launches', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { from: 'crashlytics', measures: [{ name: 'fatal', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'fatal_crash' }] }],
     metrics: [
-      { name: 'launches', type: 'simple', measure: { name: 'launches' } },
-      { name: 'fatal', type: 'simple', measure: { name: 'fatal' } },
+      { name: 'launches', type: 'simple', measure: 'launches' },
+      { name: 'fatal', type: 'simple', measure: 'fatal' },
     ],
   });
   assert.equal(both.parse.ok, true, `parse failed: ${JSON.stringify(both.parse)}`);
@@ -124,9 +123,9 @@ test('a payload property scoped to ONE event: anr rows 3, seconds 26, avg 26/3',
     name: 'anr',
     semantic_models: [{ from: 'crashlytics', measures: [{ name: 'events', agg: 'count' }, { name: 'secs', agg: 'sum', field: 'anr_duration_of_event_data' }, { name: 'avg_secs', agg: 'average', field: 'anr_duration_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'anr' }] }],
     metrics: [
-      { name: 'events', type: 'simple', measure: { name: 'events' } },
-      { name: 'secs', type: 'simple', measure: { name: 'secs' } },
-      { name: 'avg_secs', type: 'simple', measure: { name: 'avg_secs' } },
+      { name: 'events', type: 'simple', measure: 'events' },
+      { name: 'secs', type: 'simple', measure: 'secs' },
+      { name: 'avg_secs', type: 'simple', measure: 'avg_secs' },
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -145,7 +144,7 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
     context_id: crashCtx,
     name: 'ver',
     semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'app_version' }], measures: [{ name: 'reports', agg: 'count' }] }],
-    metrics: [{ name: 'reports', type: 'simple', measure: { name: 'reports' } }],
+    metrics: [{ name: 'reports', type: 'simple', measure: 'reports' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] });
@@ -327,7 +326,7 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
   const out = await engine.build_semantic_model({
     name: 'gov',
     semantic_models: [{ from: 'crashlytics', dimensions: [{ field: 'app_version' }] }],
-    metrics: [{ name: 'anr_seconds', type: 'simple', measure: { name: 'anr_seconds' } }],
+    metrics: [{ name: 'anr_seconds', type: 'simple', measure: 'anr_seconds' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const r = await q(out.context_id, { metrics: ['gov_anr_seconds'] });

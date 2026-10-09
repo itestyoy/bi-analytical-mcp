@@ -3,7 +3,7 @@
 // them. Read-only; methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
-import { MEASURE_AGGS } from '../catalog.js';
+import { TASK_MEASURE_AGGS } from '../catalog.js';
 import { frameProfile } from '../python-model.js';
 import { buildGuide } from '../guide.js';
 import { pythonAuthoringGuide } from '../python-guide.js';
@@ -178,7 +178,7 @@ export const semanticIndexMethods = {
       const viaable = rels.filter((r) => r.joins);
       const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
       const notes = [];
-      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { stages: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' } with use_base_models: ['${viaable[0].joins}'].`);
+      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { stages: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' }, with the model loaded by a semantic_models item { from: '${viaable[0].joins}' }.`);
       // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
       // onto a unique key) — say so here, or it looks like a missing feature at query time.
       if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
@@ -374,7 +374,7 @@ export const semanticIndexMethods = {
         .filter(([, rels]) => rels.length > 1);
       const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
       recommendations.push(ent
-        ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (declare use_base_models: ['${mk}']${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
+        ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (load the model with a semantic_models item { from: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
         : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
       const attrOut = {
         property: col, source: mk, model: mk, column: col, type: dim.type,
@@ -674,7 +674,7 @@ export const semanticIndexMethods = {
     // pipelines. The fact holds only per-event columns — user/experiment attributes
     // always come via their model.
     join_note: userModel
-      ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
+      ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (load it with a semantic_models item { from: '${userModel}' } in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
       : null,
     value_index_status: sync ? {
       ready: (sync.indexed_properties || 0) > 0,
@@ -686,7 +686,8 @@ export const semanticIndexMethods = {
     // drill one with semantic_index({ request: { bundle } }) to see what carries data for that app.
     // Apps PER SOURCE — the same bundle id is a different row set in each source that carries it.
     ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
-    enums: { agg: [...MEASURE_AGGS], metric_type: ['simple', 'ratio', 'cumulative', 'derived'], time_granularity: c.timeGranularities() },
+    // a task's vocabulary, keyed as the declaration's fields are: a measure's agg, a metric's type, a grain
+    enums: { agg: [...TASK_MEASURE_AGGS], type: ['simple', 'ratio', 'cumulative', 'derived'], grain: c.timeGranularities() },
     // Ready-made task templates, fetched in full via semantic_index({ request: { recipe: id } }).
     ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
     // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW

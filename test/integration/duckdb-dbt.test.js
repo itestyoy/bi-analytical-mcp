@@ -48,13 +48,12 @@ before(async () => {
   // Monetization model: only two data sources (events fact + user attributes).
   const out = await engine.build_semantic_model({
     name: 'mon',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
     metrics: [
-      { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
-      { name: 'payers', type: 'simple', measure: { name: 'payers' } },
-      { name: 'purchases', type: 'simple', measure: { name: 'purchases' } },
-      { name: 'arppu', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'payers' } },
+      { name: 'revenue', type: 'simple', measure: 'revenue' },
+      { name: 'payers', type: 'simple', measure: 'payers' },
+      { name: 'purchases', type: 'simple', measure: 'purchases' },
+      { name: 'arppu', type: 'ratio', numerator: 'revenue', denominator: 'payers' },
     ],
   });
   assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);

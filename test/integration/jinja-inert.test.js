@@ -76,7 +76,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
   const out = await engine.build_semantic_model({
     name: 'jtut',
     semantic_models: [{ from: 'events', measures: [{ name: 's1', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }, { field: 'element_of_event_data', op: 'eq', value: 'step_1' }], label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }, { field: 'element_of_event_data', op: 'eq', value: '{{ "step_1" }}' }] }] }],
-    metrics: [{ name: 's1', type: 'simple', measure: { name: 's1' } }, { name: 'sj', type: 'simple', measure: { name: 'sj' } }],
+    metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));
   const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['jtut_s1', 'jtut_sj'] });

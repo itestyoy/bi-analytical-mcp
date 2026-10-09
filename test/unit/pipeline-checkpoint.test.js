@@ -361,7 +361,7 @@ test('where the warehouse cannot be asked about a task\'s table, the marks its b
 
 test('a draft started from a semantic query run with materialize: true has its table\'s column types from the warehouse', async () => {
   const e = flagEngine(flagRunner());
-  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }] });
+  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
   const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ model: 'events', attribute: 'event_name' }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');

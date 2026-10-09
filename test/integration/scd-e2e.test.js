@@ -52,9 +52,9 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
-    name: 'scd_rev', use_base_models: ['users'],
+    name: 'scd_rev',
     semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   const ctx = created.context_id;
@@ -78,9 +78,9 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
 test('governed SCD join: metric_time series works (time spine auto-built), Jan month = 100', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
-    name: 'scd_ts', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    name: 'scd_ts',
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_ts_revenue'], group_by: [{ time: 'metric_time', grain: 'month' }], materialize: true });
@@ -93,13 +93,13 @@ test('governed SCD join: metric_time series works (time spine auto-built), Jan m
 test('governed SCD join: a measure on the SCD users model is dropped with a warning; the task still parses & queries', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
-    name: 'scd_drop', use_base_models: ['users'],
+    name: 'scd_drop',
     semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', measures: [{ name: 'player_count', agg: 'count_distinct', field: 'internal_player_id' }] }],
     metrics: [
-      { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
-      { name: 'players', type: 'simple', measure: { name: 'player_count' } },
+      { name: 'revenue', type: 'simple', measure: 'revenue' },
+      { name: 'players', type: 'simple', measure: 'player_count' },
       // built on the dropped measure through another metric
-      { name: 'revenue_per_player', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'player_count' } },
+      { name: 'revenue_per_player', type: 'ratio', numerator: 'revenue', denominator: 'player_count' },
     ],
   });
   assert.equal(created.parse.ok, true, `parse must still succeed after dropping the SCD measure: ${JSON.stringify(created.parse)}`);

@@ -31,9 +31,9 @@ const TASK = {
   name: 'cum',
   semantic_models: [{ from: 'events', measures: [{ name: 'events_n', agg: 'count' }] }],
   metrics: [
-    { name: 'daily', type: 'simple', measure: { name: 'events_n' } },
-    { name: 'two_day', type: 'cumulative', measure: { name: 'events_n' }, window: '2 days' },
-    { name: 'to_date', type: 'cumulative', measure: { name: 'events_n' } },
+    { name: 'daily', type: 'simple', measure: 'events_n' },
+    { name: 'two_day', type: 'cumulative', measure: 'events_n', window: '2 days' },
+    { name: 'to_date', type: 'cumulative', measure: 'events_n' },
   ],
 };
 
@@ -64,7 +64,7 @@ test('a cumulative metric over a time_range sums the days before the range that 
     context_id: created.context_id,
     metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'],
     group_by: [{ time: 'metric_time', grain: 'day' }],
-    order_by: [{ key: 'metric_time' }],
+    order_by: [{ key: 'metric_time_day' }],
     time_range: { start: '2026-01-03', end: '2026-01-05' },
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));

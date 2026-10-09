@@ -12,13 +12,13 @@ import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { isNumericType } from './dialects/base.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
-import { MEASURE_AGGS, NUMERIC_AGGS } from './catalog/measures.js';
+import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { physicalColumnType, isArrayPropertyType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
-export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
+export { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
 
@@ -359,6 +359,15 @@ export class Catalog {
   /** True when `key` is an events fact (has its own event vocabulary). */
   isFact(key) {
     return this.facts.includes(key);
+  }
+
+  /**
+   * The models a semantic layer can load (yaml-render.js renderBaseModel): a fact, or a model with a
+   * primary entity — what MetricFlow addresses its dimensions through. A model without one (an
+   * experiments source) is reached through a pipeline join stage instead.
+   */
+  semanticModelKeys() {
+    return this.modelKeys().filter((k) => this.isFact(k) || !!this.models[k].primary_entity);
   }
 
   /**

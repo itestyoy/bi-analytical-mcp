@@ -231,15 +231,15 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   const first = await e.build_semantic_model({
     name: 'ret',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'nope' }] } }),
-    /cannot remove dimension 'nope'.*It has: country/s,
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'platform' }] } }),
+    /cannot remove dimension 'platform'.*It has: country/s,
   );
   const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
@@ -259,13 +259,13 @@ test('groupable and the example only name models this context loaded', async () 
   const out = await e.build_semantic_model({
     name: 'evonly',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const loaded = new Set(out.joined_models);
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
   assert.ok((out.groupable || []).every((g) => loaded.has(g.model)), JSON.stringify(out.groupable));
   assert.ok((out.groupable_after_loading || []).some((g) => g.model === 'users'), 'and the rest is offered separately');
-  assert.match(out.groupable_after_loading_note || '', /use_base_models/);
+  assert.match(out.groupable_after_loading_note || '', /semantic_models: \[\{ from: '\w+' \}\]/);
   // whatever is published as groupable is accepted by the query path
   const ctx = e.ctxs.get(out.context_id);
   for (const g of out.groupable || []) {
@@ -462,9 +462,8 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   // relationship to it (two facts do not point at each other).
   const out = await e.build_semantic_model({
     name: 'evonly',
-    use_base_models: ['crashlytics', 'users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
     () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),

@@ -9,6 +9,12 @@ export const MEASURE_AGGS = new Set(['count', 'count_distinct', 'sum', 'average'
 // cast for. (count / count_distinct count rows, sum_boolean counts trues: any type will do.)
 export const NUMERIC_AGGS = new Set(['sum', 'average', 'median', 'min', 'max', 'percentile']);
 
+// The aggregations a TASK's measure chooses from (build_semantic_model): every one above but
+// sum_boolean, which is a count with a `where` under another name — the pipeline's measure has no
+// such function, and one measure is written alike wherever rows are aggregated. A governed catalog
+// measure may still fix sum_boolean: it is dbt's own word, rendered as the catalog declares it.
+export const TASK_MEASURE_AGGS = new Set([...MEASURE_AGGS].filter((a) => a !== 'sum_boolean'));
+
 /**
  * Normalise one GOVERNED measure — the opt-in case where a declaration also fixes its
  * aggregation for everyone (model-level meta.mcp.measures entry, or a column-level

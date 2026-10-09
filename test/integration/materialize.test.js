@@ -35,9 +35,9 @@ before(async () => {
   backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
-    name: 'mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
-    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+    name: 'mon',
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   ctxId = out.context_id;

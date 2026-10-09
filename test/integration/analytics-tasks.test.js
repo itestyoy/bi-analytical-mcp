@@ -71,8 +71,8 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
     name: 'castq',
     semantic_models: [{ from: 'events', measures: [{ name: 'sum_ct', agg: 'sum', field: 'complete_time_of_event_data', cast: 'numeric' }, { name: 'avg_ct', agg: 'average', field: 'complete_time_of_event_data', cast: 'numeric' }], where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }],
     metrics: [
-      { name: 'sum_ct', type: 'simple', measure: { name: 'sum_ct' } },
-      { name: 'avg_ct', type: 'simple', measure: { name: 'avg_ct' } },
+      { name: 'sum_ct', type: 'simple', measure: 'sum_ct' },
+      { name: 'avg_ct', type: 'simple', measure: 'avg_ct' },
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse.error || out.parse));
@@ -84,7 +84,7 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
   await assert.rejects(engine.build_semantic_model({
     name: 'castbad',
     semantic_models: [{ from: 'events', measures: [{ name: 'bad', agg: 'average', field: 'complete_time_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }],
-    metrics: [{ name: 'bad', type: 'simple', measure: { name: 'bad' } }],
+    metrics: [{ name: 'bad', type: 'simple', measure: 'bad' }],
   }), /not numeric|cast/i);
 });
 
@@ -115,14 +115,27 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(planned.plan && typeof planned.plan === 'object');           // plan object returned
   assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0); // dataflow plan present
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include_plan: true }), /include_plan goes with dry_run/);
+  // a dry run stores nothing: materialize beside it is refused, not ignored
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, materialize: true }), /materialize goes with a query that runs/);
 
-  // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
-  // suffix need not be guessed); dry_run surfaces the orderable tokens; a bad key lists them.
+  // a dry run is compiled with the caller's own limit: its SQL, run as shown, returns that many rows
+  // (it was compiled with the fetch size, one past the page); without a limit, every one of the 7 days
+  const limited = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], limit: 3, dry_run: true });
+  assert.equal(limited.ok, true, JSON.stringify(limited.error || limited));
+  assert.equal((await wh.query(limited.sql)).rows.length, 3);
+  assert.equal((await wh.query(ex.sql)).rows.length, 7);
+
+  // #4b: an order_by key is a result column's name — the day axis is metric_time_day; dry_run
+  // surfaces the orderable keys; a key that is no result column (the bare `metric_time` too, which
+  // with two grains in group_by named only one of them) is refused with the list.
   assert.ok(ex.orderable_keys.includes('metric_time_day') && ex.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(ex.orderable_keys)}`);
-  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time' }] });
+  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day' }] });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
-  assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time_day
+  assert.equal(sorted.row_count, 7); // same 7 days, in ascending order
+  const at = sorted.rows.map((r) => new Date(r.metric_time_day).getTime());
+  assert.deepEqual(at, [...at].sort((a, b) => a - b));
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }], order_by: [{ key: 'metric_time' }] }), /Orderable: .*metric_time_day.*metric_time_week/);
   // a key is the result column it is handed as — the same 7 days, desc puts the latest first — never
   // the token the server resolves it to
   const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day', direction: 'desc' }] });
@@ -216,6 +229,62 @@ test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers g
   assert.ok(buyersByCohort.rows.every((r) => num(r.cohort_grid_buyers) <= 7)); // per-cohort buyers <= total payers
 });
 
+// ── 5b. a task's time dimension: what the catalog types as time is read at the declared grain ──
+// users.install_date is a time column in the catalog. Declared on a task, it is a TIME dimension:
+// at `grain` when one is given (week), at the catalog's own granularity (day) when not — the same
+// rows as the users model's own install_date. The day cohorts summed by ISO week (Monday) are the
+// week cohorts. The labels given go with the dimension, the measure and the metric.
+test('a task dimension over a time column is read at its grain (week), or at the catalog\'s (day)', opts, async (t) => {
+  if (skip(t)) return;
+  const task = (name, dims) => engine.build_semantic_model({
+    name,
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', label: 'Events counted' }] }, { from: 'users', ...(dims ? { dimensions: dims } : {}) }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n', label: 'Events' }],
+  });
+  const built = {};
+  for (const [name, dims] of [['coh_wk', [{ field: 'install_date', grain: 'week', label: 'Install week' }]], ['coh_dy', [{ field: 'install_date' }]], ['coh_base', null]]) {
+    const out = await task(name, dims);
+    assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+    built[name] = out.context_id;
+  }
+  const cohorts = async (name) => {
+    const r = await q(built[name], { metrics: [`${name}_n`], group_by: [{ model: 'users', attribute: 'install_date' }] });
+    assert.equal(r.ok, true, JSON.stringify(r.error || r));
+    assert.ok(r.columns.some((c) => c.name === 'users_install_date'), `the column is named for the reference: ${JSON.stringify(r.columns)}`);
+    return r.rows;
+  };
+  const day = (v) => (v == null ? null : new Date(v).toISOString().slice(0, 10));
+  const byKey = (rows, name, key = day) => {
+    const out = {};
+    for (const r of rows) { const k = key(r.users_install_date); out[k] = (out[k] || 0) + num(r[`${name}_n`]); }
+    return out;
+  };
+  const isoWeek = (v) => { if (v == null) return null; const d = new Date(v); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+
+  const daily = byKey(await cohorts('coh_dy'), 'coh_dy');
+  // no grain: the catalog's day — the users model's own install_date, the same rows
+  assert.deepEqual(daily, byKey(await cohorts('coh_base'), 'coh_base'));
+  assert.equal(Object.values(daily).reduce((a, b) => a + b, 0), 184, 'every event counted once');
+  assert.equal(Object.keys(daily).filter((k) => k !== 'null').length, 5, 'five install days');
+  // at a week: the day cohorts summed by ISO week, two weeks
+  const weekly = byKey(await cohorts('coh_wk'), 'coh_wk');
+  assert.deepEqual(weekly, byKey(await cohorts('coh_dy'), 'coh_dy', isoWeek));
+  assert.equal(Object.keys(weekly).filter((k) => k !== 'null').length, 2, 'Jan 1-4 and Jan 5 2026 are two ISO weeks');
+  // filtered on the same attribute: only the cohort of the week of Jan 5
+  const late = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ model: 'users', attribute: 'install_date' }], where: [{ field: { model: 'users', attribute: 'install_date' }, op: 'gte', value: '2026-01-05' }] });
+  assert.equal(late.ok, true, JSON.stringify(late.error || late));
+  assert.deepEqual(byKey(late.rows, 'coh_wk'), { '2026-01-05': weekly['2026-01-05'] });
+
+  // the labels went with what they were given on, into the layer dbt parsed
+  const p = await engine.preview_semantic_model({ context_id: built.coh_wk });
+  const users = p.semantic_models.find((sm) => sm.name === 'users');
+  assert.equal(users.dimensions.find((d) => d.name === 'coh_wk_install_date').label, 'Install week');
+  // (a measure is listed by the legacy spec; the latest spec has none — a simple metric carries its own)
+  const measure = (p.semantic_models.find((sm) => sm.name === 'events').measures || []).find((m) => m.name === 'coh_wk_n');
+  if (measure) assert.equal(measure.label, 'Events counted');
+  assert.equal(p.metrics.find((m) => m.name === 'coh_wk_n').label, 'Events');
+});
+
 // ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────
 test('TASK boolean_condition_as_measure: did/didn-t-purchase counts & Metric()-in-where split', opts, async (t) => {
   if (skip(t)) return;
@@ -225,7 +294,7 @@ test('TASK boolean_condition_as_measure: did/didn-t-purchase counts & Metric()-i
   const both = await q(ctx, { metrics: ['behavior_purchases', 'behavior_sessions'] });
   const sessByDay = await q(ctx, { metrics: ['behavior_sessions'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [purchases, sessions, both, sessByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  assert.equal(num(purchases.rows[0].behavior_purchases), 8);          // 8 completed purchases (sum_boolean)
+  assert.equal(num(purchases.rows[0].behavior_purchases), 8);          // 8 completed purchases (a count with a where)
   assert.equal(num(sessions.rows[0].behavior_sessions), 21);           // 21 new_session events
   assert.equal(sumCol(sessByDay.rows, 'behavior_sessions'), 21);       // per-day sessions sum to 21
   assert.ok(num(both.rows[0].behavior_purchases) < num(both.rows[0].behavior_sessions)); // behavior is a subset signal

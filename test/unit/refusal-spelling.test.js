@@ -38,7 +38,7 @@ test("a governed measure refuses `avg` and says it is spelled `average` here", (
   const payload = (agg) => ({
     name: 'spell_task',
     semantic_models: [{ from: 'events', measures: [{ name: 'm', agg, field: 'price_in_usd_of_event_data' }] }],
-    metrics: [{ name: 'm', type: 'simple', measure: { name: 'm' } }],
+    metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
   const res = check('build_semantic_model', payload('avg'));
   assert.equal(res.ok, false);
@@ -55,7 +55,7 @@ test('the quantile is `percentile` on both paths, and SQL\'s `q` / `fn` / `as` a
   const gov = check('build_semantic_model', {
     name: 'spell_pct',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'p90', agg: 'percentile', field: 'cost', q: 0.9 }] }],
-    metrics: [{ name: 'p90', type: 'simple', measure: { name: 'p90' } }],
+    metrics: [{ name: 'p90', type: 'simple', measure: 'p90' }],
   });
   assert.equal(gov.ok, false);
   assert.match(text(gov), /here that field is called 'percentile'/);
@@ -73,6 +73,20 @@ test('a name with no counterpart in this path gets the plain list, with no inven
   assert.equal(res.ok, false);
   assert.match(text(res), /must be one of/);
   assert.ok(!/is spelled/.test(text(res)), 'nothing is suggested for a function this server does not have');
+});
+
+// `sum_boolean` has no word-for-word counterpart: a count of a column counts its non-NULL rows, not
+// its true ones, so naming `count` alone would hand back another number under the same reading. The
+// refusal lists the functions; the measure's where (and recipe boolean_condition_as_measure) teach
+// count + where.
+test('sum_boolean is refused with the list of functions, and no word-for-word advice, on both paths', () => {
+  const pipe = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'payers', agg: 'sum_boolean', column: 'is_payer' }] }));
+  const semantic = check('build_semantic_model', { name: 'spell_task', semantic_models: [{ from: 'events', measures: [{ name: 'm', agg: 'sum_boolean' }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  for (const res of [pipe, semantic]) {
+    assert.equal(res.ok, false);
+    assert.match(text(res), /must be one of/);
+    assert.ok(!/is spelled/.test(text(res)), text(res));
+  }
 });
 
 test("a read's projection explains '*': count rows by leaving `column` out", () => {

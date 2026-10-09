@@ -29,25 +29,29 @@ const COLUMN_OPTIONAL = ['count'];
  * ONE MEASURE, wherever rows are aggregated — a pipeline's aggregate stage, a read's transform, a
  * semantic model: { name, agg, <key>?, percentile?, where? }, in closed forms told apart by `agg` —
  * the functions that fold a column (it is required), those for which it is optional (a count of
- * rows), those that take none, and the percentile (column and quantile required). `aggs` is what the
- * place can compute; `key` what it calls what is aggregated (a table's `column`, a source's
- * `field`) and `column` its schema; `where` the conditions a conditional measure folds the rows of;
- * `pattern` what a produced name may be; `extra` the place's own optional fields. `named: false` is
+ * rows), and the percentile (column and quantile required). `aggs` is what the place can compute;
+ * `key` what it calls what is aggregated (a table's `column`, a source's `field`) and `column` its
+ * schema; `where` the conditions a conditional measure folds the rows of; `pattern` what a produced
+ * name may be and `nameDescription` what that name is there; `extra` the place's own optional
+ * fields; `numeric` ({ aggs, extra }) fields only the functions that fold a number take — those
+ * functions get a form of their own that carries them, so the others refuse them. `named: false` is
  * the measure where the place names what it produces itself (a pivot names a column per value): the
  * same forms without `name`.
  */
-export function measureSchema({ aggs, column, where, description, pattern = NAME, key = 'column', optional = COLUMN_OPTIONAL, none = [], extra = {}, named = true }) {
-  const name = named ? { type: 'string', pattern, description: 'The name of the column it produces.' } : undefined;
-  const needs = aggs.filter((a) => a !== 'percentile' && !optional.includes(a) && !none.includes(a));
+export function measureSchema({ aggs, column, where, description, pattern = NAME, nameDescription = 'The name of the column it produces.', key = 'column', optional = COLUMN_OPTIONAL, extra = {}, numeric = null, named = true }) {
+  const name = named ? { type: 'string', pattern, description: nameDescription } : undefined;
+  const needs = aggs.filter((a) => a !== 'percentile' && !optional.includes(a));
   const opt = aggs.filter((a) => optional.includes(a));
-  const zero = aggs.filter((a) => none.includes(a));
   const own = Object.fromEntries(Object.entries({ name, where, ...extra }).filter(([, v]) => v !== undefined));
+  const num = numeric ? { ...own, ...numeric.extra } : own;
+  const isNum = (a) => !!numeric && numeric.aggs.includes(a);
   const req = (...keys) => [...(named ? ['name'] : []), ...keys];
+  // the functions that need a column, split by whether they fold a number (and take its fields)
+  const groups = [needs.filter(isNum), needs.filter((a) => !isNum(a))].filter((g) => g.length);
   const forms = [
-    form({ title: `agg: ${needs.join(' | ')}`, tag: ['agg', needs], required: req(key), properties: { ...own, [key]: column } }),
+    ...groups.map((g) => form({ title: `agg: ${g.join(' | ')}`, tag: ['agg', g], required: req(key), properties: { ...(isNum(g[0]) ? num : own), [key]: column } })),
     ...(opt.length ? [form({ title: `agg: ${opt.join(' | ')} (${key} optional)`, tag: ['agg', opt], required: req(), properties: { ...own, [key]: column } })] : []),
-    ...(zero.length ? [form({ title: `agg: ${zero.join(' | ')} (no ${key})`, tag: ['agg', zero], required: req(), properties: own })] : []),
-    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: req(key, 'percentile'), properties: { ...own, [key]: column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
+    ...(aggs.includes('percentile') ? [form({ title: 'agg: percentile', tag: ['agg', 'percentile'], required: req(key, 'percentile'), properties: { ...(isNum('percentile') ? num : own), [key]: column, percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' } } })] : []),
   ];
   return { type: 'object', ...(description ? { description } : {}), anyOf: forms };
 }
@@ -126,9 +130,11 @@ export function operandsMisspelled(value, at = '') {
 
 /**
  * ONE TYPE WORD — what a value is read or converted as: compute's cast, a JSON / array read, an
- * unnested element, a raw expression's result, a CASE's.
+ * unnested element, a raw expression's result, a CASE's; a semantic measure's `cast` takes its
+ * number types (TYPES without string).
  */
-export const TYPE = { enum: ['int', 'numeric', 'float', 'string'], description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read, an unnested element or a raw expression yields, a CASE result.' };
+export const TYPES = ['int', 'numeric', 'float', 'string'];
+export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read, an unnested element or a raw expression yields, a CASE result.' };
 
 /**
  * ONE SORT KEY — the order_by stage's keys, a window's over.order_by and a read's order_by: a column,

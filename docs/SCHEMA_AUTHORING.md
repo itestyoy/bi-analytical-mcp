@@ -199,7 +199,7 @@ measures:
 
 | ключ | что меняет |
 |---|---|
-| `measure: true` | помечает колонку **суммой**: агрегируема любой функцией (`sum / average / min / max / count / count_distinct / sum_boolean / median / percentile`), функцию выбирает вызывающий. Перестаёт быть атрибутом и не профилируется индексом. |
+| `measure: true` | помечает колонку **суммой**: агрегируема любой функцией (`sum / average / min / max / count / count_distinct / median / percentile`), функцию выбирает вызывающий. Перестаёт быть атрибутом и не профилируется индексом. |
 | `measure: { unit, label, description }` | то же, плюс самоописание в `semantic_index` (поле → единица → смысл). |
 | `measure: { …, agg, name? }` | **опт-ин.** Дополнительно публикует губернируемую величину `name` (по умолчанию имя колонки) с зафиксированной функцией. Свободный выбор над колонкой остаётся. `percentile` требует `percentile: 0.9`. |
 | `measure` вместе с `dimension` | колонка остаётся атрибутом (группируемой), а не величиной — `dimension` побеждает. Редкий случай: числовой код, по которому и группируют, и который иногда суммируют. |
@@ -710,7 +710,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
-| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
+| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ from }` без мер подключает модель ради её атрибутов), `metrics` |
 | `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, stages }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
 | `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
@@ -756,7 +756,6 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "metric_types": ["simple", "ratio"],
   "semantic_payload": {
     "name": "rev_segment",
-    "use_base_models": ["users"],
     "semantic_models": [{
       "from": "events",
       "where": [{ "field": "event_name", "op": "eq", "value": "iap_purchase_completed" }],
@@ -764,11 +763,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
         { "name": "revenue", "agg": "sum",            "field": "price_in_usd_of_event_data" },
         { "name": "payers",  "agg": "count_distinct", "field": "player_id_of_internal" }
       ]
-    }],
+    }, { "from": "users" }],
     "metrics": [
-      { "name": "revenue", "type": "simple", "measure": { "name": "revenue" } },
-      { "name": "payers",  "type": "simple", "measure": { "name": "payers" } },
-      { "name": "arppu",   "type": "ratio",  "numerator": { "name": "revenue" }, "denominator": { "name": "payers" } }
+      { "name": "revenue", "type": "simple", "measure": "revenue" },
+      { "name": "payers",  "type": "simple", "measure": "payers" },
+      { "name": "arppu",   "type": "ratio",  "numerator": "revenue", "denominator": "payers" }
     ]
   },
   "example_queries": [

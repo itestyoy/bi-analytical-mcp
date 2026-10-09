@@ -586,7 +586,7 @@ MetricFlow умеет соединять только по уникальном�
 { "name": "ua_cpc",
   "semantic_models": [{ "from": "acquisition",
     "measures": [{ "name": "cpc_p50", "agg": "median", "field": "cost_per_click" }] }],
-  "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": { "name": "cpc_p50" } }] }
+  "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": "cpc_p50" }] }
 ```
 
 В pipeline такой колонки нет: его стадии видят только колонки модели. То же частное там

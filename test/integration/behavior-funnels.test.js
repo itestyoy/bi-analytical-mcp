@@ -62,14 +62,14 @@ before(async () => {
   // Monetization: revenue / payers / purchases / arppu / aov, with a 1-hop join
   // to user attributes and a local product_id event-property dimension.
   await create({
-    name: 'mon', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
+    name: 'mon',
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'product_id_of_event_data' }], measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' }, { name: 'purchases', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
     metrics: [
-      { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
-      { name: 'payers', type: 'simple', measure: { name: 'payers' } },
-      { name: 'purchases', type: 'simple', measure: { name: 'purchases' } },
-      { name: 'arppu', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'payers' } },
-      { name: 'aov', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'purchases' } },
+      { name: 'revenue', type: 'simple', measure: 'revenue' },
+      { name: 'payers', type: 'simple', measure: 'payers' },
+      { name: 'purchases', type: 'simple', measure: 'purchases' },
+      { name: 'arppu', type: 'ratio', numerator: 'revenue', denominator: 'payers' },
+      { name: 'aov', type: 'ratio', numerator: 'revenue', denominator: 'purchases' },
     ],
   });
 
@@ -78,30 +78,30 @@ before(async () => {
     name: 'prog',
     semantic_models: [{ from: 'events', dimensions: [{ field: 'level_id_of_event_data' }], measures: [{ name: 'starts', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_started' }] }, { name: 'completes', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'level_completed' }] }] }],
     metrics: [
-      { name: 'starts', type: 'simple', measure: { name: 'starts' } },
-      { name: 'completes', type: 'simple', measure: { name: 'completes' } },
-      { name: 'completion_rate', type: 'ratio', numerator: { name: 'completes' }, denominator: { name: 'starts' } },
+      { name: 'starts', type: 'simple', measure: 'starts' },
+      { name: 'completes', type: 'simple', measure: 'completes' },
+      { name: 'completion_rate', type: 'ratio', numerator: 'completes', denominator: 'starts' },
     ],
   });
 
   // Visitors and buyers as governed counts (the conversion itself is a pipeline, below).
   await create({
-    name: 'conv', use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
+    name: 'conv',
+    semantic_models: [{ from: 'events', measures: [{ name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
     metrics: [
-      { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
-      { name: 'buyers', type: 'simple', measure: { name: 'buyers' } },
+      { name: 'visitors', type: 'simple', measure: 'visitors' },
+      { name: 'buyers', type: 'simple', measure: 'buyers' },
     ],
   });
 
-  // Behavioral cohort: active users + a did-purchase boolean, split via Metric()
+  // Behavioral cohort: active users + a did-purchase count (a count with a where), split via Metric()
   // in the warm backend --where.
   await create({
     name: 'beh',
-    semantic_models: [{ from: 'events', measures: [{ name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'purch', agg: 'sum_boolean', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }, { name: 'purch', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
     metrics: [
-      { name: 'active', type: 'simple', measure: { name: 'active' } },
-      { name: 'purch', type: 'simple', measure: { name: 'purch' } },
+      { name: 'active', type: 'simple', measure: 'active' },
+      { name: 'purch', type: 'simple', measure: 'purch' },
     ],
   });
 }, opts);
@@ -214,9 +214,9 @@ test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limi
 test('a metric window on a partitioned source: the numbers of the rows, the same with the partition declared as without it', opts, async (t) => {
   if (skip(t)) return;
   const decl = (name) => ({
-    name, use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count' }] }],
-    metrics: [{ name: 'events', type: 'simple', measure: { name: 'events' } }],
+    name,
+    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'events', type: 'simple', measure: 'events' }],
   });
   const window = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
   const run = async (name) => {

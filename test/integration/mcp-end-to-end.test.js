@@ -134,9 +134,8 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // version valid on the spend day.
   const ctx = await mcpTask({
     name: 'e2e_ua',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'users' }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -306,9 +305,9 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
     name: 'e2e_mix',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count' }] }],
     metrics: [
-      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
-      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
-      { name: 'crashes', type: 'simple', measure: { name: 'crashes' } },
+      { name: 'cost', type: 'simple', measure: 'cost' },
+      { name: 'evts', type: 'simple', measure: 'evts' },
+      { name: 'crashes', type: 'simple', measure: 'crashes' },
     ],
   });
   const r = await call('query_semantic_model', {
@@ -410,7 +409,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const ctx = await mcpTask({
     name: 'e2e_grow',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const before = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
@@ -425,7 +424,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
     action: 'update',
     context_id: ctx,
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }] }],
-    metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
+    metrics: [{ name: 'clicks', type: 'simple', measure: 'clicks' }],
   });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 

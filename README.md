@@ -68,7 +68,8 @@ AI ──► query_semantic_model (enum-constrained)
   `error: { stage: 'validate'|'compile'|'parse'|'query', message, field }`,
   with dbt/MetricFlow output cleaned (ANSI + log timestamps stripped, the
   meaningful Error/Database Error/Parsing Error portion surfaced). Path/metric
-  validation errors are actionable (e.g. "add use_base_models including 'users'").
+  validation errors are actionable (e.g. a group_by on a model the context does not read names
+  the update that loads it: `semantic_models: [{ from: 'users' }]`).
 
 ## Recipes
 

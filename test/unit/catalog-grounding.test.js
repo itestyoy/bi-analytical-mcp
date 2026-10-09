@@ -313,7 +313,8 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   // the tool schema no longer offers it as a source, but the { model } view still accepts it to explain
   const { buildSchemas } = await import('../../src/schema.js');
   const schemas = buildSchemas(catalog);
-  const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); for (const v of Object.values(node)) enums(v, out); } return out; };
+  // the values a schema offers: its enums, and its pinned constants (a semantic_models item's `from`)
+  const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); if (typeof node.const === 'string') out.push([node.const]); for (const v of Object.values(node)) enums(v, out); } return out; };
   const offers = (schema, key) => enums(schema).some((e) => e.includes(key));
   assert.ok(!offers(schemas.build_semantic_model, 'crashlytics'), 'build_semantic_model must not offer the unavailable source');
   assert.ok(!offers(schemas.build_pipeline_model, 'crashlytics'), 'build_pipeline_model must not offer the unavailable source');

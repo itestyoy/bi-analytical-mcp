@@ -98,7 +98,7 @@ test('a measure\'s where takes an { or }: the count is the rows either condition
   const built = await engine.build_semantic_model({
     name: 'cond_levels',
     semantic_models: [{ from: 'events', measures: [{ name: 'picked', agg: 'count', where: [{ or: [{ field: 'level_id_of_event_data', op: 'eq', value: 1 }, { field: 'level_id_of_event_data', op: 'gte', value: 3 }] }] }] }],
-    metrics: [{ name: 'picked', type: 'simple', measure: { name: 'picked' } }],
+    metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
   const r = await engine.query_semantic_model({ context_id: built.context_id, metrics: ['cond_levels_picked'], time_range: { start: '2020-01-01', end: '2030-12-31' } });
@@ -112,7 +112,7 @@ test('a metric query\'s where names its field as group_by does, and takes the te
   const built = await engine.build_semantic_model({
     name: 'cond_where',
     semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name' }], measures: [{ name: 'rows', agg: 'count' }] }],
-    metrics: [{ name: 'rows', type: 'simple', measure: { name: 'rows' } }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
   const r = await engine.query_semantic_model({

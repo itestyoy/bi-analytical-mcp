@@ -12,6 +12,9 @@ import { clone } from './helpers.js';
 /** What a semantic declaration keeps in a context's state — all an update changes. */
 const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
 
+/** The call that loads `model` into a context for its attributes: an item of semantic_models with only `from`. */
+export const loadModelCall = (contextId, model) => `build_semantic_model({ request: { action: 'update', context_id: '${contextId}', semantic_models: [{ from: '${model}' }] } }) — or, in a declaration, an item { from: '${model}' } in its semantic_models`;
+
 /** What a context already holds, which a declaration into it reads and may not declare again (compileDeclaration). */
 const heldBy = (state) => ({
   measures: Object.values(state.additions || {}).flatMap((a) => a.measures.map((m) => m.name)),
@@ -41,8 +44,8 @@ export const semanticBuildMethods = {
     if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
-      `'${model}.${ref.attribute}' needs model '${model}', which is not loaded in this context. `
-        + `Recreate/update the task with use_base_models including '${model}'.`,
+      `'${model}.${ref.attribute}' needs model '${model}', which this context does not read. `
+        + `Load it: ${loadModelCall(ctx.id, model)}.`,
       { stage: 'validate', field: 'model' },
     );
   },
@@ -143,7 +146,7 @@ export const semanticBuildMethods = {
       groupable,
       ...(afterLoading.length ? {
         groupable_after_loading: afterLoading,
-        groupable_after_loading_note: `These attributes are reachable in the catalog but their model is not loaded in this context — add it with use_base_models: ['${afterLoading[0].model}'] (create/update) before naming them in group_by/where.`,
+        groupable_after_loading_note: `These attributes are reachable in the catalog but this context does not read their model — load it before naming them in group_by/where: ${loadModelCall(ctx.id, afterLoading[0].model)}.`,
       } : {}),
       parse,
       assumptions: this._assumptions(ctx),
@@ -164,9 +167,15 @@ export const semanticBuildMethods = {
     // The update is made on a COPY of the state, which replaces the context's only once every check
     // below has passed: a refused update leaves the context as it was, and a dry run never touches it.
     const state = clone(ctx.state);
+    // the task changed is one the context holds: a name it does not hold is a new task, which is a
+    // declaration beside it (create with context_id), not an update
+    const tasks = state.tasks || [];
+    if (input.task && !tasks.includes(input.task)) {
+      throw new ToolError(`context '${ctx.id}' holds no task '${input.task}'. ${tasks.length ? `It holds: ${tasks.join(', ')}.` : 'It holds none.'} To add a task beside ${tasks.length ? 'them' : 'what it holds'}, declare one: build_semantic_model({ request: { name: '${input.task}', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } })`, { stage: 'validate', field: 'task' });
+    }
     const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
     for (const sm of input.semantic_models || []) state.additions[sm.from] ||= { measures: [], dimensions: [] };
-    const task = input.task || state.tasks[0] || 'task';
+    const task = input.task || tasks[0] || 'task';
     const measureNames = () => heldBy(state).measures;
 
     // Removals first (so one update can replace a measure). A measure or metric is named as it was
@@ -216,9 +225,9 @@ export const semanticBuildMethods = {
 
     // the additions are a declaration fragment, compiled as a declaration is, against the measures the
     // task keeps — so a metric added alone reads them by the names they were declared under
-    // (the context's sources come along, so metrics alone — or removals alone — compile against them)
-    const frag = { name: task, use_base_models: state.usedModels || [], semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
-    const compiled = this._compile(frag, heldBy(state));
+    // (the context's models come along, so metrics alone — or removals alone — compile against them)
+    const frag = { name: task, semantic_models: input.semantic_models || [], metrics: input.metrics || [] };
+    const compiled = this._compile(frag, { ...heldBy(state), models: state.usedModels || [] });
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });

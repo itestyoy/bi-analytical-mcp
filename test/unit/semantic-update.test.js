@@ -29,9 +29,9 @@ const declare = (e) => e.build_semantic_model({
     { from: 'users', dimensions: [{ field: 'country' }] },
   ],
   metrics: [
-    { name: 'n', type: 'simple', measure: { name: 'n' } },
-    { name: 'u', type: 'simple', measure: { name: 'u' } },
-    { name: 'r', type: 'ratio', numerator: { name: 'n' }, denominator: { name: 'u' } },
+    { name: 'n', type: 'simple', measure: 'n' },
+    { name: 'u', type: 'simple', measure: 'u' },
+    { name: 'r', type: 'ratio', numerator: 'n', denominator: 'u' },
   ],
 });
 const update = (e, contextId, body) => e.build_semantic_model({ action: 'update', context_id: contextId, ...body });
@@ -60,7 +60,7 @@ test('cascade takes the metrics that read a removed measure with it, and the ans
 test('an update adds a metric over measures the task declared before, by their declared names', async () => {
   const e = engine();
   const first = await declare(e);
-  const out = await update(e, first.context_id, { metrics: [{ name: 'per_user', type: 'ratio', numerator: { name: 'n' }, denominator: { name: 'u' } }] });
+  const out = await update(e, first.context_id, { metrics: [{ name: 'per_user', type: 'ratio', numerator: 'n', denominator: 'u' }] });
   assert.ok(out.metrics.includes('ret_per_user'));
   const state = e.ctxs.get(first.context_id).state;
   assert.deepEqual(measuresOf(state), ['ret_n', 'ret_u'], 'no measure is added twice');
@@ -77,10 +77,10 @@ test('an update adds a metric over measures the task declared before, by their d
   });
   assert.deepEqual(measuresOf(e.ctxs.get(first.context_id).state), ['ret_n', 'ret_u']);
   // the stored name a context describes a measure under reads it too
-  const stored = await update(e, first.context_id, { metrics: [{ name: 'n_again', type: 'simple', measure: { name: 'ret_n' } }] });
+  const stored = await update(e, first.context_id, { metrics: [{ name: 'n_again', type: 'simple', measure: 'ret_n' }] });
   assert.ok(stored.metrics.includes('ret_n_again'));
   // a name that is not among them is still refused, listing the context's measures as it stores them
-  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'm', type: 'simple', measure: { name: 'nope' } }] }),
+  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'm', type: 'simple', measure: 'nope' }] }),
     /unknown measure 'nope'\. This call declares no measure\. Already in this context: ret_n, ret_u\.$/);
 });
 
@@ -88,17 +88,17 @@ test('an update adds a metric over measures the task declared before, by their d
 test('a derived metric in an update reads the task\'s metrics by their declared or stored names, and refuses one it does not have', async () => {
   const e = engine();
   const first = await declare(e);
-  await update(e, first.context_id, { metrics: [{ name: 'per_user', type: 'derived', expr: 'ret_n / ret_u', metrics: [{ metric: 'ret_n' }, { metric: 'ret_u' }] }] });
-  await update(e, first.context_id, { metrics: [{ name: 'per_user2', type: 'derived', expr: 'n / u', metrics: [{ metric: 'n' }, { metric: 'u' }] }] });
+  await update(e, first.context_id, { metrics: [{ name: 'per_user', type: 'derived', expr: 'ret_n / ret_u', metrics: ['ret_n', 'ret_u'] }] });
+  await update(e, first.context_id, { metrics: [{ name: 'per_user2', type: 'derived', expr: 'n / u', metrics: ['n', 'u'] }] });
   const state = e.ctxs.get(first.context_id).state;
   const inputsOf = (name) => state.metrics.find((m) => m.name === name).type_params.metrics.map((x) => x.name);
   assert.deepEqual(inputsOf('ret_per_user'), ['ret_n', 'ret_u'], 'the stored names, as they are');
   assert.deepEqual(inputsOf('ret_per_user2'), ['ret_n', 'ret_u'], 'the declared names, namespaced');
   const before = structuredClone(state);
-  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'bad', type: 'derived', expr: 'zz', metrics: [{ metric: 'zz' }] }] }),
+  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'bad', type: 'derived', expr: 'zz', metrics: ['zz'] }] }),
     /derived metric 'bad': no metric named 'zz' or 'ret_zz' to build it from\. This call declares no metric\. Already in this context: ret_n, ret_u, ret_r, ret_per_user, ret_per_user2\.$/);
   // a declaration of its own reads only its own metrics: an input it does not declare is refused too
-  assert.throws(() => compileDeclaration(e.catalog, { name: 'd', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'x', type: 'derived', expr: 'nope', metrics: [{ metric: 'nope' }] }] }),
+  assert.throws(() => compileDeclaration(e.catalog, { name: 'd', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'x', type: 'derived', expr: 'nope', metrics: ['nope'] }] }),
     /derived metric 'x': no metric named 'nope' or 'd_nope' to build it from\. This call declares no metric\.$/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'a refused update changes nothing');
 });
@@ -109,19 +109,19 @@ test('derived metrics built from each other are refused, in any order and throug
   const first = await declare(e);
   const before = structuredClone(e.ctxs.get(first.context_id).state);
   await assert.rejects(() => update(e, first.context_id, { metrics: [
-    { name: 'a', type: 'derived', expr: 'b + n', metrics: [{ metric: 'b' }, { metric: 'n' }] },
-    { name: 'b', type: 'derived', expr: 'a * 2', metrics: [{ metric: 'a' }] },
+    { name: 'a', type: 'derived', expr: 'b + n', metrics: ['b', 'n'] },
+    { name: 'b', type: 'derived', expr: 'a * 2', metrics: ['a'] },
   ] }), /derived metrics built from each other: ret_a → ret_b → ret_a/);
   await assert.rejects(() => update(e, first.context_id, { metrics: [
-    { name: 'a', type: 'derived', expr: 'c', metrics: [{ metric: 'c' }] },
-    { name: 'b', type: 'derived', expr: 'a', metrics: [{ metric: 'a' }] },
-    { name: 'c', type: 'derived', expr: 'b', metrics: [{ metric: 'b' }] },
+    { name: 'a', type: 'derived', expr: 'c', metrics: ['c'] },
+    { name: 'b', type: 'derived', expr: 'a', metrics: ['a'] },
+    { name: 'c', type: 'derived', expr: 'b', metrics: ['b'] },
   ] }), /derived metrics built from each other/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'a refused update changes nothing');
   // a chain that ends in a metric of the task is taken
   const out = await update(e, first.context_id, { metrics: [
-    { name: 'b', type: 'derived', expr: 'a * 2', metrics: [{ metric: 'a' }] },
-    { name: 'a', type: 'derived', expr: 'n / u', metrics: [{ metric: 'n' }, { metric: 'u' }] },
+    { name: 'b', type: 'derived', expr: 'a * 2', metrics: ['a'] },
+    { name: 'a', type: 'derived', expr: 'n / u', metrics: ['n', 'u'] },
   ] });
   assert.ok(out.metrics.includes('ret_a') && out.metrics.includes('ret_b'));
 });
@@ -131,11 +131,11 @@ test('an update that declares a metric the context already has is refused, and r
   const e = engine();
   const first = await declare(e);
   const before = structuredClone(e.ctxs.get(first.context_id).state);
-  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'n', type: 'simple', measure: { name: 'u' } }] }),
+  await assert.rejects(() => update(e, first.context_id, { metrics: [{ name: 'n', type: 'simple', measure: 'u' }] }),
     /metric 'n' is already in this context, as 'ret_n'\. To replace it, remove it and declare it again in one update/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'nothing changed');
 
-  const out = await update(e, first.context_id, { remove: { metrics: ['n'] }, cascade: true, metrics: [{ name: 'n', type: 'simple', measure: { name: 'u' } }] });
+  const out = await update(e, first.context_id, { remove: { metrics: ['n'] }, cascade: true, metrics: [{ name: 'n', type: 'simple', measure: 'u' }] });
   const state = e.ctxs.get(first.context_id).state;
   assert.deepEqual([...measureRefs(state.metrics.find((m) => m.name === 'ret_n'), state.metrics)], ['ret_u'], 'the new definition is the one kept');
   assert.deepEqual(out.metrics.slice().sort(), ['ret_n', 'ret_u'], 'the ratio built on the old one went with it');
@@ -148,16 +148,16 @@ test('a ratio over a measure refuses a metric of another definition under the na
   const first = await e.build_semantic_model({
     name: 'ret',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }, { name: 'u', agg: 'count_distinct', field: 'player_id_of_internal' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }, { name: 'u', type: 'simple', measure: { name: 'n' } }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }, { name: 'u', type: 'simple', measure: 'n' }],
   });
   const before = structuredClone(e.ctxs.get(first.context_id).state);
-  const perUser = { name: 'per_user', type: 'ratio', numerator: { name: 'n' }, denominator: { name: 'u' } };
+  const perUser = { name: 'per_user', type: 'ratio', numerator: 'n', denominator: 'u' };
   await assert.rejects(() => update(e, first.context_id, { metrics: [perUser] }),
     /ratio 'per_user' reads measure 'u' through a simple metric named 'ret_u', and 'ret_u' is already a simple metric over measure 'ret_n' in this context/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'nothing changed');
 
   // a simple metric over u declared before it is the one the ratio reads; ret_n, over n, is reused as it is
-  await update(e, first.context_id, { metrics: [{ name: 'users', type: 'simple', measure: { name: 'u' } }, perUser] });
+  await update(e, first.context_id, { metrics: [{ name: 'users', type: 'simple', measure: 'u' }, perUser] });
   const state = e.ctxs.get(first.context_id).state;
   const ratio = state.metrics.find((m) => m.name === 'ret_per_user');
   assert.deepEqual([ratio.type_params.numerator.name, ratio.type_params.denominator.name], ['ret_n', 'ret_users']);
@@ -167,13 +167,13 @@ test('a ratio over a measure refuses a metric of another definition under the na
 test('in one declaration a metric takes a name no other metric of it holds, a ratio\'s own included', () => {
   const catalog = loadCatalog(CATALOG, {});
   const decl = (metrics) => ({ name: 'ret', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }, { name: 'u', agg: 'count_distinct', field: 'player_id_of_internal' }] }], metrics });
-  const ratio = { name: 'r', type: 'ratio', numerator: { name: 'n' }, denominator: { name: 'u' } };
-  const overU = { name: 'n', type: 'simple', measure: { name: 'u' } };
+  const ratio = { name: 'r', type: 'ratio', numerator: 'n', denominator: 'u' };
+  const overU = { name: 'n', type: 'simple', measure: 'u' };
   assert.throws(() => compileDeclaration(catalog, decl([ratio, overU])), /metric 'n' is stored as 'ret_n', the name of the simple metric over measure 'ret_n' that a ratio of this call reads it through/);
   assert.throws(() => compileDeclaration(catalog, decl([overU, ratio])), /ratio 'r' reads measure 'n' through a simple metric named 'ret_n', and 'ret_n' is already a simple metric over measure 'ret_u' of this call/);
-  assert.throws(() => compileDeclaration(catalog, decl([{ name: 'n', type: 'simple', measure: { name: 'n' } }, { name: 'n', type: 'simple', measure: { name: 'u' } }])), /metric 'n' is declared twice in this call/);
+  assert.throws(() => compileDeclaration(catalog, decl([{ name: 'n', type: 'simple', measure: 'n' }, { name: 'n', type: 'simple', measure: 'u' }])), /metric 'n' is declared twice in this call/);
   // the same reading under that name is the caller's, wherever it is written: the ratio reads it, filled as declared
-  const filled = { name: 'n', type: 'simple', measure: { name: 'n' }, fill_nulls_with: 0 };
+  const filled = { name: 'n', type: 'simple', measure: 'n', fill_nulls_with: 0 };
   for (const metrics of [[ratio, filled], [filled, ratio]]) {
     const out = compileDeclaration(catalog, decl(metrics));
     assert.deepEqual(out.metrics.map((m) => m.name).sort(), ['ret_n', 'ret_r', 'ret_u']);
@@ -187,21 +187,21 @@ test('a declaration into a context refuses a measure or metric the context alrea
   const first = await declare(e);
   const before = structuredClone(e.ctxs.get(first.context_id).state);
   const into = (body) => e.build_semantic_model({ context_id: first.context_id, ...body });
-  await assert.rejects(() => into({ name: 'ret', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n2', type: 'simple', measure: { name: 'n' } }] }),
+  await assert.rejects(() => into({ name: 'ret', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n2', type: 'simple', measure: 'n' }] }),
     /measure 'n' is already in this context, as 'ret_n'/);
-  await assert.rejects(() => into({ name: 'ret', semantic_models: [{ from: 'events', measures: [{ name: 'k', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'k' } }] }),
+  await assert.rejects(() => into({ name: 'ret', semantic_models: [{ from: 'events', measures: [{ name: 'k', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: 'k' }] }),
     /metric 'n' is already in this context, as 'ret_n'/);
-  await assert.rejects(() => into({ name: 'ret', dry_run: true, semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n2', type: 'simple', measure: { name: 'n' } }] }),
+  await assert.rejects(() => into({ name: 'ret', dry_run: true, semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n2', type: 'simple', measure: 'n' }] }),
     /measure 'n' is already in this context/, 'a dry run is refused alike');
   assert.deepEqual(e.ctxs.get(first.context_id).state, before, 'nothing changed');
 
-  await into({ name: 'conv', semantic_models: [{ from: 'events', measures: [{ name: 'k', agg: 'count' }] }], metrics: [{ name: 'k', type: 'simple', measure: { name: 'k' } }] });
+  await into({ name: 'conv', semantic_models: [{ from: 'events', measures: [{ name: 'k', agg: 'count' }] }], metrics: [{ name: 'k', type: 'simple', measure: 'k' }] });
   const state = e.ctxs.get(first.context_id).state;
   assert.deepEqual(state.tasks, ['ret', 'conv']);
   assert.deepEqual(measuresOf(state), ['conv_k', 'ret_n', 'ret_u'], 'each measure once');
 
   // the refusal of an unknown measure lists the context's measures as the context's, not the task's
-  await assert.rejects(() => update(e, first.context_id, { task: 'ret', metrics: [{ name: 'm', type: 'simple', measure: { name: 'nope' } }] }),
+  await assert.rejects(() => update(e, first.context_id, { task: 'ret', metrics: [{ name: 'm', type: 'simple', measure: 'nope' }] }),
     /unknown measure 'nope'\. This call declares no measure\. Already in this context: ret_n, ret_u, conv_k\.$/);
 });
 
@@ -253,17 +253,17 @@ test('a refused update leaves the context state and its files as they were', asy
   const fileBefore = readFileSync(first.files[0], 'utf8');
 
   // a removal on a model the task never declared: refused, and no entry is made for that model
-  await assert.rejects(() => update(e, first.context_id, { remove: { dimensions: [{ from: 'crashlytics', field: 'x' }] } }),
-    /cannot remove dimension 'x': 'crashlytics' carries no such dimension.*It has none/s);
+  await assert.rejects(() => update(e, first.context_id, { remove: { dimensions: [{ from: 'crashlytics', field: 'app_version' }] } }),
+    /cannot remove dimension 'app_version': 'crashlytics' carries no such dimension.*It has none/s);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before);
 
   // a measure removal that would pass, in a call refused on its dimension
-  await assert.rejects(() => update(e, first.context_id, { remove: { measures: ['u'], dimensions: [{ from: 'users', field: 'nope' }] }, cascade: true }),
-    /cannot remove dimension 'nope'/);
+  await assert.rejects(() => update(e, first.context_id, { remove: { measures: ['u'], dimensions: [{ from: 'users', field: 'platform' }] }, cascade: true }),
+    /cannot remove dimension 'platform'/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before);
 
   // an addition that does not compile, beside a removal
-  await assert.rejects(() => update(e, first.context_id, { remove: { metrics: ['r'] }, metrics: [{ name: 'm', type: 'simple', measure: { name: 'nope' } }] }),
+  await assert.rejects(() => update(e, first.context_id, { remove: { metrics: ['r'] }, metrics: [{ name: 'm', type: 'simple', measure: 'nope' }] }),
     /unknown measure 'nope'/);
   assert.deepEqual(e.ctxs.get(first.context_id).state, before);
   assert.equal(readFileSync(first.files[0], 'utf8'), fileBefore, 'the context file is not rewritten');
@@ -316,7 +316,7 @@ test('a semantic model condition on event_name takes the pattern operators; an e
   const decl = (cond) => ({
     name: 'pat',
     semantic_models: [{ from: 'events', where: [cond], measures: [{ name: 'm', agg: 'count', where: [cond] }] }],
-    metrics: [{ name: 'm', type: 'simple', measure: { name: 'm' } }],
+    metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
   for (const [op, value] of [['like', 'level_%'], ['not_like', 'ad_%'], ['contains', 'level'], ['starts_with', 'ad_'], ['ends_with', '_completed']]) {
     assert.doesNotThrow(() => compileDeclaration(catalog, decl({ field: 'event_name', op, value })), op);
@@ -325,4 +325,39 @@ test('a semantic model condition on event_name takes the pattern operators; an e
     assert.throws(() => compileDeclaration(catalog, decl({ field: 'event_name', op, value })), /unknown event 'nope' on 'events'/, op);
   }
   assert.doesNotThrow(() => compileDeclaration(catalog, decl({ field: 'event_name', op: 'in', value: ['level_started', 'level_completed'] })));
+});
+
+// ── an update to a task the context does not hold made a second task ────────────────────────
+// A name the context has no task under is refused with the tasks it has and the declaration that
+// adds one; a task it does hold is the one changed.
+test('an update names a task the context holds; another name is refused with the declaration that adds one', async () => {
+  const e = engine();
+  const first = await declare(e);
+  const before = JSON.stringify(e.ctxs.get(first.context_id).state);
+  await assert.rejects(() => update(e, first.context_id, { task: 'typo', metrics: [{ name: 'k', type: 'simple', measure: 'n' }] }),
+    (err) => err.field === 'task' && /holds no task 'typo'\. It holds: ret\./.test(err.message) && /build_semantic_model\(\{ request: \{ name: 'typo', context_id: /.test(err.message));
+  assert.equal(JSON.stringify(e.ctxs.get(first.context_id).state), before, 'the refused update changed nothing');
+
+  // a second task, declared beside the first, is changed by an update that names it
+  await e.build_semantic_model({ name: 'ret_v2', context_id: first.context_id, semantic_models: [{ from: 'events', measures: [{ name: 'm', agg: 'count' }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  await update(e, first.context_id, { task: 'ret_v2', metrics: [{ name: 'm2', type: 'simple', measure: 'm' }] });
+  const state = e.ctxs.get(first.context_id).state;
+  assert.deepEqual([...state.tasks].sort(), ['ret', 'ret_v2']);
+  assert.ok(state.metrics.some((m) => m.name === 'ret_v2_m2'), 'the metric went to the task named');
+});
+
+// ── a where with nothing to scope was ignored ───────────────────────────────────────────────
+// An item's where scopes the measures declared beside it; an item with a where and no measures is
+// refused (an item with only `from` loads its model, and is taken).
+test('an item with a where and no measures is refused, in a declaration and in an update', async () => {
+  const e = engine();
+  const where = [{ field: 'event_name', op: 'eq', value: 'level_started' }];
+  assert.throws(() => compileDeclaration(e.catalog, { name: 'w', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'events', where }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }),
+    (err) => err.field === 'semantic_models.where' && /has a where but no measures/.test(err.message));
+  const first = await declare(e);
+  await assert.rejects(() => update(e, first.context_id, { semantic_models: [{ from: 'events', where }] }), /has a where but no measures/);
+  // the same item with a measure beside it is taken, and so is a bare { from }
+  assert.doesNotThrow(() => compileDeclaration(e.catalog, { name: 'w', semantic_models: [{ from: 'events', where, measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }));
+  await update(e, first.context_id, { semantic_models: [{ from: 'crashlytics' }] });
+  assert.ok(e.ctxs.get(first.context_id).state.usedModels.includes('crashlytics'), 'an item with only from loads its model in an update');
 });

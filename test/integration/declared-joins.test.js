@@ -89,18 +89,16 @@ before(async () => {
   // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
   const acq = await engine.build_semantic_model({
     name: 'jacq',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'users' }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   assert.equal(acq.parse.ok, true, JSON.stringify(acq.parse));
   acqCtx = acq.context_id;
 
   const ev = await engine.build_semantic_model({
     name: 'jev',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
-    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(ev.parse.ok, true, JSON.stringify(ev.parse));
   evCtx = ev.context_id;
@@ -141,7 +139,7 @@ before(async () => {
   const pc = await phantomEngine.build_semantic_model({
     name: 'jph',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   assert.equal(pc.parse.ok, true, `the grounded phantom catalog must still parse: ${JSON.stringify(pc.parse)}`);
   phantomCostCtx = pc.context_id;
@@ -159,9 +157,8 @@ before(async () => {
   ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
   const oc = await ownerEngine.build_semantic_model({
     name: 'jown',
-    use_base_models: ['crashlytics'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
-    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics' }],
+    metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(oc.parse.ok, true, JSON.stringify(oc.parse));
   ownerCtx = oc.context_id;
@@ -190,9 +187,9 @@ before(async () => {
   // its last leg is in the context.
   const evtsOn = async (engine, name) => {
     const r = await engine.build_semantic_model({
-      name, use_base_models: ['crashlytics', 'users'],
-      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
-      metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+      name,
+      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+      metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
     });
     assert.equal(r.parse.ok, true, JSON.stringify(r.parse));
     return r;
@@ -503,9 +500,8 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   // u1's 36 events reach BOTH of its install rows, so the grouped total is 220, not 184.
   const sm = await phantomEngine.build_semantic_model({
     name: 'jphev',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
-    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
   const res = await phantomEngine.query_semantic_model({ context_id: sm.context_id, metrics: ['jphev_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
@@ -971,12 +967,11 @@ test('40. governed: spend and events from two sources, sliced by the same instal
   if (skip(t)) return;
   const task = await engine.build_semantic_model({
     name: 'jmix',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
     metrics: [
-      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
-      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
-      { name: 'cost_per_event', type: 'ratio', numerator: { name: 'cost' }, denominator: { name: 'evts' } },
+      { name: 'cost', type: 'simple', measure: 'cost' },
+      { name: 'evts', type: 'simple', measure: 'evts' },
+      { name: 'cost_per_event', type: 'ratio', numerator: 'cost', denominator: 'evts' },
     ],
   });
   assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
@@ -1013,17 +1008,24 @@ test('41. a join path without its owning model is refused, and works once loaded
   const bare = await engine.build_semantic_model({
     name: 'jbare',
     semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
-    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+    metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
   await assert.rejects(
     () => engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'], group_by: [{ model: 'users', attribute: 'country' }] }),
-    /needs model 'users', which is not loaded.*use_base_models/s,
+    /needs model 'users', which this context does not read.*semantic_models: \[\{ from: 'users' \}\]/s,
   );
   // the metric itself answers fine — it is the PATH that needed the model, not the measure.
   const flat = await engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
   assert.equal(num(flat.rows[0].jbare_evts), 184);
+  // the fix the refusal names — an update whose item only names the model — loads it into this context,
+  // and the same group_by now answers, every event counted once
+  const loadedNow = await engine.build_semantic_model({ action: 'update', context_id: bare.context_id, semantic_models: [{ from: 'users' }] });
+  assert.equal(loadedNow.parse.ok, true, JSON.stringify(loadedNow.parse));
+  const viaUpdate = await engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
+  assert.equal(viaUpdate.ok, true, JSON.stringify(viaUpdate.error));
+  assert.equal(sumCol(viaUpdate.rows, 'jbare_evts'), 184);
   // …and the context that DID load it returns the point-in-time breakdown.
   const loaded = await q(evCtx, { metrics: ['jev_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(loaded.ok, true, JSON.stringify(loaded.error));
@@ -1064,9 +1066,9 @@ test('43. three sources side by side on metric_time keep their own totals: 17.50
     name: 'jtri',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count' }] }],
     metrics: [
-      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
-      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
-      { name: 'crashes', type: 'simple', measure: { name: 'crashes' } },
+      { name: 'cost', type: 'simple', measure: 'cost' },
+      { name: 'evts', type: 'simple', measure: 'evts' },
+      { name: 'crashes', type: 'simple', measure: 'crashes' },
     ],
   });
   assert.equal(task.parse.ok, true, JSON.stringify(task.parse));

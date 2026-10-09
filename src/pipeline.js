@@ -112,13 +112,15 @@ function sourceColumns(catalog, key, physicalCols = null) {
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
 // silently mix one fact's payload into another fact's pipeline.
-function buildOps(catalog, d, baseColumns, stages, source, physical = null) {
+function buildOps(catalog, d, baseColumns, stages, source, physical = null, spelled = null) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const stored of stages) {
     // a step stored by an earlier version is built in this version's spelling (src/pipeline/earlier.js) —
-    // its stage too, which an earlier version may have named otherwise
+    // its stage too, which an earlier version may have named otherwise — resolved against the columns
+    // before it, and reported (`spelled`) so a draft keeps it in that spelling from now on
     const st = currentSpelling(stored, { cols, catalog, source });
+    spelled?.set(stored, st);
     const def = st && Object.hasOwn(STAGES, st.stage) ? STAGES[st.stage] : null;
     if (!def) {
       // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never
@@ -200,14 +202,17 @@ function boundPartitions(m, stages, cols) {
  * ones that still have to run — the prefix is the table. `source` is still the catalog source the
  * stages resolve their event/property semantics against; a stage that needs a column the built
  * relation no longer carries fails as a normal "unknown column".
- * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
+ * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql, current }
  *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
- *   pipeline when there is no python stage).
+ *   pipeline when there is no python stage); `current` = each stage given (by identity) → the same
+ *   stage in this version's spelling, as it was built (src/pipeline/earlier.js).
  */
 export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe', from = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
+  const given = stages;
   if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols));
+  const spelled = new Map();
   // Cut the stage list at every python stage.
   const segments = []; let cur = [];
   for (const st of stages) {
@@ -221,7 +226,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     seg.input = input;
     const baseRelation = `{{ ref('${input}') }}`;
     if (seg.kind === 'sql') {
-      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source, physicalCols);
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source, physicalCols, spelled);
       // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
       // CTEs on DuckDB — whether it reads the source or the model a python stage produced.
       seg.sql = d.renderPipeline(baseRelation, ops);
@@ -230,10 +235,14 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
       const def = STAGES[seg.stage.stage];
       if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : 'the python stage is not available on this warehouse');
       cols = def.build({ d, catalog, cols, source }, seg.stage).cols;
+      spelled.set(seg.stage, currentSpelling(seg.stage));
     }
     seg.columns = cols;
     input = seg.model;
   });
   const lastSql = [...segments].reverse().find((seg) => seg.kind === 'sql');
-  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null };
+  // each given stage in this version's spelling — a where the partition bound was added to as written
+  // (the bound is the render's, not the step's), respelled on its own: a where reads no columns to resolve
+  const current = new Map(given.map((st, i) => [st, stages[i] === st ? (spelled.get(st) ?? st) : currentSpelling(st, { catalog, source })]));
+  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null, current };
 }

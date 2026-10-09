@@ -7,7 +7,7 @@ import { dbtFailure } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { retentioneeringFacts } from './schema.js';
-import { pathColumns, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
+import { pathColumns, pathParts, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize, truncatedTables } from './results.js';
@@ -44,8 +44,8 @@ export function pathHint(catalog, spec) {
 
 /** The names of a path key the caller set (null: one path per user). */
 export function pathKey(spec) {
-  if (spec.columns) return [].concat(spec.columns.path);
-  return spec.path ? spec.path.map((ref) => ref.column ?? ref.property) : null;
+  const parts = pathParts(spec);
+  return parts ? parts.map((ref) => ref.column ?? ref.property) : null;
 }
 
 /** The events kept at a share of their rows (a share of 1 keeps them whole, so it is not a sample). */
@@ -92,18 +92,15 @@ export function opParams(op) {
   return new Set(retentioneeringFacts().ops[op].params.map((p) => p.name));
 }
 
-/** `path` → the library's path column: the user key, the build's session, or a path column a step
- *  made (a split_sessions session_col) — among the ones the eventstream holds. */
+/** `path` → the library's path column: one of the path columns the eventstream holds (its shape's
+ *  `paths`) — the build's path key (the default), its sessions, or a session column a step made. */
 export function pathColumn(es, paths, path, field) {
-  if (path === undefined || path === 'users') return ES_COLUMNS.user;
-  const col = path === 'sessions' ? ES_COLUMNS.session : path;
-  if (!paths.includes(col)) {
-    const made = paths.filter((p) => p !== ES_COLUMNS.user && p !== ES_COLUMNS.session);
-    throw new ToolError(path === 'sessions'
-      ? `path: "sessions" needs sessions — start eventstream '${es.name}' with sessions: { gap_minutes }, or add a split_sessions step and materialize it${made.length ? ` (its path columns: ${made.join(', ')})` : ''}`
-      : `path '${path}' is not a path column of eventstream '${es.name}' (${paths.join(', ')}) — a split_sessions step makes one, once it is materialized`, { stage: 'validate', field });
+  if (path === undefined) return ES_COLUMNS.user;
+  if (!paths.includes(path)) {
+    const sessions = paths.includes(ES_COLUMNS.session) ? '' : `; ${ES_COLUMNS.session} is there once eventstream '${es.name}' is started with sessions: { gap_minutes }`;
+    throw new ToolError(`path '${path}' is not a path column of eventstream '${es.name}' — its path columns: ${paths.join(', ')}${sessions}; a split_sessions step makes another, once it is materialized`, { stage: 'validate', field });
   }
-  return col;
+  return path;
 }
 
 export function validateAnalyses(es, shape, analyses) {
@@ -114,13 +111,13 @@ export function validateAnalyses(es, shape, analyses) {
   const event = (n, field) => {
     if (vocab && !vocab.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, vocab)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}${es.steps?.length ? ' and its steps' : ''}`, { stage: 'validate', field });
   };
-  const ids = new Set();
+  const names = new Set();
   return analyses.map((a) => {
-    const { kind, id: given, path, ...params } = a;
+    const { kind, name: given, path, ...params } = a;
     let id = given || kind;
-    if (!given) for (let n = 2; ids.has(id); n += 1) id = `${kind}_${n}`;
-    if (ids.has(id)) throw new ToolError(`two analyses are named '${id}' — give each its own id`, { stage: 'validate', field: 'analyses.id' });
-    ids.add(id);
+    if (!given) for (let n = 2; names.has(id); n += 1) id = `${kind}_${n}`;
+    if (names.has(id)) throw new ToolError(`two analyses are named '${id}' — give each its own name`, { stage: 'validate', field: 'analyses.name' });
+    names.add(id);
     const pathCol = pathColumn(es, paths, path, 'analyses.path');
     // a funnel's steps are events of the stream (its path_start / path_end are not steps); an anchor or
     // a path pattern is the library's grammar, which its own check reads (the checker below)

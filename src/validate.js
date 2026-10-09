@@ -30,7 +30,8 @@ export function makeValidators(schemas) {
  * context is `context_id`, a list of measures is `measures`, what a note is about is `about`, a
  * substring filter is `search` and a time window `time_range`; a caller used to SQL or another tool
  * (or to an earlier version of this one) writes `avg`, `q`, `fn`, `as`, `draft_id`, `aggregations`,
- * `targets`, `text`, `since` —
+ * `targets`, `text`, `since` — or a stage's earlier field: a limit's `n`, a sample's `percent`,
+ * unpivot's `name_as` / `value_as`, a funnel's `mode` —
  * and the refusal says what this server calls it, when that name is allowed where it was written.
  * A hint, never an alias: the other spelling is refused.
  */
@@ -51,6 +52,13 @@ export const CROSS_PATH_SPELLING = {
   since: 'time_range',
   until: 'time_range',
   model: 'source',
+  // a stage's earlier field, hinted only in the stage that has the field it became (a form with a
+  // `mode` of its own — a frame, a drill — takes it as written)
+  n: 'limit',
+  percent: 'share',
+  name_as: 'name_column',
+  value_as: 'value_column',
+  mode: 'between_steps',
 };
 
 /** What this path calls `used`, when it has a name for it at all. */

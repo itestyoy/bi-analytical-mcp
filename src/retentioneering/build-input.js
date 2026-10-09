@@ -22,8 +22,10 @@ export function checkEvents(catalog, source, names, field) {
   }
 }
 
-/** The relationship `source` reaches `model` by — the one declared, or the one the caller named. */
+/** The relationship `source` reaches `model` by — the one declared, or the one the caller named. A
+ *  source's own columns are carried as they are ({ column }), never by joining it onto itself. */
 export function relationshipTo(catalog, source, model, via) {
+  if (model === source) throw new ToolError(`'${model}' is the source itself — carry its column as { column }, without a join`, { stage: 'validate', field: 'segments.model' });
   const shared = Object.keys(catalog.entitiesOf(source)).filter((name) => catalog.joinTargetFor(name) === model);
   if (via) {
     if (!shared.includes(via)) throw new ToolError(`'${source}' reaches '${model}' by ${shared.length ? shared.map((n) => `'${n}'`).join(', ') : 'no declared relationship'}, not '${via}'`, { stage: 'validate', field: 'segments.via' });
@@ -61,7 +63,7 @@ export function validateBuild(engine, input, physical = null) {
   (input.events?.split || []).forEach((rule, i) => {
     checkEvents(c, source, [rule.event], `events.split.${i}.event`);
     if (rule.by) checkRef(rule.by, `events.split.${i}.by`);
-    for (const cs of rule.cases || []) eachCondition(cs.where, (w) => { checkRef(w, `events.split.${i}.cases.where`); checkBetween(w, `events.split.${i}.cases.where`); });
+    for (const cs of rule.cases || []) eachCondition(cs.when, (w) => { checkRef(w, `events.split.${i}.cases.when`); checkBetween(w, `events.split.${i}.cases.when`); });
   });
   // what one path is, when not the user: columns and properties of the source
   (input.path || []).forEach((ref) => checkRef(ref, 'path'));
@@ -121,9 +123,9 @@ export function claimSegmentName(name, taken) {
 /**
  * A build FROM A TASK's stored table (a pipeline build — the place for event logic the build's own
  * rules cannot say: windows, a match_recognize, several sources joined, a cohort). The table has no
- * catalog meaning, so the caller names its path columns, and what the build reads is its columns:
- * a filter, a segment and a split parameter each name one. Payload properties and joined attributes
- * belong in the pipeline that made the table.
+ * catalog meaning, so the caller names its path columns (path) and its event and time columns
+ * (columns), and what the build reads is its columns: a filter, a segment and a split parameter each
+ * name one. Payload properties and joined attributes belong in the pipeline that made the table.
  */
 export function validateTaskBuild(input, base) {
   const have = base.columns.map((c) => c.name);
@@ -131,22 +133,21 @@ export function validateTaskBuild(input, base) {
   const known = (col, field) => {
     if (!have.includes(col)) throw new ToolError(`'${col}' is not a column of task ${base.task_id}'s table${suggest(col, have)} (its columns: ${have.join(', ')})`, { stage: 'validate', field });
   };
-  if (input.path) throw new ToolError('with from_task the path is named in columns.path (the table\'s own columns), not in path', { stage: 'validate', field: 'path' });
   const { event, time } = input.columns;
-  const path = [].concat(input.columns.path);
-  path.forEach((col) => known(col, 'columns.path'));
+  const path = input.path.map((ref) => ref.column);
+  path.forEach((col) => known(col, 'path'));
   known(event, 'columns.event'); known(time, 'columns.time');
-  if (new Set([...path, event, time]).size < path.length + 2) throw new ToolError('columns.path, columns.event and columns.time name different columns', { stage: 'validate', field: 'columns' });
+  if (new Set([...path, event, time]).size < path.length + 2) throw new ToolError('path, columns.event and columns.time name different columns', { stage: 'validate', field: 'columns' });
   const t = String(typeOf.get(time) || 'unknown');
   if (!['time', 'timestamp', 'date', 'datetime', 'unknown'].includes(t)) throw new ToolError(`columns.time '${time}' is a ${t} column — the paths are ordered by a time (a timestamp or a date)`, { stage: 'validate', field: 'columns.time' });
   const noCatalog = (what, field) => { throw new ToolError(`${what} — a task's table carries no catalog meaning: bring it in as a column in the pipeline that made the table (a compute reading the property, a join of the attribute), then name that column here`, { stage: 'validate', field }); };
   (input.events?.split || []).forEach((rule, i) => {
     if (rule.by?.property !== undefined) noCatalog(`events.split.${i}.by names the event property '${rule.by.property}'`, `events.split.${i}.by`);
     if (rule.by) known(rule.by.column, `events.split.${i}.by`);
-    for (const cs of rule.cases || []) eachCondition(cs.where, (w) => {
-      if (w.property !== undefined) noCatalog(`a case of events.split.${i} names the event property '${w.property}'`, `events.split.${i}.cases.where`);
-      known(w.column, `events.split.${i}.cases.where`);
-      checkBetween(w, `events.split.${i}.cases.where`);
+    for (const cs of rule.cases || []) eachCondition(cs.when, (w) => {
+      if (w.property !== undefined) noCatalog(`a case of events.split.${i} names the event property '${w.property}'`, `events.split.${i}.cases.when`);
+      known(w.column, `events.split.${i}.cases.when`);
+      checkBetween(w, `events.split.${i}.cases.when`);
     });
   });
   const segNames = [];

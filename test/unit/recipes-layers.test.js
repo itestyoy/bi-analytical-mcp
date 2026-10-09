@@ -110,6 +110,40 @@ test('a deployment recipe in the earlier { name, pipeline } shape is served as t
   assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
 });
 
+// Its stages and its semantic payload, written in an earlier spelling, are served in today's: the
+// recipe view hands the tool a request it accepts as it stands.
+test('a deployment recipe in earlier stage and semantic spellings is served as requests the tools accept', async () => {
+  await import('../../src/engine.js');
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+  const validators = makeValidators(buildSchemas(catalog));
+  const pipeline = { name: 'old_stages', pipeline: { source: 'events', stages: [{ stage: 'where', conditions: [{ left: { column: 'event_name' }, op: 'eq', value: 'first_launch' }] }, { stage: 'project', columns: ['event_name'] }, { stage: 'sample', percent: 10 }, { stage: 'limit', n: 5 }] } };
+  const semantic = {
+    name: 'old_sem', use_base_models: ['users'],
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name', as_type: 'categorical' }], measures: [{ name: 'launches', agg: 'sum_boolean', where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { name: 'rows', agg: 'count' }] }],
+    metrics: [
+      { name: 'launches', type: 'simple', measure: { name: 'launches' } },
+      { name: 'rows', type: 'simple', measure: { name: 'rows' } },
+      { name: 'share', type: 'ratio', numerator: { name: 'launches' }, denominator: { name: 'rows' } },
+      { name: 'rest', type: 'derived', expr: 'a - b', metrics: [{ metric: 'rows', name: 'a' }, { metric: 'launches', name: 'b' }] },
+    ],
+  };
+  const mine = deploymentFile([{ id: 'old_stages', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: pipeline }, { id: 'old_sem', task_type: 't', title: 'old', when_to_use: '', hack: '', semantic_payload: semantic }]);
+  const recipes = loadRecipes(SYSTEM, mine);
+  const p = recipes.get('old_stages').pipeline_payload;
+  assert.deepEqual(p.stages, [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
+  const pr = validateInput(validators.build_pipeline_model, p);
+  assert.equal(pr.ok, true, (pr.errors || []).join(' | '));
+  const s = recipes.get('old_sem').semantic_payload;
+  assert.deepEqual(s.semantic_models.map((m) => m.from), ['events', 'users'], 'a model loaded for its attributes is a { from } item');
+  assert.deepEqual(s.semantic_models[0].measures[0], { name: 'launches', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] });
+  assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: 'rows - launches', metrics: ['rows', 'launches'] });
+  const sr = validateInput(validators.build_semantic_model, s);
+  assert.equal(sr.ok, true, (sr.errors || []).join(' | '));
+});
+
 // The same for an experiment block written for an earlier version: its columns are named by flat
 // `<field>_field` keys (the experiment tool's earlier field names), which the tool now refuses. It is
 // served with `arm` — the group as the tool takes it — and a row read through it is a group the

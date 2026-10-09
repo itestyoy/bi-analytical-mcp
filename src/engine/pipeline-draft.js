@@ -6,6 +6,7 @@
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
 import { operandsMisspelled } from '../pipeline/sql.js';
+import { currentSpelling } from '../pipeline/earlier.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 
 export const pipelineDraftMethods = {
@@ -293,8 +294,13 @@ export const pipelineDraftMethods = {
     return conditions ? [{ stage: 'where', conditions }, ...draft.stages] : draft.stages;
   },
 
+  /** The draft's steps as an answer shows them: each in this version's spelling, so a step copied into
+   *  edit_step is one the tool takes (a step kept from an earlier version, src/pipeline/earlier.js). */
   _draftSteps(draft) {
-    return draft.stages.map((s, i) => ({ index: i + 1, ...s }));
+    // with no render at hand, a name is read as the build reads it when the step builds: an event
+    // property of the source where it is one, else a column of the rows
+    const cols = { has: (n) => { try { return !this.catalog.propertyFor(draft.source, n)?.spec; } catch { return false; } } };
+    return draft.stages.map((s, i) => ({ index: i + 1, ...currentSpelling(s, { catalog: this.catalog, source: draft.source, cols }) }));
   },
 
   async _draftStart(input) {
@@ -550,7 +556,10 @@ export const pipelineDraftMethods = {
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
         .map((cd) => ({ at: this.advisor.valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
     }
-    draft.stages = newStages;
+    // a step an earlier version stored is kept from now on in the spelling it was built in — the
+    // render's, resolved against the columns before it (src/pipeline/earlier.js); a step the render
+    // did not reach (a materialized prefix) stays as stored, and is shown in this spelling (_draftSteps)
+    draft.stages = rendered ? newStages.map((st) => rendered.current.get(st) ?? st) : newStages;
     // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
     // the files of the ones nobody else reads go with them.
     const why = `step ${dropFrom} was ${action === 'delete_step' ? 'deleted' : action === 'insert_step' ? 'shifted by an insert' : action === 'truncate' ? 'truncated away' : 'edited'}`;

@@ -199,6 +199,11 @@ test('no text teaches a form the server retired', async () => {
     ['project\'s columns, now keep', /["']?stage["']?\s*:\s*["']project["']\s*,\s*["']?columns\b/],
     ['unnest\'s source, now property | column', /["']?stage["']?\s*:\s*["']unnest["']\s*,\s*["']?source\b/],
     ['a pivot\'s value_column and agg, now one measure', /["']?stage["']?\s*:\s*["']pivot["'][^}]*\bvalue_column\b/],
+    ['an eventstream from a task naming its path in columns, now path: [{ column }]', /\bcolumns["']?\s*:\s*\{\s*["']?path["']?\s*:/],
+    ['the path words users / sessions, now the path column (user_id / session_id)', /\bpath["']?\s*:\s*["'](?:users|sessions)["']/],
+    ['filter_events\' where as an { op, conditions } tree, now a condition list', /\bwhere["']?\s*:\s*\{\s*["']?op["']?\s*:\s*["'](?:and|or)["']/],
+    ['an events.split case\'s where, now when', /\bcases["']?\s*:\s*\[\s*\{\s*["']?name["']?\s*:[^}]*?\bwhere\b/],
+    ['an analysis named by id, now name', /\bkind["']?\s*:\s*["']\w+["']\s*,\s*["']?id["']?\s*:/],
   ];
   const found = [];
   for (const [where, text] of [...texts, ...clientSkill(), ...docs]) {

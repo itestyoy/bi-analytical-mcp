@@ -263,3 +263,14 @@ export const KEPT_ROWS = 1000;
 /** How many contexts one context({ action: list }) page holds, unless it asks for another number. */
 export const CONTEXT_PAGE = 20;
 
+
+/**
+ * THE READ HALF OF A QUERY TOOL — { task_ids } waits for tasks of the tool's side and returns each one;
+ * with cancel: true it stops them. One definition for every query tool, the core's and a feature's, so
+ * a read is written the same way whichever side it reads.
+ */
+export const TASK_READ = {
+  task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'Read tasks of this side back (instead of starting one) — one, or several read together: waits until all are done and returns each one\'s result under `results`, in this order.' },
+  wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment every task is done. 0 = just look.` },
+  cancel: { type: 'boolean', const: true, description: 'CANCEL these tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' },
+};

@@ -21,6 +21,7 @@ import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
 import { userKeyColumn } from './schema.js';
 import { mapConditions, eachCondition } from '../conditions.js';
+import { currentSpec } from './earlier.js';
 
 /** The fixed columns of every eventstream (segment columns come after them). */
 export const ES_COLUMNS = { user: 'user_id', event: 'event', time: 'event_time', session: 'session_id' };
@@ -39,10 +40,11 @@ export function pathColumns(catalog, spec) {
 }
 
 /** What one path is: the parts of its key — the source's user (the default), or the columns and
- *  properties the caller names (one path per value; several parts make a composite key). */
+ *  properties the caller names (one path per value; several parts make a composite key). A start from a
+ *  task's table always names its columns. (A spec stored before `path` named them is read in today's
+ *  spelling, src/retentioneering/earlier.js.) */
 export function pathParts(spec) {
-  if (spec.columns) return [].concat(spec.columns.path).map((column) => ({ column }));
-  return spec.path || null;
+  return currentSpec(spec).path || null;
 }
 
 /**
@@ -96,7 +98,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
     const cases = [];
     splits.forEach((rule, i) => {
       if (rule.cases) {
-        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...mapConditions(cs.where, cond)], then: { value: cs.name } });
+        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...mapConditions(cs.when, cond)], then: { value: cs.name } });
         if (rule.else) cases.push({ when: [isEvent(rule.event)], then: { value: rule.else } });
         return;
       }

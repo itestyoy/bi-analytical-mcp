@@ -147,10 +147,11 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
 }
 
 /**
- * A path-analysis context as context() shows it: its description and each eventstream — its source
- * (or the task it was started from), what it was forked from, its steps as preview gives them, how
- * far they are materialized and the shape at the end — and how to go on with it. `brief` is the
- * listing's line: the eventstreams by name, with their step counts.
+ * A path-analysis context as context() shows it: each eventstream — its description, its source (or
+ * the task it was started from), what it was forked from, its steps as preview gives them, how far
+ * they are materialized and the shape at the end — and how to go on with it. `brief` is the listing's
+ * line: the eventstreams by name, with their step counts. (A context stored before an eventstream kept
+ * its own description carries one for the context: shown as it was.)
  */
 function describePathContext(ctx) {
   const state = ctx.state?.retentioneering;
@@ -166,7 +167,7 @@ function describePathContext(ctx) {
     engine: SIDE,
     ...(state.description ? { description: state.description } : {}),
     eventstreams,
-    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, source: e.source, steps: e.steps.length, materialized_through: e.materialized_through })) },
+    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, ...(e.description ? { description: e.description } : {}), source: e.source, steps: e.steps.length, materialized_through: e.materialized_through })) },
     continue_with: `${BUILD}({ request: { action: 'preview' | 'add_steps' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it.`,
   };
 }
@@ -194,7 +195,7 @@ async function buildAction(engine, feature, input, action) {
 async function start(engine, feature, input) {
   // a task's stored table (a pipeline build) as the rows — found, and checked to be there, the way a
   // pipeline started from a task finds it
-  const found = input.from_task ? engine.host.taskBase({ from_task: input.from_task, source: input.source, time_range: input.time_range }) : null;
+  const found = input.from_task ? engine.host.taskBase({ from_task: input.from_task, source: input.source }) : null;
   // the table's real columns: what a segment or a filter on the source itself may name
   const own = found ? null : await engine.host.grounding(input.source);
   const spec = found ? { ...validateTaskBuild(input, found.base), source: found.source } : validateBuild(engine, input, own);
@@ -224,12 +225,11 @@ async function start(engine, feature, input) {
   const paths = basePaths(spec);
   // a later start of the same name replaces the eventstream, its steps with it
   const es = {
-    model: modelName, source: spec.source, ...(found ? { from_task: found.base.task_id } : {}), spec: input, columns: rendered.columns, segments: rendered.segments, sessions: !!spec.sessions, summary: null,
+    model: modelName, source: spec.source, ...(found ? { from_task: found.base.task_id } : {}), ...(input.description ? { description: input.description } : {}), spec: input, columns: rendered.columns, segments: rendered.segments, sessions: !!spec.sessions, summary: null,
     base: { model: modelName, task_id: null, summary: null, shape: null },
     steps: [], checkpoint: null,
   };
   state.eventstreams[spec.name] = es;
-  if (input.description) state.description = input.description;
   engine.ctxs.writeModel(ctx.id, modelName, `${engine.host.modelConfigLine('table')}\n${rendered.sql}\n`);
   engine.ctxs.touch(ctx.id);
   const id = engine.tasks.start(ctx, BUILD, async (taskId) => {

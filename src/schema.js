@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
@@ -141,12 +141,14 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   const step = (action, title, tagDescription, required, optional = []) => form({ title, tag: ['action', action], tagDescription, required: ['context_id', ...required], properties: pick(pipelineFields, ['context_id', ...required, ...optional, ...echo]) });
   // a start makes the draft: in a new context, or — context_id given — in that one (its draft replaced)
   const startFields = { ...pipelineFields, context_id: { type: 'string', pattern: CTX, description: 'Start the draft in this context (one a build returned; a draft already in it is replaced). Omit it for a new context.' } };
-  const startOptional = ['context_id', 'description', 'materialized', 'time_range', 'stages', 'materialize', ...echo];
+  // a source is read within a window; a task's table was computed under its own already (a where step
+  // filters it), so its form takes none
+  const startOptional = ['context_id', 'description', 'materialized', 'stages', 'materialize', ...echo];
   const buildModel = {
     type: 'object',
     description: 'One form per `action`: start (the default — with `stages`, its first steps) → add_steps → optionally preview → materialize, then more steps and materialize again; materialize: true on start or add_steps builds right after the steps. Every edit revalidates the whole pipeline and names the step it breaks. A materialized table stands for the steps so far: later steps read it instead of recomputing the prefix, and editing a step at or before it retires it (from_checkpoint / steps_recomputed / checkpoints_dropped say which).',
     anyOf: [
-      form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over a catalog source (returns its context_id + the source columns).', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', ...startOptional]) }),
+      form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over a catalog source (returns its context_id + the source columns).', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', 'time_range', ...startOptional]) }),
       form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(startFields, ['name', 'from_task', 'source', ...startOptional]) }),
       step('add_steps', 'add steps', 'add_steps: append stages — one or several, in order, all or none; returns what each did to the data.', ['stages'], ['materialize']),
       step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a stage before `index`.', ['index', 'stage']),
@@ -163,20 +165,15 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     transform: projection,
     limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the projection the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
   };
-  // The read half of a query tool: { task_ids } waits for tasks of its side and returns each one.
-  const taskRead = {
-    task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: 'Read tasks of this side back (instead of starting a query) — one, or several (the task_ids a batch returned): waits until all are done and returns each one\'s result under `results`, in this order.' },
-    wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment every task is done. 0 = just look.` },
-    cancel: { type: 'boolean', const: true, description: 'CANCEL these tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' },
-  };
+
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
   // batch (context_id + queries), read tasks (task_ids), cancel them. Told apart by the fields each
   // requires; each takes only its own.
   const queryModes = (startFields, batch, paging) => [
     form({ title: 'start a query', required: ['context_id', ...(startFields.required || [])], properties: { context_id: startFields.context_id, ...startFields.fields } }),
     form({ title: 'start a batch', required: ['context_id', 'queries'], properties: { context_id: startFields.context_id, queries: batch } }),
-    form({ title: 'read tasks', required: ['task_ids'], properties: { ...pick(taskRead, ['task_ids', 'wait_seconds']), ...paging } }),
-    form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
+    form({ title: 'read tasks', required: ['task_ids'], properties: { ...pick(TASK_READ, ['task_ids', 'wait_seconds']), ...paging } }),
+    form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(TASK_READ, ['task_ids', 'cancel']) }),
   ];
   // A READ PAGES each task's result: its rows from `offset` (a row number of the result, 0 its first) —
   // the rows a task keeps, or the table it stored — READ_PAGE of them unless `limit` says otherwise

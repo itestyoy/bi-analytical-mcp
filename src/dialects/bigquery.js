@@ -309,8 +309,9 @@ export class BigQueryDialect extends Dialect {
         return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.quoteIdent(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
       case 'unpivot':
         // exactly `keep` + the two produced columns, and a row for every folded value — a NULL one too
-        // (UNPIVOT drops them unless told otherwise), as the UNION ALL of the CTE lowering returns
-        return `|> SELECT ${[...op.keep, ...op.columns].map((c) => this.quoteIdent(c)).join(', ')}\n|> UNPIVOT INCLUDE NULLS (${this.quoteIdent(op.valueColumn)} FOR ${this.quoteIdent(op.nameColumn)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))`;
+        // (UNPIVOT drops them unless told otherwise), as the UNION ALL of the CTE lowering returns — in
+        // the declared order, the name column before the value (UNPIVOT puts the value first)
+        return `|> SELECT ${[...op.keep, ...op.columns].map((c) => this.quoteIdent(c)).join(', ')}\n|> UNPIVOT INCLUDE NULLS (${this.quoteIdent(op.valueColumn)} FOR ${this.quoteIdent(op.nameColumn)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))\n|> SELECT ${[...op.keep, op.nameColumn, op.valueColumn].map((c) => this.quoteIdent(c)).join(', ')}`;
       case 'order_by':
         return `|> ORDER BY ${op.keys.map((k) => this.orderKey(this.quoteIdent(k.key), k.direction, k.nulls)).join(', ')}`;
       case 'sample':

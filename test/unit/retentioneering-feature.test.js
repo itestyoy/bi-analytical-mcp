@@ -127,7 +127,7 @@ test('the schemas offer exactly what the library does — every choice from the 
   assert.deepEqual([...analyses.keys()], Object.keys(f.analyses));
   for (const [kind, fs] of analyses) {
     const lib = f.analyses[kind].params.map((p) => (p.name === 'path_col' ? 'path' : p.name)).filter((n) => !NOT_OFFERED.params[n]);
-    const taken = [...new Set(fs.flatMap((x) => Object.keys(x.properties)))].filter((k) => !['kind', 'id'].includes(k));
+    const taken = [...new Set(fs.flatMap((x) => Object.keys(x.properties)))].filter((k) => !['kind', 'name'].includes(k));
     assert.deepEqual(taken.sort(), lib.sort(), kind);
     assert.deepEqual(common(fs.map((x) => x.required)).filter((k) => k !== 'kind').sort(), f.analyses[kind].params.filter((p) => p.required).map((p) => p.name).sort(), `${kind}: required as the library requires`);
     assert.ok(fs.every((x) => !('preprocess' in x.properties)), `${kind} takes no steps of its own`);
@@ -156,8 +156,19 @@ test('the schemas offer exactly what the library does — every choice from the 
   // the build: the source's events and the models' attributes are enums from the catalog
   const start = forms(b0, b0).find((x) => x.title === 'start from an events source');
   assert.ok(deref(b0, field(b0, field(b0, start, 'events'), 'include').items).enum?.includes('level_started'), 'an events source: its events, as an enum');
-  const seg = forms(b0, field(b0, start, 'segments').items).find((x) => x.title === 'users');
+  const segs = forms(b0, field(b0, start, 'segments').items);
+  const seg = segs.find((x) => x.title === 'users');
   assert.ok(field(b0, seg, 'attribute').enum.includes('platform'));
+  // a segment of a related model is offered for a model another source reaches — never the source itself
+  // (its columns are { column }) — and `via` only where several relationships lead to the model
+  for (const src of e.catalog.facts) assert.ok(!segs.some((x) => x.title === src), `no join of ${src} onto itself`);
+  assert.equal(seg.properties.via, undefined, 'one relationship leads to users: no via');
+  // a start from a task's table: its path named by its own columns, its event and time in columns, no window
+  const fromTask = forms(b0, b0).find((x) => x.title === 'start from a task\'s table');
+  assert.deepEqual([...fromTask.required].sort(), ['columns', 'from_task', 'name', 'path']);
+  assert.deepEqual(Object.keys(field(b0, fromTask, 'columns').properties).sort(), ['event', 'time']);
+  assert.ok(!('time_range' in fromTask.properties));
+  assert.deepEqual(forms(b0, field(b0, fromTask, 'path').items).map((x) => Object.keys(x.properties)), [['column']]);
 });
 
 test('the facts sheet is what the installed library says (where the feature\'s environment is built)', (t) => {
@@ -230,6 +241,31 @@ test('input the schema refuses is refused before anything starts', async () => {
     await refused('build_retentioneering_model', { context_id: 'abc', ...input }, pastSchema);
   }
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
+  // filter_events' where is the one condition grammar: a list of conditions, the operators every where takes
+  const where = (w) => step({ type: 'filter_events', where: w });
+  await refused('build_retentioneering_model', where({ op: 'and', conditions: [{ column: 'platform', op: '=', value: 'ios' }] }), /invalid input/);
+  await refused('build_retentioneering_model', where([{ column: 'platform', op: '==', value: 'ios' }]), /invalid input/);
+  await refused('build_retentioneering_model', where([{ not: { column: 'platform', op: 'eq', value: 'ios' } }]), /invalid input/);
+  await refused('build_retentioneering_model', where([{ column: 'platform', op: 'eq', value: 'ios' }, { or: [{ column: 'level', op: 'between', value: [1, 3] }, { and: [{ column: 'event', op: 'starts_with', value: 'level' }, { column: 'level', op: 'is_null' }] }] }]), pastSchema);
+  // a path is a path column of the eventstream, named as it is there: the schema takes the name, the
+  // eventstream decides (below); an analysis's own name is `name`
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'describe', id: 'shape' }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'describe', name: 'shape' }, { kind: 'transition_graph', path: 'session_id' }] }, pastSchema);
+  // a start from a task's table names its path in path ([{ column }]) and takes no window
+  const fromTask = { name: 'x', from_task: 'a0a0a0a0a0a0', path: [{ column: 'u' }], columns: { event: 'e', time: 't' } };
+  await refused('build_retentioneering_model', fromTask, /unknown task_id/);
+  const { path: _path, ...noPath } = fromTask;
+  await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, /invalid input/);
+  await refused('build_retentioneering_model', noPath, /invalid input/);
+  await refused('build_retentioneering_model', { ...fromTask, path: [{ property: 'level_id_of_event_data' }] }, /invalid input/);
+  await refused('build_retentioneering_model', { ...fromTask, time_range: { start: '2026-01-01' } }, /invalid input/);
+  await refused('build_pipeline_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
+  // the eventstream's own name goes into its models' file names: bounded as the core's names are
+  await refused('build_retentioneering_model', { name: `e${'x'.repeat(41)}`, source: 'events' }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'preview', context_id: 'A-B' }, /invalid input/);
+  // a split case's conditions are its `when`, as a compute case's
+  await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, /invalid input/);
+  await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel', title: 'Onboarding funnel, Sep 1–23' }, /unknown task_id/);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /invalid input/); // not a task id at all
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result
@@ -352,12 +388,14 @@ test('context() lists and describes a path-analysis context by its eventstreams 
     model: 'm', source: 'events', spec: {}, columns: [], segments: [], steps: [{ step: { type: 'add_start_end_events' }, library: 'add_start_end_events', checked: true, shape: null }], checkpoint: null,
     base: { model: 'm', task_id: null, summary: { events: ['a'], users: 3 }, shape: null }, summary: null,
   };
+  // a description is kept with its eventstream (a context stored before kept one for the context: shown as it was)
+  ctx.state.retentioneering.eventstreams.es2 = { ...ctx.state.retentioneering.eventstreams.es, description: 'level paths', steps: [] };
   const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === ctx.id);
   assert.equal(listed.description, 'onboarding paths');
-  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps: 1, materialized_through: 0 }]);
+  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps: 1, materialized_through: 0 }, { name: 'es2', description: 'level paths', source: 'events', steps: 0, materialized_through: 0 }]);
   const d = await e.context({ action: 'describe', context_id: ctx.id });
   assert.equal(d.engine, 'retentioneering');
-  assert.deepEqual(d.eventstreams.map((x) => [x.name, x.source, x.steps.map((s) => s.library), x.base.users]), [['es', 'events', ['add_start_end_events'], 3]]);
+  assert.deepEqual(d.eventstreams.map((x) => [x.name, x.source, x.steps.map((s) => s.library), x.base.users, x.description]), [['es', 'events', ['add_start_end_events'], 3, undefined], ['es2', 'events', [], 3, 'level paths']]);
   assert.equal(d.brief, undefined, 'the listing line is not repeated in describe');
   e.close();
 });
@@ -391,8 +429,9 @@ test('a read of several path-analysis tasks says how long it waited for them', a
   assert.equal(r.results[0].status, 'running');
   assert.equal(r.results[0].waited_seconds, 0, 'asked not to wait');
   const id2 = e.tasks.start(ctx, QUERY, () => new Promise((resolve) => { setTimeout(() => resolve({ ok: false, error: { message: 'x' } }), 5000); }));
-  const r2 = await e.query_retentioneering_model({ task_ids: [id2], wait_seconds: 1 });
-  assert.ok(r2.waited_seconds >= 0.9 && r2.results[0].waited_seconds >= 0.9, JSON.stringify(r2));
+  // a wait is a number of seconds, as every read's is
+  const r2 = await e.query_retentioneering_model({ task_ids: [id2], wait_seconds: 1.5 });
+  assert.ok(r2.waited_seconds >= 1.4 && r2.results[0].waited_seconds >= 1.4, JSON.stringify(r2));
   e.close();
 });
 
@@ -438,4 +477,80 @@ test('add_steps lists each added step with what it changed and why one was not c
   // an edit names the step it put in place and what that step changed
   const c = await commit([{ ok: true, shape: shape(['a', 'shop_opened']) }], 'edit_step', { index: 1, step: two[1] }, [{ step: two[0], library: {}, checked: true, shape: shape(['a', 'shop', 'tutorial']) }]);
   assert.deepEqual([c.step, c.changed, c.added], [{ index: 1, type: 'drop_events', checked: true }, { events_removed: ['tutorial'] }, undefined]);
+});
+
+// What a path names and what a filter_events condition holds are checked against the eventstream as
+// the step is added — before the library's check, before anything runs. Input guards; no warehouse.
+test('a path is one of the eventstream\'s path columns, and a condition\'s constant is what its operator takes', async () => {
+  const { validateAnalyses } = await import('../../src/retentioneering/query.js');
+  const { commitSteps } = await import('../../src/retentioneering/steps.js');
+  const shape = { events: ['a', 'b'], paths: ['user_id', 'session_id'], segments: { level: { levels: ['1', '2'], complete: true } }, columns: [] };
+  const es = { name: 'es', segments: ['level'], sessions: true, spec: {}, steps: [] };
+  // the path columns, as the eventstream's shape lists them: no word stands for one
+  assert.deepEqual(validateAnalyses(es, shape, [{ kind: 'transition_graph', path: 'session_id' }]).map((a) => a.path_col), ['session_id']);
+  for (const path of ['users', 'sessions', 'visit']) {
+    assert.throws(() => validateAnalyses(es, shape, [{ kind: 'transition_graph', path }]), (e) => e.field === 'analyses.path' && /user_id, session_id/.test(e.message), path);
+  }
+  // two analyses of one name are refused, the name said as the caller gives it
+  assert.throws(() => validateAnalyses(es, shape, [{ kind: 'describe', name: 'x' }, { kind: 'transition_graph', name: 'x' }]), (e) => e.field === 'analyses.name');
+  const add = (where) => commitSteps({ ctxs: { touch() {} } }, { checker: { check: async () => null } }, { id: 'c1', state: {} }, 'es', { base: { shape, model: 'm', summary: {} }, steps: [], checkpoint: null }, 'add_steps', { steps: [{ type: 'filter_events', where }] });
+  for (const [where, re] of [
+    [[{ column: 'level', op: 'in', value: 3 }], /in takes a list/],
+    [[{ column: 'level', op: 'eq', value: [3] }], /one constant/],
+    [[{ column: 'level', op: 'between', value: [1] }], /\[low, high\]/],
+    [[{ column: 'level', op: 'in', value: [1, '2'] }], /one kind/],
+    [[{ column: 'level', op: 'contains', value: 1 }], /a string/],
+    [[{ column: 'level', op: 'eq', value: null }], /is_null/],
+    [[{ column: 'level', op: 'is_null', value: 1 }], /takes no value/],
+    [[{ column: 'level', op: 'gt' }], /needs a value/],
+  ]) await assert.rejects(add(where), (e) => e.field === 'steps[0].where' && re.test(e.message), JSON.stringify(where));
+  // …and one that is, is taken (the check could not run here: nothing refused, nothing ran)
+  const ok = await add([{ column: 'level', op: 'gte', value: 2 }, { or: [{ column: 'event', op: 'not_in', value: ['a'] }, { column: 'level', op: 'is_null' }] }]);
+  assert.equal(ok.steps, 1);
+});
+
+// A step kept by an eventstream an earlier version stored — filter_events' where as its own tree — is
+// re-checked, and kept from then on, in today's spelling: what a call can write. Context lifecycle; the
+// rows it keeps are proved in test/integration/retentioneering.test.js.
+test('a filter_events step stored in the earlier tree is carried over: re-checked and kept as the condition list', async () => {
+  const e = on();
+  const { commitSteps, preview } = await import('../../src/retentioneering/steps.js');
+  const shape = { events: ['a', 'b'], paths: ['user_id'], segments: { level: { levels: ['1', '2'], complete: true } }, columns: [] };
+  const tree = { op: 'or', conditions: [{ column: 'level', op: '>', value: 5 }, { not: { op: 'and', conditions: [{ column: 'level', op: '>=', value: 2 }, { column: 'event', op: 'in', value: ['a'] }] } }] };
+  const es = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'drop_events', names: ['b'] } }, { step: { type: 'filter_events', where: tree } }], checkpoint: null };
+  let asked = null;
+  const feature = { checker: { check: async (req) => { asked = req; return { steps: req.steps.map(() => ({ ok: true, shape })) }; } } };
+  const ctx = { id: 'c1', state: {} };
+  // deleting the step before it re-checks it — in today's spelling, which the schema takes as a call's step
+  await commitSteps({ ctxs: { touch() {} } }, feature, ctx, 'es', es, 'delete_step', { index: 1 });
+  const kept = es.steps[0].step;
+  assert.ok(Array.isArray(kept.where), 'kept as a condition list');
+  assert.deepEqual(asked.constants, [kept]);
+  e.host.validate('build_retentioneering_model', { action: 'edit_step', context_id: 'abcdef012345', index: 1, step: kept });
+  assert.deepEqual(preview(ctx, 'es', es).steps.map((x) => x.step), [kept]);
+  // a step not yet re-checked is shown in today's spelling too
+  const stored = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'filter_events', where: tree }, library: {}, checked: true, shape }], checkpoint: null };
+  e.host.validate('build_retentioneering_model', { action: 'edit_step', context_id: 'abcdef012345', index: 1, step: preview(ctx, 'es', stored).steps[0].step });
+  e.close();
+});
+
+test('a step stored with an earlier path word is carried over: re-checked and shown with the path column it meant', async () => {
+  const e = on();
+  const { commitSteps, preview } = await import('../../src/retentioneering/steps.js');
+  const shape = { events: ['a', 'b'], paths: ['user_id', 'session_id'], segments: {}, columns: [] };
+  const es = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'drop_events', names: ['b'] } }, { step: { type: 'collapse_events', loops: true, path: 'sessions' } }], checkpoint: null };
+  let asked = null;
+  const feature = { checker: { check: async (req) => { asked = req; return { steps: req.steps.map(() => ({ ok: true, shape })) }; } } };
+  const ctx = { id: 'c1', state: {} };
+  // deleting the step before it re-checks it — with the column the word named, in the step and in the library's form
+  await commitSteps({ ctxs: { touch() {} } }, feature, ctx, 'es', es, 'delete_step', { index: 1 });
+  assert.deepEqual(es.steps[0].step, { type: 'collapse_events', loops: true, path: 'session_id' });
+  assert.equal(es.steps[0].library.path_col, 'session_id');
+  assert.equal(asked.steps[0].path_col, 'session_id');
+  e.host.validate('build_retentioneering_model', { action: 'edit_step', context_id: 'abcdef012345', index: 1, step: es.steps[0].step });
+  assert.deepEqual(preview(ctx, 'es', es).steps.map((x) => x.step), [es.steps[0].step]);
+  // a step not yet re-checked is shown with the column too
+  const stored = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'collapse_events', loops: true, path: 'users' }, library: { loops: true, path_col: 'user_id' }, checked: true, shape }], checkpoint: null };
+  assert.equal(preview(ctx, 'es', stored).steps[0].step.path, 'user_id');
+  e.close();
 });

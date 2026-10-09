@@ -92,6 +92,17 @@ test('a step stored by an earlier version is built in this version\'s spelling �
   assert.deepEqual(unnested([{ stage: 'unnest', source: 'words_collected', name: 'w' }]), unnested([{ stage: 'unnest', property: 'words_collected', name: 'w' }]));
   const parsed = { stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'event_name' }] } };
   assert.deepEqual(unnested([parsed, { stage: 'unnest', source: 'arr', name: 'w' }]), unnested([parsed, { stage: 'unnest', column: 'arr', name: 'w' }]));
+  // the render reports each kept step in today's spelling — what a draft keeps from its next accepted
+  // edit — and a draft's steps are shown in it, so one copied into edit_step is one the tool takes
+  const kept = [parsed, { stage: 'unnest', source: 'arr', name: 'w' }, { stage: 'limit', n: 5 }];
+  const built = renderPipeline(catalog, catalog.dialect, 'events', kept, { physicalCols: new Set([...COLS, 'event_data']) });
+  assert.deepEqual(kept.map((s) => built.current.get(s)), [parsed, { stage: 'unnest', column: 'arr', name: 'w' }, { stage: 'limit', limit: 5 }]);
+  assert.equal(built.current.get(parsed), parsed, 'a step in today\'s spelling is kept as it is');
+  assert.deepEqual(Engine.prototype._draftSteps.call({ catalog }, { source: 'events', stages: [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, { stage: 'unnest', source: 'arr', name: 'v' }] }), [
+    { index: 1, stage: 'limit', limit: 5 },
+    { index: 2, stage: 'unnest', property: 'words_collected', name: 'w' },
+    { index: 3, stage: 'unnest', column: 'arr', name: 'v' },
+  ]);
   // a kept one that named a scalar property — which the schema no longer offers — is refused by its build, saying what the property is
   assert.throws(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'unnest', source: 'price_in_usd_of_event_data', name: 'w' }], { physicalCols: new Set([...COLS, 'price_in_usd_of_event_data']) }), /'price_in_usd_of_event_data' is declared as numeric, not an array/);
   // a derive stage is the compute stage reading the same event property — a column of its own, or a key of the payload

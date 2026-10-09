@@ -170,9 +170,9 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   the source (a bidfloor id, a tracking id, a level) or of several (a composite key: the user and a
   bidfloor id). For event logic these rules cannot say — events defined by a window (a lag, the n-th
   fail in a row), a match_recognize, several sources joined, a cohort — the table is built with
-  `build_pipeline_model` and the eventstream starts from its task (`from_task` + `columns: { path,
-  event, time }`), reading that table's columns; its cards are the same transition graph, step
-  matrix and sankey.
+  `build_pipeline_model` and the eventstream starts from its task (`from_task` + `path: [{ column }]`
+  + `columns: { event, time }`), reading that table's columns; its cards are the same transition
+  graph, step matrix and sankey.
   It is built in SQL where the data lives and materialized; the call returns a task.
   Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
   `steps: [...]` takes one or several of the library's own steps, in order (each

@@ -105,7 +105,9 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (r.error) return none('error');
   // analysis_kind stays the analysis's own kind where the card's kind is a shape of its (a diff, a distribution)
   const synthetic = new Set(Array.isArray(drawn.synthetic_events) ? drawn.synthetic_events : Object.keys(START_END));
-  const head = { kind: r.kind, analysis_kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
+  // the card's title: the caller's, in the person's words — else the analysis's kind in words
+  const title = typeof drawn.title === 'string' && drawn.title.trim() ? drawn.title : titleOf(r.kind);
+  const head = { kind: r.kind, analysis_kind: r.kind, title, analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
   if (!hasCard(r.kind, diffForm(r))) return none('no_card');

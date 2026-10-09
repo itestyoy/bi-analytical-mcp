@@ -574,7 +574,8 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
 });
 
 // unpivot returns exactly `keep` + the two columns it makes, and a row for every folded value — a
-// NULL one too (BigQuery's UNPIVOT is told INCLUDE NULLS, and selects the kept and folded columns first)
+// NULL one too (BigQuery's UNPIVOT is told INCLUDE NULLS, selects the kept and folded columns first,
+// and puts the name column before the value after it, as the stage declares)
 test('pipeline unpivot: exactly keep + name/value columns, one row per value — NULL values kept', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([

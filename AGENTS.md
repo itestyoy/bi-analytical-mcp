@@ -463,9 +463,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
   What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
-  src/retentioneering/schema.js — today `filter_events.where`, a condition tree on the eventstream's
-  columns, written into the library's `sql` with every name and constant quoted, a column compared as its
-  constant's kind and a missing value matching nothing — so a negation keeps it, as the library's drop does). The path-pattern
+  src/retentioneering/schema.js — today `filter_events.where`, the one condition grammar (a list that all
+  hold, `{ or: [...] }`, the operators of `OPS`) on the eventstream's columns, written into the library's
+  `sql` with every name and constant quoted, a column compared as its constant's kind and a missing value
+  matching nothing — so a negation (neq, not_in, not_like) keeps it, as the library's drop does). The path-pattern
   language (path_pattern, an anchor's pattern, matches_pattern) is the library's parser's own, extracted
   into the sheet (`path_patterns`) and rendered in the guide; the library's relative doc links are made
   absolute in the sheet.
@@ -671,9 +672,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   adapters, the library and the numerical packages that decide its results, all pinned), and a dbt
   client of its own over it, so turning the feature on changes nothing the core runs; its test file
   (test/integration/retentioneering.test.js) runs on it and skips when it is not built.
-- The integration tests query through the dbt client production runs (`testDbt`, test/helpers/
-  dbt-env.js → `createDbt`): the numbers they prove come from `mf query` and `dbt show` as the server
-  calls them. Do NOT add a query backend only the tests use.
+- The integration tests query through the server's own dbt client contract (`testDbt`, test/helpers/
+  dbt-env.js → `createDbt` over `TEST_ENV`): the numbers they prove come from `mf query` and `dbt show`
+  as the server calls them — on the test environment's dbt, so the client of another major version
+  (production's `DEFAULT_ENV`) is proven only by a run with DBT_ENV naming it. Do NOT add a query
+  backend only the tests use.
 - THE EVALS ARE THE PRODUCTION SURFACE WITH A MODEL IN IT (evals/): golden questions — direct,
   indirect, negative — put to a model through the listed tools over MCP, on the engine production
   builds (`makeEngine`) over the fixture warehouse, EACH CASE IN A WORLD OF ITS OWN (a fresh engine and

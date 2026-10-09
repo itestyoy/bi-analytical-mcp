@@ -15,6 +15,7 @@ import { byText } from './view-model.js';
 import { BUILD, QUERY } from './names.js';
 import { serially, basePaths } from './contexts.js';
 import { pathKey, sampleOf, eventstreamOf, opParams } from './query.js';
+import { currentStep } from './earlier.js';
 
 /** How many levels of a segment the summary lists in full; a segment with more is known by its count. */
 export const LEVEL_CAP = 1000;
@@ -108,11 +109,11 @@ export function shapeAtEnd(es) {
   return shapeBefore(es, (es.steps || []).length + 1);
 }
 
-/** One step in the library's own form: `path` as the library's path column, a reshaped parameter
- *  translated back (RESHAPED). */
+/** One step in the library's own form: `path` as the library's path column (a path column of the
+ *  eventstream, named as it is there), a reshaped parameter translated back (RESHAPED). */
 export function toLibrary(step, field) {
   const { path, ...rest } = step;
-  if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = path === 'users' ? ES_COLUMNS.user : path === 'sessions' ? ES_COLUMNS.session : path;
+  if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = path;
   for (const [name, r] of Object.entries(RESHAPED)) if (rest[name] != null) rest[name] = r.toLibrary(rest[name], `${field}.${name}`);
   // a parameter this tool adds goes to the library as the one it stands for
   for (const [name, a] of Object.entries(ADDED[step.type] || {})) {
@@ -138,7 +139,8 @@ export const NOT_CHECKED = 'not checked: the library\'s own check could not run 
 /** Steps `from`..end of `view` checked by the library on the shape before `from` → one entry per
  *  step: { step, library, checked, shape | problem | note }. */
 export async function checkSteps(feature, view, from, fieldOf) {
-  const list = view.steps.slice(from - 1);
+  // a step kept from an earlier version is checked — and kept from now on — in today's spelling
+  const list = view.steps.slice(from - 1).map((s) => ({ ...s, step: currentStep(s.step) }));
   const library = list.map((s, i) => toLibrary(s.step, fieldOf(from + i)));
   const entries = list.map((s, i) => ({ step: s.step, library: library[i], checked: false, shape: null }));
   const shape = shapeBefore(view, from);
@@ -260,7 +262,7 @@ export function preview(ctx, name, es) {
     ok: true, context_id: ctx.id, eventstream: name, action: 'preview',
     // (an eventstream a former version of the server stored may carry no base: said, not thrown)
     base: es.base ? { model: es.base.model, ...(es.base.summary ? { events: es.base.summary.events, users: es.base.summary.users } : { building: es.base.task_id }) } : { missing: 'this eventstream was stored without its base table — start it again' },
-    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: s.step, library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
+    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: currentStep(s.step), library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
     materialized_through: upto,
     ...(es.checkpoint ? { table: es.checkpoint.model } : {}),
     shape: describeShape(shapeAtEnd(es)),

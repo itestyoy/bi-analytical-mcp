@@ -158,7 +158,45 @@ kept from an earlier version, carried over on read (src/pipeline/earlier.js); `n
   - shared definitions: one `timeRange(description)` (src/schema-kit.js) for every `time_range`; the
     `delete_context.*` and `context.describe` method contracts are the tool's own forms without their
     tag.
-- Later batches of the same job (retentioneering) are recorded here as they land.
+- Batch F, the retentioneering feature:
+  - `filter_events.where` is the one condition grammar (`conditionList` over `{ column, op ∈ OPS, value }`,
+    the column one of the eventstream's at that step); its SQL keeps the earlier rule that a missing
+    value matches nothing, so a negation (neq, not_in, not_like) keeps it; a constant that does not fit
+    its operator is refused as the step is added; a step stored in the earlier tree (`{ op, conditions }`,
+    `{ not }`, `=`/`==`/`!=`…) is translated when it is re-checked or previewed
+    (src/retentioneering/earlier.js: negations pushed to the leaves, a negated order comparison its
+    opposite or a missing value);
+  - an analysis's `path` is a path column of the eventstream as its shape lists it (`user_id`, the build's
+    path key; `session_id`; a split_sessions column) — the words `users` / `sessions` are gone, and a
+    refusal lists the shape's paths; a step stored with one of those words (any op with the library's
+    path column) is read as `user_id` / `session_id` when it is re-checked or previewed
+    (src/retentioneering/earlier.js `currentStep`); an analysis's own name is `name` (was `id`);
+  - a start from a task's table: `path: [{ column }]` (1–4, required) and `columns: { event, time }`;
+    `columns.path` and `time_range` are gone from that form (build_pipeline_model's from_task form takes
+    no `time_range` either); a stored spec with `columns.path` reads as `path`;
+  - a segment `{ model, attribute }` is offered for a model another path source reaches (no join of a
+    source onto itself, which the start also refuses), `via` only where several relationships lead to it;
+  - the read and cancel forms are the core's (`TASK_READ`, src/schema/fields.js: `wait_seconds` a
+    number); `from_task` is `TASK_ID_PATTERN`; the eventstream's own `name` / `eventstream` are the core
+    `NAME`; display's `task_id` says it is a finished query_retentioneering_model task;
+  - `description` on start is kept with the eventstream (as fork's is); a context stored before keeps
+    its context-level description, shown as it was;
+  - display_retentioneering_result takes an optional `title` (`cardTitle`), drawn as the card's head
+    (the kind's title otherwise);
+  - an events.split case is `{ name, when }` (was `where`), as a compute case; a stored spec is read so.
+- The final review's fixes:
+  - a retentioneering step stored with `path: 'users' | 'sessions'` is read as its column (above);
+  - the retired retentioneering spellings join the RETIRED guard (test/unit/model-facing-calls.test.js);
+  - a deployment's recipe file in an earlier spelling is served in today's (src/recipes.js): each
+    pipeline stage through src/pipeline/earlier.js, a semantic payload's `use_base_models`, `{ name }`
+    references, derived `[{ metric, name }]`, `as_type` and `sum_boolean` translated;
+  - a kept pipeline draft is stored in today's spelling at its next accepted edit (the render's,
+    `renderPipeline(...).current`) and its steps are shown in it (`_draftSteps`);
+  - BigQuery's unpivot returns `keep`, name column, value column, as DuckDB and the stage declare;
+  - a stage's earlier field (`n`, `percent`, `name_as`, `value_as`, `mode`) is refused with a hint
+    (`CROSS_PATH_SPELLING`);
+  - AGENTS.md: the integration tests run the client contract over `TEST_ENV`, not necessarily
+    production's; docs/analytics-mcp-tools-design.md carries the historical-design banner.
 
 ## Out Of Scope
 
@@ -190,7 +228,8 @@ A pipeline built again after this job can return different numbers than before, 
     otherwise (BigQuery's own default puts them first there; DuckDB's already put them last);
   - a pivot's `count` counts the rows per cell (it was the count of an already aggregated value — 1
     per group);
-  - unpivot returns exactly `keep` + the two produced columns, with a row for a NULL value too;
+  - unpivot returns exactly `keep` + the two produced columns, with a row for a NULL value too, in
+    that order: the name column before the value column (UNPIVOT's own order put the value first);
   - `date_diff` reads a DATE side as its midnight TIMESTAMP.
 - DuckDB
   - `date_diff` is an integer of whole elapsed units truncated toward zero: hour, minute and second
@@ -204,6 +243,15 @@ A semantic task declared again after Batch C:
   dimension at its grain (it was categorical unless `as_type: time`), and a group_by on a time
   attribute returns its column as `<model>_<attribute>` (it was MetricFlow's `<path>__<grain>`);
 - a dry run's SQL carries the caller's limit (it carried limit + offset + 1, or 1001 by default).
+
+An eventstream step kept from before Batch F:
+
+- a filter_events `where` that negated an order comparison (`{ not: { column, op: '>', value: 5 } }`)
+  is read as `{ or: [{ op: lte }, { op: is_null }] }`: the same rows, but for a value that is there and
+  is not a number (text compared with a number) — the earlier tree kept such a row, the carried-over
+  list drops it. Every other condition keeps the rows it kept.
+- a step's `path: 'users'` / `path: 'sessions'` is read as `path: 'user_id'` / `'session_id'` — the
+  columns the earlier step already ran on (its library form named them), so the rows do not change.
 
 ## Verification
 
@@ -224,6 +272,9 @@ Recorded per batch in the job's run (lint:names, unit tests, the touched integra
   recipes-parse, value-index, end-to-end, audit-regressions, mcp-end-to-end, acquisition-source,
   crashlytics-complex-types, declared-joins, match-recognize, project-semantics, retentioneering;
   `npm run eval:check` 14/14 cases hold.
+- Batch F and the final review's fixes: pending the single final run (`npm run lint:names` clean). The
+  integration tests run on `TEST_ENV` (`dbt-v2`); the `dbt-v1` client production runs (`DEFAULT_ENV`)
+  is proven by this run only for the python stage's file, unless it is made with `DBT_ENV=dbt-v1`.
 
 ## Source Of Truth
 

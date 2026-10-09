@@ -204,7 +204,7 @@ test('a row whose array payload is not an array is counted as absent, not fatal 
   }
 });
 
-// semantic_index({ source, property }) value listing is pageable + orderable (limit/offset/order_by/direction).
+// semantic_index({ source, property }) value listing is pageable + orderable (limit/offset/order_by).
 test('semantic_index({ source, property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;
   // freq desc, top 1 → 'rewarded' (10); next page → 'interstitial' (8).
@@ -214,12 +214,12 @@ test('semantic_index({ source, property }) pages + orders the indexed values', o
   const p2 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1, offset: 1 });
   assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
   // order_by value asc → alphabetical.
-  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'value' });
+  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: [{ key: 'value' }] });
   assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
-  assert.equal(alpha.value_stats.order_by, 'value');
+  assert.deepEqual(alpha.value_stats.order_by, [{ key: 'value', direction: 'asc' }]);
   assert.equal(alpha.value_stats.has_more, false);
   // freq asc → least common first.
-  const asc = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'freq', direction: 'asc' });
+  const asc = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: [{ key: 'freq', direction: 'asc' }] });
   assert.deepEqual(asc.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // has_more must be FALSE when the page covers all values (limit == distinct_count),
   // and TRUE only when a non-empty next page exists (no false positive at the boundary).
@@ -363,10 +363,10 @@ test('experiments.experiment_name / variant_group are indexed (checkout_flow; co
   assert.equal(valOf(variants, 'variant_b').freq, 6);
 });
 
-// semantic_index({ model: 'users' }) surfaces each dimension WITH its indexed values.
-test('semantic_index({ model: "users" }) lists dimensions with sample_values + cardinality', opts, async (t) => {
+// semantic_index({ source: 'users' }) surfaces each dimension WITH its indexed values.
+test('semantic_index({ source: "users" }) lists dimensions with sample_values + cardinality', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ model: 'users' });
+  const out = await engine.semantic_index({ source: 'users' });
   const country = out.dimensions.find((d) => d.name === 'country');
   assert.equal(country.distinct_count, 4);
   assert.ok(country.sample_values.some((v) => v.value === 'US' && v.freq === 4), `US(4) in samples: ${JSON.stringify(country.sample_values)}`);
@@ -378,8 +378,8 @@ test('semantic_index({ model: "users" }) lists dimensions with sample_values + c
 test('semantic_index({ source: "users", property: "country" }) returns the attribute value distribution', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.semantic_index({ source: 'users', property: 'country' });
-  assert.equal(out.model, 'users');
-  assert.equal(out.column, 'country');
+  // the answer names the source once, and the column as the view takes it
+  assert.deepEqual([out.source, out.property, out.model, out.column], ['users', 'country', undefined, undefined]);
   assert.equal(out.distinct_count, 4);
   assert.equal(valOf(out.sample_values, 'US').freq, 4);
   // dim_users is SCD-2 and u1 has a US version and a GB one, so US and GB are TIED at 4
@@ -403,13 +403,13 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   const deHit = de.value_matches.find((m) => m.source === 'users' && m.property === 'country' && m.value === 'DE');
   assert.ok(deHit, `expected users.country DE value match: ${JSON.stringify(de.value_matches)}`);
   assert.equal(deHit.freq, 3);
-  assert.equal(deHit.model, 'users');
+  assert.equal(deHit.model, undefined, 'a value names its source once');
   // an experiment name is discoverable by substring.
   const exp = await engine.semantic_index({ search: 'checkout' });
   assert.ok(exp.value_matches.some((m) => m.source === 'experiments' && m.property === 'experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
   // a dimension attribute is discoverable by its name.
   const dim = await engine.semantic_index({ search: 'country' });
-  assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.column === 'country'), JSON.stringify(dim.dimension_matches));
+  assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.property === 'country'), JSON.stringify(dim.dimension_matches));
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
   assert.ok(ret.recipe_matches.some((r) => r.id === 'conversion_metric_window'), JSON.stringify(ret.recipe_matches));

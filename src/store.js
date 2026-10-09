@@ -16,7 +16,7 @@
 //   values.replaceProperty(source, property, { distinctCount, totalCount, nullCount, values:[{value,freq}], coverage:[{event,rowCount,nonNull}], bundleCoverage:[{bundle,…}], cellCoverage:[{bundle,event,rowCount,nonNull}], highCardinality, dataWatermark })
 //   values.cellCoverage(source, property, { bundle, event }) -> { row_count, non_null, null_count } | null  (triple)
 //   values.top(source, property, limit)   -> [{value,freq}]  (freq desc, value asc)
-//   values.page(source, property, { limit, offset, col:'freq'|'value', direction:'asc'|'desc' })
+//   values.page(source, property, { limit, offset, col:'freq'|'value', direction:'asc'|'desc', tie:'asc'|'desc' })
 //   values.stats(source, property)        -> { distinctCount, totalCount, nullCount, indexedAt, highCardinality, dataWatermark } | null
 //   values.coverage(source, property)     -> [{event_name, row_count, non_null, null_count}] (row_count desc)
 //   values.bundleCoverage(source, property) -> [{bundle, row_count, non_null, null_count}] (row_count desc)
@@ -41,13 +41,13 @@
 //   memory.add({ id, note, targets, aliases, links, created_at }) -> id
 //   memory.get(id)                    -> { id, note, targets:[], aliases:[], links:[], created_at } | null
 //   memory.remove(id)                 -> bool (a row existed)
-//   memory.all({ limit })             -> rows[] (most recent first)
+//   memory.all({ limit, offset })     -> rows[] (most recent first)
 //   memory.counts()                   -> { notes }
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
 //   memory.vectorIds(model)           -> Set<id> (notes already embedded for this model)
 //   memory.vectorSearch(qvec, { limit, model }) -> [{ id, score }] (cosine; KNN via sqlite-vec)
 //   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail, context, files, runtime }) -> id
-//   errors.list({ since, until, source, severity, tool, stage, context_id, task_id, text, limit, offset }) -> { total, rows[] } (newest first)
+//   errors.list({ since, until, source, severity, tool, stage, context_id, task_id, search, limit, offset }) -> { total, rows[] } (newest first)
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
 //   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
@@ -120,14 +120,15 @@ export class MemoryBackend {
         const e = entryOf(source, property);
         return e ? e.values.slice(0, limit).map((v) => ({ value: v.value, freq: v.freq })) : [];
       },
-      page: (source, property, { limit, offset, col, direction }) => {
+      page: (source, property, { limit, offset, col, direction, tie = 'asc' }) => {
         const e = entryOf(source, property);
         if (!e) return [];
-        // primary key honours direction; ties always break on value ASC.
+        // primary key honours direction; ties break on the value, ascending unless `tie` says desc.
         const sign = direction === 'desc' ? -1 : 1;
+        const tieSign = tie === 'desc' ? -1 : 1;
         const arr = [...e.values].sort((a, b) => {
           const primary = col === 'value' ? String(a.value).localeCompare(String(b.value)) : a.freq - b.freq;
-          return primary !== 0 ? sign * primary : String(a.value).localeCompare(String(b.value));
+          return primary !== 0 ? sign * primary : tieSign * String(a.value).localeCompare(String(b.value));
         });
         return arr.slice(offset, offset + limit).map((v) => ({ value: v.value, freq: v.freq }));
       },
@@ -208,7 +209,7 @@ export class MemoryBackend {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
-      all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
+      all: ({ limit = 200, offset = 0 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(offset, offset + limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
       // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
       vectorPut: (id, vec, model) => { if (memory.has(id)) vectors.set(id, { vec: Array.from(vec), model }); },
@@ -225,7 +226,7 @@ export class MemoryBackend {
     let errorSeq = 0;
     const errorMatch = (f = {}) => (e) => (f.since == null || e.at >= f.since) && (f.until == null || e.at <= f.until)
       && ['source', 'severity', 'tool', 'stage', 'context_id', 'task_id'].every((k) => f[k] == null || e[k] === f[k])
-      && (f.text == null || `${e.message || ''} ${e.detail || ''}`.toLowerCase().includes(String(f.text).toLowerCase()));
+      && (f.search == null || `${e.message || ''} ${e.detail || ''}`.toLowerCase().includes(String(f.search).toLowerCase()));
     this.errors = {
       add: (e) => { const id = ++errorSeq; errors.push({ id, ...e }); return id; },
       list: ({ limit = 20, offset = 0, ...f } = {}) => {
@@ -385,7 +386,7 @@ export class SqliteBackend {
       if (f.since != null) { w.push('at >= ?'); p.push(f.since); }
       if (f.until != null) { w.push('at <= ?'); p.push(f.until); }
       for (const k of ERROR_COLS) if (f[k] != null) { w.push(`${k} = ?`); p.push(f[k]); }
-      if (f.text != null) { w.push("lower(coalesce(message, '') || ' ' || coalesce(detail, '')) LIKE ? ESCAPE '\\'"); p.push(`%${String(f.text).toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`); }
+      if (f.search != null) { w.push("lower(coalesce(message, '') || ' ' || coalesce(detail, '')) LIKE ? ESCAPE '\\'"); p.push(`%${String(f.search).toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`); }
       return { sql: w.length ? ` WHERE ${w.join(' AND ')}` : '', params: p };
     };
     this.errors = {
@@ -437,12 +438,13 @@ export class SqliteBackend {
       top(source, property, limit) {
         return s._all('SELECT value, freq FROM prop_values WHERE source = ? AND property = ? ORDER BY freq DESC, value ASC LIMIT ?', source, property, limit).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
-      page(source, property, { limit, offset, col, direction }) {
-        // col ∈ {freq,value} and direction ∈ {asc,desc} are a closed set (normalised by the
+      page(source, property, { limit, offset, col, direction, tie = 'asc' }) {
+        // col ∈ {freq,value} and direction/tie ∈ {asc,desc} are a closed set (normalised by the
         // caller), safe to interpolate; the value tiebreak keeps paging stable.
         const c = col === 'value' ? 'value' : 'freq';
         const d = direction === 'desc' ? 'DESC' : 'ASC';
-        return s._all(`SELECT value, freq FROM prop_values WHERE source = ? AND property = ? ORDER BY ${c} ${d}, value ASC LIMIT ? OFFSET ?`, source, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
+        const t = tie === 'desc' ? 'DESC' : 'ASC';
+        return s._all(`SELECT value, freq FROM prop_values WHERE source = ? AND property = ? ORDER BY ${c} ${d}, value ${t} LIMIT ? OFFSET ?`, source, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
       stats(source, property) {
         const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark FROM prop_stats WHERE source = ? AND property = ?', source, property);
@@ -536,7 +538,7 @@ export class SqliteBackend {
       add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
-      all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
+      all({ limit = 200, offset = 0 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?', limit, offset).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 
       // ── semantic (vector) search ──────────────────────────────────────────────

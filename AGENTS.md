@@ -237,7 +237,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   are dropped with a warning (count on an events source instead).
 - A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js) over
   per-group aggregates (proportion → z-test; mean →
-  Welch t-test).
+  Welch t-test; ratio → delta method; cuped → variance reduction). A group's sums of one value are
+  `{ sum, sum_squares }` wherever a test reads them — a mean group's, a ratio's numerator and
+  denominator, a CUPED group's own and its covariate's — with `sum_products` beside a pair; they are
+  mapped onto src/stats.js's internals at the edge (src/experiment.js) and nowhere else.
 - A FACT ABOUT AN EXTERNAL LIBRARY IS GENERATED FROM THAT LIBRARY, NEVER WRITTEN IN PROSE (HARD
   RULE). Signatures, which methods raise, what a class returns: extracted by a script into a
   checked-in sheet (`scripts/bigframes-facts.py` → `config/bigframes-facts.json`), and every text
@@ -324,7 +327,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   attributes), in a declaration and an update alike. A SORT KEY over a table's rows (the
   order_by stage, a window's order, a read) is ONE item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
-  funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a week is the ISO
+  funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a time window is
+  `time_range` `{ start, end, timezone }` (ONE builder, `timeRange` in src/schema-kit.js, read by
+  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a catalog
+  entity is addressed `{ source }`, `{ source, property }` or `{ source, event }` — semantic_index's views
+  and what a memory note is `about` alike; a week is the ISO
   week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE expression —
   `{ column }`, `{ value }`, `{ now: true }` or `{ fn, args: [expressions], …its parameters }`, nested
   to any depth, the one `$defs.expr` every operand references (src/pipeline/compute.js `FNS`: a function
@@ -333,7 +340,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   where each goes, written quoted by the server — POSITIONAL: a word of its text spelled exactly as a
   column of the step is refused, with no list of words beside it; the rest goes as written). Every column
   name the server writes into SQL is quoted by the warehouse's dialect, in every stage and every read. A caller who brings another tool's spelling
-  (`avg`, `q`, `fn`, `as`) is told this server's (src/validate.js). The retentioneering steps keep
+  (`avg`, `q`, `fn`, `as`, `targets`, `text`) is told this server's (src/validate.js). The retentioneering steps keep
   the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the

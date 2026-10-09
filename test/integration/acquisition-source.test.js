@@ -193,7 +193,7 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
 // column; meta.mcp.index:false keeps one out of value profiling while leaving it groupable.
 test('the schema opt-outs hold: a measure/opted-out column is not groupable but is readable', opts, async (t) => {
   if (skip(t)) return;
-  const model = await engine.semantic_index({ model: 'acquisition' });
+  const model = await engine.semantic_index({ source: 'acquisition' });
   const dims = model.dimensions.map((d) => d.name);
   // The measure columns and the `dimension: false` column are NOT attributes; the source's
   // declared time axis is (grouping spend by its own day needs no join).

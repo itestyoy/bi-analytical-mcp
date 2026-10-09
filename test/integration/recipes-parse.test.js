@@ -16,6 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, startAndBuild } from '../helpers/settle.js';
+import { armFrom } from '../helpers/experiment-arm.js';
 import { DBT_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -96,13 +97,7 @@ for (const r of recipes.list) {
       assert.ok(Array.isArray(out.rows) && out.rows.length >= least, `${r.id} expected >=${least} row(s), got ${out.rows?.length}`);
       if (r.experiment?.action === 'analyze') {
         const map = r.experiment;
-        const arms = out.rows.map((row) => {
-          const arm = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
-          if (map.conversions_field) arm.conversions = Number(row[map.conversions_field]);
-          if (map.mean_field) { arm.mean = Number(row[map.mean_field]); arm.stddev = Number(row[map.stddev_field]); }
-          for (const f of ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY', 'sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen']) if (map[`${f}_field`]) arm[f] = Number(row[map[`${f}_field`]]);
-          return arm;
-        });
+        const arms = out.rows.map((row) => armFrom(map, row));
         const [control, ...variants] = arms;
         const res = engine._analyzeExperiment({ metric: map.metric, control, variants });
         assert.equal(res.ok, true, `experiment analyze failed for ${r.id}: ${JSON.stringify(res)}`);
@@ -111,7 +106,7 @@ for (const r of recipes.list) {
       }
       if (r.experiment?.action === 'check_split') {
         const map = r.experiment;
-        const groups = out.rows.map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
+        const groups = out.rows.map((row) => armFrom(map, row));
         const res = engine._checkSplit({ groups, ...(map.expected_ratio ? { expected_ratio: map.expected_ratio } : {}) });
         assert.equal(res.ok, true, `experiment check_split failed for ${r.id}: ${JSON.stringify(res)}`);
         assert.ok(Number.isFinite(res.p_value) && res.p_value >= 0 && res.p_value <= 1, `bad p_value for ${r.id}`);

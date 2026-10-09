@@ -27,8 +27,10 @@ export function makeValidators(schemas) {
 /**
  * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. Every path aggregates with
  * `agg`, the mean is `average`, a quantile is `percentile`, the name a step produces is `name`, a
- * context is `context_id` and a list of measures is `measures`; a caller used to SQL or another tool
- * (or to an earlier version of this one) writes `avg`, `q`, `fn`, `as`, `draft_id`, `aggregations` —
+ * context is `context_id`, a list of measures is `measures`, what a note is about is `about`, a
+ * substring filter is `search` and a time window `time_range`; a caller used to SQL or another tool
+ * (or to an earlier version of this one) writes `avg`, `q`, `fn`, `as`, `draft_id`, `aggregations`,
+ * `targets`, `text`, `since` —
  * and the refusal says what this server calls it, when that name is allowed where it was written.
  * A hint, never an alias: the other spelling is refused.
  */
@@ -43,6 +45,12 @@ export const CROSS_PATH_SPELLING = {
   explain: 'dry_run',
   draft_id: 'context_id',
   aggregations: 'measures',
+  // what a note is about, a substring filter, a time window, a catalog model on its own
+  targets: 'about',
+  text: 'search',
+  since: 'time_range',
+  until: 'time_range',
+  model: 'source',
 };
 
 /** What this path calls `used`, when it has a name for it at all. */
@@ -374,12 +382,36 @@ function explainNode(root, n, value, memo) {
   // required field means they meant it and left something out; a bad enum/const value means they DID
   // name it and got the value wrong — that is the message worth showing, so it costs least.
   const weight = (e) => ({ additionalProperties: 10, type: 8, required: 6, pinnedNone: 3 }[e.keyword] ?? 1);
-  // The value's own fields decide first: the branch that knows more of them is closer, whatever lies
-  // deeper inside the fields it knows — a list of views with one bad item is still the { views } form,
-  // not the empty one that knows no `views` (errors under a field would otherwise outweigh the field).
-  const unknown = (es) => es.filter((e) => e.keyword === 'additionalProperties' && e.instancePath === '').length;
-  const scored = candidates.map((i) => { const es = explain(root, branches[i], value, memo); return { i, es, unknown: unknown(es), score: es.reduce((s, e) => s + weight(e), 0) }; });
-  const best = scored.sort((a, b) => a.unknown - b.unknown || a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
+  // A field the value spells as another path does (CROSS_PATH_SPELLING — `model` where this form says
+  // `source`) stands for the field it names here: it is no unknown field of the form, and the field it
+  // stands for is not missing from it — the refusal says the name instead (describe, additionalProperties).
+  const respelled = (b) => {
+    const fields = Object.keys(b?.properties || {});
+    const out = new Map();
+    if (isPlainObject(value)) for (const k of Object.keys(value)) { const alt = !fields.includes(k) && otherSpelling(k, fields); if (alt) out.set(k, alt); }
+    return out;
+  };
+  // How far a form is from the value, field by field, in three steps. Furthest: a field it lacks that
+  // another form REQUIRES — the field that names another mode (an `event`, a `bundle`), so the value
+  // meant that mode. Then: a field it pins to ONE value (its tag — the source a { source, property }
+  // form is of) that the value gives otherwise — the caller named another form. Closest: a field it
+  // lacks that no form requires, a modifier written where it does not apply — so a stray field beside
+  // a users property is that form's stray field, not a reason to say "`source` must be events" of a
+  // form that knows every field given. A pin of several values is a vocabulary, not a tag: a name it
+  // does not hold is a misspelling inside the form meant, and costs what a bad value costs (below).
+  const identifying = new Set(isPlainObject(value) ? Object.keys(value).filter((k) => candidates.some((j) => requires(root, branches[j], k))) : []);
+  const mismatched = (i) => (isPlainObject(value) ? Object.keys(value).filter((k) => { const p = pins[i].get(k); return p && new Set(p).size === 1 && !p.includes(value[k]); }).length : 0);
+  // These, the value's own fields, decide before whatever lies deeper inside the fields a form knows — a
+  // list of views with one bad item is still the { views } form, not the empty one that knows no
+  // `views` (errors under a field would otherwise outweigh the field).
+  const scored = candidates.map((i) => {
+    const alts = respelled(branches[i]);
+    const standsFor = new Set(alts.values());
+    const es = explain(root, branches[i], value, memo).filter((e) => !(e.keyword === 'required' && e.instancePath === '' && standsFor.has(e.params.missingProperty)));
+    const strays = es.filter((e) => e.keyword === 'additionalProperties' && e.instancePath === '' && !alts.has(e.params.additionalProperty)).map((e) => e.params.additionalProperty);
+    return { i, es, lacksMode: strays.filter((k) => identifying.has(k)).length, mismatched: mismatched(i), unknown: strays.length, score: es.reduce((s, e) => s + weight(e), 0) };
+  });
+  const best = scored.sort((a, b) => a.lacksMode - b.lacksMode || a.mismatched - b.mismatched || a.unknown - b.unknown || a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
   // the modes are named unless the value named its own — or meant the default one, which it need not name
   const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(candidates.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);

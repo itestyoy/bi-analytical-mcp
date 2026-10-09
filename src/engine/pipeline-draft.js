@@ -323,7 +323,7 @@ export const pipelineDraftMethods = {
       recommendations: [
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first stage can reference (include_columns:true lists them); nothing before it is recomputed.`
-          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { model: '${source}' } }).`,
+          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/compute then aggregate.`,
         buildHint,
       ],

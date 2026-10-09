@@ -30,11 +30,56 @@ export function pipelineStartRequest(payload) {
   return { action: 'start', ...rest, ...pipeline };
 }
 
+// The earlier experiment block's flat `<field>_field` keys → where that column goes in `arm` (a path
+// into the group as the experiment tool takes it).
+const EARLIER_ARM_FIELDS = {
+  n_field: ['n'],
+  conversions_field: ['conversions'],
+  mean_field: ['mean'],
+  stddev_field: ['stddev'],
+  sumY_field: ['sum'],
+  sumY2_field: ['sum_squares'],
+  sumX_field: ['covariate', 'sum'],
+  sumX2_field: ['covariate', 'sum_squares'],
+  sumXY_field: ['sum_products'],
+  sumNum_field: ['numerator', 'sum'],
+  sumNum2_field: ['numerator', 'sum_squares'],
+  sumDen_field: ['denominator', 'sum'],
+  sumDen2_field: ['denominator', 'sum_squares'],
+  sumNumDen_field: ['sum_products'],
+};
+
+/**
+ * A recipe's experiment block, as `{ action, metric?, group_field, expected_ratio?, arm }` — `arm` the
+ * group as the experiment tool takes it, each value the column that holds it. A file written for an
+ * earlier version names each column by a flat `<field>_field` key (`n_field`, `sumY_field`,
+ * `sumNum_field` …), the tool's earlier field names; a deployment's file is not ours to rewrite, so it
+ * is read as that `arm` here.
+ */
+export function experimentMap(e) {
+  if (!e || typeof e !== 'object' || e.arm || !('n_field' in e)) return e;
+  const arm = {};
+  const rest = {};
+  for (const [k, v] of Object.entries(e)) {
+    const path = EARLIER_ARM_FIELDS[k];
+    if (!path) { rest[k] = v; continue; }
+    let at = arm;
+    for (const step of path.slice(0, -1)) at = at[step] ??= {};
+    at[path[path.length - 1]] = v;
+  }
+  return { ...rest, arm };
+}
+
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. */
 function readFile(path, origin) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  return (raw.recipes || []).map((r) => ({ ...r, ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}), origin }));
+  return (raw.recipes || []).map((r) => ({
+    ...r,
+    ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}),
+    ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
+    origin,
+  }));
 }
 
 /**

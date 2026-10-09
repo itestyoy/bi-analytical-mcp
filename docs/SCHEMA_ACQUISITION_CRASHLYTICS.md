@@ -392,7 +392,7 @@ join 'acquisition': `attrs` is required — list the columns you want from it; n
 added implicitly. Columns of 'acquisition': acquisition_id, player_id_of_internal,
 spend_date, cost, impressions, clicks, media_source, campaign, campaign_id,
 ingest_batch_id. Use { column, name } to expose one under a different name.
-semantic_index({ request: { model: 'acquisition' } }) describes them.
+semantic_index({ request: { source: 'acquisition' } }) describes them.
 ```
 
 ### Одно имя не может адресовать две колонки

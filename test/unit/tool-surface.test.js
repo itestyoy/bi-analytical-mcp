@@ -191,7 +191,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   // overview points at the guide; guide is a mutually-exclusive view.
   const ov = await e.semantic_index();
   assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
-  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /must be exactly one of: .*\{ guide \}/);
+  await assert.rejects(() => e.semantic_index({ guide: true, source: 'events' }), /must be exactly one of: .*\{ guide \}/);
 });
 
 // Without recipes configured, the recipe view + overview list are simply absent.
@@ -221,37 +221,40 @@ test('a group-by path onto an unloaded FACT is refused with the fix: an item { f
 
 // The relationship a model OWNS is reported as owned — its governed path ends here — not as
 // "pipeline only" (the two conditions used to be tested in the wrong order).
-test('semantic_index({ model }) reports an owned relationship as owned, with a governed path', async () => {
+test('semantic_index({ source }) reports an owned relationship as owned, with a governed path', async () => {
   const e = engine();
-  const users = await e.semantic_index({ model: 'users' });
+  const users = await e.semantic_index({ source: 'users' });
   const rel = users.relationships.find((r) => r.entity === 'user');
   assert.equal(rel.owned_here, true);
   assert.match(rel.use, /^owned here — other models point at it/);
   assert.ok(!/No model owns 'user'/.test(users.join_note || ''), users.join_note);
-  const events = await e.semantic_index({ model: 'events' });
+  const events = await e.semantic_index({ source: 'events' });
   assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
 });
 
-// A target is the PAIR the tool itself emits. A name on its own has no spelling at all — so a name
-// two sources carry can never be attached to the wrong one, and never has to be disambiguated.
-test('memory targets: { source, name } resolves; a bare name is not a target', async () => {
+// What a note is about is the PAIR the tool itself emits. A name on its own has no spelling at all — so
+// a name two sources carry can never be attached to the wrong one, and never has to be disambiguated.
+test('memory about: { source, property } and { source, event } resolve; a bare name is no entity', async () => {
   const e = engine();
-  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] }] })).notes[0];
-  assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
+  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', about: [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }] }] })).notes[0];
+  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }]);
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', targets: ['app_version'] }] }), /must be exactly one of: \{ source: "events", name\? \}[^;]*\| \{ term \}/);
-  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] }] })).notes[0];
-  assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/);
+  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', about: [{ source: 'users', property: 'app_version' }, { source: 'crashlytics', property: 'app_version' }] }] })).notes[0];
+  assert.deepEqual(both.about.map((a) => a.source), ['users', 'crashlytics']);
 });
 
 // Attributes that live only on an events source are searchable by name like any other.
 test('semantic_index({ search }) finds a dimension that exists only on an events source', async () => {
   const e = engine();
   const r = await e.semantic_index({ search: 'bundle_id' });
-  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.column === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.property === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  // a match is named as the view that opens it takes it
+  const m = r.dimension_matches.find((d) => d.property === 'bundle_id');
+  assert.equal((await e.semantic_index({ source: m.source, property: m.property })).property, 'bundle_id');
   const r2 = await e.semantic_index({ search: 'device_model' });
   assert.ok(r2.dimension_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
 });

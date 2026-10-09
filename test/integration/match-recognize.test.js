@@ -420,7 +420,7 @@ test('_buildPipeline: same name in two contexts → distinct relations', opts, a
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
 });
 
-test('semantic_index: overview lists models, then { model } drills into the usable columns', opts, async (t) => {
+test('semantic_index: overview lists models, then { source } drills into the usable columns', opts, async (t) => {
   if (skip(t)) return;
   const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
@@ -428,11 +428,11 @@ test('semantic_index: overview lists models, then { model } drills into the usab
   assert.ok(overview.event_names.events.length > 0, 'the events source lists its own event names');
   assert.equal(overview.models.find((m) => m.key === 'events').columns, undefined, 'overview does NOT dump columns');
   // drill down for the ONE list of usable columns (grounded to the real relation)
-  const events = await engine.semantic_index({ model: 'events' });
+  const events = await engine.semantic_index({ source: 'events' });
   assert.equal(events.physical_columns, undefined, 'no second physical_columns list');
   assert.equal(events.pipeline_columns, undefined, 'no separate pipeline_columns list');
   // #4/#3: the usable columns + the time axis are discoverable
-  assert.ok(Array.isArray(events.columns), 'events { model } lists columns');
+  assert.ok(Array.isArray(events.columns), 'events { source } lists columns');
   const pcNames = events.columns.map((c) => c.name);
   assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'columns include time + key');
   assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');

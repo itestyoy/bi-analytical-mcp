@@ -70,7 +70,7 @@ test('grounded catalog: phantom field is absent from semantic_index everywhere',
   const s = await e.semantic_index({ search: 'complete_time_of_event_data', fuzzy: false });
   assert.ok(!s.property_matches.some((p) => p.property === 'complete_time_of_event_data'));
   // a pruned USERS dimension is gone from the model view + group-by surface.
-  const um = await e.semantic_index({ model: 'users' });
+  const um = await e.semantic_index({ source: 'users' });
   assert.ok(!um.dimensions.some((d) => d.name === 'region'));
   assert.ok(!e.catalog.modelDimensionColumns('users').includes('region'));
 });
@@ -302,15 +302,15 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   const catalog = loadCatalog(CATALOG, {});
   catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_name']));
   const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) }));
-  // { model } view: the status with the missing columns, not an error and not a half model
-  const view = await engine.semantic_index({ model: 'crashlytics' });
+  // { source } view: the status with the missing columns, not an error and not a half model
+  const view = await engine.semantic_index({ source: 'crashlytics' });
   assert.equal(view.unavailable, true);
   assert.deepEqual(view.missing_columns, ['event_name']);
   assert.match(view.reason, /is_event_name/);
   // a task on it is refused at validation with the reason (schema enum excludes it; the engine names why)
   const { compileDeclaration } = await import('../../src/compile.js');
   assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'crashlytics', measures: [{ name: 'n', agg: 'count' }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
-  // the tool schema no longer offers it as a source, but the { model } view still accepts it to explain
+  // the tool schema no longer offers it as a source, but the { source } view still accepts it to explain
   const { buildSchemas } = await import('../../src/schema.js');
   const schemas = buildSchemas(catalog);
   // the values a schema offers: its enums, and its pinned constants (a semantic_models item's `from`)
@@ -320,8 +320,9 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.ok(!offers(schemas.build_pipeline_model, 'crashlytics'), 'build_pipeline_model must not offer the unavailable source');
   assert.ok(offers(schemas.build_semantic_model, 'events'));
   const si = schemas.semantic_index;
-  const modelView = si.anyOf.map((b) => (b.$ref ? si.$defs[b.$ref.split('/').pop()] : b)).find((b) => b.title === '{ model }');
-  assert.ok(modelView.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
+  const modelView = si.anyOf.map((b) => (b.$ref ? si.$defs[b.$ref.split('/').pop()] : b)).find((b) => b.title === '{ source }');
+  const sourceField = modelView.properties.source.$ref ? si.$defs[modelView.properties.source.$ref.split('/').pop()] : modelView.properties.source;
+  assert.ok(sourceField.enum.includes('crashlytics'), 'the { source } view still accepts it, to explain');
 });
 
 // Grounding reads the WAREHOUSE's answer. When dbt never got to ask — its own timeout, a signal, a

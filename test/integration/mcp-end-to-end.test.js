@@ -121,7 +121,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   const models = JSON.stringify(overview.models || overview);
   for (const m of ['events', 'crashlytics', 'acquisition', 'users']) assert.match(models, new RegExp(m));
   // …drilling the spend source shows which of its fields are AMOUNTS, with no function fixed…
-  const acq = await call('semantic_index', { model: 'acquisition' });
+  const acq = await call('semantic_index', { source: 'acquisition' });
   const amounts = (acq.aggregatable || []).map((a) => a.field);
   for (const f of ['cost', 'impressions', 'clicks']) assert.ok(amounts.includes(f), `${f} is offered as an amount`);
   assert.ok(!(acq.dimensions || []).some((d) => d.name === 'cost'), 'an amount is not a groupable attribute');

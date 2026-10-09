@@ -380,7 +380,7 @@ export class Catalog {
     if (this.eventNames(fact).includes(name)) return name;
     const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
     if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
-    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { model: '${fact}' } })`);
+    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { source: '${fact}' } })`);
   }
 
   /**
@@ -506,7 +506,7 @@ export class Catalog {
    * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
    * for a groupable attribute of any model, null when the source does not carry it. THE one place
    * that answers "does this source have this attribute" — every resolver in the engine (value-index
-   * keys, the { source, property } view, memory targets) asks here, so a dimension is never asked for
+   * keys, the { source, property } view, what a memory note is about) asks here, so a dimension is never asked for
    * payload properties and no caller re-implements the rule.
    */
   attributeKind(source, name) {

@@ -518,24 +518,24 @@ export class Engine {
     return sampleSize(input);
   }
 
-  /**
-   * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
-   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
-   *
-   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
-   * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
-   * cap is reported back (`cap_seconds`) so the pacing can be planned from the answer instead of
-   * from the description.
-   */
   /** The memory tool (src/engine/memory.js — engine.notes). */
   memory(input) {
     return this.notes.run(input);
   }
 
+  /**
+   * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
+   * waiting for a task is its side's query tool ({ task_ids }), which returns the moment it is done.
+   *
+   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
+   * call, so a caller that asks for a minute gets a dropped connection rather than a minute — the
+   * schema refuses more than the cap. The cap is reported back (`cap_seconds`) so the pacing can be
+   * planned from the answer instead of from the description.
+   */
   async time(input) {
     this._validate('time', input);
-    const requested = Number(input.seconds) || 0;
-    const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
+    // the schema bounds it to [0, MAX_WAIT_SECONDS]: a longer wait is refused, never cut short silently
+    const seconds = Number(input.seconds) || 0;
     const startedAt = new Date().toISOString();
     // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
     const signal = currentSignal();
@@ -545,7 +545,7 @@ export class Engine {
       signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
     });
     const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
-    return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    return { ok: true, waited_seconds: waited, cap_seconds: MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   /**

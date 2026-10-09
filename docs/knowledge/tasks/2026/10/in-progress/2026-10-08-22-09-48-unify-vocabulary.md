@@ -128,8 +128,37 @@ kept from an earlier version, carried over on read (src/pipeline/earlier.js); `n
     `format: currency`); one card aggregation list (`CARD_AGGS`: a read's functions but percentile)
     for `drill.agg` and pivot `values[].agg`; one `level` item for pivot and drill levels; a column is
     described without listing spellings.
-- Later batches of the same job (catalog tools, experiment, retentioneering) are recorded here as
-  they land.
+- Batch E, catalog views, memory, the error log, the timer and the experiment:
+  - memory: a note's entities are `about` (was `targets`), each `{ source, property? }` (a column or
+    payload property of that source; omitted, the model), `{ source, event }` (an event of an events
+    source) or `{ term }` — closed, told apart by their keys, so nothing looks a name up to tell a
+    property from an event; the store keeps its own `{ kind, source, name }` (src/memory.js `aboutOf`
+    maps it at the edges — nothing stored migrates); every answer that shows a note's entities writes
+    them in that form, record adds `surfaces_in: [call, …]` in the same order, the about-filtered
+    listing answers `{ about, total, notes }`, and `{ notes }` pages with `offset` / `next_offset`;
+    `links` are `{ url, title? }` only; `aliases` are unique, non-blank;
+  - semantic_index: the model view is `{ source }` (enum: the models and the unavailable ones; every
+    printed hint says so); an attribute's answer names `source` and `property` once; search's
+    `dimension_matches` are `{ source, property, … }` and `value_matches` carry no `model`; a
+    property's values are ordered by `order_by: [{ key: freq | value, direction? }]` (1–2 items, the
+    second orders the first one's ties); `include_coverage` only on an events source's property
+    forms; search's `limit` and status's `recent` say what they bound; the bundle view's `source`
+    lists the events sources that name an app; `status` is `{ const: true }`;
+  - explore_errors: `{ id }` alone, or the page form; `time_range` (read by `resolveTimeRange`, the
+    duplicate parser gone), `search` (was `text`), `detail: summary | full`; its outputSchema
+    declares `next_offset`; `source` kept;
+  - time: `seconds` above `MAX_WAIT_SECONDS` is refused (was clamped); `requested_seconds` and
+    `clamped` are gone from the answer;
+  - experiment: a ratio group is `{ label?, n, numerator: { sum, sum_squares }, denominator: { sum,
+    sum_squares }, sum_products }`, a CUPED group `{ label?, n, sum, sum_squares, covariate: { sum,
+    sum_squares }, sum_products }`, mapped onto src/stats.js at the edge (src/experiment.js);
+    `confidence`, `alternative` and `expected_ratio` are defined once; a recipe's `experiment` block
+    is `{ action, metric?, group_field, arm }`, `arm` the group as the tool takes it with each value
+    the column that holds it (was a flat `<field>_field` map);
+  - shared definitions: one `timeRange(description)` (src/schema-kit.js) for every `time_range`; the
+    `delete_context.*` and `context.describe` method contracts are the tool's own forms without their
+    tag.
+- Later batches of the same job (retentioneering) are recorded here as they land.
 
 ## Out Of Scope
 
@@ -191,6 +220,10 @@ Recorded per batch in the job's run (lint:names, unit tests, the touched integra
   audit-regressions, behavior-funnels, batch-queries, crashlytics-fact, ab-test, scd-e2e,
   mcp-end-to-end, task-results, materialize, acquisition-source, duckdb-dbt, jinja-inert,
   multistep-funnel, condition-grammar, value-index; `npm run eval:check` 14/14 cases hold.
+- Batch E: `npm run lint:names` clean; `npm test` 682/682; integration 353/353 over ab-test,
+  recipes-parse, value-index, end-to-end, audit-regressions, mcp-end-to-end, acquisition-source,
+  crashlytics-complex-types, declared-joins, match-recognize, project-semantics, retentioneering;
+  `npm run eval:check` 14/14 cases hold.
 
 ## Source Of Truth
 

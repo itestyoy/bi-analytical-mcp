@@ -24,8 +24,8 @@ test('overview surfaces event_semantics + partition_column for the events fact',
   assert.equal(ev.partition_column, 'event_date');
 });
 
-test('semantic_index({ model: events }) carries the static partition/cost hint', async () => {
-  const out = await engine().semantic_index({ model: 'events' });
+test('semantic_index({ source: events }) carries the static partition/cost hint', async () => {
+  const out = await engine().semantic_index({ source: 'events' });
   assert.equal(out.partition_column, 'event_date'); // static — no live runner needed
   assert.ok(typeof out.cost_hint === 'string' && out.cost_hint.length > 0);
   assert.deepEqual(out.event_semantics.session_end_event, 'end_session');

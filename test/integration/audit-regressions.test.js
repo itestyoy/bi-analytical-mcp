@@ -11,7 +11,7 @@
 //             `<entity>__<attribute>` spelling is resolved from the schema, never typed;
 //   B (11-16) the filter-value guard reaches a joined attribute through its OWNER;
 //   C (17-20) relationship labelling: owned vs pipeline-only, and the path each one gives;
-//   D (21-23) memory targets in the qualified form; ambiguity reported;
+//   D (21-23) what a memory note is about, in the qualified form; ambiguity reported;
 //   E (24-27) grounding prunes amounts, measures and time axes with their columns;
 //   F (28-30) a column that is BOTH an amount and an attribute;
 //   G (31-32) MCP_DB_RESET is a clean slate even over a v1 database;
@@ -269,7 +269,7 @@ test("16. the source's own attribute is guarded against its own indexed values",
 
 test('17. the users model reports `user` as owned, and the governed path it promises works', opts, async (t) => {
   if (skip(t)) return;
-  const v = await engine.semantic_index({ model: 'users' });
+  const v = await engine.semantic_index({ source: 'users' });
   const rel = v.relationships.find((r) => r.entity === 'user');
   assert.equal(rel.owned_here, true);
   assert.match(rel.use, /^owned here — other models point at it/);
@@ -280,7 +280,7 @@ test('17. the users model reports `user` as owned, and the governed path it prom
 
 test('18. the events model reports `user` as metric query + pipeline, pointing at users', opts, async (t) => {
   if (skip(t)) return;
-  const v = await engine.semantic_index({ model: 'events' });
+  const v = await engine.semantic_index({ source: 'events' });
   const rel = v.relationships.find((r) => r.entity === 'user');
   assert.equal(rel.use, 'metric query + pipeline');
   assert.equal(rel.joins, 'users');
@@ -288,7 +288,7 @@ test('18. the events model reports `user` as metric query + pipeline, pointing a
 
 test('19. a relationship nobody owns is pipeline only — and the pipeline join gives 14 rows', opts, async (t) => {
   if (skip(t)) return;
-  const v = await engine.semantic_index({ model: 'crashlytics' });
+  const v = await engine.semantic_index({ source: 'crashlytics' });
   assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'pipeline only');
   const rows = await pipeRows('crashlytics', [
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev_name' }] },
@@ -299,34 +299,34 @@ test('19. a relationship nobody owns is pipeline only — and the pipeline join 
 
 test('20. with an owner declared, both sides label the relationship consistently', opts, async (t) => {
   if (skip(t)) return;
-  const crash = await ownerEngine.semantic_index({ model: 'crashlytics' });
+  const crash = await ownerEngine.semantic_index({ source: 'crashlytics' });
   assert.match(crash.relationships.find((r) => r.entity === 'ad_funnel').use, /^owned here — other models point at it/);
-  const events = await ownerEngine.semantic_index({ model: 'events' });
+  const events = await ownerEngine.semantic_index({ source: 'events' });
   const rel = events.relationships.find((r) => r.entity === 'ad_funnel');
   assert.equal(rel.use, 'metric query + pipeline');
   assert.equal(rel.joins, 'crashlytics');
 });
 
-// ═══════════ D. MEMORY TARGETS ═══════════
+// ═══════════ D. WHAT A MEMORY NOTE IS ABOUT ═══════════
 
-test('21. a finding recorded on { source: events, name: ad_finished } surfaces on that event', opts, async (t) => {
+test('21. a finding recorded about { source: events, event: ad_finished } surfaces on that event', opts, async (t) => {
   if (skip(t)) return;
-  const saved = (await engine.memory({ action: 'record', notes: [{ note: 'ad_finished carries revenue; ad_started never does', targets: [{ source: 'events', name: 'ad_finished' }] }] })).notes[0];
-  assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event']);
+  const saved = (await engine.memory({ action: 'record', notes: [{ note: 'ad_finished carries revenue; ad_started never does', about: [{ source: 'events', event: 'ad_finished' }] }] })).notes[0];
+  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }]);
   const v = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((v.memory || []).some((m) => /ad_finished carries revenue/.test(m.note)), JSON.stringify(v.memory));
 });
 
 test('22. a finding on a qualified crash property surfaces on that property', opts, async (t) => {
   if (skip(t)) return;
-  await engine.memory({ action: 'record', notes: [{ note: 'ANR seconds are only on anr reports', targets: [{ source: 'crashlytics', name: 'anr_duration_of_event_data' }] }] });
+  await engine.memory({ action: 'record', notes: [{ note: 'ANR seconds are only on anr reports', about: [{ source: 'crashlytics', property: 'anr_duration_of_event_data' }] }] });
   const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
   assert.ok((v.memory || []).some((m) => /ANR seconds/.test(m.note)), JSON.stringify(v.memory));
 });
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', notes: [{ note: 'x', targets: ['app_version'] }] }), /must be exactly one of: \{ source: "events", name\? \}.*\{ term \}/);
+  await assert.rejects(() => engine.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}.*\{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════
@@ -405,7 +405,7 @@ test('29. …and clicks still sums as an amount: 64', opts, async (t) => {
 
 test('30. the model view lists clicks both as an attribute and as an amount', opts, async (t) => {
   if (skip(t)) return;
-  const v = await bothEngine.semantic_index({ model: 'acquisition' });
+  const v = await bothEngine.semantic_index({ source: 'acquisition' });
   assert.ok(v.dimensions.some((d) => d.name === 'clicks'));
   assert.ok(v.aggregatable.some((a) => a.field === 'clicks'));
   assert.equal(v.dimensions.find((d) => d.name === 'clicks').distinct_count, null, 'not profiled by THIS engine\'s index (separate store) — the attribute exists regardless');
@@ -464,7 +464,7 @@ test('37. …a pipeline reads the key like any column: sessions 1..4 hold 150 / 
 test('38. search finds bundle_id on the events source, and the attribute groups 131 / 53', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.semantic_index({ search: 'bundle_id' });
-  assert.ok(s.dimension_matches.some((d) => d.source === 'events' && d.column === 'bundle_id'), JSON.stringify(s.dimension_matches));
+  assert.ok(s.dimension_matches.some((d) => d.source === 'events' && d.property === 'bundle_id'), JSON.stringify(s.dimension_matches));
   const r = await q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'bundle_id' }] });
   assert.deepEqual(mapCol(r.rows, groupCol(r, 'aev_evts'), 'aev_evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 });
 });
@@ -472,7 +472,7 @@ test('38. search finds bundle_id on the events source, and the attribute groups 
 test('39. device_model is found on users AND on crashlytics; the crash copy counts 7 / 4 / 2', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.semantic_index({ search: 'device_model' });
-  assert.deepEqual([...new Set(s.dimension_matches.filter((d) => d.column === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users']);
+  assert.deepEqual([...new Set(s.dimension_matches.filter((d) => d.property === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users']);
   const r = await q(evCrashCtx, { metrics: ['aboth_reports'], group_by: [{ model: 'crashlytics', attribute: 'device_model' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.deepEqual(mapCol(r.rows, groupCol(r, 'aboth_reports'), 'aboth_reports'), { iphone: 7, pixel: 4, galaxy: 2 });

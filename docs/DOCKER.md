@@ -129,9 +129,10 @@ step, an eventstream with its steps), for a failed task the code of each generat
 names — as written and as dbt ran it, which is where a warehouse error's `[line:column]` points — and
 the runtime: server version and surface, dbt, dialect.
 
-`explore_errors()` gives the newest 20 and a summary by source, tool and stage. `since` / `until`,
-`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `text` narrow them, and `{ id }`
-gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
+`explore_errors()` gives the newest 20 and a summary by source, tool and stage. `time_range`
+(`{ start, end, timezone }`, read as every other window: a date-only end is the whole day),
+`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `search` narrow them, `detail: "full"`
+gives each of the page in full, and `{ id }` — alone — gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
 newest `MCP_ERROR_MAX_ROWS` (default **10000**). It is not cleared by `MCP_DB_RESET`, because a server
 that fails on every start is exactly what it is for.
 

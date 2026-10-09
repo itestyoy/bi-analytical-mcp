@@ -61,11 +61,52 @@ test('experiment analyze, mean from sums: the same test as from the mean and std
 test('experiment analyze, ratio: delta-method path over per-user sums', () => {
   const r = engine._analyzeExperiment({
     metric: 'ratio',
-    control: { label: 'control', n: 5, sumNum: 15, sumDen: 5, sumNum2: 55, sumDen2: 5, sumNumDen: 15 },
-    variants: [{ label: 'B', n: 5, sumNum: 20, sumDen: 5, sumNum2: 90, sumDen2: 5, sumNumDen: 20 }],
+    control: { label: 'control', n: 5, numerator: { sum: 15, sum_squares: 55 }, denominator: { sum: 5, sum_squares: 5 }, sum_products: 15 },
+    variants: [{ label: 'B', n: 5, numerator: { sum: 20, sum_squares: 90 }, denominator: { sum: 5, sum_squares: 5 }, sum_products: 20 }],
   });
   assert.equal(r.ok, true);
   assert.ok(Math.abs(r.results[0].control_ratio - 3) < 1e-9 && Math.abs(r.results[0].variant_ratio - 4) < 1e-9);
+});
+
+test('experiment analyze, ratio: the numerator, the denominator and their products reach the delta method as given', () => {
+  // per-user (num, den): control (1,1) (2,2) (6,2) — ratio 9/5; B (2,1) (2,1) (2,2) — ratio 6/4
+  const sums = (pairs) => ({
+    n: pairs.length,
+    numerator: { sum: pairs.reduce((a, [x]) => a + x, 0), sum_squares: pairs.reduce((a, [x]) => a + x * x, 0) },
+    denominator: { sum: pairs.reduce((a, [, y]) => a + y, 0), sum_squares: pairs.reduce((a, [, y]) => a + y * y, 0) },
+    sum_products: pairs.reduce((a, [x, y]) => a + x * y, 0),
+  });
+  const r = engine._analyzeExperiment({ metric: 'ratio', control: sums([[1, 1], [2, 2], [6, 2]]), variants: [{ label: 'B', ...sums([[2, 1], [2, 1], [2, 2]]) }] });
+  const v = r.results[0];
+  assert.ok(Math.abs(v.control_ratio - 9 / 5) < 1e-12 && Math.abs(v.variant_ratio - 6 / 4) < 1e-12);
+  // the delta-method variance of one group's ratio: (varY − 2R·cov + R²·varX) / (mX²·n), population moments
+  const varR = (pairs) => {
+    const n = pairs.length; const mY = pairs.reduce((a, [x]) => a + x, 0) / n; const mX = pairs.reduce((a, [, y]) => a + y, 0) / n;
+    const varY = pairs.reduce((a, [x]) => a + x * x, 0) / n - mY * mY; const varX = pairs.reduce((a, [, y]) => a + y * y, 0) / n - mX * mX;
+    const cov = pairs.reduce((a, [x, y]) => a + x * y, 0) / n - mY * mX; const R = mY / mX;
+    return (varY - 2 * R * cov + R * R * varX) / (mX * mX * n);
+  };
+  const z = (6 / 4 - 9 / 5) / Math.sqrt(varR([[1, 1], [2, 2], [6, 2]]) + varR([[2, 1], [2, 1], [2, 2]]));
+  assert.ok(Math.abs(v.z - z) < 1e-9, `z ${v.z} vs ${z}`);
+});
+
+test('experiment analyze, cuped: the in-experiment sums, the covariate and their products reach the adjustment as given', () => {
+  // per-user (y, x): control (3,1) (5,2) (7,3) (9,5); B (6,1) (7,2) (11,3) (12,5) — y tracks x, so θ > 0 removes variance
+  const sums = (pairs) => ({
+    n: pairs.length,
+    sum: pairs.reduce((a, [y]) => a + y, 0), sum_squares: pairs.reduce((a, [y]) => a + y * y, 0),
+    covariate: { sum: pairs.reduce((a, [, x]) => a + x, 0), sum_squares: pairs.reduce((a, [, x]) => a + x * x, 0) },
+    sum_products: pairs.reduce((a, [y, x]) => a + y * x, 0),
+  });
+  const control = [[3, 1], [5, 2], [7, 3], [9, 5]]; const b = [[6, 1], [7, 2], [11, 3], [12, 5]];
+  const r = engine._analyzeExperiment({ metric: 'cuped', control: { label: 'control', ...sums(control) }, variants: [{ label: 'B', ...sums(b) }] });
+  assert.equal(r.ok, true);
+  // θ pooled over both groups = cov(Y, X) / var(X), from the per-user values themselves
+  const all = [...control, ...b]; const n = all.length;
+  const mY = all.reduce((a, [y]) => a + y, 0) / n; const mX = all.reduce((a, [, x]) => a + x, 0) / n;
+  const theta = all.reduce((a, [y, x]) => a + (y - mY) * (x - mX), 0) / all.reduce((a, [, x]) => a + (x - mX) ** 2, 0);
+  assert.ok(Math.abs(r.theta - theta) < 1e-9, `theta ${r.theta} vs ${theta}`);
+  assert.ok(r.results[0].variance_reduction > 0, 'a covariate that tracks the metric removes variance');
 });
 
 test('experiment analyze, correction: adjusted p-values across the variant family', () => {
@@ -92,13 +133,19 @@ test('experiment analyze contract: mean requires both mean and stddev', () => {
   assert.throws(() => engine._analyzeExperiment({ metric: 'mean', control: { n: 100, mean: 1 }, variants: [{ n: 100, mean: 2 }] }), /invalid input/);
 });
 
-test('experiment analyze contract: ratio requires all five per-user sums and a positive denominator', () => {
-  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
-  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 0, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }, variants: [{ n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }] }), /invalid input/);
+test('experiment analyze contract: ratio requires the numerator, the denominator (positive) and their products', () => {
+  const ok = { n: 5, numerator: { sum: 1, sum_squares: 1 }, denominator: { sum: 1, sum_squares: 1 }, sum_products: 1 };
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, numerator: { sum: 1, sum_squares: 1 }, denominator: { sum: 1, sum_squares: 1 } }, variants: [ok] }), /invalid input/);
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { ...ok, denominator: { sum: 0, sum_squares: 1 } }, variants: [ok] }), /invalid input/);
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { ...ok, numerator: { sum: 1 } }, variants: [ok] }), /invalid input/);
+  // the earlier camelCase sums are no spelling of this tool
+  assert.throws(() => engine._analyzeExperiment({ metric: 'ratio', control: { n: 5, sumNum: 1, sumDen: 1, sumNum2: 1, sumDen2: 1, sumNumDen: 1 }, variants: [ok] }), /invalid input/);
 });
 
 test('experiment analyze contract: a cuped arm cannot carry conversions; unknown metric is rejected', () => {
-  assert.throws(() => engine._analyzeExperiment({ metric: 'cuped', control: { n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1, conversions: 3 }, variants: [{ n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1 }] }), /invalid input/);
+  const ok = { n: 5, sum: 1, sum_squares: 1, covariate: { sum: 1, sum_squares: 1 }, sum_products: 1 };
+  assert.throws(() => engine._analyzeExperiment({ metric: 'cuped', control: { ...ok, conversions: 3 }, variants: [ok] }), /invalid input/);
+  assert.throws(() => engine._analyzeExperiment({ metric: 'cuped', control: { n: 5, sumY: 1, sumY2: 1, sumX: 1, sumX2: 1, sumXY: 1 }, variants: [ok] }), /invalid input/);
   assert.throws(() => engine._analyzeExperiment({ metric: 'bogus', control: { n: 5, conversions: 1 }, variants: [{ n: 5, conversions: 1 }] }), /invalid input/);
 });
 

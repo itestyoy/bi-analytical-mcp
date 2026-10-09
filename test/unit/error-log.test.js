@@ -31,10 +31,13 @@ test('a refused call is kept with its arguments, and explore_errors reads it bac
   // one in full: the call's arguments as they were given
   const one = payload(await runTool(engine, 'explore_errors', { request: { id: page.errors[1].id } }));
   assert.deepEqual(one.error.args, { request: bad }, 'as the call gave them — replaying them repeats it');
-  // narrowed by tool, by text, by time
+  // narrowed by tool, by a search, by a time window
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'no_such_tool' } })).total, 1);
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { text: 'CTX_NOPE' } })).total, 1);
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { until: '2000-01-01' } })).total, 0);
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { search: 'CTX_NOPE' } })).total, 1);
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { time_range: { end: '2000-01-01' } } })).total, 0);
+  // a summary page names each by its message; detail: "full" carries the arguments too
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model' } })).errors[0].args, undefined);
+  assert.deepEqual(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', detail: 'full' } })).errors[0].args, { request: bad });
   // paged
   const first = payload(await runTool(engine, 'explore_errors', { request: { limit: 1 } }));
   assert.equal(first.next_offset, 1);
@@ -45,10 +48,29 @@ test('a refused call is kept with its arguments, and explore_errors reads it bac
 
 test('bad input to explore_errors is refused, and that refusal is kept too', async () => {
   const engine = makeEngine({ recipes: false });
-  assert.equal((await runTool(engine, 'explore_errors', { request: { since: 'yesterday' } })).result.isError, true);
+  assert.equal((await runTool(engine, 'explore_errors', { request: { time_range: { start: 'yesterday' } } })).result.isError, true);
   assert.equal((await runTool(engine, 'explore_errors', { request: { id: 999 } })).result.isError, true);
   assert.equal((await runTool(engine, 'explore_errors', { request: { source: 'nope' } })).result.isError, true);
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 3);
+  // { id } reads one error: a filter beside it would be read by nothing, so it is refused, not ignored
+  assert.equal((await runTool(engine, 'explore_errors', { request: { id: 1, limit: 3 } })).result.isError, true);
+  // the earlier spellings are no fields of this tool
+  for (const request of [{ since: '2026-01-01' }, { text: 'x' }, { detail: true }]) assert.equal((await runTool(engine, 'explore_errors', { request })).result.isError, true, JSON.stringify(request));
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 7);
+});
+
+test('explore_errors reads a time window as every time_range is read: a date-only end is its whole day, a timezone shifts both bounds', () => {
+  const store = openStore({});
+  const log = new ErrorLog({ store, retentionDays: 0, maxRows: 0 });
+  const at = (iso) => store.errors.add({ at: Date.parse(iso), source: 'tool', tool: 't', message: iso });
+  for (const iso of ['2026-03-01T23:30:00Z', '2026-03-02T00:30:00Z', '2026-03-02T23:59:59Z', '2026-03-03T00:00:00Z']) at(iso);
+  const shown = (time_range) => log.explore({ time_range }).errors.map((e) => e.message).sort();
+  // UTC: the whole of 2 March, both ends inclusive
+  assert.deepEqual(shown({ start: '2026-03-02', end: '2026-03-02' }), ['2026-03-02T00:30:00Z', '2026-03-02T23:59:59Z']);
+  // Berlin (UTC+1 in March): 2 March there is 1 March 23:00 – 2 March 23:00 UTC
+  assert.deepEqual(shown({ start: '2026-03-02', end: '2026-03-02', timezone: 'Europe/Berlin' }), ['2026-03-01T23:30:00Z', '2026-03-02T00:30:00Z']);
+  // an instant with an offset of its own is that instant
+  assert.deepEqual(shown({ start: '2026-03-02T23:59:59Z' }), ['2026-03-02T23:59:59Z', '2026-03-03T00:00:00Z']);
+  assert.throws(() => log.explore({ time_range: { start: '2026-03-02', timezone: 'Mars/Olympus' } }), /unknown timezone/);
 });
 
 test('what a start could not serve is the first thing in the log, and the log outlives a restart', () => {
@@ -72,7 +94,7 @@ test('the log is bounded by age and by count', () => {
     assert.deepEqual(log.list({}).rows.map((r) => r.message), ['m4', 'm3', 'm2'], store.kind);
     store.errors.add({ at: Date.now() - 40 * 86400000, source: 'tool', message: 'old' });
     new ErrorLog({ store, retentionDays: 30, maxRows: 0 });
-    assert.equal(log.list({ text: 'old' }).total, 0, store.kind);
+    assert.equal(log.list({ search: 'old' }).total, 0, store.kind);
   }
 });
 
@@ -83,7 +105,7 @@ test('a task that ends in an error is kept once, with its input — its reads ar
   await engine._awaitTasks([id, thrown], 5);
   const tasks = engine.explore_errors({ source: 'task' });
   assert.deepEqual(tasks.errors.map((e) => e.task_id).sort(), [id, thrown].sort());
-  assert.deepEqual(engine.explore_errors({ task_id: id, detail: true }).errors[0].args, { transform: { limit: 1 } });
+  assert.deepEqual(engine.explore_errors({ task_id: id, detail: 'full' }).errors[0].args, { transform: { limit: 1 } });
   await runTool(engine, 'query_pipeline_model', { request: { task_ids: [id] } });
   assert.equal(engine.explore_errors({}).total, 2);
 });

@@ -50,7 +50,7 @@ function fieldCond(catalog, modelKey, cond) {
     const found = factProp(catalog, modelKey, cond.field, 'where.field');
     lhs = propExpr(catalog, modelKey, found.name);
   } else if (columns.has(cond.field)) lhs = cond.field;
-  else fail(`where: '${cond.field}' is not a column or scalar property of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists them`, 'where.field');
+  else fail(`where: '${cond.field}' is not a column or scalar property of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists them`, 'where.field');
   try { return comparison(lhs, cond.op, value); } catch (e) { return fail(e.message, 'where.op'); }
 }
 
@@ -113,7 +113,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // the tool cannot offer a field this then rejects.
     const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
-      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
+      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }
     valueExpr = field;
   }
@@ -156,7 +156,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     const found = factProp(catalog, modelKey, decl.field, 'dimensions.field');
     return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name };
   }
-  fail(`dimension '${decl.field}' is not a groupable column or scalar property of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists them`, 'dimensions.field');
+  fail(`dimension '${decl.field}' is not a groupable column or scalar property of '${modelKey}'. semantic_index({ request: { source: '${modelKey}' } }) lists them`, 'dimensions.field');
 }
 
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure. */

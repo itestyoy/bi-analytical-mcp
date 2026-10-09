@@ -37,6 +37,7 @@ import { Engine } from '../../src/engine.js';
 import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, readTable, one, stepEffect } from '../helpers/settle.js';
+import { armFrom } from '../helpers/experiment-arm.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -122,7 +123,7 @@ test('1c. semantic_index({ source, property }) pages + orders the indexed values
   const p2 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1, offset: 1 });
   assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
   // order_by value asc → alphabetical
-  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'value' });
+  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: [{ key: 'value' }] });
   assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   assert.ok(Array.isArray(out.recommendations) && out.recommendations.length > 0 && out.recommendations.every((r) => typeof r === 'string' && r.length), 'actionable recommendations');
 });
@@ -361,7 +362,7 @@ test('5a. build_pipeline_model fed the conversion recipe stages → per-variant 
 test('5b. experiment({analyze}) on the per-variant aggregates: significant drop (1.0 → 1/6)', opts, async (t) => {
   if (skip(t)) return;
   const { abMap: map, abByGroup: byGroup } = S;
-  const arm = (row) => ({ label: String(row[map.group_field]), n: num(row[map.n_field]), conversions: num(row[map.conversions_field]) });
+  const arm = (row) => armFrom(map, row);
   const res = engine.experiment({ action: 'analyze', metric: map.metric, control: arm(byGroup.control), variants: [arm(byGroup.variant_b)] });
   assert.equal(res.ok, true);
   const v = res.results[0];
@@ -375,7 +376,7 @@ test('5b. experiment({analyze}) on the per-variant aggregates: significant drop 
 test('5c. experiment({check_split}) on the warehouse-computed split: clean 6 vs 6 passes', opts, async (t) => {
   if (skip(t)) return;
   const { abMap: map, abByGroup: byGroup } = S;
-  const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: num(row[map.n_field]) }));
+  const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: num(row[map.arm.n]) }));
   const res = engine.experiment({ action: 'check_split', groups });
   assert.equal(res.ok, true);
   close(res.chi_square, 0);          // 6 vs 6 against an even split

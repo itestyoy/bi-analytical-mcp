@@ -21,7 +21,7 @@ import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
-import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
+import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, timeRange } from '../schema-kit.js';
 import { OPS } from '../conditions.js';
 import { CTX } from '../schema/fields.js';
 
@@ -63,15 +63,7 @@ export const CONDITION_DEF = 'retentioneering_condition';
 
 const TASK_ID = { type: 'string', pattern: TASK_ID_PATTERN, description: 'A task this tool started (its task_id).' };
 
-const timeRange = {
-  type: 'object', additionalProperties: false,
-  description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.',
-  properties: {
-    start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' },
-    end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
-    timezone: { ...TIMEZONE, description: 'Optional IANA timezone: start/end are wall-clock there. Omit for UTC.' },
-  },
-};
+const eventstreamWindow = timeRange('The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.');
 
 /** The events sources a path analysis can run over: those that name who each event belongs to. */
 export function pathSources(catalog) {
@@ -218,7 +210,7 @@ export function buildSchema(catalog) {
       },
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },
       description: { type: 'string', description: 'What this eventstream is for, in your words — kept with the context.' },
-      time_range: timeRange,
+      time_range: eventstreamWindow,
       path: {
         type: 'array', minItems: 1, maxItems: 4, items: parameter,
         description: `What one path is, when it is not the user (${[...new Set(sources.map((src) => userKeyColumn(catalog, src)))].join(', ')}): a column or scalar event property of the source — one path per value (a bidfloor id: one path per search cycle; a tracking id; a level) — or several, a composite key (the user column and a bidfloor id: one path per player per cycle). Events without every part are left out. Omit for one path per user.`,

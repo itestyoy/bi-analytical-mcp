@@ -78,6 +78,15 @@ export function localToUtc(value, tz) {
   return fmtUtc(guess);
 }
 
+/**
+ * A moment as epoch milliseconds — one with an offset of its own at that instant, a wall-clock one read
+ * as UTC (what resolveTimeRange's bounds are). Null when it is no moment.
+ */
+export function momentMs(value) {
+  const p = parseMoment(value);
+  return p ? p.ms - (p.offset ?? 0) * 60000 : null;
+}
+
 /** Whether a moment carries its own offset (Z, ±hh:mm): an instant, not a wall-clock reading. */
 const hasOffset = (v) => parseMoment(v)?.offset != null;
 

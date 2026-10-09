@@ -89,7 +89,7 @@ test('concurrent calls share ONE introspection instead of spawning a dbt process
   const results = await Promise.all([
     e.build_pipeline_model({ action: 'start', name: 'concurrent_a', source: 'events' }),
     e.build_pipeline_model({ action: 'start', name: 'concurrent_b', source: 'events' }),
-    e.semantic_index({ model: 'events' }),
+    e.semantic_index({ source: 'events' }),
   ]);
   assert.equal(runner.state.calls, 1, 'one in-flight read serves every caller waiting on it');
   assert.ok(results.every((r) => r), 'and each of them got an answer');
@@ -100,7 +100,7 @@ test('a hanging freshness query does not hold semantic_index either', async () =
   const runner = hangingRunner();
   const e = engineWith(runner);
   const t0 = Date.now();
-  const r = await e.semantic_index({ model: 'events' });
+  const r = await e.semantic_index({ source: 'events' });
   assert.ok(Date.now() - t0 < GRACE * 5, 'the overview hands back at the grace');
   assert.equal(r.data_freshness, undefined, 'freshness that did not arrive is simply absent');
   assert.ok(r.columns.length > 0, 'and the columns are still there');

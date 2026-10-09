@@ -132,7 +132,8 @@ test('semantic_index accepts one view at a time and refuses a name without its s
 
   for (const ok of [
     {},
-    { model: 'events' },
+    { source: 'events' },
+    { source: 'users' },
     { source: 'events', event: 'first_launch' },
     { source: 'events', property: 'level_id_of_event_data', limit: 5 },
     { search: 'retention' },
@@ -149,9 +150,9 @@ test('semantic_index accepts one view at a time and refuses a name without its s
 
   for (const bad of [
     { property: 'level_id_of_event_data' },            // same, for a column
-    { source: 'events' },                              // a source alone is not a view
-    { model: 'events', limit: 5 },                     // limit does not apply to { model }
-    { model: 'events', search: 'x' },                  // two views at once
+    { model: 'events' },                               // the model view is { source }
+    { source: 'events', fuzzy: true },                 // fuzzy does not apply to { source }
+    { source: 'events', search: 'x' },                 // two views at once
     { source: 'events', event: 'no_such_event' },      // a name that source does not declare
     { source: 'users', event: 'first_launch' },        // an events name on a non-events source
   ]) assert.equal(check(bad).ok, false, `should refuse ${JSON.stringify(bad)}`);

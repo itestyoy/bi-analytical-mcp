@@ -3,6 +3,8 @@
 // `mixin` puts them on the Engine's prototype, as the class's own methods are — so `this` is the engine
 // in every one of them, and a method is reached as `engine.<name>` wherever it is written.
 
+import { aboutOf } from '../memory.js';
+
 /** Define each method (and getter) of `parts` on `Class.prototype`, non-enumerable like a class's own. A name defined twice is a mistake. */
 export function mixin(Class, ...parts) {
   for (const part of parts) {
@@ -13,14 +15,14 @@ export function mixin(Class, ...parts) {
   }
 }
 
-/** Presentation shape for a stored memory note: its note, targets, aliases and links, and its time. */
+/** Presentation shape for a stored memory note: its note, what it is about (as memory records it and semantic_index filters by it), aliases and links, and its time. */
 export function memoryView(e) {
-  const targets = [...(e.targets || [])];
+  const about = (e.targets || []).map(aboutOf);
   return {
     id: e.id,
     note: e.note,
     ...(e.question ? { question: e.question } : {}),
-    ...(targets.length ? { about: targets } : {}),
+    ...(about.length ? { about } : {}),
     ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
     ...(e.links && e.links.length ? { links: e.links } : {}),
     recorded_at: e.created_at ? new Date(e.created_at).toISOString() : null,

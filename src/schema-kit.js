@@ -76,6 +76,22 @@ export const ISO_TIME = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}([T ]\\
 /** An IANA timezone name, spelled as the zone database spells it ("UTC", "Europe/Berlin", "America/Argentina/Buenos_Aires"). */
 export const TIMEZONE = { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$' };
 
+/**
+ * A TIME WINDOW — { start?, end?, timezone? }, the one shape and wording every `time_range` takes
+ * (src/time-range.js resolveTimeRange reads it). Only which axis it bounds differs from one place to
+ * another, and that is the window's own `description`.
+ */
+export function timeRange(description) {
+  return {
+    type: 'object', additionalProperties: false, description,
+    properties: {
+      start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' },
+      end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
+      timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start and end are read as wall-clock time there and converted to UTC instants. Omit to read them as UTC.' },
+    },
+  };
+}
+
 /** A constant a condition or an expression takes: a scalar — or, for in / not_in / between, a list of them. */
 export const SCALAR = { anyOf: [{ type: 'string', title: 'a string' }, { type: 'number', title: 'a number' }, { type: 'boolean', title: 'a boolean' }, { type: 'null', title: 'null' }] };
 export const CONSTANT = { anyOf: [...SCALAR.anyOf, { type: 'array', items: SCALAR, title: 'a list of constants' }] };

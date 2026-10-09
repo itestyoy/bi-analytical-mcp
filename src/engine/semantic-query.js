@@ -109,7 +109,7 @@ export const semanticQueryMethods = {
     }
     if (candidates.size === 1) return `${[...candidates][0]}__${attribute}`;
     if (candidates.size > 1) throw new ToolError(`${where}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field: 'via' });
-    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it (semantic_models: [{ from: '${model}' }]) and check semantic_index({ request: { model: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
+    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it (semantic_models: [{ from: '${model}' }]) and check semantic_index({ request: { source: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
   },
 
   /** The dimension a task declared on `model` for `attribute` — the one a reference resolves to first. */

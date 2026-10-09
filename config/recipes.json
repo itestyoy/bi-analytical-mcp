@@ -1311,8 +1311,10 @@
         "action": "analyze",
         "metric": "proportion",
         "group_field": "variant_group",
-        "n_field": "n",
-        "conversions_field": "conversions"
+        "arm": {
+          "n": "n",
+          "conversions": "conversions"
+        }
       },
       "notes": "The pipeline-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
       "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ request: { action: 'analyze' } }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
@@ -1637,9 +1639,11 @@
         "action": "analyze",
         "metric": "mean",
         "group_field": "variant_group",
-        "n_field": "n",
-        "mean_field": "rev_mean",
-        "stddev_field": "rev_sd"
+        "arm": {
+          "n": "n",
+          "mean": "rev_mean",
+          "stddev": "rev_sd"
+        }
       },
       "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + average + stddev and call experiment({ request: { action: 'analyze', metric: mean } }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
       "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest."
@@ -1899,15 +1903,19 @@
         "action": "analyze",
         "metric": "cuped",
         "group_field": "variant_group",
-        "n_field": "n",
-        "sumY_field": "sum_y",
-        "sumY2_field": "sum_y2",
-        "sumX_field": "sum_x",
-        "sumX2_field": "sum_x2",
-        "sumXY_field": "sum_xy"
+        "arm": {
+          "n": "n",
+          "sum": "sum_y",
+          "sum_squares": "sum_y2",
+          "covariate": {
+            "sum": "sum_x",
+            "sum_squares": "sum_x2"
+          },
+          "sum_products": "sum_xy"
+        }
       },
-      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ request: { action: 'analyze', metric: cuped } }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
-      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit n, the sums of Y (sum, sum_squares), the sums of X (covariate: { sum, sum_squares }) and sum_products (Σ X·Y), and call experiment({ request: { action: 'analyze', metric: 'cuped' } }) with each group as `arm` says. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass each group's n, sum and sum_squares of the in-experiment value, covariate { sum, sum_squares } and sum_products — `arm` names the column that holds each; the tool computes the pooled theta and runs Welch on the adjusted means."
     },
     {
       "id": "experiment_ratio",
@@ -1930,15 +1938,21 @@
         "action": "analyze",
         "metric": "ratio",
         "group_field": "variant_group",
-        "n_field": "n",
-        "sumNum_field": "sum_num",
-        "sumDen_field": "sum_den",
-        "sumNum2_field": "sum_num2",
-        "sumDen2_field": "sum_den2",
-        "sumNumDen_field": "sum_numden"
+        "arm": {
+          "n": "n",
+          "numerator": {
+            "sum": "sum_num",
+            "sum_squares": "sum_num2"
+          },
+          "denominator": {
+            "sum": "sum_den",
+            "sum_squares": "sum_den2"
+          },
+          "sum_products": "sum_numden"
+        }
       },
-      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ request: { action: 'analyze', metric: ratio } }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
-      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ request: { action: 'analyze', metric: ratio } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users), the sums of the per-user numerator and denominator with their squares, and the sum of their products. Then call experiment({ request: { action: 'analyze', metric: 'ratio' } }) with each group { n, numerator: { sum, sum_squares }, denominator: { sum, sum_squares }, sum_products } — `arm` names the column that holds each: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and product (num·den) and sum per variant — numerator { sum, sum_squares }, denominator { sum, sum_squares }, sum_products. experiment({ request: { action: 'analyze', metric: 'ratio' } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
       "pipeline_payload": {
         "action": "start",
         "name": "ab_level_completion_ratio",
@@ -2166,7 +2180,9 @@
       "experiment": {
         "action": "check_split",
         "group_field": "variant_group",
-        "n_field": "n"
+        "arm": {
+          "n": "n"
+        }
       },
       "notes": "The pipeline-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
       "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ request: { action: 'check_split' } }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",

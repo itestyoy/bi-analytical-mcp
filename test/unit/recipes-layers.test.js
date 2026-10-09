@@ -109,3 +109,56 @@ test('a deployment recipe in the earlier { name, pipeline } shape is served as t
   const mine = deploymentFile([{ id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages } } }]);
   assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
 });
+
+// The same for an experiment block written for an earlier version: its columns are named by flat
+// `<field>_field` keys (the experiment tool's earlier field names), which the tool now refuses. It is
+// served with `arm` — the group as the tool takes it — and a row read through it is a group the
+// experiment tool accepts.
+test('a deployment recipe with the earlier flat experiment block is served with `arm`, and its rows are groups the tool accepts', async () => {
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { ContextManager } = await import('../../src/context-manager.js');
+  const { Engine } = await import('../../src/engine.js');
+  const { settle } = await import('../helpers/settle.js');
+  const { armFrom } = await import('../helpers/experiment-arm.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../../config/catalog.yml', import.meta.url)), { dialect: 'duckdb' });
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-ab-')) }) }));
+
+  const old = {
+    proportion: { action: 'analyze', metric: 'proportion', group_field: 'g', n_field: 'n', conversions_field: 'conv' },
+    mean: { action: 'analyze', metric: 'mean', group_field: 'g', n_field: 'n', mean_field: 'm', stddev_field: 'sd' },
+    cuped: { action: 'analyze', metric: 'cuped', group_field: 'g', n_field: 'n', sumY_field: 'sy', sumY2_field: 'sy2', sumX_field: 'sx', sumX2_field: 'sx2', sumXY_field: 'sxy' },
+    ratio: { action: 'analyze', metric: 'ratio', group_field: 'g', n_field: 'n', sumNum_field: 'sn', sumDen_field: 'sd', sumNum2_field: 'sn2', sumDen2_field: 'sd2', sumNumDen_field: 'snd' },
+    split: { action: 'check_split', group_field: 'g', n_field: 'n', expected_ratio: [1, 1] },
+  };
+  const mine = deploymentFile(Object.entries(old).map(([k, experiment]) => ({ id: `old_${k}`, task_type: 'experiment', title: k, when_to_use: '', hack: '', experiment })));
+  const served = (k) => loadRecipes(SYSTEM, mine).get(`old_${k}`).experiment;
+
+  assert.deepEqual(served('proportion'), { action: 'analyze', metric: 'proportion', group_field: 'g', arm: { n: 'n', conversions: 'conv' } });
+  assert.deepEqual(served('mean'), { action: 'analyze', metric: 'mean', group_field: 'g', arm: { n: 'n', mean: 'm', stddev: 'sd' } });
+  assert.deepEqual(served('cuped'), { action: 'analyze', metric: 'cuped', group_field: 'g', arm: { n: 'n', sum: 'sy', sum_squares: 'sy2', covariate: { sum: 'sx', sum_squares: 'sx2' }, sum_products: 'sxy' } });
+  assert.deepEqual(served('ratio'), { action: 'analyze', metric: 'ratio', group_field: 'g', arm: { n: 'n', numerator: { sum: 'sn', sum_squares: 'sn2' }, denominator: { sum: 'sd', sum_squares: 'sd2' }, sum_products: 'snd' } });
+  assert.deepEqual(served('split'), { action: 'check_split', group_field: 'g', expected_ratio: [1, 1], arm: { n: 'n' } });
+
+  // rows as a per-group pipeline gives them: control first, then the variant
+  const rows = {
+    proportion: [{ g: 'control', n: 1000, conv: 200 }, { g: 'B', n: 1000, conv: 250 }],
+    mean: [{ g: 'control', n: 500, m: 10, sd: 2 }, { g: 'B', n: 500, m: 12, sd: 2 }],
+    cuped: [{ g: 'control', n: 4, sy: 10, sy2: 30, sx: 8, sx2: 20, sxy: 24 }, { g: 'B', n: 4, sy: 14, sy2: 54, sx: 8, sx2: 20, sxy: 32 }],
+    ratio: [{ g: 'control', n: 4, sn: 6, sn2: 12, sd: 12, sd2: 40, snd: 21 }, { g: 'B', n: 4, sn: 8, sn2: 20, sd: 12, sd2: 40, snd: 28 }],
+  };
+  for (const [k, [control, ...variants]] of Object.entries(rows)) {
+    const map = served(k);
+    const r = engine.experiment({ action: map.action, metric: map.metric, control: armFrom(map, control), variants: variants.map((row) => armFrom(map, row)) });
+    assert.equal(r.ok, true, k);
+    assert.equal(r.results.length, 1, k);
+    assert.equal(r.results[0].variant, 'B', k);
+  }
+  const split = served('split');
+  const srm = engine.experiment({ action: split.action, groups: [{ g: 'control', n: 1000 }, { g: 'B', n: 1010 }].map((row) => armFrom(split, row)), expected_ratio: split.expected_ratio });
+  assert.equal(srm.srm_detected, false);
+
+  // a block already in the current shape is served as written
+  const current = { action: 'analyze', metric: 'proportion', group_field: 'g', arm: { n: 'n', conversions: 'conv' } };
+  const now = deploymentFile([{ id: 'now', task_type: 'experiment', title: 'now', when_to_use: '', hack: '', experiment: current }]);
+  assert.deepEqual(loadRecipes(SYSTEM, now).get('now').experiment, current);
+});

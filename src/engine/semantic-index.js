@@ -69,7 +69,7 @@ export const semanticIndexMethods = {
    * well it is indexed. The events fact carries ~150 event-scoped properties, so
    * dumping everything at once is wasteful. Call with NO arguments for a compact
    * OVERVIEW, then drill down:
-   *   { model }    → one model's entities/time/dimensions (with real values) + physical columns
+   *   { source }   → one model's entities/time/dimensions (with real values) + physical columns
    *   { source, event } → only the properties populated on that event (what you can use)
    *   { source, property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
@@ -126,20 +126,21 @@ export const semanticIndexMethods = {
     }
 
     // ── the catalog's views, one method each; none of them is the default ──
-    if (input.model) return this._indexModel(input);
     if (input.event) return this._indexEvent(input);
     if (input.property) return this._indexProperty(input);
     if (input.bundle !== undefined && input.bundle !== false) return this._indexBundle(input);
     if (input.search) return this._indexSearch(input);
-    if (input.notes) return this.notes.list({ limit: input.limit ?? 50, about: input.about });
+    if (input.notes) return this.notes.list({ limit: input.limit ?? 50, offset: input.offset ?? 0, about: input.about });
+    // a source named alone — no event, property or app beside it — is the model itself
+    if (input.source) return this._indexModel(input);
 
     return this._indexOverview(input);
   },
 
-  /** { model }: one model in depth — its entities, time and dimensions with real values, and the warehouse's own columns. */
+  /** { source }: one model in depth — its entities, time and dimensions with real values, and the warehouse's own columns. */
   async _indexModel(input) {
     const c = this.catalog;
-    const k = input.model;
+    const k = input.source;
     if (c.unavailableModels()[k]) {
       // Declared, but the warehouse cannot back it: say exactly why instead of describing a
       // model no tool will accept.
@@ -274,7 +275,7 @@ export const semanticIndexMethods = {
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'find where a known attribute value occurs' },
       ];
     // Saved findings about this model (memory tool) — surface them where they belong (compact).
-    this.notes.attach(out, [{ kind: 'model', source: k }], { source: k });
+    this.notes.attach(out, { kind: 'model', source: k });
     return out;
   },
 
@@ -329,7 +330,7 @@ export const semanticIndexMethods = {
       next_actions: nextActions,
       recommendations: recommendations.slice(0, 4),
     };
-    this.notes.attach(eventOut, [{ kind: 'event', source: fact, name: eventName }], { source: fact, name: eventName });
+    this.notes.attach(eventOut, { kind: 'event', source: fact, name: eventName });
     return eventOut;
   },
 
@@ -377,14 +378,14 @@ export const semanticIndexMethods = {
         ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (load the model with a semantic_models item { from: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
         : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
       const attrOut = {
-        property: col, source: mk, model: mk, column: col, type: dim.type,
+        property: col, source: mk, type: dim.type,
         description: dDescs[col],
         sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
         indexing: this.indexViews.history(mk, col, input.recent ?? 3),
         recommendations: recommendations.slice(0, 3),
       };
-      this.notes.attach(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
+      this.notes.attach(attrOut, { kind: 'property', source: mk, name: col });
       return attrOut;
     }
     const propFact = pSource; const propName = p;
@@ -411,7 +412,7 @@ export const semanticIndexMethods = {
       else recommendations.push(`Complex (${spec.type}) property — no examples indexed yet (the value index may not have run); its structure is in \`items\`/\`fields\` above.`);
     } else if (samples.length) {
       recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
-      if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ request: { source: '${propFact}', property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} } }), or re-order with order_by:'value'.`);
+      if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ request: { source: '${propFact}', property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} } }), or order them by the value itself with order_by: [{ key: 'value' }].`);
       recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): semantic_index({ request: { search: '<value>' } }).`);
     } else {
       recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
@@ -478,7 +479,7 @@ export const semanticIndexMethods = {
         if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { bundle: '<app>' } }) or include_coverage:true.`];
       }
     }
-    this.notes.attach(out, [{ kind: 'property', source: propFact, name: p }], { source: propFact, name: p });
+    this.notes.attach(out, { kind: 'property', source: propFact, name: p });
     return out;
   },
 
@@ -658,7 +659,7 @@ export const semanticIndexMethods = {
     ...(c.dialectFallback ? { dialect_note: `dbt connects with the '${c.dialectFallback.profile_type}' adapter, which this server writes no SQL for: pipelines are rendered as ${c.dialectFallback.rendering_as} SQL${c.dialectFallback.explicit ? ' (set explicitly)' : ''}. Supported natively: ${[...SUPPORTED_DIALECTS].join(', ')}.` } : {}),
     // Declared models the warehouse cannot back (a structural column or the table is missing):
     // excluded from every tool; the reason is here so the analyst can be told what to fix.
-    ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ request: { model } }) on one shows what is missing.' } : {}),
+    ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ request: { source } }) on one shows what is missing.' } : {}),
     ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
     // Each events source lists its OWN event names — they are never merged into one list,
     // because two sources may legitimately carry the same event name.
@@ -696,7 +697,7 @@ export const semanticIndexMethods = {
     // Machine-readable map of the drill-down views (key → when to use it), so the next call
     // can be chosen without parsing prose. Exactly one view key per call (mutually exclusive).
     views: [
-      { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
+      { view: 'source', arg: 'source (a model key)', when: "one model's columns/entities/time + dimension attributes with real sample values" },
       { view: 'event', arg: 'event name', when: 'the properties populated on that event (what you can measure/group/filter)' },
       { view: 'property', arg: 'source + property', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
       { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
@@ -710,14 +711,14 @@ export const semanticIndexMethods = {
     next_actions: [
       { call: 'semantic_index({ request: { guide: true } })', why: 'unsure how to approach the question — get the workflow + IF/DO routing first' },
       { call: `semantic_index({ request: { source: '${exFact}', event: '${exEvent || '<event_name>'}' } })`, why: "see an event's properties with real sample values + cardinality" },
-      { call: `semantic_index({ request: { model: '${userModel || 'users'}' } })`, why: 'list segmentation attributes (country/platform/…) with real values' },
+      { call: `semantic_index({ request: { source: '${userModel || 'users'}' } })`, why: 'list segmentation attributes (country/platform/…) with real values' },
       ...(bundleList.length ? [{ call: `semantic_index({ request: { source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' } })`, why: 'scope to one app in one source — which properties carry data vs are EMPTY for it' }] : []),
       { call: "semantic_index({ request: { search: '<word or value>' } })", why: 'find an event/property/attribute/value/recipe by name or value' },
     ],
     recommendations: [
       `New to this dataset or unsure how to approach the question? semantic_index({ request: { guide: true } }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
       `Start by inspecting an event's properties: semantic_index({ request: { source: '${exFact}', event: '${exEvent || '<event_name>'}' } }) — it lists each property with its real sample values + cardinality.`,
-      `Segmentation attributes live on the dimension models: semantic_index({ request: { model: '${userModel || 'users'}' } }) shows them with real values; drill one via semantic_index({ request: { source: '${userModel || 'users'}', property: '${exAttr || 'country'}' } }).`,
+      `Segmentation attributes live on the dimension models: semantic_index({ request: { source: '${userModel || 'users'}' } }) shows them with real values; drill one via semantic_index({ request: { source: '${userModel || 'users'}', property: '${exAttr || 'country'}' } }).`,
       ...(bundleList.length ? [`Working with ONE app? semantic_index({ request: { source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' } }) lists which event properties carry data for it vs are EMPTY in that source (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
       `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ request: { search: '<value>' } }) tells you exactly where it lives.`,
     ],

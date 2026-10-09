@@ -25,6 +25,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, startAndBuild } from '../helpers/settle.js';
+import { armFrom } from '../helpers/experiment-arm.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -62,14 +63,8 @@ async function aggregatesFor(id) {
   return { map, byGroup, context_id: out.context_id };
 }
 
-// Turn one per-variant row into an experiment arm using the recipe's field mapping.
-function arm(map, row) {
-  const a = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
-  if (map.conversions_field) a.conversions = Number(row[map.conversions_field]);
-  if (map.mean_field) { a.mean = Number(row[map.mean_field]); a.stddev = Number(row[map.stddev_field]); }
-  for (const f of ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY', 'sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen']) if (map[`${f}_field`]) a[f] = Number(row[map[`${f}_field`]]);
-  return a;
-}
+// Turn one per-variant row into an experiment arm using the recipe's arm template.
+const arm = armFrom;
 
 test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs variant 1/6)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
@@ -159,7 +154,7 @@ test('SRM: per-variant sizes computed in the DB pass the guardrail (6 vs 6)', op
   const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
   try {
     // feed the warehouse-computed group sizes into the SRM check — a clean 6/6 split
-    const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
+    const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.arm.n]) }));
     const res = engine._checkSplit({ groups });
     assert.equal(res.ok, true);
     close(res.chi_square, 0);             // 6 vs 6 against an even split

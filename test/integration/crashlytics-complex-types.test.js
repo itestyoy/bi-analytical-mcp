@@ -376,7 +376,7 @@ test('15. the complex properties are discoverable with their declared shape', op
   assert.match(keys.description, /JSON object/);
 
   // the model view lists all three as real columns of the source, so a pipeline can name them
-  const model = await engine.semantic_index({ model: 'crashlytics' });
+  const model = await engine.semantic_index({ source: 'crashlytics' });
   const cols = new Set((model.columns || []).map((c) => String(c.name ?? c)));
   for (const n of ['breadcrumbs_of_event_data', 'stack_frames_of_event_data', 'custom_keys_of_event_data']) {
     assert.ok(cols.has(n), `${n} is a referenceable column (got: ${[...cols].join(', ')})`);

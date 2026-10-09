@@ -5,7 +5,7 @@
 
 import { TASK_MEASURE_AGGS, NUMERIC_AGGS, GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
-import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, ISO_TIME, TIMEZONE } from '../schema-kit.js';
+import { strEnum, anyOfOr, withoutEmpty, form, pick, conditionList, CONSTANT, timeRange } from '../schema-kit.js';
 import { measureSchema, TYPES } from '../pipeline/sql.js';
 import { OPS } from '../conditions.js';
 import { CONTEXT_ID } from '../context-manager.js';
@@ -215,15 +215,15 @@ export function attributeRefForms(catalog, { lead = {}, required = [] } = {}) {
       properties: {
         ...lead,
         model: { const: model, description: 'The model that carries the attribute.' },
-        attribute: strEnum(attrs, `An attribute of ${model}, as semantic_index({ request: { model: "${model}" } }) lists it.`),
+        attribute: strEnum(attrs, `An attribute of ${model}, as semantic_index({ request: { source: "${model}" } }) lists it.`),
         ...(vias.length > 1 ? { via: { enum: vias, description: `The relationship to reach ${model} through — several lead to it.` } } : {}),
       },
     };
   }).filter(Boolean);
 }
 
-/** A metric_time window, as a metric query and a preview's validation take it. */
-export const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' }, end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' }, timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
+/** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
+export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.');
 
 /** The metric time axis at a grain — as group_by and where name it. */
 export const timeRef = (catalog) => ({ type: 'object', additionalProperties: false, required: ['time'], title: 'the metric time axis', description: 'The metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } });
@@ -253,8 +253,8 @@ export function predicateDefs(catalog, project = null) {
 
 // The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by
 // the same thing a build's grace is bounded by: the client's own timeout, which this server neither
-// knows nor can raise. Asking for more than this returns after the cap, with `clamped: true`.
-// Declared here because both the schema text and the engine's clamp must say the same number.
+// knows nor can raise. Asking for more than this is refused by the schema (the timer's `seconds` and a
+// read's `wait_seconds` alike), so a wait is never cut short behind the caller's back.
 export const MAX_WAIT_SECONDS = 30;
 /** How many rows a read of a task ({ task_ids }) hands back unless it asks for another number: its offset and limit are row numbers of the task's result, the rest is a next_offset away. */
 export const READ_PAGE = 50;

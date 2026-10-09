@@ -30,12 +30,10 @@ const started = shape('The task the call started, and the query tool that reads 
 });
 
 export const OUTPUTS = {
-  time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'requested_seconds', 'cap_seconds', 'clamped', 'started_at', 'finished_at'], {
+  time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'cap_seconds', 'started_at', 'finished_at'], {
     ok: { const: true },
     waited_seconds: num,
-    requested_seconds: num,
     cap_seconds: num,
-    clamped: bool,
     cancelled: bool,
     started_at: str,
     finished_at: str,
@@ -85,11 +83,11 @@ export const OUTPUTS = {
   }),
 
   // a page of failures, or one in full
-  explore_errors: shape('A page of the failures kept, newest first (`errors`), or one in full ({ id }: `error`).', ['ok'], {
+  explore_errors: shape('A page of the failures kept, newest first (`errors`, and `next_offset` while more are kept), or one in full ({ id }: `error`).', ['ok'], {
     ok: bool,
     total: int,
     shown: int,
-    offset: int,
+    next_offset: int,
     errors: list(obj),
     by_source: list(obj),
     note: str,

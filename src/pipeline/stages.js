@@ -196,7 +196,7 @@ export const STAGES = {
         throw new Error(
           `join '${p.with}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly.`
           + `${joined.size ? ` Columns of '${p.with}': ${avail()}.` : ''}`
-          + ` Use { column, name } to expose one under a different name. semantic_index({ request: { model: '${p.with}' } }) describes them.`,
+          + ` Use { column, name } to expose one under a different name. semantic_index({ request: { source: '${p.with}' } }) describes them.`,
         );
       }
       const attrs = p.attrs.map((a) => ({ column: a.column, as: a.name || a.column }));

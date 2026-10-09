@@ -581,12 +581,12 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
 
 test('relationships are discoverable, with their key columns and what they point at', opts, async (t) => {
   if (skip(t)) return;
-  const crash = Object.fromEntries((await engine.semantic_index({ model: 'crashlytics' })).relationships.map((r) => [r.entity, r]));
+  const crash = Object.fromEntries((await engine.semantic_index({ source: 'crashlytics' })).relationships.map((r) => [r.entity, r]));
   assert.deepEqual(crash.ad_funnel_rewarded.key, ['rewarded_tracking_id', 'player_id_of_internal']);
   assert.deepEqual(crash.ad_funnel_banner.key, ['banner_tracking_id', 'player_id_of_internal']);
   assert.equal(crash.ad_funnel_rewarded.joins, undefined, 'nobody owns the funnel key — pipeline only');
   assert.equal(crash.user.joins, 'users');
-  const ev = Object.fromEntries((await engine.semantic_index({ model: 'events' })).relationships.map((r) => [r.entity, r]));
+  const ev = Object.fromEntries((await engine.semantic_index({ source: 'events' })).relationships.map((r) => [r.entity, r]));
   assert.deepEqual(ev.ad_funnel_rewarded.key, ['tracking_id', 'player_id_of_internal'],
     'the single-column side answers every variant');
 });

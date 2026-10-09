@@ -8,9 +8,11 @@
 // (the note set is tiny), and no SQL.
 //
 // A TARGET is stored as what it IS — { kind, source, name } for a property/attribute/event,
-// { kind, source } for a model, { kind, term } for a free phrase the user used. `targetKey` folds
-// one into a single string ONLY to look it up; nothing ever takes a key apart again. That is the
-// whole rule: a name may be assembled for an index, never dismantled to recover what it names.
+// { kind, source } for a model, { kind, term } for a free phrase the user used — and spoken by the
+// tools as `aboutOf` writes it ({ source, property } / { source, event } / { source } / { term }).
+// `targetKey` folds one into a single string ONLY to look it up; nothing ever takes a key apart
+// again. That is the whole rule: a name may be assembled for an index, never dismantled to recover
+// what it names.
 
 import { randomUUID } from 'node:crypto';
 import { rankFuzzy } from './fuzzy.js';
@@ -20,6 +22,18 @@ export function targetKey(t) {
   if (t.kind === 'term') return `term:${String(t.term).toLowerCase()}`;
   if (t.kind === 'model') return `model:${t.source}`;
   return `${t.kind}:${t.source}.${t.name}`;
+}
+
+/**
+ * A stored target as the tools write it — what memory records under `about` and semantic_index's
+ * { notes, about } filters by: { source, property }, { source, event }, { source } for the model,
+ * { term }. The stored kind maps one-to-one to the key, so nothing stored has to change.
+ */
+export function aboutOf(t) {
+  if (t.kind === 'term') return { term: t.term };
+  if (t.kind === 'model') return { source: t.source };
+  if (t.kind === 'event') return { source: t.source, event: t.name };
+  return { source: t.source, property: t.name };
 }
 
 /** The words of a target, for search and embedding — the parts, not the assembled key. */

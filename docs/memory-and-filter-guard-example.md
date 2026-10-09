@@ -15,9 +15,9 @@
 вопрос пользователя
   → discover (semantic_index: overview → event → property → search)
   → resolve (нашли реальное поле/значение)
-  → memory record (notes: [{ note + question + bilingual aliases + targets }])
+  → memory record (notes: [{ note + question + bilingual aliases + about }])
   → в следующий раз: semantic_index { search } (RU/EN, лексика + семантика), { notes: true }
-                      ИЛИ инлайн в semantic_index { source, property } / { source, event } / { model }
+                      ИЛИ инлайн в semantic_index { source, property } / { source, event } / { source }
   → строим запрос
   → гард значений не даёт подставить непроверенное / не-то-регистра значение
 ```
@@ -38,7 +38,7 @@ memory({ "request": {
   "notes": [{
     "note": "'ad format' = the event_data property ad_type_of_event_data (only on ad_started/ad_finished); values rewarded/interstitial/banner",
     "question": "which ad format drives the most rewarded revenue?",
-    "targets": [{ "source": "events", "name": "ad_type_of_event_data" }, { "source": "events", "name": "ad_finished" }],
+    "about": [{ "source": "events", "property": "ad_type_of_event_data" }, { "source": "events", "event": "ad_finished" }],
     "aliases": ["ad format", "формат рекламы", "тип рекламы"]
   }]
 } })
@@ -54,9 +54,10 @@ memory({ "request": {
     "id": "519f5af8cac1",
     "note": "'ad format' = the event_data property ad_type_of_event_data …",
     "question": "which ad format drives the most rewarded revenue?",
-    "linked_to": [
-      { "kind": "property", "target": { "source": "events", "name": "ad_type_of_event_data" }, "surfaces_in": "semantic_index({ request: { source: 'events', property: 'ad_type_of_event_data' } })" },
-      { "kind": "event",    "target": { "source": "events", "name": "ad_finished" },           "surfaces_in": "semantic_index({ request: { source: 'events', event: 'ad_finished' } })" }
+    "about": [{ "source": "events", "property": "ad_type_of_event_data" }, { "source": "events", "event": "ad_finished" }],
+    "surfaces_in": [
+      "semantic_index({ request: { source: 'events', property: 'ad_type_of_event_data' } })",
+      "semantic_index({ request: { source: 'events', event: 'ad_finished' } })"
     ],
     "aliases": ["ad format", "формат рекламы", "тип рекламы"],
     "links": []
@@ -108,8 +109,8 @@ RU "низкая выручка" → memory_semantic = true → нашёл EN-з
     "note": "'ad format' = the event_data property ad_type_of_event_data …",
     "question": "which ad format drives the most rewarded revenue?",
     "about": [
-      { "kind": "property", "source": "events", "name": "ad_type_of_event_data" },
-      { "kind": "event", "source": "events", "name": "ad_finished" }
+      { "source": "events", "property": "ad_type_of_event_data" },
+      { "source": "events", "event": "ad_finished" }
     ],
     "recorded_at": "2026-10-08"
   }
@@ -194,7 +195,7 @@ const e = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx(), emb
 const rec = await e.memory({ action: 'record', notes: [{
   note: "'ad format' = ad_type_of_event_data (only on ad_started/ad_finished); rewarded/interstitial/banner",
   question: 'which ad format drives the most rewarded revenue?',
-  targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'events', name: 'ad_finished' }],
+  about: [{ source: 'events', property: 'ad_type_of_event_data' }, { source: 'events', event: 'ad_finished' }],
   aliases: ['ad format', 'формат рекламы', 'тип рекламы'] }] });
 
 // 2-3) search EN + RU — .memory_matches
@@ -202,7 +203,7 @@ await e.semantic_index({ search: 'ad format' });
 await e.semantic_index({ search: 'формат рекламы' });
 
 // 4) semantic cross-language
-await e.memory({ action: 'record', notes: [{ note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] }] });
+await e.memory({ action: 'record', notes: [{ note: 'IAP purchases are failing for some payers', aliases: ['monetization'], about: [{ source: 'events', property: 'price_in_usd_of_event_data' }] }] });
 await e.semantic_index({ search: 'низкая выручка' });   // → .memory_matches находит EN-заметку
 await e.semantic_index({ notes: true });                // → все заметки
 

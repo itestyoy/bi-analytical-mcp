@@ -1642,7 +1642,7 @@ models:
 
   # ── SECOND EVENTS FACT — Firebase Crashlytics (TEMPLATE, not active) ──────────────────
   # Uncomment and fill in the REAL column / event names of the prod crash table, then the
-  # whole events machinery applies to it as-is: its own semantic_index({ request: { model: 'crashlytics' } })
+  # whole events machinery applies to it as-is: its own semantic_index({ request: { source: 'crashlytics' } })
   # and { source: 'crashlytics', event } views, a semantic model from: 'crashlytics' (its where on event_name),
   # match_recognize funnels over source: 'crashlytics', value-index sample values, and a join
   # to dim_users by the user entity. Nothing else in the server needs to change.

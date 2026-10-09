@@ -1,7 +1,8 @@
 // THE RETENTIONEERING FEATURE AS A SWITCH (src/features.js): off, the server's surface is exactly
 // what it is without it — no tool, no view, no guide, no skill, no line of instructions; on, all of
 // it, each piece held to the budgets every tool meets and to the library's facts sheet. The data
-// path is test/integration/retentioneering.test.js. These are surface and input-validation checks.
+// path is test/integration/retentioneering.test.js (the analyses) and retentioneering-steps.test.js (an
+// eventstream's steps, a start's spec). These are surface and input-validation checks.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -491,6 +492,11 @@ test('a path is one of the eventstream\'s path columns, and a condition\'s const
   for (const path of ['users', 'sessions', 'visit']) {
     assert.throws(() => validateAnalyses(es, shape, [{ kind: 'transition_graph', path }]), (e) => e.field === 'analyses.path' && /user_id, session_id/.test(e.message), path);
   }
+  // an eventstream started without sessions has one path column, and the refusal says where sessions come from
+  const plain = { name: 'plain', segments: [], sessions: false, spec: {}, steps: [] };
+  for (const path of ['session_id', 'users']) {
+    assert.throws(() => validateAnalyses(plain, { events: ['a', 'b'], paths: ['user_id'], segments: {}, columns: [] }, [{ kind: 'transition_graph', path }]), (e) => e.field === 'analyses.path' && /its path columns: user_id/.test(e.message) && /started with sessions/.test(e.message), path);
+  }
   // two analyses of one name are refused, the name said as the caller gives it
   assert.throws(() => validateAnalyses(es, shape, [{ kind: 'describe', name: 'x' }, { kind: 'transition_graph', name: 'x' }]), (e) => e.field === 'analyses.name');
   const add = (where) => commitSteps({ ctxs: { touch() {} } }, { checker: { check: async () => null } }, { id: 'c1', state: {} }, 'es', { base: { shape, model: 'm', summary: {} }, steps: [], checkpoint: null }, 'add_steps', { steps: [{ type: 'filter_events', where }] });
@@ -553,4 +559,23 @@ test('a step stored with an earlier path word is carried over: re-checked and sh
   const stored = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'collapse_events', loops: true, path: 'users' }, library: { loops: true, path_col: 'user_id' }, checked: true, shape }], checkpoint: null };
   assert.equal(preview(ctx, 'es', stored).steps[0].step.path, 'user_id');
   e.close();
+});
+
+// A start from a task's table an earlier version stored names its path in columns.path: it is read as
+// today's path: [{ column }] — the key a summary says, whatever the steps materialized after it. Pure
+// translation; the rows of such an eventstream are proved in test/integration/retentioneering.test.js.
+test('a start stored with columns.path is read as path: [{ column }]', async () => {
+  const { currentSpec } = await import('../../src/retentioneering/earlier.js');
+  const { pathKey } = await import('../../src/retentioneering/query.js');
+  const { summarizeEventstream } = await import('../../src/retentioneering/steps.js');
+  const stored = { name: 'from_pipe', from_task: 'a0a0a0a0a0a0', columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', name: 'app' }] };
+  const now = currentSpec(stored);
+  assert.deepEqual(now.path, [{ column: 'player_id_of_internal' }]);
+  assert.deepEqual(now.columns, { event: 'ev', time: 'device_time' });
+  assert.deepEqual(pathKey(stored), ['player_id_of_internal']);
+  // the summary a materialize answers with says the path as the stored spec meant it (the warehouse's
+  // answers are stubs: one event, two paths)
+  const runner = { show: async () => ({ ok: true, rows: [{ events: 3, users: 2, names: 1, event: 'a' }] }) };
+  const summary = await summarizeEventstream(runner, '/nowhere', 'm', { segments: [], paths: ['user_id'], spec: stored, dialect: 'duckdb' });
+  assert.deepEqual([summary.path, summary.users], [['player_id_of_internal'], 2]);
 });

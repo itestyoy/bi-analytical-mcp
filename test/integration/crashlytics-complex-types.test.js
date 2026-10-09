@@ -63,12 +63,6 @@ async function pipeRows(...stages) {
   return c.rows;
 }
 
-/** The add_steps response (for rejection assertions). */
-async function step(stage) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cxw_${seq++}`, source: 'crashlytics' });
-  return engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
-}
-
 // ═══════════ A. an array of scalars ═══════════
 
 // 1. Exploding the trail gives one row per breadcrumb: 20 across the 13 reports.
@@ -101,23 +95,23 @@ test('2. array_length on the flattened array: 13 rows, 20 elements, longest 3', 
 });
 
 // 3. Membership: `contains` answers "which REPORTS have this breadcrumb", which is not the same
-//    number as how many times it occurs.
+//    number as how many times it occurs. One build, the flag per report: the reports it holds
+//    for and the ones it does not are both read off the same 13 rows. (A where on a derived
+//    array_contains flag is the same condition writer as match-recognize.test.js's array_contains
+//    step.)
 test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
-    { stage: 'aggregate', group_by: ['retried'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'project', keep: ['crash_id', 'retried'] },
   );
-  const by = mapCol(rows, 'retried', 'n');
-  assert.equal(by.true, 3);
-  assert.equal(by.false, 10);
-  // …and filtering on it keeps exactly those reports.
-  const only = await pipeRows(
-    { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
-    { stage: 'where', conditions: [{ column: 'retried', op: 'eq', value: true }] },
-    { stage: 'project', keep: ['crash_id'] },
-  );
-  assert.deepEqual(new Set(only.map((r) => String(r.crash_id))), new Set(['k7', 'k8', 'k9']));
+  assert.equal(rows.length, 13, 'one row per report');
+  const flagged = (v) => rows.filter((r) => String(r.retried) === v);
+  // the flag's split: 3 reports carry it, the other 10 read false (none NULL)
+  assert.equal(flagged('true').length, 3, '[by flag] true');
+  assert.equal(flagged('false').length, 10, '[by flag] false');
+  // …and the reports it holds for are exactly those
+  assert.deepEqual(new Set(flagged('true').map((r) => String(r.crash_id))), new Set(['k7', 'k8', 'k9']), '[the reports] k7, k8, k9');
 });
 
 // ═══════════ B. an array of structs ═══════════
@@ -137,42 +131,33 @@ test('4. unnest an array of structs by field: 16 frames over 6 files, Game.cs 5'
 });
 
 // 5. The WHOLE struct bound as one column, then several fields pulled off it — the only way to
-//    keep file, line and in_app on the same row.
+//    keep file, line and in_app on the same row. One build of the 16 frames, every figure read
+//    off its rows (the totals, the in_app split and the deepest frame were three builds).
 test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 / 3', opts, async (t) => {
   if (skip(t)) return;
-  const frames = [
+  const frames = await pipeRows(
     { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'frame' },
     { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
     { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } },
     { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } },
-  ];
-  const totals = await pipeRows(...frames, {
-    stage: 'aggregate',
-    measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'lines', agg: 'sum', column: 'line' },
-      { name: 'deepest', agg: 'max', column: 'line' },
-      { name: 'files', agg: 'count_distinct', column: 'file' },
-    ],
-  });
-  assert.equal(num(totals[0].n), 16);
-  assert.equal(num(totals[0].lines), 922, 'the line numbers came through as NUMBERS, not text');
-  assert.equal(num(totals[0].deepest), 250);
-  assert.equal(num(totals[0].files), 6);
+    { stage: 'project', keep: ['crash_id', 'file', 'line', 'in_app'] },
+  );
+  assert.equal(frames.length, 16, '[totals] 16 frames');
+  assert.ok(frames.every((r) => typeof r.line === 'number'), `[totals] the line numbers came through as NUMBERS, not text: ${JSON.stringify(frames.map((r) => r.line))}`);
+  assert.equal(frames.reduce((s, r) => s + r.line, 0), 922, '[totals] sum(line)');
+  assert.equal(Math.max(...frames.map((r) => r.line)), 250, '[totals] the deepest line');
+  assert.equal(new Set(frames.map((r) => String(r.file))).size, 6, '[totals] distinct files');
 
   // the boolean field of the struct splits app code from engine code
-  const split = await pipeRows(...frames, { stage: 'aggregate', group_by: ['in_app'], measures: [{ name: 'n', agg: 'count' }] });
-  const by = mapCol(split, 'in_app', 'n');
-  assert.equal(by.true, 13);
-  assert.equal(by.false, 3, 'the three Engine.cs frames');
+  const inApp = (v) => frames.filter((r) => String(r.in_app) === v).length;
+  assert.equal(inApp('true'), 13, '[in_app split] true');
+  assert.equal(inApp('false'), 3, '[in_app split] the three Engine.cs frames');
 
   // and file + line together identify a frame: the deepest one is Engine.cs:250 in k6
-  const deepest = await pipeRows(...frames,
-    { stage: 'where', conditions: [{ column: 'line', op: 'eq', value: 250 }] },
-    { stage: 'project', keep: ['crash_id', 'file', 'line'] });
-  assert.equal(deepest.length, 1);
-  assert.equal(String(deepest[0].crash_id), 'k6');
-  assert.equal(String(deepest[0].file), 'Engine.cs');
+  const deepest = frames.filter((r) => r.line === 250);
+  assert.equal(deepest.length, 1, '[deepest frame] one frame at line 250');
+  assert.equal(String(deepest[0].crash_id), 'k6', '[deepest frame] crash');
+  assert.equal(String(deepest[0].file), 'Engine.cs', '[deepest frame] file');
 });
 
 // 6. An array-of-structs also answers non-exploding questions: how deep was each stack.
@@ -193,7 +178,9 @@ test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read 
 });
 
 // 7. …and that is the difference between the two readings: an unnest DROPS the reports with no
-//    stack, while a length keeps them. Same data, two grains, both correct.
+//    stack, while a length keeps them. Same data, two grains, both correct. (The length's side —
+//    13 reports, 10 of them with a depth — is 6's rows; a count over a column skipping its NULLs
+//    is materialize.test.js's count(column) read.)
 test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', opts, async (t) => {
   if (skip(t)) return;
   const exploded = await pipeRows(
@@ -202,12 +189,6 @@ test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', 
   );
   assert.equal(num(exploded[0].n), 16);
   assert.equal(num(exploded[0].crashes), 10, 'k11..k13 have no stack, so they are simply not there');
-  const kept = await pipeRows(
-    { stage: 'compute', name: 'depth', expr: { fn: 'array_length', property: 'stack_frames_of_event_data' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'with_stack', agg: 'count', column: 'depth' }] },
-  );
-  assert.equal(num(kept[0].n), 13);
-  assert.equal(num(kept[0].with_stack), 10, 'count over the column skips the NULLs');
 });
 
 // ═══════════ C. a JSON object (not an array) ═══════════
@@ -262,13 +243,12 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
   assert.equal(pair.k11, 'ui_freeze>gc_pause');
   assert.equal(pair.k13, 'gc_pause>gc_pause', 'the trail starts and ends on the same step');
   assert.equal(pair.k2, 'level_start>level_start', 'a one-element trail: first and last coincide');
-  // what the app was doing at the moment it died, across all reports
-  const last = await pipeRows(
-    { stage: 'compute', name: 'trail', expr: { fn: 'json_parse_array', args: [{ column: 'breadcrumbs_of_event_data' }] } },
-    { stage: 'compute', name: 'died_at', expr: { fn: 'array_last', args: [{ column: 'trail' }] } },
-    { stage: 'aggregate', group_by: ['died_at'], measures: [{ name: 'n', agg: 'count' }] });
-  assert.equal(sumCol(last, 'n'), 13);
-  assert.deepEqual(mapCol(last, 'died_at', 'n'), { ad_shown: 2, iap_start: 1, level_start: 2, shop_open: 1, net_retry: 3, decode: 1, gc_pause: 2, ui_freeze: 1 });
+  // what the app was doing at the moment it died, across all reports — counted over the same 13
+  // per-report rows
+  const last = {};
+  for (const r of rows) last[String(r.died_at)] = (last[String(r.died_at)] || 0) + 1;
+  assert.equal(Object.values(last).reduce((a, b) => a + b, 0), 13, '[died_at] every report');
+  assert.deepEqual(last, { ad_shown: 2, iap_start: 1, level_start: 2, shop_open: 1, net_retry: 3, decode: 1, gc_pause: 2, ui_freeze: 1 }, '[died_at] by the last breadcrumb');
 });
 
 // ═══════════ E. complex data across a join ═══════════
@@ -324,31 +304,9 @@ test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellul
 
 // ═══════════ F. guards (input validation) ═══════════
 
-// 14. A complex op on a column that is not complex is refused, naming what the column IS —
-//     rather than building array SQL over text and failing in the warehouse.
-test('14. complex ops on a scalar column are refused with what it actually is', opts, async (t) => {
-  if (skip(t)) return;
-  // an unnest names only an array property: a scalar one is not among those it offers
-  await assert.rejects(
-    () => step({ stage: 'unnest', property: 'issue_title_of_event_data', name: 'x' }),
-    /`stages\.0\.property` must be one of: .*breadcrumbs_of_event_data/,
-  );
-  await assert.rejects(
-    () => step({ stage: 'compute', name: 'x', expr: { fn: 'array_length', property: 'issue_title_of_event_data' } }),
-    /array_length: 'issue_title_of_event_data' is declared as string, not an array/,
-  );
-  // the custom-keys column holds a JSON OBJECT, so an array op is wrong there too — and the
-  // message points at the read that IS right for an object.
-  await assert.rejects(
-    () => step({ stage: 'compute', name: 'x', expr: { fn: 'array_contains', property: 'custom_keys_of_event_data', item: 'wifi' } }),
-    /array_contains: 'custom_keys_of_event_data'.*not an array.*fn: "event_property", property, field/s,
-  );
-  // element_at needs a native array, not the raw JSON string.
-  await assert.rejects(
-    () => step({ stage: 'compute', name: 'x', expr: { fn: 'element_at', args: [{ column: 'breadcrumbs_of_event_data' }], index: 1 } }),
-    /not an array — produce an array first.*json_parse_array/s,
-  );
-});
+// (14. A complex op on a column that is not complex is refused, naming what the column IS — four
+// add_steps refusals driven by the catalog's declared shapes, no warehouse read:
+// test/unit/build-pipeline-model.test.js.)
 
 // 15. The catalog SURFACES the shape, so a caller knows what to reach for: which properties
 //     are complex, and whether an element is a scalar or a struct.

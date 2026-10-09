@@ -793,3 +793,30 @@ test('the preparation nudge does not fire where the stage reads a table rather t
   // a time_range is preparation (a leading WHERE on the source's time column)
   assert.deepEqual(nudges([PY_STAGE], { timeRange: { start: '2026-01-01' } }), []);
 });
+
+// Every shipped recipe for a PYTHON model (moved here from test/integration/recipes-parse.test.js: it
+// never read the warehouse). A python recipe cannot run where the warehouse runs no dbt python models
+// (the DuckDB fixtures). It is still checked where it can rot — the payload must COMPILE for a
+// deployment that does run them: the stages render, the chain is laid out, the function bodies pass
+// the static gate and the declared output columns propagate to the SQL stages after it. (A generated
+// REFERENCE entry is no payload to build: test/unit/recipes-layers.test.js holds it.)
+const PY_RECIPES = (await import('../../src/recipes.js')).loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url)))
+  .list.filter((r) => r.requires === 'python_models' && !r.reference);
+for (const r of PY_RECIPES) {
+  test(`recipe '${r.id}' compiles for a deployment that runs python models: every stage gated, the chain laid out`, async (t) => {
+    if (skipNoPy(t)) return;
+    const pyCatalog = loadCatalog(CATALOG, {});
+    pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
+    const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY }));
+    // the start request as it is served: every stage checked (the bodies through the static gate),
+    // then the preview lays out the chain of models a build would run
+    const started = await pyEngine.build_pipeline_model(r.pipeline_payload);
+    assert.equal(started.steps_count, r.pipeline_payload.stages.length, `${r.id}: every stage is on the draft`);
+    const out = await pyEngine.build_pipeline_model({ action: 'preview', context_id: started.context_id });
+    assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
+    const declared = r.pipeline_payload.stages.flatMap((st) => st.output?.columns || []);
+    for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
+    assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
+    assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
+  });
+}

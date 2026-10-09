@@ -16,6 +16,7 @@ import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { loadRecipes } from '../../src/recipes.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
@@ -25,6 +26,7 @@ const BASE = fixtureProject('dbt_project'); // a private copy: the test files ru
 const opts = { timeout: 300000 };
 
 let wh; let engine; let backend; let ctx;
+const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
@@ -81,46 +83,37 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
-// SEED_DATA §11: 13 rows, cost 17.50, impressions 1280, clicks 64.
-test('a marked amount is aggregated the way the task asks: cost 17.50 / impressions 1280 / clicks 64', opts, async (t) => {
+// EVERY AGGREGATION THE TASK CHOSE over the marked amounts, asked in ONE ungrouped query (MetricFlow
+// takes all eight metrics in one call); each check is named by the question it answers.
+test('every aggregation the task chose over the marked amounts, in one ungrouped query: cost / impressions / clicks, max / mean / p90, the mean per-row cost per click, CPC', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks'] });
+  const r = await q({ metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks', 'uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost', 'uacq_avg_cost_per_click', 'uacq_cpc'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].uacq_cost), 17.5), `cost=${r.rows[0].uacq_cost}`);
-  assert.equal(num(r.rows[0].uacq_impressions), 1280);
-  assert.equal(num(r.rows[0].uacq_clicks), 64);
-});
+  const row = r.rows[0];
 
-// THE SAME marked field, three different aggregations chosen by the task — including one that
-// carries a parameter. Over the 13 daily costs: max 3.00, mean 17.50/13, and percentile_cont(0.9)
-// interpolating between 2.50 and 2.75 → 2.70. Nothing in the schema decided any of these.
-test('the same amount under three measures: max 3.00, mean 17.50/13, p90 2.70', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].uacq_max_daily_cost), 3.0), `max=${r.rows[0].uacq_max_daily_cost}`);
-  assert.ok(near(num(r.rows[0].uacq_avg_daily_cost), 17.5 / 13, 1e-6), `avg=${r.rows[0].uacq_avg_daily_cost}`);
-  assert.ok(near(num(r.rows[0].uacq_p90_daily_cost), 2.7, 1e-4), `p90=${r.rows[0].uacq_p90_daily_cost}`);
-});
+  // [a marked amount is aggregated the way the task asks] SEED_DATA §11: 13 rows, cost 17.50,
+  // impressions 1280, clicks 64.
+  assert.ok(near(num(row.uacq_cost), 17.5), `[marked amount: cost 17.50] cost=${row.uacq_cost}`);
+  assert.equal(num(row.uacq_impressions), 1280, '[marked amount: impressions 1280]');
+  assert.equal(num(row.uacq_clicks), 64, '[marked amount: clicks 64]');
 
-// A model-level entry is an aggregatable EXPRESSION over the model's columns, equally free of a
-// fixed function. cost_per_click = cost / clicks per row; the four rows with no clicks are NULL,
-// so the mean is over the nine that have them.
-test('an aggregatable expression: the mean per-row cost per click over the rows that have clicks', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_avg_cost_per_click'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
+  // [the same amount under three measures] THE SAME marked field, three different aggregations
+  // chosen by the task — including one that carries a parameter. Over the 13 daily costs: max 3.00,
+  // mean 17.50/13, and percentile_cont(0.9) interpolating between 2.50 and 2.75 → 2.70. Nothing in
+  // the schema decided any of these.
+  assert.ok(near(num(row.uacq_max_daily_cost), 3.0), `[three measures: max 3.00] max=${row.uacq_max_daily_cost}`);
+  assert.ok(near(num(row.uacq_avg_daily_cost), 17.5 / 13, 1e-6), `[three measures: mean 17.50/13] avg=${row.uacq_avg_daily_cost}`);
+  assert.ok(near(num(row.uacq_p90_daily_cost), 2.7, 1e-4), `[three measures: p90 2.70] p90=${row.uacq_p90_daily_cost}`);
+
+  // [an aggregatable expression] A model-level entry is an aggregatable EXPRESSION over the model's
+  // columns, equally free of a fixed function. cost_per_click = cost / clicks per row; the four rows
+  // with no clicks are NULL, so the mean is over the nine that have them.
   const perRow = [[1.50, 5], [2.00, 8], [1.25, 6], [3.00, 10], [0.50, 2], [2.50, 9], [1.75, 7], [2.25, 8], [2.75, 9]].map(([c, k]) => c / k);
   const expected = perRow.reduce((a, b) => a + b, 0) / perRow.length;
-  assert.ok(near(num(r.rows[0].uacq_avg_cost_per_click), expected, 1e-6), `avg cpc=${r.rows[0].uacq_avg_cost_per_click} want ${expected}`);
-});
+  assert.ok(near(num(row.uacq_avg_cost_per_click), expected, 1e-6), `[aggregatable expression: mean per-row cost per click] avg cpc=${row.uacq_avg_cost_per_click} want ${expected}`);
 
-// A ratio over two of the task's own measures: 17.50 / 64.
-test('a ratio metric over two task measures: CPC = 17.50/64', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cpc'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].uacq_cpc), 17.5 / 64, 1e-6), `cpc=${r.rows[0].uacq_cpc}`);
+  // [a ratio metric over two task measures] 17.50 / 64.
+  assert.ok(near(num(row.uacq_cpc), 17.5 / 64, 1e-6), `[ratio of two task measures: CPC = 17.50/64] cpc=${row.uacq_cpc}`);
 });
 
 // SEED_DATA §11: cost by channel — meta 5.75, applovin 8.25, google 3.50, organic 0.
@@ -136,21 +129,8 @@ test('grouped by an attribute of the same source: cost by media_source', opts, a
   assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5));
 });
 
-// The source carries the user entity, and dim_users is SLOWLY-CHANGING, so spend is attributed
-// POINT-IN-TIME — to the install version valid on the SPEND DAY. u1 spent 1.50 on 01-01 (still
-// US) and 0.50 on 01-03 (already GB), so that 0.50 lands in GB, not US.
-// SEED_DATA §11 + §13: US 6.75 / GB 5.00 / DE 4.00 / BR 1.75, total still 17.50.
-test('cost by users.country is attributed to the install version valid on the spend day', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'uacq_cost'), 'uacq_cost');
-  assert.ok(near(by.US, 6.75), `US=${by.US}`);
-  assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
-  assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
-  assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
-  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), 'no version fan-out: the total is unchanged');
-});
+// (Spend by users.country, attributed POINT-IN-TIME to the install version valid on the spend day —
+// US 6.75 / GB 5.00 / DE 4.00 / BR 1.75 — is mcp-end-to-end.test.js #1, the same measure over MCP.)
 
 // meta.mcp.is_time gives a NON-events source its own time axis, so metric_time works on it.
 // SEED_DATA §11 per day: 1.50 / 3.25 / 3.50 / 4.25 / 5.00.
@@ -230,12 +210,10 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
 test('a governed measure declared in the schema: total_spend = 17.50, applovin 8.25', opts, async (t) => {
   if (skip(t)) return;
   // The task declares NO measure of its own: it names the schema's, and adds only the attribute
-  // it wants to slice by.
-  const out = await engine.build_semantic_model({
-    name: 'gov',
-    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'media_source' }] }, { from: 'users' }],
-    metrics: [{ name: 'total_spend', type: 'simple', measure: 'total_spend' }],
-  });
+  // it wants to slice by. It is the shipped recipe's own payload (governed_measure_by_name), and its
+  // first query is the recipe's first example — this test is that recipe's data proof
+  // (test/helpers/recipe-coverage.js).
+  const out = await engine.build_semantic_model(recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));

@@ -12,6 +12,11 @@
 // without recomputing. Every assertion is a number or a set of ids from the database — per the
 // project rule, never the text of a generated query.
 //
+// It is also the one home of the join scenarios declared-joins.test.js would otherwise repeat on the
+// engine: the validity window present / absent (#3), the governed spend by install country (#1), the
+// three ad formats and k1's funnels kept apart (#4), the attrs rename built (#5), three sources on
+// metric_time (#7), and the chain grouped by media_source with its spend and impressions (#9).
+//
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
 import { test, before, after } from 'node:test';
@@ -369,11 +374,13 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
 
 // ═══════════ 9. a stored result, re-sliced without recomputing ═══════════
 
+// The slice groups by an attribute of the third model and measures that model's AMOUNTS (spend and
+// impressions) beside a count of the first — declared-joins.test.js's 45, folded in here.
 test('9. materialize once, then re-slice the stored result from its task: meta 18 / organic 2 / applovin 2', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('crashlytics', [
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
-    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }] },
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'media_source' }, { column: 'cost' }, { column: 'impressions' }] },
   ], `e2e_store_${seq++}`);
   assert.equal(num(built.row_count), 22, 'the row-level result is stored as a table');
 
@@ -384,12 +391,17 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
     return call('build_pipeline_model', { action: 'materialize', context_id: d.context_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
-    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] },
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }, { name: 'impressions', agg: 'sum', column: 'impressions' }] },
   ]);
   const n = mapCol(sliced.rows, 'media_source', 'n');
   const spend = mapCol(sliced.rows, 'media_source', 'spend');
   assert.deepEqual(n, { meta: 18, organic: 2, applovin: 2 });
   assert.ok(near(spend.meta, 20.0) && near(spend.organic, 0.0) && near(spend.applovin, 5.0), JSON.stringify(spend));
+  // '45. group by a joined attribute, measure joined amounts' (declared-joins.test.js): its impressions
+  const imp = mapCol(sliced.rows, 'media_source', 'impressions');
+  assert.equal(imp.meta, 1420, '[45] meta impressions');
+  assert.equal(imp.organic, 0, '[45] organic impressions');
+  assert.equal(imp.applovin, 360, '[45] applovin impressions');
 
   // a filter over the stored result is just as cheap.
   const meta = await slice(`e2e_slice_${seq++}`, [

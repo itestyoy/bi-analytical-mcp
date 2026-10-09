@@ -68,14 +68,65 @@ test('a where keeps a row when any condition of an { or } holds, beside the cond
   assert.equal(num(nested.rows[0].n), both);
 });
 
-test('a CASE branch takes the same conditions: an { or } in `when` flags the rows either event names', opts, async (t) => {
+// ONE ungrouped aggregate over events carries what four tests each built a whole-table pipeline for,
+// every figure held to the warehouse's own count of the same rows (SQL written here by hand):
+//   - a CASE branch takes the same conditions: an { or } in `when` flags the rows either event names;
+//   - an aggregate measure takes a where of its own: a conditional count and sum beside the
+//     unconditional one, in one pass;
+//   - a text column of the warehouse compared with a boolean matches the ways text spells the flag,
+//     not run as STRING = BOOL;
+//   - a raw expression takes its columns positionally, in args: the server writes each quoted, a
+//     reserved word (`order`) too.
+// The in-call refusals of the last two (an order on a text flag; a column named in raw text, a
+// placeholder with no argument, an argument no placeholder uses) are checked on drafts after it.
+test('one ungrouped aggregate over events carrying every condition and expression form: the CASE { or } flag, conditional count/sum, text-vs-boolean yes/no, raw positional args', opts, async (t) => {
   if (skip(t)) return;
-  const want = await truth("select count(*) as n from fct_analytics_events where event_name in ('tutorial', 'level_started')");
+  const flagged = await truth("select count(*) as n from fct_analytics_events where event_name in ('tutorial', 'level_started')");
+  const all = await truth('select count(*) as n from fct_analytics_events');
+  const tutorials = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial' or event_name like 'level%'");
+  const early = await truth('select sum(session_number) as n from fct_analytics_events where session_number <= 2');
+  const filled = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
+  const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
+  const doubled = await truth('select sum(session_number * 2) as n from fct_analytics_events');
   const { rows } = await pipe([
     { stage: 'compute', name: 'flag', expr: { fn: 'case', cases: [{ when: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'eq', value: 'level_started' }] }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'flag' }] },
+    { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
+    { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
+    { stage: 'aggregate', measures: [
+      { name: 'flagged', agg: 'sum', column: 'flag' },
+      { name: 'n', agg: 'count' },
+      { name: 'n_tut', agg: 'count', where: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'starts_with', value: 'level' }] }] },
+      { name: 's_early', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'lte', value: 2 }] },
+      { name: 'yes', agg: 'count', where: [{ column: 'bundle_id', op: 'eq', value: true }] },
+      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
+      { name: 'twice_sum', agg: 'sum', column: 'twice' },
+    ] },
   ]);
-  assert.equal(num(rows[0].n), want);
+  const row = rows[0];
+  // 'a CASE branch takes the same conditions: an { or } in `when` flags the rows either event names'
+  assert.equal(num(row.flagged), flagged, '[CASE { or }] the flagged rows');
+  // 'an aggregate measure takes a where of its own: a conditional count and sum beside the unconditional one, in one pass'
+  assert.ok(tutorials > 0 && tutorials < all, '[measure where] the condition keeps some rows, not all');
+  assert.deepEqual([num(row.n), num(row.n_tut), num(row.s_early)], [all, tutorials, early], '[measure where] count, conditional count, conditional sum');
+  // 'a text column of the warehouse compared with a boolean matches the ways text spells the flag, not run as STRING = BOOL'
+  assert.ok(filled > 0, '[text vs boolean] the fixture has the column filled');
+  assert.deepEqual([num(row.yes), num(row.no)], [truthy, filled - truthy], '[text vs boolean] yes / no');
+  // 'a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too'
+  assert.equal(num(row.twice_sum), doubled, '[raw positional args] sum of {1} * 2 over `order`');
+
+  // [text vs boolean] an order compares no flag: refused as the step is added
+  const flag = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: flag.context_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
+  // [raw positional args] a column named in its text is refused
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
+  // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
+  for (const sql of ['order * 2', '"order" * 2']) {
+    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
+  }
+  // a placeholder with no argument, and an argument no placeholder uses, are refused
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
 test('a read of a built model filters and keeps groups with the same grammar: where and having take { or }', opts, async (t) => {
@@ -91,36 +142,35 @@ test('a read of a built model filters and keeps groups with the same grammar: wh
   assert.equal(kept.rows.length, counts.filter((n) => n === lo || n === hi).length);
 });
 
-test('a measure\'s where takes an { or }: the count is the rows either condition holds for', opts, async (t) => {
+// One semantic build serves both sides of the governed grammar (each was a build of its own): a
+// measure's where and a metric query's where.
+test('a semantic measure\'s where and a metric query\'s where take { or } and the text operators', opts, async (t) => {
   if (skip(t)) return;
-  const want = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
-  assert.ok(want > 0, 'the fixture has such rows');
   const built = await engine.build_semantic_model({
-    name: 'cond_levels',
-    semantic_models: [{ from: 'events', measures: [{ name: 'picked', agg: 'count', where: [{ or: [{ field: 'level_id_of_event_data', op: 'eq', value: 1 }, { field: 'level_id_of_event_data', op: 'gte', value: 3 }] }] }] }],
-    metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }],
+    name: 'cond_sem',
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name' }], measures: [
+      { name: 'picked', agg: 'count', where: [{ or: [{ field: 'level_id_of_event_data', op: 'eq', value: 1 }, { field: 'level_id_of_event_data', op: 'gte', value: 3 }] }] },
+      { name: 'rows', agg: 'count' },
+    ] }],
+    metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }, { name: 'rows', type: 'simple', measure: 'rows' }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
-  const r = await engine.query_semantic_model({ context_id: built.context_id, metrics: ['cond_levels_picked'], time_range: { start: '2020-01-01', end: '2030-12-31' } });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].cond_levels_picked), want);
-});
 
-test('a metric query\'s where names its field as group_by does, and takes the text operators and { or } too', opts, async (t) => {
-  if (skip(t)) return;
-  const want = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
-  const built = await engine.build_semantic_model({
-    name: 'cond_where',
-    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name' }], measures: [{ name: 'rows', agg: 'count' }] }],
-    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
-  });
-  assert.ok(built.context_id, JSON.stringify(built.error || built));
-  const r = await engine.query_semantic_model({
-    context_id: built.context_id, metrics: ['cond_where_rows'], time_range: { start: '2020-01-01', end: '2030-12-31' },
+  // 'a measure's where takes an { or }: the count is the rows either condition holds for'
+  const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
+  assert.ok(picked > 0, '[measure where] the fixture has such rows');
+  const r = await engine.query_semantic_model({ context_id: built.context_id, metrics: ['cond_sem_picked'], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].cond_sem_picked), picked, '[measure where] the rows either condition holds for');
+
+  // 'a metric query's where names its field as group_by does, and takes the text operators and { or } too'
+  const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
+  const w = await engine.query_semantic_model({
+    context_id: built.context_id, metrics: ['cond_sem_rows'], time_range: { start: '2020-01-01', end: '2030-12-31' },
     where: [{ or: [{ field: { model: 'events', attribute: 'event_name' }, op: 'contains', value: 'level' }, { field: { model: 'events', attribute: 'event_name' }, op: 'eq', value: 'tutorial' }] }],
   });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].cond_where_rows), want);
+  assert.equal(w.ok, true, JSON.stringify(w.error));
+  assert.equal(num(w.rows[0].cond_sem_rows), named, '[query where] the rows the { or } of text operators keeps');
 });
 
 test('a time window whose bounds carry their own offset is those instants, whatever timezone is named beside them', opts, async (t) => {
@@ -135,22 +185,6 @@ test('a time window whose bounds carry their own offset is those instants, whate
   const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.equal(num(built.rows[0].n), want);
-});
-
-test('an aggregate measure takes a where of its own: a conditional count and sum beside the unconditional one, in one pass', opts, async (t) => {
-  if (skip(t)) return;
-  const all = await truth('select count(*) as n from fct_analytics_events');
-  const tutorials = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial' or event_name like 'level%'");
-  const early = await truth('select sum(session_number) as n from fct_analytics_events where session_number <= 2');
-  const { rows } = await pipe([
-    { stage: 'aggregate', measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'n_tut', agg: 'count', where: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'starts_with', value: 'level' }] }] },
-      { name: 's_early', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'lte', value: 2 }] },
-    ] },
-  ]);
-  assert.ok(tutorials > 0 && tutorials < all, 'the condition keeps some rows, not all');
-  assert.deepEqual([num(rows[0].n), num(rows[0].n_tut), num(rows[0].s_early)], [all, tutorials, early]);
 });
 
 test('a project stage drops the columns it names and keeps the rest; the next stage still reads them', opts, async (t) => {
@@ -193,23 +227,6 @@ test('a query over a built model reads columns named with reserved words (order,
   assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
 });
 
-test('a text column of the warehouse compared with a boolean matches the ways text spells the flag, not run as STRING = BOOL', opts, async (t) => {
-  if (skip(t)) return;
-  const all = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
-  const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
-  const { rows } = await pipe([
-    { stage: 'aggregate', measures: [
-      { name: 'yes', agg: 'count', where: [{ column: 'bundle_id', op: 'eq', value: true }] },
-      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
-    ] },
-  ]);
-  assert.ok(all > 0, 'the fixture has the column filled');
-  assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
-  // an order compares no flag: refused as the step is added
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
-});
-
 test('a text flag stays text after a checkpoint and from a build\'s task, with the constant on either side', opts, async (t) => {
   if (skip(t)) return;
   const all = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
@@ -250,26 +267,6 @@ test('a joined text column, under the name the join gave it, is compared with a 
   ]);
   assert.ok(all > 0, 'the fixture joins users to events');
   assert.deepEqual([num(rows[0].yes), num(rows[0].no)], [truthy, all - truthy]);
-});
-
-test('a raw expression takes its columns positionally, in args: the server writes each quoted, a reserved word too; a column named in its text is refused', opts, async (t) => {
-  if (skip(t)) return;
-  const want = await truth('select sum(session_number * 2) as n from fct_analytics_events');
-  const { rows } = await pipe([
-    { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
-    { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'sum', column: 'twice' }] },
-  ]);
-  assert.equal(num(rows[0].n), want);
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
-  // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
-  for (const sql of ['order * 2', '"order" * 2']) {
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
-  }
-  // a placeholder with no argument, and an argument no placeholder uses, are refused
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
 test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {

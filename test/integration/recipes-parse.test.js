@@ -2,6 +2,12 @@
 // and its first example query executes (mf query); its pipeline_payload — a build_pipeline_model
 // start request — is sent AS IT STANDS, with materialize: true, and its build returns rows. This
 // guarantees the recipes we hand to the agent are requests the tools take, and compute.
+//
+// What this loop leaves to others, so nothing is run twice: a recipe another test builds from its
+// own payload and proves on its numbers (DATA_TESTED, test/helpers/recipe-coverage.js), and the kinds
+// that never read the warehouse — a PYTHON-model recipe (compiled and gated in
+// test/unit/python-stage.test.js), a generated REFERENCE entry and a tool-only recipe
+// (test/unit/recipes-layers.test.js). Any recipe not covered there, a new one included, runs here.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +23,8 @@ import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, startAndBuild } from '../helpers/settle.js';
 import { armFrom } from '../helpers/experiment-arm.js';
-import { DBT_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DATA_TESTED } from '../helpers/recipe-coverage.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -40,51 +47,12 @@ before(async () => {
 
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 
-for (const r of recipes.list) {
+// The recipes only this loop proves: not data-tested elsewhere, and of a kind that reads the warehouse.
+const RUN_HERE = recipes.list.filter((r) => !DATA_TESTED[r.id] && !r.reference && r.requires !== 'python_models' && !r.tool_calls);
+
+for (const r of RUN_HERE) {
   test(`recipe '${r.id}' is runnable end-to-end`, opts, async (t) => {
     if (!HAS_DBT) return t.skip('dbt/mf not installed');
-
-    // A recipe for a PYTHON model cannot run here: the test warehouse (DuckDB) runs no
-    // dbt python models. It is still checked where it can rot — the payload must COMPILE for a
-    // deployment that does run them: the stages render, the chain is laid out, the function bodies
-    // pass the static gate and the declared output columns propagate to the SQL stages after it.
-    // A REFERENCE entry (generated from an extracted fact sheet) is not a payload to build: it is
-    // the library's own surface, offered by id so it can be fetched mid-write. What can rot here is
-    // its content — an empty sheet, or a version it cannot name.
-    if (r.reference) {
-      assert.ok(r.reference.version, `${r.id}: a reference must name the version it was read from`);
-      assert.ok(Object.keys(r.reference).length > 3, `${r.id}: the reference carries no lists`);
-      assert.ok(r.approach && r.instead_of && r.hack, `${r.id}: a reference still says how to use it`);
-      assert.ok(!r.pipeline_payload, `${r.id}: a reference declares no model`);
-      return;
-    }
-
-    if (r.requires === 'python_models') {
-      const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
-      pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
-      const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY_BIN }));
-      // the start request as it is served: every stage checked (the bodies through the static gate),
-      // then the preview lays out the chain of models a build would run
-      const started = await pyEngine.build_pipeline_model(r.pipeline_payload);
-      assert.equal(started.steps_count, r.pipeline_payload.stages.length, `${r.id}: every stage is on the draft`);
-      const out = await pyEngine.build_pipeline_model({ action: 'preview', context_id: started.context_id });
-      assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
-      const declared = r.pipeline_payload.stages.flatMap((st) => st.output?.columns || []);
-      for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
-      assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
-      assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
-      return;
-    }
-
-    // Tool-only recipe (no warehouse), e.g. power/sample-size planning: run each
-    // declared tool call and assert it computes a successful result.
-    if (r.tool_calls) {
-      for (const call of r.tool_calls) {
-        const res = engine[call.tool](call.args);
-        assert.equal(res.ok, true, `${r.id}: tool ${call.tool} failed: ${JSON.stringify(res)}`);
-      }
-      return;
-    }
 
     // Pipeline recipe (e.g. A/B): its start request, built in the same call, then — if it
     // declares an experiment mapping (analyze, or check_split) — its per-group rows fed into the test.

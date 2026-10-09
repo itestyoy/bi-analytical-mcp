@@ -74,13 +74,39 @@ const PY = {
 };
 const num = (v) => (v == null || v === '' ? null : Number(v));
 
+// The first test's stage carries two more functions after `tier`, each proving how a body's blocks
+// reach the generated model (neither reads a column an earlier step changed: `depth` reads the
+// frame's largest revenue, `label` each row's revenue):
+// - `depth`: a DEEPLY NESTED body — if revenue > 12: … elif > 11: … down to > 1, each level tagging
+//   its own depth, twelve levels deep. What it means depends on that indentation reaching the model
+//   as written, so the rows say which branch the interpreter actually took.
+// - `label`: both sides of a nested if/else, decided PER ROW — a for-loop over the rows with an
+//   if/else inside it, so the branches are separate paths, not one flattened block.
+const pad = (d) => '    '.repeat(12 - d);
+const level = (n) => (n === 0
+  ? [`${pad(n)}df['depth'] = 0`]
+  : [`${pad(n)}if df['revenue'].fillna(0).max() > ${n}:`, `${pad(n)}    df['depth'] = ${n}`, `${pad(n)}else:`, ...level(n - 1)]);
+const DEPTH = { name: 'depth', params: ['df'], body: [...level(12), 'return df'].join('\n') };
+const LABEL = {
+  name: 'label',
+  params: ['df', 'cut'],
+  // for-loop over the rows, if/else inside it: two levels of nesting, both taken
+  body: "df['band'] = 'none'\nfor i in df.index:\n    if df.loc[i, \"revenue\"] > cut:\n        df.loc[i, 'band'] = 'high'\n    else:\n        df.loc[i, 'band'] = 'low'\nreturn df",
+};
+const PY_NESTED = {
+  ...PY,
+  functions: [...PY.functions, DEPTH, LABEL],
+  steps: [...PY.steps, { call: 'depth' }, { call: 'label', args: { cut: 20 } }],
+  output: { columns: [...PY.output.columns, 'depth', 'band'] },
+};
+
 test('python stage: dbt builds the prep table, runs the Python model, and its ROWS are the pipeline result', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY] } });
+  const r = await engine._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_NESTED] } });
   assert.equal(r.ok ?? r.build?.ok, true, JSON.stringify(r.error || r));
   assert.equal(r.build.executed, true, 'dbt actually ran both models');
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [[`${r.model}_s1`, 'sql', 'fct_analytics_events'], [r.model, 'python', `${r.model}_s1`]]);
-  assert.deepEqual(r.columns.map((c) => c.name ?? c), PY.output.columns);
+  assert.deepEqual(r.columns.map((c) => c.name ?? c), PY_NESTED.output.columns);
   const rows = r.rows.map((x) => ({ ...x, n: num(x.n), revenue: num(x.revenue), revenue_z: num(x.revenue_z) })).sort((a, b) => a.player_id_of_internal.localeCompare(b.player_id_of_internal));
   assert.equal(rows.length, 4, 'one row per player, incl. the player with no purchases');
   assert.deepEqual(rows.map((x) => [x.player_id_of_internal, x.n, x.revenue]), [['p1', 2, 30], ['p2', 1, 5], ['p3', 3, 65], ['p4', 1, null]], 'the SQL prep numbers');
@@ -88,6 +114,12 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   const p4 = rows.find((x) => x.player_id_of_internal === 'p4');
   assert.ok(p4.revenue_z == null || Number.isNaN(p4.revenue_z), 'no revenue → no z-score');
   assert.deepEqual(rows.map((x) => x.tier), ['low', 'low', 'high', 'low'], 'the second function ran on the first one\'s output');
+  // [nested body] p3's 65 is the largest revenue in the seed, so the OUTERMOST branch (12) is the one
+  // that runs; every row gets it, because the function decides once for the frame.
+  assert.deepEqual([...new Set(r.rows.map((x) => num(x.depth)))], [12], `[a deeply nested body runs, each level indented where it was declared] ${JSON.stringify(r.rows)}`);
+  // [nested if/else] revenue: p1 30, p2 5, p3 65, p4 NULL → the > 20 branch for p1/p3, the else for p2 and (NaN) p4
+  const bands = Object.fromEntries(r.rows.map((x) => [x.player_id_of_internal, x.band]));
+  assert.deepEqual(bands, { p1: 'high', p2: 'low', p3: 'high', p4: 'low' }, `[both sides of a nested if/else are reachable, decided per row] ${JSON.stringify(r.rows)}`);
 
   // The result IS a table in the warehouse: re-read it, and re-slice it.
   const again = await readTable(engine, r.context_id, r.model);
@@ -171,57 +203,4 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   for (const m of r.models) assert.equal((await readTable(engine, r.context_id, m.model)).ok !== false, true, m.model);
   const s1 = await readTable(engine, r.context_id, r.models[0].model);
   assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
-});
-
-// The body is the function's Python text, its blocks indented as Python reads them. What it means
-// depends on that indentation reaching the generated model as written — so it is proven by running
-// it: twelve levels deep, each level picking a different value, and the rows say which branch the
-// interpreter actually took.
-test('python stage: a deeply nested body runs, and each level indents where it was declared', opts, async (t) => {
-  if (skip(t)) return;
-  // if revenue > 12: … elif > 11: … down to > 1, each level tagging its own depth.
-  const pad = (d) => '    '.repeat(12 - d);
-  const level = (n) => (n === 0
-    ? [`${pad(n)}df['depth'] = 0`]
-    : [`${pad(n)}if df['revenue'].fillna(0).max() > ${n}:`, `${pad(n)}    df['depth'] = ${n}`, `${pad(n)}else:`, ...level(n - 1)]);
-  const deep = {
-    stage: 'python',
-    functions: [
-      { name: 'to_pandas', params: ['df'], body: "return df.df()" },
-      { name: 'depth', params: ['df'], body: [...level(12), 'return df'].join('\n') },
-    ],
-    steps: [{ call: 'to_pandas' }, { call: 'depth' }],
-    output: { columns: ['player_id_of_internal', 'revenue', 'depth'] },
-  };
-  const r = await engine._buildPipeline({ name: 'deep', pipeline: { source: 'events', stages: [AGG, deep] } });
-  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
-  // p3's 65 is the largest revenue in the seed, so the OUTERMOST branch (12) is the one that runs;
-  // every row gets it, because the function decides once for the frame.
-  assert.deepEqual([...new Set(r.rows.map((x) => num(x.depth)))], [12], JSON.stringify(r.rows));
-  assert.equal(r.rows.length, 4);
-});
-
-// The nested branches inside a body really are separate paths — not one flattened block: the same
-// function returns a different value per row depending on which branch its condition selects.
-test('python stage: both sides of a nested if/else are reachable, decided per row', opts, async (t) => {
-  if (skip(t)) return;
-  const branch = {
-    stage: 'python',
-    functions: [
-      { name: 'to_pandas', params: ['df'], body: "return df.df()" },
-      {
-        name: 'label',
-        params: ['df', 'cut'],
-        // for-loop over the rows, if/else inside it: two levels of nesting, both taken
-        body: "df['band'] = 'none'\nfor i in df.index:\n    if df.loc[i, \"revenue\"] > cut:\n        df.loc[i, 'band'] = 'high'\n    else:\n        df.loc[i, 'band'] = 'low'\nreturn df",
-      },
-    ],
-    steps: [{ call: 'to_pandas' }, { call: 'label', args: { cut: 20 } }],
-    output: { columns: ['player_id_of_internal', 'revenue', 'band'] },
-  };
-  const r = await engine._buildPipeline({ name: 'band', pipeline: { source: 'events', stages: [AGG, branch] } });
-  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
-  const bands = Object.fromEntries(r.rows.map((x) => [x.player_id_of_internal, x.band]));
-  // revenue: p1 30, p2 5, p3 65, p4 NULL → the > 20 branch for p1/p3, the else for p2 and (NaN) p4
-  assert.deepEqual(bands, { p1: 'high', p2: 'low', p3: 'high', p4: 'low' }, JSON.stringify(r.rows));
 });

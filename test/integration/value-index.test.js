@@ -76,6 +76,15 @@ test('ad_type_of_event_data indexes the real value SET with seed frequencies', o
   const st = index.stats('events', 'ad_type_of_event_data');
   assert.equal(st.distinctCount, 3);
   assert.equal(st.totalCount, 24);
+  // the index read DIRECTLY, as end-to-end.test.js's '2b. the value index holds the exact seeded
+  // values (direct read)' did — its stamp, its paging by value, its substring search:
+  assert.ok(typeof st.indexedAt === 'number', '[direct read] the stats carry when they were indexed');
+  assert.deepEqual(index.listValues('events', 'ad_type_of_event_data', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded'], '[direct read] order_by value → alphabetical');
+  // substring search may legitimately match more than one value (e.g. 'rewarded_ad'), ordered by
+  // freq desc → the exact ad_type 'rewarded' (10) is the top hit.
+  const sv = index.searchValues('rewarded');
+  assert.ok(sv.some((m) => m.property === 'ad_type_of_event_data' && m.value === 'rewarded' && m.freq === 10), '[direct read] exact rewarded→ad_type match present');
+  assert.equal(sv[0].value, 'rewarded', '[direct read] highest-frequency match first');
 });
 
 // result over the whole fact (only level_completed carries it): win 20 / lose 5, distinct = 2.
@@ -85,6 +94,8 @@ test('result_of_event_data indexes win/lose with the seed counts (20 wins / 5 lo
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['win', 'lose']));
   assert.equal(valOf(vals, 'win').freq, 20);
   assert.equal(valOf(vals, 'lose').freq, 5);
+  // in freq order, as the direct read of end-to-end.test.js's 2b had it
+  assert.deepEqual(vals, [{ value: 'win', freq: 20 }, { value: 'lose', freq: 5 }], '[direct read] win 20 / lose 5, most frequent first');
   const st = index.stats('events', 'result_of_event_data');
   assert.equal(st.distinctCount, 2);
   assert.equal(st.totalCount, 25); // 25 level_completed rows
@@ -99,6 +110,9 @@ test('semantic_index({ source, property }) returns sample_values + counts matchi
   assert.equal(out.total_count, 24);
   assert.deepEqual(new Set(out.sample_values.map((v) => v.value)), new Set(['rewarded', 'interstitial', 'banner']));
   assert.equal(valOf(out.sample_values, 'rewarded').freq, 10);
+  // every value's frequency through the view, as end-to-end.test.js's '1c. … (10/8/6)' read it
+  assert.equal(valOf(out.sample_values, 'interstitial').freq, 8, '[1c] interstitial through the view');
+  assert.equal(valOf(out.sample_values, 'banner').freq, 6, '[1c] banner through the view');
   // descriptive stats: most-frequent value + its share of the 24 indexed rows.
   assert.equal(out.value_stats.distinct_count, 3);
   assert.equal(out.value_stats.total_count, 24);
@@ -276,6 +290,23 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
   assert.equal(vi.last_successful_run.errors, 0);
   assert.ok(vi.last_successful_run.properties_indexed > 0);
   assert.ok(typeof vi.seconds_since_last_sync === 'number' && vi.seconds_since_last_sync >= 0);
+  // EXACT coverage (end-to-end.test.js's '2. semantic_index({ status }) reports a clean value-index
+  // sync with EXACT coverage') — one prop_stats row per indexable key, over EVERY events fact:
+  //   · that fact's event properties (scalar top-values AND complex coverage-only), plus
+  //   · its categorical dimensions except the event_name column,
+  // and the categorical dimensions of every non-fact model (users/experiments). No gaps. …minus
+  // anything the schema opted OUT of value indexing (meta.mcp.index:false — an id column is
+  // groupable but has no enumerable value set worth scanning).
+  const c = engine.catalog;
+  const catDims = (k, except) => Object.entries(c.getModel(k).dimensions || {})
+    .filter(([d, spec]) => d !== except && spec?.index !== false && String(spec?.type || '').toLowerCase() !== 'time')
+    .map(([d]) => d);
+  const expected = c.facts.reduce((n, f) => n + c.eventProps(f).length + catDims(f, c.eventNameColumn(f)).length, 0)
+    + c.modelKeys().filter((k) => !c.isFact(k)).reduce((n, k) => n + catDims(k).length, 0);
+  assert.equal(vi.indexed_properties, expected, '[exact coverage] one prop_stats row per indexable property/attribute');
+  // …and the persisted counts equal what the run itself reported (DB COUNT == run counters).
+  assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed, '[exact coverage] DB count == the run\'s properties_indexed');
+  assert.equal(vi.total_values, vi.last_successful_run.values_written, '[exact coverage] DB count == the run\'s values_written');
   // jobs section present (no background query jobs ran in this suite).
   assert.equal(typeof out.tasks.total, 'number');
   assert.ok(Array.isArray(out.tasks.running));
@@ -427,6 +458,12 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   const apps = Object.fromEntries((ov.bundles || []).map((b) => [b.bundle, b.event_rows]));
   assert.equal(apps['com.omg.wordsearch'], 131, JSON.stringify(ov.bundles));
   assert.equal(apps['com.omg.colorfit'], 53, JSON.stringify(ov.bundles));
+  // the same overview, as end-to-end.test.js's '1a. semantic_index overview lists models + event
+  // names (no column dump)' read it: each events source lists ITS own event names, never merged
+  assert.ok(ov.models.find((m) => m.key === 'events'), '[overview] events model present');
+  assert.ok(ov.event_names.events.includes('ad_finished'), '[overview] the events source lists its own event names incl. ad_finished');
+  assert.ok(ov.event_names.crashlytics.includes('fatal_crash'), '[overview] the crash source lists ITS own event names, not merged into one list');
+  assert.equal(ov.models.find((m) => m.key === 'events').physical_columns, undefined, '[overview] stays compact');
 
   // colorfit = only level_started/level_completed → level_id populated, ad_type EMPTY.
   const colorfit = await engine.semantic_index({ bundle: 'com.omg.colorfit' });

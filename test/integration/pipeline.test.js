@@ -41,22 +41,8 @@ const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-// where -> compute (an event property) -> join -> aggregate(group_by)
-test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await run([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
-  ]);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  const by = Object.fromEntries(r.rows.map((x) => [String(x.country), num(x.revenue)]));
-  assert.equal(by.US, 35);
-  assert.equal(by.GB, 25);
-  assert.equal(by.BR, 25);
-  assert.equal(r.rows.reduce((s, x) => s + num(x.revenue), 0), 85);
-});
+// (where -> compute (an event property) -> join -> aggregate(group_by), IAP revenue by country
+// US 35 / GB 25 / BR 25: the first unpivot test reads it off the rows it folds.)
 
 // unnest a FLAT array column stored as a JSON-encoded STRING (mirrors the real
 // warehouse: words_selected lands as text like '["cat","dog"]'). meta.mcp.array
@@ -195,27 +181,47 @@ test('pipeline pivot: a numeric column pivots by number, a missing value is a co
   assert.ok(pivoted.rows.some((row) => num(row.s1) > 0), 'session 1 is counted');
 });
 
-// statistical aggregates over the 8 IAP prices [5,5,5,10,10,10,20,20]
-test('pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5', opts, async (t) => {
+// ONE ungrouped aggregate over the 8 IAP prices [5,5,5,10,10,10,20,20] carries what were four
+// tests: the statistical aggregates, compute arithmetic, a constant column, and approx_count_distinct
+// (HLL++: BigQuery APPROX_COUNT_DISTINCT; DuckDB exact).
+test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    // compute: scalar arithmetic over a derived column
+    { stage: 'compute', name: 'double_price', expr: { fn: 'mul', args: [{ column: 'price' }, { value: 2 }] } },
+    // compute const: a literal numeric column
+    { stage: 'compute', name: 'one', expr: { value: 1 } },
     { stage: 'aggregate', group_by: [], measures: [
       { name: 'n', agg: 'count' },
       { name: 'med', agg: 'median', column: 'price' },
       { name: 'sd', agg: 'stddev', column: 'price' },
       { name: 'p90', agg: 'percentile', column: 'price', percentile: 0.9 },
       { name: 'p25', agg: 'percentile', column: 'price', percentile: 0.25 },
+      { name: 'd', agg: 'sum', column: 'double_price' },
+      { name: 's', agg: 'sum', column: 'price' },
+      { name: 'rows', agg: 'sum', column: 'one' },
+      { name: 'payers', agg: 'approx_count_distinct', column: 'player_id_of_internal' },
+      { name: 'exact', agg: 'count_distinct', column: 'player_id_of_internal' },
     ] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const row = r.rows[0];
-  assert.equal(num(row.n), 8);
-  assert.equal(num(row.med), 10);
-  assert.ok(Math.abs(num(row.sd) - 6.23176) < 1e-3, `stddev=${row.sd}`);
-  assert.equal(num(row.p90), 20);
-  assert.equal(num(row.p25), 5);
+  // 'pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5'
+  assert.equal(num(row.n), 8, '[statistical aggregates] n');
+  assert.equal(num(row.med), 10, '[statistical aggregates] median');
+  assert.ok(Math.abs(num(row.sd) - 6.23176) < 1e-3, `[statistical aggregates] stddev=${row.sd}`);
+  assert.equal(num(row.p90), 20, '[statistical aggregates] p90');
+  assert.equal(num(row.p25), 5, '[statistical aggregates] p25');
+  // 'pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)'
+  assert.equal(num(row.d), 170, '[compute arithmetic] sum(price*2)');
+  assert.equal(num(row.s), 85, '[compute arithmetic] sum(price)');
+  // 'pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)'
+  assert.equal(num(row.rows), 8, '[compute const] the constant column sums to the row count');
+  // 'pipeline approx_count_distinct: distinct payers = 7 (exact on DuckDB)': u1,u3,u5,u7,u9,u10,u11
+  assert.equal(num(row.payers), 7, '[approx_count_distinct] distinct payers');
+  assert.equal(num(row.exact), 7, '[approx_count_distinct] the exact count agrees on this small set');
 });
 
 // compute elapsed_days: whole 24-HOUR buckets between two timestamps (retention-day), NOT
@@ -240,20 +246,6 @@ test('pipeline elapsed_days: 24h buckets (25h=1, 47h59m=1, 48h=2, negative→0)'
   assert.equal(num(row.d48h), 2);
   assert.equal(num(row.dneg), 0);
   assert.equal(num(row.draw), -2);
-});
-
-// compute: scalar arithmetic over a derived column
-test('pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await run([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'compute', name: 'double_price', expr: { fn: 'mul', args: [{ column: 'price' }, { value: 2 }] } },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'd', agg: 'sum', column: 'double_price' }, { name: 's', agg: 'sum', column: 'price' }] },
-  ]);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(num(r.rows[0].d), 170);
-  assert.equal(num(r.rows[0].s), 85);
 });
 
 // compute window: row_number per user to find repeat purchasers
@@ -338,18 +330,6 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   assert.deepEqual(rolls, [5, 15]);
 });
 
-// approx_count_distinct (HLL++): BigQuery APPROX_COUNT_DISTINCT; DuckDB exact
-test('pipeline approx_count_distinct: distinct payers = 7 (exact on DuckDB)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await run([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'payers', agg: 'approx_count_distinct', column: 'player_id_of_internal' }, { name: 'exact', agg: 'count_distinct', column: 'player_id_of_internal' }] },
-  ]);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(num(r.rows[0].payers), 7); // u1,u3,u5,u7,u9,u10,u11
-  assert.equal(num(r.rows[0].exact), 7); // exact fallback agrees on this small set
-});
-
 // HLL sketches are ADDITIVE: per-product sketches MERGE to the true distinct count
 // (deduping the overlap), whereas summing per-product distinct counts double-counts.
 test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum = 8)', opts, async (t) => {
@@ -398,18 +378,6 @@ test('pipeline unnest struct + json_field: reward item/qty extracted together', 
   assert.ok(grants.gem >= 1 && grants.gem < 25); // gem only on level-1 completions
   assert.equal(qty.gem, 2 * grants.gem); // each gem reward qty = 2 → qty extracted correctly
   assert.equal(qty.coin, 125 + 5 * grants.gem); // level-1 coin=10, others=5: 5*25 + 5*gemCount
-});
-
-// compute const: a literal numeric column summed = row count
-test('pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await run([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'one', expr: { value: 1 } },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'rows', agg: 'sum', column: 'one' }] },
-  ]);
-  assert.equal(r.ok, true, JSON.stringify(r));
-  assert.equal(num(r.rows[0].rows), 8);
 });
 
 // compute string ops: concat a product_id with a string constant, upper-cased
@@ -554,8 +522,11 @@ test('pipeline window partition_by { entity }: the same rows as the key column',
   assert.deepEqual(counts(byEntity), { 1: 7, 2: 1 }); // 7 payers, one of them (u1) twice
 });
 
-// ... |> UNPIVOT: fold measures back into (metric, value) rows
-test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, async (t) => {
+// ... |> UNPIVOT: fold measures back into (metric, value) rows. The stages before the unpivot are
+// where -> compute (an event property) -> join -> aggregate(group_by): the IAP revenue by country,
+// read off the folded 'revenue' rows (it was a test of its own, 'pipeline aggregate: IAP revenue by
+// country = US35 / GB25 / BR25').
+test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35; IAP revenue by country = US35 / GB25 / BR25', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
@@ -571,6 +542,13 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   // every country contributes exactly the two folded metrics
   const usRows = r.rows.filter((x) => String(x.country) === 'US');
   assert.equal(usRows.length, 2);
+  // 'pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25'
+  const revenue = r.rows.filter((x) => String(x.metric) === 'revenue');
+  const by = Object.fromEntries(revenue.map((x) => [String(x.country), num(x.value)]));
+  assert.equal(by.US, 35, '[aggregate by country] US');
+  assert.equal(by.GB, 25, '[aggregate by country] GB');
+  assert.equal(by.BR, 25, '[aggregate by country] BR');
+  assert.equal(revenue.reduce((s, x) => s + num(x.value), 0), 85, '[aggregate by country] sums to 85');
 });
 
 // unpivot returns exactly `keep` + the two columns it makes, and a row for every folded value — a

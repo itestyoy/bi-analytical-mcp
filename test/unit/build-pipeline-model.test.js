@@ -409,3 +409,123 @@ test('drill_result reads only a drawn task, by the path and level of its card �
   e.jobs.ready(task_id);
   await assert.rejects(() => e.drill_result({ task_id }), /not drawn/);
 });
+
+// ── add_steps refusals moved from the integration suites: each is decided by the schema and the
+// catalog when the step is added, before any SQL exists, so no warehouse is read. ──
+
+/** Start a draft over `source` and add one stage to it (a refusal throws). */
+async function addOne(e, source, stage) {
+  const s = await e.build_pipeline_model({ action: 'start', name: 'guard_step', source });
+  return e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
+}
+
+// (from test/integration/declared-joins.test.js)
+test('join guards: an undeclared relationship, a self-join and a top-level on are all rejected', async () => {
+  const e = engine();
+  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }),
+    /`stages\.0\.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
+  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
+  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property 'on'/, 'how the rows match is one field, via: a relationship or { on }');
+});
+
+// (from test/integration/declared-joins.test.js, 48.) Every way a name can end up used twice is
+// refused, with the reason and the rename. The join key is called out separately: its value is the
+// same on both sides, so the copy is not something to rename — it is something to drop. (The rename
+// the error prints, built with both sides present, is mcp-end-to-end.test.js #5(c).)
+test('48. duplicate names and unknown columns are refused with the fix', async () => {
+  const e = engine();
+  // (a) attrs missing entirely — the error lists what the model actually offers.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'join', with: 'acquisition', via: 'user' }),
+    (err) => {
+      assert.match(err.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s, '(a) attrs missing');
+      return true;
+    },
+  );
+  // (b) a column the joined model does not have.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: [{ column: 'cost' }, { column: 'nope' }] }),
+    /`stages\.0\.attrs\.1\.column` must be one of: .*cost/s,
+    '(b) a column the joined model does not have',
+  );
+  // (c) a name the pipeline already carries, holding DIFFERENT data → rename it.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }),
+    (err) => {
+      assert.match(err.message, /already has a column named 'event_name'/, '(c) the name already carried');
+      assert.match(err.message, /hold different data.*name: 'events_event_name'/s, '(c) the rename to apply');
+      return true;
+    },
+  );
+  // (d) the same name, but it is the JOIN KEY → the pipeline's column already holds that value.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'player_id_of_internal' }] }),
+    /is the join key.*holds the same value — drop it from attrs/s,
+    '(d) the join key',
+  );
+  // (e) two entries resolving to one name.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', {
+      stage: 'join', with: 'events', via: 'ad_funnel_rewarded',
+      attrs: [{ column: 'event_id', name: 'x' }, { column: 'tracking_id', name: 'x' }],
+    }),
+    /'event_id' and 'tracking_id' would both be named 'x'/,
+    '(e) two entries, one name',
+  );
+});
+
+// (from test/integration/crashlytics-fact.test.js) A funnel runs over ONE fact: an event of the
+// OTHER fact is rejected outright rather than silently matching nothing.
+test('an event of the other fact is rejected in a crash-fact funnel', async () => {
+  const e = engine();
+  const a = await addOne(e, 'crashlytics', {
+    stage: 'match_recognize',
+    partition_by: ['player_id_of_internal'],
+    steps: [
+      { name: 'launch', event_name: ['first_launch'] },
+      { name: 'crash', event_name: ['fatal_crash'] },
+    ],
+  }).catch((err) => ({ error: { message: err.message } }));
+  assert.ok(a.error, 'a cross-fact step is refused');
+  assert.match(String(a.error.message), /first_launch/);
+});
+
+// (from test/integration/crashlytics-complex-types.test.js, 14.) A complex op on a column that is
+// not complex is refused, naming what the column IS — rather than building array SQL over text and
+// failing in the warehouse.
+test('14. complex ops on a scalar column are refused with what it actually is', async () => {
+  const e = engine();
+  // an unnest names only an array property: a scalar one is not among those it offers
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'unnest', property: 'issue_title_of_event_data', name: 'x' }),
+    /`stages\.0\.property` must be one of: .*breadcrumbs_of_event_data/,
+  );
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'compute', name: 'x', expr: { fn: 'array_length', property: 'issue_title_of_event_data' } }),
+    /array_length: 'issue_title_of_event_data' is declared as string, not an array/,
+  );
+  // the custom-keys column holds a JSON OBJECT, so an array op is wrong there too — and the
+  // message points at the read that IS right for an object.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'compute', name: 'x', expr: { fn: 'array_contains', property: 'custom_keys_of_event_data', item: 'wifi' } }),
+    /array_contains: 'custom_keys_of_event_data'.*not an array.*fn: "event_property", property, field/s,
+  );
+  // element_at needs a native array, not the raw JSON string.
+  await assert.rejects(
+    () => addOne(e, 'crashlytics', { stage: 'compute', name: 'x', expr: { fn: 'element_at', args: [{ column: 'breadcrumbs_of_event_data' }], index: 1 } }),
+    /not an array — produce an array first.*json_parse_array/s,
+  );
+});
+
+// (from test/integration/match-recognize.test.js) A dry run renders the pipeline and builds nothing:
+// no runner is wired here, so nothing could be built.
+test('_buildPipeline: dry_run returns SQL without building', async () => {
+  const e = engine();
+  const dr = await e._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] }] } });
+  assert.equal(dr.dry_run, true);
+  assert.equal(dr.kind, 'pipeline');
+  assert.equal(typeof dr.model_sql, 'string');
+  // SQL is rendered in the ACTIVE warehouse dialect only — no second-dialect blob.
+  assert.equal(dr.dialect, e.catalog.dialect);
+  assert.equal(dr.model_sql_bigquery, undefined);
+});

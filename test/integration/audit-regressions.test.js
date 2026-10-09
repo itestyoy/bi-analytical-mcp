@@ -6,25 +6,30 @@
 // about a refusal, the test asserts the refusal AND, next to it, the number the correct call
 // returns, so the guard is shown to protect a real answer.
 //
-// Sections:
-//   A (1-10)  { model, attribute, via } — the attribute addressed by where it lives; the
-//             `<entity>__<attribute>` spelling is resolved from the schema, never typed;
-//   B (11-16) the filter-value guard reaches a joined attribute through its OWNER;
-//   C (17-20) relationship labelling: owned vs pipeline-only, and the path each one gives;
-//   D (21-23) what a memory note is about, in the qualified form; ambiguity reported;
-//   E (24-27) grounding prunes amounts, measures and time axes with their columns;
-//   F (28-30) a column that is BOTH an amount and an attribute;
-//   G (31-32) MCP_DB_RESET is a clean slate even over a v1 database;
-//   H (33-35) no anchor: roles are identity, sources are named;
-//   I (36-37) no join key is an attribute by NAME;
-//   J (38-39) search covers the attributes of events sources;
-//   K (40-43) one property-expression rule: governed, pipeline and index agree;
-//   L (44-45) run rows carry their source; same-named properties stay apart;
-//   M (46)    the guide's variant trigger names real relationships that really join;
-//   N (47-49) data freshness comes from the sources whose measures are read;
-//   O (50-52) per-app coverage per source;
-//   P (53-57) nothing declared about events or values: the index is the truth;
-//   Q (58-60) the indexer scans each source on its own axis.
+// The findings share their warehouse work: one query is grouped by several attributes and each
+// finding reads its own marginal of it, one catalog variant carries several mutations, and the
+// index is scanned once. Every assertion message starts with the number of the finding it proves.
+//
+// Scenarios, in file order (the letters are the audit's sections):
+//   S1  (A/C/J/K/N) one events x users query: the country, app, ad_type and month splits, the paths
+//                   the structured references resolved to, and the freshness of the events read;
+//   S2  (B)         the filter-value guard over the real index: five refusals, and the correctly
+//                   cased values answer;
+//   S3  (A/C)       a fact that OWNS ad_funnel: its attributes reached without and with via, and
+//                   both sides label the relationship alike;
+//   19  (C)         a relationship nobody owns is pipeline only, and the pipeline join gives 14 rows;
+//   S5  (E/H)       grounding prunes an amount, a governed measure and a time axis with their
+//                   columns; an events role not called 'events' loads; what survives answers;
+//   S6  (F/N)       a column that is BOTH an amount and an attribute; a spend task joined to
+//                   installs is as fresh as spend;
+//   49b (N)         freshness over the recent partitions, and over a source quiet for longer;
+//   S9  (J/N)       the crash source in a two-source task: device_model and event_name splits,
+//                   per-source freshness;
+//   S10 (I/K)       one events pipeline: the session key, an extracted property and a 64-bit id,
+//                   all read back exact;
+//   S7  (G/L/O/P/Q) the index before() built over a reset store: wiped, then filled; watermarks,
+//                   run rows and apps per source; the property and event views;
+//   S8  (Q)         a second merge pass finds no new rows — LAST: it rewrites the run S7 reads.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -41,7 +46,6 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex } from '../../src/value-index.js';
 import { BackgroundIndexer } from '../../src/value-indexer.js';
-import { openStore } from '../../src/store.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
@@ -53,15 +57,21 @@ const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.
 const opts = { timeout: 600000 };
 
 let wh; let backend; let ctxs; let engine; let catalog;
-let evCtx; let evUsersCtx; let acqUsersCtx; let evCrashCtx;
+let indexer;                             // before()'s merge indexer over engine.valueIndex (S8 runs it again)
+let wipedBeforeScan;                     // what the reset store held for users.country before the scan
+let evUsersCtx; let evCrashCtx;
 let ownerEngine; let ownerCtx;           // the crash source OWNS ad_funnel (type: unique)
 let bothEngine; let bothCtx;             // acquisition.clicks is measure AND dimension
-let renamedEngine;                       // the events role is called 'analytics'
 let seq = 0;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [r[keyCol] == null ? 'none' : String(r[keyCol]), num(r[valCol])]));
-const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
+/** The sum of a measure per value of ONE group column of a multi-column result (null → 'none'). */
+const marginal = (rows, keyCol, valCol) => {
+  const out = {};
+  for (const r of rows) { const k = r[keyCol] == null ? 'none' : String(r[keyCol]); out[k] = (out[k] ?? 0) + num(r[valCol]); }
+  return out;
+};
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (ctx, input, eng = engine) => eng.query_semantic_model({ context_id: ctx, ...input });
@@ -102,20 +112,31 @@ before(async () => {
   ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
-  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
+
+  // MCP_DB_RESET over a store that already holds a value: the engine opens its store with reset,
+  // the production path, so the index starts empty (S7 asserts the seeded value is gone and the
+  // scan filled the real ones).
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite');
+  const seeded = new ValueIndex({ dbPath });
+  seeded.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
+  seeded.close();
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath, resetDb: true }));
+  wipedBeforeScan = engine.valueIndex.stats('users', 'country');
+
   // The value index is REAL: a full pass over the warehouse, awaited, so the guard and the
-  // coverage views below answer from measured data.
-  const indexer = new BackgroundIndexer({ catalog, runner: backend, index: engine.valueIndex, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
+  // coverage views below answer from measured data. With merge on, a first pass over an empty
+  // index scans every source whole and records each one's watermark; S8 runs the second pass.
+  indexer = new BackgroundIndexer({ catalog, runner: backend, index: engine.valueIndex, baseProjectDir: BASE, intervalMs: 0, merge: true, maxValues: 50, logger: () => {} });
   await indexer.refresh();
 
-  evCtx = (await evtsTask(engine, 'aev')).context_id;
-  evUsersCtx = (await evtsTask(engine, 'aeu', ['users'])).context_id;
-  const acq = await engine.build_semantic_model({
-    name: 'aacq',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'users' }],
-    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
+  // events x users, ad_type declared as a task dimension: S1 reads every split of one query
+  const eu = await engine.build_semantic_model({
+    name: 'aeu',
+    semantic_models: [{ from: 'events', dimensions: [{ field: 'ad_type_of_event_data' }], measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
-  acqUsersCtx = acq.context_id;
+  assert.equal(eu.parse.ok, true, `40: a task declaring ad_type as a dimension parses: ${JSON.stringify(eu.parse)}`);
+  evUsersCtx = eu.context_id;
   const both = await engine.build_semantic_model({
     name: 'aboth',
     semantic_models: [{ from: 'events', measures: [{ name: 'launches', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { from: 'crashlytics', measures: [{ name: 'reports', agg: 'count' }] }],
@@ -129,161 +150,108 @@ before(async () => {
   }));
   ownerCtx = (await evtsTask(ownerEngine, 'aown', ['crashlytics', 'users'])).context_id;
 
+  // spend with installs loaded beside it (S6: the clicks splits, and freshness from spend alone)
   ({ engine: bothEngine } = variant((M) => {
     const clicks = M.fct_player_acquisition.columns.find((c) => c.name === 'clicks');
     setMcp(clicks, { measure: true, dimension: {} });
   }));
   const bt = await bothEngine.build_semantic_model({
     name: 'aclk',
-    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }, { from: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'click_total', type: 'simple', measure: 'click_total' }],
   });
   assert.equal(bt.parse.ok, true, JSON.stringify(bt.parse));
   bothCtx = bt.context_id;
-
-  ({ engine: renamedEngine } = variant((M) => { mcp(M.fct_analytics_events).role = 'analytics'; }));
 }, opts);
 
 after(async () => { backend?.close?.(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
 
-// ═══════════ A. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES ═══════════
+// ═══════════ S1. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES — ONE QUERY, EVERY SPLIT ═══════════
 
-test('1. { model: users, attribute: country } returns exactly what users.country returns', opts, async (t) => {
+test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / month marginals, resolved paths, freshness', opts, async (t) => {
   if (skip(t)) return;
-  const a = await q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
-  const b = await q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(b.ok, true, JSON.stringify(b.error));
-  const byA = mapCol(a.rows, groupCol(a, 'aeu_evts'), 'aeu_evts');
-  const byB = mapCol(b.rows, groupCol(b, 'aeu_evts'), 'aeu_evts');
-  assert.deepEqual(byB, byA);
-  assert.deepEqual(byB, { US: 67, GB: 57, DE: 31, BR: 29 });
-});
-
-test('2. the response echoes the path the structured reference resolved to', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.deepEqual(r.group_by_resolved, { 'users.country': 'users_country' });
-  assert.ok(r.columns.some((c) => c.name.includes('country')), 'the result column carries the resolved name');
-});
-
-test('3. a where clause addressed by model + attribute: GB has 57 events', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
+  const r = await q(evUsersCtx, {
+    metrics: ['aeu_evts'],
+    group_by: [
+      { model: 'users', attribute: 'country' },
+      { model: 'events', attribute: 'bundle_id' },
+      { model: 'events', attribute: 'ad_type_of_event_data' },
+      { time: 'metric_time', grain: 'month' },
+    ],
+  });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].aeu_evts), 57);
+  const res = r.group_by_resolved || {};
+  // 2. the response echoes the path each structured reference resolved to (metric_time is no attribute)
+  assert.deepEqual(res, { 'users.country': 'users_country', 'events.bundle_id': 'events_bundle_id', 'events.ad_type_of_event_data': 'events_ad_type_of_event_data' },
+    `2: the response echoes the path each structured reference resolved to: ${JSON.stringify(res)}`);
+  assert.ok(r.columns.some((c) => c.name.includes('country')), '2: the result column carries the resolved name');
+  // 1/17. { model: users, attribute: country } returns what users.country holds — the governed path the users model promises
+  assert.deepEqual(marginal(r.rows, res['users.country'], 'aeu_evts'), { US: 67, GB: 57, DE: 31, BR: 29 }, '1/17: events per users.country');
+  // 10/17. a structured attribute and a time grain together: one month, four countries, 184 events
+  assert.equal(sumCol(r.rows, 'aeu_evts'), 184, '10/17: every event counted once across the splits');
+  const monthCol = r.columns.map((c) => c.name).find((n) => n.startsWith('metric_time'));
+  assert.ok(monthCol, `10: the month is a result column: ${r.columns.map((c) => c.name)}`);
+  assert.equal(new Set(r.rows.map((row) => String(row[monthCol]))).size, 1, '10: the events fall in one month');
+  assert.equal(new Set(r.rows.map((row) => row[res['users.country']])).size, 4, '10: four countries in the one month');
+  // 4/38. the source's OWN attribute under its identity: bundle_id splits 131 / 53
+  assert.deepEqual(marginal(r.rows, res['events.bundle_id'], 'aeu_evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 }, '4/38: bundle_id splits 131 / 53');
+  // 40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8 / banner 6
+  const byAd = marginal(r.rows, res['events.ad_type_of_event_data'], 'aeu_evts');
+  assert.equal(byAd.rewarded, 10, `40: rewarded 10 (${JSON.stringify(byAd)})`);
+  assert.equal(byAd.interstitial, 8, '40: interstitial 8');
+  assert.equal(byAd.banner, 6, '40: banner 6');
+  // 47. an events task is current through 2026-01-09, the latest device_time (users lends attributes, not measures)
+  assert.equal(r.provenance.source, 'events', '47: the freshness is the events source\'s');
+  assert.equal(dayOf(r.provenance.data_freshness), '2026-01-09', '47: current through the latest device_time');
 });
 
-test("4. the source's OWN attribute under its identity: bundle_id splits 131 / 53", opts, async (t) => {
+// ═══════════ S2. THE VALUE GUARD REACHES A JOINED ATTRIBUTE THROUGH ITS OWNER ═══════════
+
+test('S2 (B). the value guard over the real index: five refusals, and the correct values answer 57 / 124 / 31 / 53', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'bundle_id' }] });
+  const country = { model: 'users', attribute: 'country' };
+  const bundle = { model: 'events', attribute: 'bundle_id' };
+  const filtered = (field, op, value) => ({ metrics: ['aeu_evts'], where: [{ field, op, value }] });
+  // the guard reads the keys the REAL indexer wrote: (users, country) and (events, bundle_id)
+  await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'gb')), /different casing.*'GB'/s, '11: a wrong-cased country on users.country is rejected with the real casing');
+  await assert.rejects(() => q(evUsersCtx, filtered(country, 'in', ['GB', 'us'])), /different casing/, '13: an IN list is checked value by value');
+  await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'XX')), /does not occur in this column/, '14: a value absent from a fully indexed small set is rejected outright');
+  await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'De')), /different casing.*'DE'/s, '15: the guard applies to the structured reference too');
+  await assert.rejects(() => q(evUsersCtx, filtered(bundle, 'eq', 'COM.OMG.COLORFIT')), /different casing.*'com\.omg\.colorfit'/s, "16: the source's own attribute is guarded against its own indexed values");
+  // …and the correctly cased values answer
+  const r = await q(evUsersCtx, { ...filtered(country, 'in', ['GB', 'US', 'DE']), group_by: [country] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(mapCol(r.rows, groupCol(r, 'aev_evts'), 'aev_evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 });
-  assert.equal(r.group_by_resolved['events.bundle_id'], 'events_bundle_id');
+  const by = mapCol(r.rows, r.group_by_resolved['users.country'], 'aeu_evts');
+  assert.equal(by.GB, 57, `3/12: a where addressed by model + attribute keeps GB's 57 events (${JSON.stringify(by)})`);
+  assert.equal(by.GB + by.US, 124, '13: the IN list GB + US = 124');
+  assert.equal(by.DE, 31, '15: the correctly cased DE returns 31');
+  assert.ok(!('BR' in by), `3: the where keeps only the listed countries (${JSON.stringify(by)})`);
+  const own = await q(evUsersCtx, filtered(bundle, 'eq', 'com.omg.colorfit'));
+  assert.equal(own.ok, true, JSON.stringify(own.error));
+  assert.equal(num(own.rows[0].aeu_evts), 53, "16: the source's own attribute, correctly cased, returns 53");
 });
 
-test('5. an attribute the model does not have is refused, listing the ones it has', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'shoe_size' }] }),
-    /`group_by.0.attribute` must be one of: .*country/s);
-});
+// ═══════════ S3 / 19. RELATIONSHIP LABELLING AND THE PATH IT GIVES ═══════════
 
-test('6. a model the task did not load is refused with the fix: an item { from } that loads it', opts, async (t) => {
+test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labelled on both sides', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'users', attribute: 'country' }] }),
-    /needs model 'users'.*semantic_models: \[\{ from: 'users' \}\]/s);
-});
-
-test('7. an attribute of an owned FACT is reached through the relationship the source declares', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }, ownerEngine);
+  const r = await q(ownerCtx, {
+    metrics: ['aown_evts'],
+    group_by: [{ model: 'crashlytics', attribute: 'app_version' }, { model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
+  }, ownerEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(mapCol(r.rows, groupCol(r, 'aown_evts'), 'aown_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 });
-  assert.equal(r.group_by_resolved['crashlytics.app_version'], 'crashlytics_app_version', 'resolved through ad_funnel, not through the crash identity');
-});
-
-test('8. via names the relationship explicitly and gives the same numbers', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }] }, ownerEngine);
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(mapCol(r.rows, groupCol(r, 'aown_evts'), 'aown_evts'), { none: 176, iphone: 14 });
-});
-
-test('9. a via that is not a relationship to that model is refused, listing the real ones', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(ownerCtx, { metrics: ['aown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'session' }] }, ownerEngine),
-    /`group_by.0.via` must be one of: .*ad_funnel/s);
-});
-
-test('10. a structured attribute and a time grain together: one month, 184 events', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'country' }, { time: 'metric_time', grain: 'month' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(r.rows.length, 4, 'four countries in the one month');
-  assert.equal(sumCol(r.rows, 'aeu_evts'), 184);
-});
-
-// ═══════════ B. THE VALUE GUARD REACHES A JOINED ATTRIBUTE THROUGH ITS OWNER ═══════════
-
-test('11. a wrong-cased country on users.country is rejected with the real casing', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'gb' }] }),
-    /different casing.*'GB'/s);
-});
-
-test('12. …and the correctly cased value returns 57', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
-  assert.equal(num(r.rows[0].aeu_evts), 57);
-});
-
-test('13. an IN list is checked value by value: GB + US = 124', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'US'] }] });
-  assert.equal(num(r.rows[0].aeu_evts), 124);
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['GB', 'us'] }] }), /different casing/);
-});
-
-test('14. a value absent from a fully indexed small set is rejected outright', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'XX' }] }),
-    /does not occur in this column/);
-});
-
-test('15. the guard applies to the structured reference too', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'De' }] }),
-    /different casing.*'DE'/s);
-  const ok = await q(evUsersCtx, { metrics: ['aeu_evts'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'DE' }] });
-  assert.equal(num(ok.rows[0].aeu_evts), 31);
-});
-
-test("16. the source's own attribute is guarded against its own indexed values", opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'COM.OMG.COLORFIT' }] }),
-    /different casing.*'com\.omg\.colorfit'/s);
-  const ok = await q(evCtx, { metrics: ['aev_evts'], where: [{ field: { model: 'events', attribute: 'bundle_id' }, op: 'eq', value: 'com.omg.colorfit' }] });
-  assert.equal(num(ok.rows[0].aev_evts), 53);
-});
-
-// ═══════════ C. RELATIONSHIP LABELLING AND THE PATH IT GIVES ═══════════
-
-test('17. the users model reports `user` as owned, and the governed path it promises works', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'users' });
-  const rel = v.relationships.find((r) => r.entity === 'user');
-  assert.equal(rel.owned_here, true);
-  assert.match(rel.use, /^owned here — other models point at it/);
-  assert.ok(!/No model owns 'user'/.test(v.join_note || ''));
-  const r = await q(evUsersCtx, { metrics: ['aeu_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(sumCol(r.rows, 'aeu_evts'), 184);
-});
-
-test('18. the events model reports `user` as metric query + pipeline, pointing at users', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'events' });
-  const rel = v.relationships.find((r) => r.entity === 'user');
-  assert.equal(rel.use, 'metric query + pipeline');
-  assert.equal(rel.joins, 'users');
+  // 7. an attribute of an owned FACT is reached through the relationship the source declares
+  assert.equal(r.group_by_resolved['crashlytics.app_version'], 'crashlytics_app_version', '7: resolved through ad_funnel, not through the crash identity');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.app_version'], 'aown_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, '7: events per crash app_version, without via');
+  // 8. via names the relationship explicitly and gives the same join's numbers
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aown_evts'), { none: 176, iphone: 14 }, '8: events per crash device_model, via ad_funnel');
+  // 20. with an owner declared, both sides label the relationship consistently
+  const crash = await ownerEngine.semantic_index({ source: 'crashlytics' });
+  assert.match(crash.relationships.find((x) => x.entity === 'ad_funnel').use, /^owned here — other models point at it/, '20: the crash side owns ad_funnel');
+  const events = await ownerEngine.semantic_index({ source: 'events' });
+  const rel = events.relationships.find((x) => x.entity === 'ad_funnel');
+  assert.equal(rel.use, 'metric query + pipeline', '20: the events side reaches it by metric query and pipeline');
+  assert.equal(rel.joins, 'crashlytics', '20: the events side points at the owner');
 });
 
 test('19. a relationship nobody owns is pipeline only — and the pipeline join gives 14 rows', opts, async (t) => {
@@ -297,290 +265,78 @@ test('19. a relationship nobody owns is pipeline only — and the pipeline join 
   assert.deepEqual(mapCol(rows, 'event_name', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
 });
 
-test('20. with an owner declared, both sides label the relationship consistently', opts, async (t) => {
+// ═══════════ S5. GROUNDING, AND NO ANCHOR ═══════════
+
+test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time axis pruned; a renamed events role; what survives answers 17.50 / 17.50 / 184 and control 6 / variant_b 6", opts, async (t) => {
   if (skip(t)) return;
-  const crash = await ownerEngine.semantic_index({ source: 'crashlytics' });
-  assert.match(crash.relationships.find((r) => r.entity === 'ad_funnel').use, /^owned here — other models point at it/);
-  const events = await ownerEngine.semantic_index({ source: 'events' });
-  const rel = events.relationships.find((r) => r.entity === 'ad_funnel');
-  assert.equal(rel.use, 'metric query + pipeline');
-  assert.equal(rel.joins, 'crashlytics');
-});
-
-// ═══════════ D. WHAT A MEMORY NOTE IS ABOUT ═══════════
-
-test('21. a finding recorded about { source: events, event: ad_finished } surfaces on that event', opts, async (t) => {
-  if (skip(t)) return;
-  const saved = (await engine.memory({ action: 'record', notes: [{ note: 'ad_finished carries revenue; ad_started never does', about: [{ source: 'events', event: 'ad_finished' }] }] })).notes[0];
-  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }]);
-  const v = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
-  assert.ok((v.memory || []).some((m) => /ad_finished carries revenue/.test(m.note)), JSON.stringify(v.memory));
-});
-
-test('22. a finding on a qualified crash property surfaces on that property', opts, async (t) => {
-  if (skip(t)) return;
-  await engine.memory({ action: 'record', notes: [{ note: 'ANR seconds are only on anr reports', about: [{ source: 'crashlytics', property: 'anr_duration_of_event_data' }] }] });
-  const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
-  assert.ok((v.memory || []).some((m) => /ANR seconds/.test(m.note)), JSON.stringify(v.memory));
-});
-
-test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}.*\{ term \}/);
-});
-
-// ═══════════ E. GROUNDING ═══════════
-
-test('24. a declared amount the table lacks is pruned; the real one still sums to 17.50', opts, async (t) => {
-  if (skip(t)) return;
+  // four mutations that touch each other nowhere: two on acquisition, one on experiments, the events role renamed
   const { catalog: cat, engine: eng } = variant((M) => {
     M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
-  });
-  const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
-  assert.ok(pruned.acquisition.includes('amount:bonus_spend'), JSON.stringify(pruned));
-  assert.ok(!cat.aggregatableFields('acquisition').some((a) => a.name === 'bonus_spend'));
-  const c = await eng.build_semantic_model({ name: 'agr1', semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }], metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }] });
-  const r = await q(c.context_id, { metrics: ['agr1_cost'] }, eng);
-  assert.ok(Math.abs(num(r.rows[0].agr1_cost) - 17.5) < 1e-6);
-});
-
-test('25. a measure over the pruned amount is refused at validation, not in the warehouse', opts, async (t) => {
-  if (skip(t)) return;
-  const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', config: { meta: { mcp: { measure: { unit: 'usd' } } } } });
-  });
-  await groundCatalogToPhysical(cat, backend, BASE);
-  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
-    /bonus_spend|invalid input/);
-});
-
-test('26. a governed measure whose column is missing is pruned; the surviving one answers 17.50', opts, async (t) => {
-  if (skip(t)) return;
-  const { catalog: cat, engine: eng } = variant((M) => {
     mcp(M.fct_player_acquisition).measures.ghost_total = { expr: 'ghost_cost', agg: 'sum', unit: 'usd' };
-  });
-  const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
-  assert.ok(pruned.acquisition.includes('measure:ghost_total'), JSON.stringify(pruned));
-  assert.equal(cat.getModel('acquisition').measures.ghost_total, undefined);
-  const c = await eng.build_semantic_model({ name: 'agr3', metrics: [{ name: 'total_spend', type: 'simple', measure: 'total_spend' }] });
-  assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
-  const r = await q(c.context_id, { metrics: ['agr3_total_spend'] }, eng);
-  assert.ok(Math.abs(num(r.rows[0].agr3_total_spend) - 17.5) < 1e-6);
-});
-
-test('27. a time axis on a missing column is dropped and the model still joins: control 6 / variant_b 6', opts, async (t) => {
-  if (skip(t)) return;
-  const { catalog: cat, engine: eng } = variant((M) => {
     M.fct_experiment_assignments.columns.push({ name: 'ghost_time', data_type: 'timestamp', config: { meta: { mcp: { is_time: true } } } });
+    mcp(M.fct_analytics_events).role = 'analytics';
   });
-  assert.equal(cat.getModel('experiments').time?.column, 'ghost_time', 'declared before grounding');
+  assert.equal(cat.getModel('experiments').time?.column, 'ghost_time', '27: the time axis is declared before grounding');
+  assert.deepEqual([...eng.catalog.facts].sort(), ['analytics', 'crashlytics'], "33: an events source whose role is not called 'events' loads");
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
-  assert.ok(pruned.experiments.includes('(time axis)'), JSON.stringify(pruned));
-  assert.equal(cat.getModel('experiments').time, undefined);
-  const rows = await pipeRows('events', [
+  // 24. a declared amount the table lacks is pruned
+  assert.ok(pruned.acquisition.includes('amount:bonus_spend'), `24: the missing amount is pruned: ${JSON.stringify(pruned)}`);
+  assert.ok(!cat.aggregatableFields('acquisition').some((a) => a.name === 'bonus_spend'), '24: the pruned amount is no aggregatable field');
+  // 26. a governed measure whose column is missing is pruned
+  assert.ok(pruned.acquisition.includes('measure:ghost_total'), `26: the governed measure over a missing column is pruned: ${JSON.stringify(pruned)}`);
+  assert.equal(cat.getModel('acquisition').measures.ghost_total, undefined, '26: the pruned measure is gone from the model');
+  // 27. a time axis on a missing column is dropped
+  assert.ok(pruned.experiments.includes('(time axis)'), `27: the time axis over a missing column is pruned: ${JSON.stringify(pruned)}`);
+  assert.equal(cat.getModel('experiments').time, undefined, '27: the model has no time axis left');
+  // 25. a measure over the pruned amount is refused at validation, not in the warehouse
+  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
+    /bonus_spend|invalid input/, '25: a measure over the pruned amount is refused at validation');
+  // what survives builds and answers: the real amount, the surviving governed measure, the renamed source's count
+  const c = await eng.build_semantic_model({
+    name: 'agr',
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'analytics', measures: [{ name: 'n', agg: 'count' }] }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],
+  });
+  assert.equal(c.parse.ok, true, `26/33: the surviving measures and the renamed source parse: ${JSON.stringify(c.parse)}`);
+  const r = await q(c.context_id, { metrics: ['agr_cost', 'agr_total_spend', 'agr_n'] }, eng);
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(Math.abs(num(r.rows[0].agr_cost) - 17.5) < 1e-6, `24: the real amount still sums to 17.50 (${r.rows[0].agr_cost})`);
+  assert.ok(Math.abs(num(r.rows[0].agr_total_spend) - 17.5) < 1e-6, `26: the surviving governed measure answers 17.50 (${r.rows[0].agr_total_spend})`);
+  assert.equal(num(r.rows[0].agr_n), 184, "33: the source whose role is not called 'events' counts 184");
+  // 27. …and the model without its time axis still joins
+  const rows = await pipeRows('analytics', [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', agg: 'count_distinct', column: 'player_id_of_internal' }] },
   ], eng);
-  assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 });
+  assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 }, '27: the model without its time axis still joins: control 6 / variant_b 6');
 });
 
-// ═══════════ F. AN AMOUNT THAT IS ALSO AN ATTRIBUTE ═══════════
+// ═══════════ S6. AN AMOUNT THAT IS ALSO AN ATTRIBUTE; FRESHNESS FROM SPEND ═══════════
 
-test('28. cost grouped by the clicks VALUE: 9 clicks cost 5.25, 8 clicks 4.25, 0 clicks 0', opts, async (t) => {
+test('S6 (F/N). clicks is both an amount and an attribute; a spend task joined to installs is as fresh as spend', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { metrics: ['aclk_cost'], group_by: [{ model: 'acquisition', attribute: 'clicks' }] }, bothEngine);
+  const r = await q(bothCtx, { metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ model: 'acquisition', attribute: 'clicks' }] }, bothEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'aclk_cost'), 'aclk_cost');
-  assert.ok(Math.abs(by['9'] - 5.25) < 1e-6, JSON.stringify(by));
-  assert.ok(Math.abs(by['8'] - 4.25) < 1e-6);
-  assert.equal(by['0'], 0);
-  assert.ok(Math.abs(sumCol(r.rows, 'aclk_cost') - 17.5) < 1e-6);
-});
-
-test('29. …and clicks still sums as an amount: 64', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(bothCtx, { metrics: ['aclk_click_total'] }, bothEngine);
-  assert.equal(num(r.rows[0].aclk_click_total), 64);
-});
-
-test('30. the model view lists clicks both as an attribute and as an amount', opts, async (t) => {
-  if (skip(t)) return;
+  // 28. cost grouped by the clicks VALUE: 9 clicks cost 5.25, 8 clicks 4.25, 0 clicks 0
+  const by = mapCol(r.rows, r.group_by_resolved['acquisition.clicks'], 'aclk_cost');
+  assert.ok(Math.abs(by['9'] - 5.25) < 1e-6, `28: 9 clicks cost 5.25 (${JSON.stringify(by)})`);
+  assert.ok(Math.abs(by['8'] - 4.25) < 1e-6, '28: 8 clicks cost 4.25');
+  assert.equal(by['0'], 0, '28: 0 clicks cost 0');
+  assert.ok(Math.abs(sumCol(r.rows, 'aclk_cost') - 17.5) < 1e-6, '28: the groups sum to the 17.50 spent');
+  // 29. …and clicks still sums as an amount: 64
+  assert.equal(sumCol(r.rows, 'aclk_click_total'), 64, '29: clicks still sums as an amount');
+  // 48. a spend task joined to installs takes its freshness from spend, not from installs
+  assert.equal(r.provenance.source, 'acquisition', '48: users contributes attributes, not measures');
+  assert.equal(dayOf(r.provenance.data_freshness), '2026-01-05', '48: current through the latest spend day');
+  assert.equal(r.provenance.data_freshness_by_source, undefined, '48: one contributing source, no per-source split');
+  // 30. the model view lists clicks both as an attribute and as an amount
   const v = await bothEngine.semantic_index({ source: 'acquisition' });
-  assert.ok(v.dimensions.some((d) => d.name === 'clicks'));
-  assert.ok(v.aggregatable.some((a) => a.field === 'clicks'));
-  assert.equal(v.dimensions.find((d) => d.name === 'clicks').distinct_count, null, 'not profiled by THIS engine\'s index (separate store) — the attribute exists regardless');
+  assert.ok(v.dimensions.some((d) => d.name === 'clicks'), '30: clicks is listed as an attribute');
+  assert.ok(v.aggregatable.some((a) => a.field === 'clicks'), '30: clicks is listed as an amount');
+  assert.equal(v.dimensions.find((d) => d.name === 'clicks').distinct_count, null, '30: not profiled by THIS engine\'s index (separate store) — the attribute exists regardless');
 });
 
-// ═══════════ G. RESET IS A CLEAN SLATE ═══════════
-
-test('32. reset() over a fresh store leaves an empty index that the scan then fills', opts, async (t) => {
-  if (skip(t)) return;
-  const path = join(mkdtempSync(join(tmpdir(), 'aud-reset-')), 'vi.sqlite');
-  let index = new ValueIndex({ store: openStore({ dbPath: path }) });
-  index.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
-  index.close();
-  index = new ValueIndex({ store: openStore({ dbPath: path, reset: true }) });
-  assert.equal(index.stats('users', 'country'), null, 'wiped');
-  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
-  await bi.refresh();
-  const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
-  assert.deepEqual(vals, { US: 4, GB: 4, DE: 3, BR: 2 });
-  index.close();
-});
-
-// ═══════════ H. NO ANCHOR ═══════════
-
-test("33. an events source whose role is not called 'events' loads and counts 184", opts, async (t) => {
-  if (skip(t)) return;
-  assert.deepEqual([...renamedEngine.catalog.facts].sort(), ['analytics', 'crashlytics']);
-  const c = await renamedEngine.build_semantic_model({ name: 'aren', semantic_models: [{ from: 'analytics', measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
-  assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
-  const r = await q(c.context_id, { metrics: ['aren_n'] }, renamedEngine);
-  assert.equal(num(r.rows[0].aren_n), 184);
-});
-
-test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
-  if (skip(t)) return;
-  assert.throws(() => catalog.eventNames(), /a source is required/);
-  assert.deepEqual([...catalog.eventNames('crashlytics')].sort(), ['anr', 'fatal_crash', 'non_fatal']);
-});
-
-// ═══════════ I. NO JOIN KEY IS AN ATTRIBUTE BY NAME ═══════════
-
-test('36. the session key is not a groupable path of the events source', opts, async (t) => {
-  if (skip(t)) return;
-  assert.ok(!catalog.modelDimensionColumns('events').includes('session_number'));
-  await assert.rejects(() => q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'session_number' }] }), /`group_by.0.attribute` must be one of/);
-});
-
-test('37. …a pipeline reads the key like any column: sessions 1..4 hold 150 / 26 / 4 / 4 events', opts, async (t) => {
-  if (skip(t)) return;
-  const rows = await pipeRows('events', [{ stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', agg: 'count' }] }]);
-  assert.deepEqual(mapCol(rows, 'session_number', 'n'), { 1: 150, 2: 26, 3: 4, 4: 4 });
-});
-
-// ═══════════ J. SEARCH COVERS EVENTS-SOURCE ATTRIBUTES ═══════════
-
-test('38. search finds bundle_id on the events source, and the attribute groups 131 / 53', opts, async (t) => {
-  if (skip(t)) return;
-  const s = await engine.semantic_index({ search: 'bundle_id' });
-  assert.ok(s.dimension_matches.some((d) => d.source === 'events' && d.property === 'bundle_id'), JSON.stringify(s.dimension_matches));
-  const r = await q(evCtx, { metrics: ['aev_evts'], group_by: [{ model: 'events', attribute: 'bundle_id' }] });
-  assert.deepEqual(mapCol(r.rows, groupCol(r, 'aev_evts'), 'aev_evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 });
-});
-
-test('39. device_model is found on users AND on crashlytics; the crash copy counts 7 / 4 / 2', opts, async (t) => {
-  if (skip(t)) return;
-  const s = await engine.semantic_index({ search: 'device_model' });
-  assert.deepEqual([...new Set(s.dimension_matches.filter((d) => d.property === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users']);
-  const r = await q(evCrashCtx, { metrics: ['aboth_reports'], group_by: [{ model: 'crashlytics', attribute: 'device_model' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(mapCol(r.rows, groupCol(r, 'aboth_reports'), 'aboth_reports'), { iphone: 7, pixel: 4, galaxy: 2 });
-});
-
-// ═══════════ K. ONE RULE FOR READING A PROPERTY ═══════════
-
-test('40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8 / banner 6', opts, async (t) => {
-  if (skip(t)) return;
-  const c = await engine.build_semantic_model({ name: 'aadt', semantic_models: [{ from: 'events', dimensions: [{ field: 'ad_type_of_event_data' }], measures: [{ name: 'n', agg: 'count' }] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
-  assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
-  const r = await q(c.context_id, { metrics: ['aadt_n'], group_by: [{ model: 'events', attribute: 'ad_type_of_event_data' }] });
-  const by = mapCol(r.rows, groupCol(r, 'aadt_n'), 'aadt_n');
-  assert.equal(by.rewarded, 10); assert.equal(by.interstitial, 8); assert.equal(by.banner, 6);
-});
-
-test('41. pipeline: the same property extracted → the same 10 / 8 / 6', opts, async (t) => {
-  if (skip(t)) return;
-  const rows = await pipeRows('events', [
-    { stage: 'compute', name: 'ad_type', expr: { fn: 'event_property', property: 'ad_type_of_event_data' } },
-    { stage: 'where', conditions: [{ column: 'ad_type', op: 'is_not_null' }] },
-    { stage: 'aggregate', group_by: ['ad_type'], measures: [{ name: 'n', agg: 'count' }] },
-  ]);
-  assert.deepEqual(mapCol(rows, 'ad_type', 'n'), { rewarded: 10, interstitial: 8, banner: 6 });
-});
-
-test('42. the value index read the same property the same way: 10 / 8 / 6 with 24 non-null', opts, async (t) => {
-  if (skip(t)) return;
-  const vals = Object.fromEntries(engine.valueIndex.sampleValues('events', 'ad_type_of_event_data', 10).map((v) => [v.value, v.freq]));
-  assert.deepEqual(vals, { rewarded: 10, interstitial: 8, banner: 6 });
-  assert.equal(engine.valueIndex.stats('events', 'ad_type_of_event_data').totalCount, 24);
-});
-
-test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 purchases', opts, async (t) => {
-  if (skip(t)) return;
-  const c = await engine.build_semantic_model({ name: 'arev', semantic_models: [{ from: 'events', measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'n', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }], metrics: [{ name: 'rev', type: 'simple', measure: 'rev' }, { name: 'n', type: 'simple', measure: 'n' }] });
-  const r = await q(c.context_id, { metrics: ['arev_rev', 'arev_n'] });
-  assert.equal(num(r.rows[0].arev_rev), 85); assert.equal(num(r.rows[0].arev_n), 8);
-  const rows = await pipeRows('events', [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
-  ]);
-  assert.equal(num(rows[0].rev), 85); assert.equal(num(rows[0].n), 8);
-});
-
-// ═══════════ L. RUN ROWS CARRY THEIR SOURCE ═══════════
-
-test('44. the run view tells users.app_version (1 distinct) from crashlytics.app_version (2 distinct)', opts, async (t) => {
-  if (skip(t)) return;
-  const st = await engine.semantic_index({ status: true });
-  const run = await engine.semantic_index({ run: st.value_index.last_run.id });
-  const rows = run.properties.filter((p) => p.property === 'app_version');
-  assert.deepEqual(rows.map((p) => p.source).sort(), ['crashlytics', 'users']);
-  assert.equal(rows.find((p) => p.source === 'users').distinct_count, 1);
-  assert.equal(rows.find((p) => p.source === 'crashlytics').distinct_count, 2);
-});
-
-test('45. the property view always takes the source, and answers per source', opts, async (t) => {
-  if (skip(t)) return;
-  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /must be exactly one of: .*\{ source, property \}/);
-  const u = await engine.semantic_index({ source: 'users', property: 'app_version' });
-  // the seed writes '1.0'; dbt seed types the column numeric, so the warehouse value is 1
-  assert.deepEqual(u.sample_values.map((v) => [String(v.value), v.freq]), [['1', 13]]);
-  const c = await engine.semantic_index({ source: 'crashlytics', property: 'app_version' });
-  assert.deepEqual(Object.fromEntries(c.sample_values.map((v) => [v.value, v.freq])), { '1.0.0': 7, '1.1.0': 6 });
-});
-
-// ═══════════ M. THE GUIDE ═══════════
-
-test('46. the guide names the real variant relationships, and the first one joins 14 rows', opts, async (t) => {
-  if (skip(t)) return;
-  const g = await engine.semantic_index({ guide: true });
-  const trig = g.routing_triggers.find((x) => /alternative columns/.test(x.if));
-  assert.ok(trig && /ad_funnel_rewarded/.test(trig.do) && /ad_funnel_interstitial/.test(trig.do) && /ad_funnel_banner/.test(trig.do), JSON.stringify(trig));
-  assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'nothing domain-specific');
-  const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
-  ]);
-  assert.equal(num(rows[0].n), 14);
-});
-
-// ═══════════ N. DATA FRESHNESS ═══════════
-
-test('47. an events task is current through 2026-01-09, the latest device_time', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evCtx, { metrics: ['aev_evts'] });
-  assert.equal(dayOf(r.provenance.data_freshness), '2026-01-09');
-  assert.equal(r.provenance.source, 'events');
-});
-
-test('48. a spend task joined to installs takes its freshness from spend, not from installs', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(acqUsersCtx, { metrics: ['aacq_cost'] });
-  assert.equal(r.provenance.source, 'acquisition', 'users contributes attributes, not measures');
-  assert.equal(dayOf(r.provenance.data_freshness), '2026-01-05');
-  assert.equal(r.provenance.data_freshness_by_source, undefined, 'one contributing source, no per-source split');
-});
-
-test('49. two events sources: per-source freshness, headline = the staler (crashes, 2026-01-08)', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evCrashCtx, { metrics: ['aboth_launches', 'aboth_reports'] });
-  assert.deepEqual([...r.provenance.source].sort(), ['crashlytics', 'events']);
-  assert.equal(dayOf(r.provenance.data_freshness_by_source.events), '2026-01-09');
-  assert.equal(dayOf(r.provenance.data_freshness_by_source.crashlytics), '2026-01-08');
-  assert.equal(dayOf(r.provenance.data_freshness), '2026-01-08');
-});
+// ═══════════ 49b / S9. DATA FRESHNESS; THE CRASH SOURCE BESIDE EVENTS ═══════════
 
 test('49b. freshness read over the recent partitions is the latest device_time of all; a source quiet for longer is read whole, to the same day', opts, async (t) => {
   if (skip(t)) return;
@@ -593,119 +349,110 @@ test('49b. freshness read over the recent partitions is the latest device_time o
   assert.equal(dayOf(await probeAt('2026-06-01T00:00:00Z').dataFreshness('events')), truth);
 });
 
-test('49c. an id past 2^53 comes back from a pipeline with every digit the warehouse holds', opts, async (t) => {
+test('S9 (J/N). the crash source in a two-source task: device_model and event_name splits, per-source freshness', opts, async (t) => {
+  if (skip(t)) return;
+  // 39. search finds device_model on users AND on crashlytics
+  const s = await engine.semantic_index({ search: 'device_model' });
+  assert.deepEqual([...new Set(s.dimension_matches.filter((d) => d.property === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users'], '39: device_model is found on users and on crashlytics');
+  const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((row) => [row.event_name, Number(row.n)]));
+  const r = await q(evCrashCtx, {
+    metrics: ['aboth_reports'],
+    group_by: [{ model: 'crashlytics', attribute: 'device_model' }, { model: 'crashlytics', attribute: 'event_name' }],
+    time_range: { start: '2020-01-01', end: '2030-12-31' },
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aboth_reports'), { iphone: 7, pixel: 4, galaxy: 2 }, '39: the crash copy of device_model counts 7 / 4 / 2');
+  // 49d. a metric grouped by the event name the schema offers as an attribute: the counts the warehouse holds
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.event_name'], 'aboth_reports'), truth, '49d: reports per crash event, as the warehouse holds them');
+  // 49. two events sources: per-source freshness, headline = the staler (crashes, 2026-01-08)
+  const f = await q(evCrashCtx, { metrics: ['aboth_launches', 'aboth_reports'] });
+  assert.equal(f.ok, true, JSON.stringify(f.error));
+  assert.deepEqual([...f.provenance.source].sort(), ['crashlytics', 'events'], '49: both sources contribute measures');
+  assert.equal(dayOf(f.provenance.data_freshness_by_source.events), '2026-01-09', '49: events are current through 2026-01-09');
+  assert.equal(dayOf(f.provenance.data_freshness_by_source.crashlytics), '2026-01-08', '49: crashes are current through 2026-01-08');
+  assert.equal(dayOf(f.provenance.data_freshness), '2026-01-08', '49: the headline is the staler source');
+});
+
+// ═══════════ S10. ONE EVENTS PIPELINE: NO JOIN KEY IS AN ATTRIBUTE BY NAME; ONE PROPERTY RULE ═══════════
+
+test('S10 (I/K). one events pipeline: session_number, an extracted ad_type and a 64-bit id, all read back exact', opts, async (t) => {
   if (skip(t)) return;
   const truth = (await wh.query('select cast(3000624785682605657 as bigint)::varchar as id')).rows[0].id;
   const rows = await pipeRows('events', [
+    { stage: 'compute', name: 'ad_type', expr: { fn: 'event_property', property: 'ad_type_of_event_data' } },
     { stage: 'compute', name: 'big_id', expr: { fn: 'raw', sql: 'CAST(3000624785682605657 AS BIGINT)', type: 'numeric' } },
-    { stage: 'aggregate', group_by: ['big_id'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['session_number', 'ad_type', 'big_id'], measures: [{ name: 'n', agg: 'count' }] },
   ]);
-  assert.equal(String(rows[0].big_id), truth);
+  // 37. a pipeline reads the session key like any column
+  assert.deepEqual(marginal(rows, 'session_number', 'n'), { 1: 150, 2: 26, 3: 4, 4: 4 }, '37: sessions 1..4 hold 150 / 26 / 4 / 4 events');
+  // 41. the same property extracted in a pipeline → the same 10 / 8 / 6
+  const byAd = marginal(rows, 'ad_type', 'n');
+  delete byAd.none; // the events that carry no ad_type
+  assert.deepEqual(byAd, { rewarded: 10, interstitial: 8, banner: 6 }, '41: the extracted ad_type splits 10 / 8 / 6');
+  // 49c. an id past 2^53 comes back from a pipeline with every digit the warehouse holds
+  assert.ok(rows.length > 0, '49c: the pipeline returned rows');
+  for (const row of rows) assert.equal(String(row.big_id), truth, '49c: an id past 2^53 keeps every digit');
 });
 
-test('49d. a metric is grouped by the event name the schema offers as an attribute — the counts per crash event the warehouse holds', opts, async (t) => {
+// ═══════════ S7. THE INDEX before() BUILT — NO WAREHOUSE CALL ═══════════
+
+test('S7 (G/L/O/P/Q). the index before() built over a reset store: wiped, then filled; watermarks, run rows and apps per source; the views', opts, async (t) => {
   if (skip(t)) return;
-  const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((r) => [r.event_name, Number(r.n)]));
-  const r = await q(evCrashCtx, { metrics: ['aboth_reports'], group_by: [{ model: 'crashlytics', attribute: 'event_name' }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const col = Object.keys(r.rows[0]).find((k) => k !== 'aboth_reports');
-  assert.deepEqual(Object.fromEntries(r.rows.map((row) => [row[col], Number(row.aboth_reports)])), truth);
-});
-
-// ═══════════ O. PER-APP COVERAGE PER SOURCE ═══════════
-
-test('50. apps are listed per source: two on events (131 / 53), none on the crash source', opts, async (t) => {
-  if (skip(t)) return;
-  const apps = engine.valueIndex.bundles();
-  assert.deepEqual(apps.map((b) => [b.source, b.bundle, b.row_count]), [['events', 'com.omg.wordsearch', 131], ['events', 'com.omg.colorfit', 53]]);
-  assert.deepEqual(engine.valueIndex.bundles('crashlytics'), []);
-});
-
-test('51. { source: events, bundle: colorfit }: level_id populated (53), ad_type empty', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'events', bundle: 'com.omg.colorfit' });
-  assert.equal(v.source, 'events'); assert.equal(v.event_rows, 53);
-  assert.equal(v.populated.find((p) => p.property === 'level_id_of_event_data')?.non_null, 53);
-  assert.ok(v.empty.includes('ad_type_of_event_data'));
-});
-
-test('52. the app view offers only the sources that declare an app column', opts, async (t) => {
-  if (skip(t)) return;
-  // not a refusal the engine writes: the view's `source` is enumerated from the sources that
-  // carry an app column, so naming one without it has no spelling.
-  // One source carries an app column here, so the refusal PINS it ("must be \"events\""); with
-  // several it lists them.
-  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /`source` must be ("events"|one of: events)/);
-});
-
-// ═══════════ P. NOTHING DECLARED — THE INDEX IS THE TRUTH ═══════════
-
-test('53. which events carry anr_duration is observed: exactly [anr]', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
-  assert.deepEqual([...v.events].sort(), ['anr']);
-  assert.equal(v.declared_values, undefined, 'nothing declared, nothing echoed');
-});
-
-test('54. the event view lists only what the event actually carries', opts, async (t) => {
-  if (skip(t)) return;
-  const lc = await engine.semantic_index({ source: 'events', event: 'level_completed' });
-  const names = lc.properties.map((p) => p.name);
-  assert.ok(names.includes('result_of_event_data') && names.includes('level_id_of_event_data'), names.join(','));
-  assert.ok(!names.includes('ad_type_of_event_data'), 'ad_type is never on level_completed');
-});
-
-test('55. values come from the index with their frequencies: win 20 / lose 5', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'events', property: 'result_of_event_data' });
-  assert.deepEqual(Object.fromEntries(v.sample_values.map((x) => [x.value, x.freq])), { win: 20, lose: 5 });
-  assert.deepEqual([...v.events].sort(), ['level_completed']);
-});
-
-test('57. the anr event carries anr_duration, breadcrumbs and custom_keys — not the stack', opts, async (t) => {
-  if (skip(t)) return;
-  const v = await engine.semantic_index({ source: 'crashlytics', event: 'anr' });
-  const names = v.properties.map((p) => p.name);
-  for (const n of ['anr_duration_of_event_data', 'breadcrumbs_of_event_data', 'custom_keys_of_event_data']) assert.ok(names.includes(n), `${n} missing from ${names}`);
-  assert.ok(!names.includes('stack_frames_of_event_data'), 'an ANR has no exception stack');
-});
-
-// ═══════════ Q. EACH SOURCE IS SCANNED ON ITS OWN AXIS ═══════════
-
-test('58. with merge on, each source records its own watermark: events 2026-01-09, crashes 2026-01-08', opts, async (t) => {
-  if (skip(t)) return;
-  const index = new ValueIndex();
-  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, merge: true, maxValues: 50, logger: () => {} });
-  await bi.refresh();
+  const index = engine.valueIndex;
+  // 32. reset() over a store that held a value leaves an empty index that the scan then fills
+  assert.equal(wipedBeforeScan, null, '32: the reset store held nothing before the scan');
+  assert.deepEqual(Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq])), { US: 4, GB: 4, DE: 3, BR: 2 }, '32: the scan filled the real values');
+  // 58. with merge on, each source records its own watermark: events 2026-01-09, crashes 2026-01-08
   const ev = index.stats('events', 'ad_type_of_event_data').dataWatermark;
   const cr = index.stats('crashlytics', 'issue_title_of_event_data').dataWatermark;
-  assert.equal(new Date(ev).toISOString().slice(0, 10), '2026-01-09');
-  assert.equal(new Date(cr).toISOString().slice(0, 10), '2026-01-08');
+  assert.equal(new Date(ev).toISOString().slice(0, 10), '2026-01-09', '58: the events watermark is its latest device_time');
+  assert.equal(new Date(cr).toISOString().slice(0, 10), '2026-01-08', '58: the crash watermark is its own latest time');
   t.diagnostic(`events wm ${new Date(ev).toISOString()} / crash wm ${new Date(cr).toISOString()}`);
-  index.close();
-});
-
-test('59. a second merge pass finds no new rows on either source and keeps every value', opts, async (t) => {
-  if (skip(t)) return;
-  const index = new ValueIndex();
-  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, merge: true, maxValues: 50, logger: () => {} });
-  await bi.refresh();
-  await bi.refresh();
-  const run = index.syncStatus().last_run;
-  assert.equal(run.status, 'ok', JSON.stringify(run));
-  assert.deepEqual(Object.fromEntries(index.sampleValues('events', 'ad_type_of_event_data', 10).map((v) => [v.value, v.freq])), { rewarded: 10, interstitial: 8, banner: 6 }, 'not double-counted');
-  assert.deepEqual(Object.fromEntries(index.sampleValues('crashlytics', 'app_version', 10).map((v) => [v.value, v.freq])), { '1.0.0': 7, '1.1.0': 6 });
-  index.close();
-});
-
-test('60. one run covers both sources, each row labelled with its source and all ok', opts, async (t) => {
-  if (skip(t)) return;
+  // 44/60. the run rows carry their source
   const st = await engine.semantic_index({ status: true });
   const run = await engine.semantic_index({ run: st.value_index.last_run.id });
+  const appVersion = run.properties.filter((p) => p.property === 'app_version');
+  assert.deepEqual(appVersion.map((p) => p.source).sort(), ['crashlytics', 'users'], '44: app_version has a run row per source');
+  assert.equal(appVersion.find((p) => p.source === 'users').distinct_count, 1, '44: users.app_version has 1 distinct value');
+  assert.equal(appVersion.find((p) => p.source === 'crashlytics').distinct_count, 2, '44: crashlytics.app_version has 2 distinct values');
   const bySource = {};
   for (const p of run.properties) (bySource[p.source] ||= []).push(p);
-  assert.ok(bySource.events?.length >= 20, `events rows: ${bySource.events?.length}`);
-  assert.ok(bySource.crashlytics?.length >= 7, `crash rows: ${bySource.crashlytics?.length}`);
-  assert.ok(bySource.users?.length >= 10, `users rows: ${bySource.users?.length}`);
-  assert.deepEqual([...new Set(run.properties.map((p) => p.status))], ['ok']);
+  assert.ok(bySource.events?.length >= 20, `60: events rows: ${bySource.events?.length}`);
+  assert.ok(bySource.crashlytics?.length >= 7, `60: crash rows: ${bySource.crashlytics?.length}`);
+  assert.ok(bySource.users?.length >= 10, `60: users rows: ${bySource.users?.length}`);
+  assert.deepEqual([...new Set(run.properties.map((p) => p.status))], ['ok'], '60: every row of the run is ok');
+  // 45. the property view always takes the source, and answers per source
+  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /must be exactly one of: .*\{ source, property \}/, '45: the property view always takes the source');
+  const u = await engine.semantic_index({ source: 'users', property: 'app_version' });
+  // the seed writes '1.0'; dbt seed types the column numeric, so the warehouse value is 1
+  assert.deepEqual(u.sample_values.map((v) => [String(v.value), v.freq]), [['1', 13]], '45: users.app_version answers for users');
+  const c = await engine.semantic_index({ source: 'crashlytics', property: 'app_version' });
+  assert.deepEqual(Object.fromEntries(c.sample_values.map((v) => [v.value, v.freq])), { '1.0.0': 7, '1.1.0': 6 }, '45: crashlytics.app_version answers for crashlytics');
+  // 50. apps are listed per source: two on events (131 / 53), none on the crash source
+  assert.deepEqual(index.bundles().map((b) => [b.source, b.bundle, b.row_count]), [['events', 'com.omg.wordsearch', 131], ['events', 'com.omg.colorfit', 53]], '50: two apps, both on events');
+  assert.deepEqual(index.bundles('crashlytics'), [], '50: none on the crash source, which declares no app column');
+  // 51. { source: events, bundle: colorfit }: level_id populated on every one of its 53 rows
+  const colorfit = await engine.semantic_index({ source: 'events', bundle: 'com.omg.colorfit' });
+  assert.equal(colorfit.populated.find((p) => p.property === 'level_id_of_event_data')?.non_null, 53, '51: level_id is populated on all 53 colorfit rows');
+  // 57. the anr event carries anr_duration, breadcrumbs and custom_keys — not the stack
+  const anr = await engine.semantic_index({ source: 'crashlytics', event: 'anr' });
+  const names = anr.properties.map((p) => p.name);
+  for (const n of ['anr_duration_of_event_data', 'breadcrumbs_of_event_data', 'custom_keys_of_event_data']) assert.ok(names.includes(n), `57: ${n} missing from ${names}`);
+  assert.ok(!names.includes('stack_frames_of_event_data'), '57: an ANR has no exception stack');
+});
+
+// ═══════════ S8. THE SECOND MERGE PASS — LAST: IT REWRITES THE RUN S7 READS ═══════════
+
+test("S8 (Q). a second merge pass over the engine's index finds no new rows and keeps every value", opts, async (t) => {
+  if (skip(t)) return;
+  const index = engine.valueIndex;
+  const watermark = (source, property) => index.stats(source, property).dataWatermark;
+  const kept = { events: watermark('events', 'ad_type_of_event_data'), crashlytics: watermark('crashlytics', 'issue_title_of_event_data') };
+  await indexer.refresh();
+  const run = index.syncStatus().last_run;
+  assert.equal(run.status, 'ok', `59: the second pass ends ok: ${JSON.stringify(run)}`);
+  assert.deepEqual(Object.fromEntries(index.sampleValues('events', 'ad_type_of_event_data', 10).map((v) => [v.value, v.freq])), { rewarded: 10, interstitial: 8, banner: 6 }, '59: the events values are not double-counted');
+  assert.deepEqual(Object.fromEntries(index.sampleValues('crashlytics', 'app_version', 10).map((v) => [v.value, v.freq])), { '1.0.0': 7, '1.1.0': 6 }, '59: the crash values are kept');
+  assert.equal(watermark('events', 'ad_type_of_event_data'), kept.events, '59: no new events rows, so the events watermark stays');
+  assert.equal(watermark('crashlytics', 'issue_title_of_event_data'), kept.crashlytics, '59: no new crash rows, so the crash watermark stays');
 });

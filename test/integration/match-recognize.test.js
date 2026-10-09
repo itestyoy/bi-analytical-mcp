@@ -14,7 +14,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, stepEffect } from '../helpers/settle.js';
+import { settle } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -34,6 +34,11 @@ async function pipe(stages, name) {
   ctxId = out.context_id;
   return out;
 }
+
+// The activation funnel as it stands — `pipe([matchActivation()])` — is built ONCE and read by
+// every case that needs it as it is (declared-joins' chainCache pattern).
+let activationBuild;
+const activation = () => (activationBuild ||= pipe([matchActivation()]));
 
 // The canonical 4-step activation funnel as a single match_recognize stage.
 const activationSteps = [
@@ -129,13 +134,29 @@ test('a where on the time axis, alone or before a funnel, reads the same rows wi
   assert.deepEqual(n(early.rows), { '2026-01-01': 4, '2026-01-02': 30 });
 });
 
-test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {
+// Four former tests over the one build: what each asserted is labelled with its old title.
+test('the activation funnel, built once: reached 12/8/5/3, output_columns + its task, furthest_step distribution, launch→tut1 = 8/12', opts, async (t) => {
   if (skip(t)) return;
-  const out = await pipe([matchActivation()]);
-  assert.equal(reached(out.rows, 'launch'), 12);
-  assert.equal(reached(out.rows, 'tut1'), 8);
-  assert.equal(reached(out.rows, 'tut2'), 5);
-  assert.equal(reached(out.rows, 'tut3'), 3);
+  const out = await activation();
+  // 'funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)'
+  assert.equal(reached(out.rows, 'launch'), 12, '[reached per step] launch');
+  assert.equal(reached(out.rows, 'tut1'), 8, '[reached per step] tut1');
+  assert.equal(reached(out.rows, 'tut2'), 5, '[reached per step] tut2');
+  assert.equal(reached(out.rows, 'tut3'), 3, '[reached per step] tut3');
+  // 'pipeline response: output_columns (carried partition key) + the task that holds it' (A2/A4: the
+  // pipeline response documents its output columns and the task it can be re-read from)
+  assert.ok(Array.isArray(out.output_columns), '[pipeline response] output_columns present');
+  const names = out.output_columns.map((c) => c.name);
+  assert.ok(names.includes('player_id_of_internal'), '[pipeline response] partition key carried through to the output');
+  assert.ok(names.includes('reached_launch') && names.includes('completed'), '[pipeline response] funnel columns present');
+  assert.equal(out.table, out.model, '[pipeline response] the task left the model as its table');
+  assert.match(out.task_id, /^[a-f0-9]{12}$/, '[pipeline response] the task that holds it');
+  // 'funnel: furthest_step_name distribution sums to 12; tut3 = 3'
+  assert.equal(out.rows.length, 12, '[furthest_step] one row per user who entered (launched)');
+  assert.equal(out.rows.filter((r) => String(r.furthest_step_name) === 'tut3').length, 3, '[furthest_step] tut3 = 3');
+  // 'funnel: conversion launch→tut1 = 8/12 (computed from per-user reached flags)'
+  const cr = reached(out.rows, 'tut1') / reached(out.rows, 'launch');
+  assert.ok(Math.abs(cr - 8 / 12) < 1e-9, `[conversion launch→tut1] cr=${cr}`);
 });
 
 // A1: between_steps option. 'any' = nearest-later occurrence (repeats between steps
@@ -156,18 +177,6 @@ test('match_recognize between_steps: explicit "any" equals the default; "gap" is
   assert.ok(G <= A && G >= 0, `gap (${G}) is a subset of any (${A}) — never over-matches`);
 });
 
-// A2/A4: the pipeline response documents its output columns and the task it can be re-read from.
-test('pipeline response: output_columns (carried partition key) + the task that holds it', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await pipe([matchActivation()]);
-  assert.ok(Array.isArray(out.output_columns), 'output_columns present');
-  const names = out.output_columns.map((c) => c.name);
-  assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to the output');
-  assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel columns present');
-  assert.equal(out.table, out.model, 'the task left the model as its table');
-  assert.match(out.task_id, /^[a-f0-9]{12}$/);
-});
-
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
 test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
   if (skip(t)) return;
@@ -179,52 +188,19 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
 });
 
-// Feature C: incremental build_pipeline_model. Each add_steps returns the columns
-// available for the next stage; a committed draft yields the SAME rows as the
-// all-at-once _buildPipeline (fidelity), proven on the activation funnel.
-test('build_pipeline_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
-  if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
-  assert.ok(s.context_id, 'start returns a context_id');
-  assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
-  // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [matchActivation()], include_columns: true });
-  assert.equal(stepEffect(a1).step_index, 1);
-  const names = a1.available_columns.map((c) => c.name);
-  assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
-  assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel output columns available next');
-  // preview renders SQL without materializing.
-  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
-  assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL');
-  assert.equal(pv.steps.length, 1);
-  // commit materializes; rows MATCH the all-at-once funnel exactly.
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
-  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
-  assert.equal(reached(c.rows, 'launch'), 12);
-  assert.equal(reached(c.rows, 'tut1'), 8);
-  assert.equal(reached(c.rows, 'tut2'), 5);
-  assert.equal(reached(c.rows, 'tut3'), 3);
-});
-
-// Lifecycle/validation guard: a rejected stage must NOT mutate the draft.
-test('build_pipeline_model add_steps rejects an invalid stage without mutating the draft', opts, async (t) => {
-  if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_guard', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
-  await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', keep: ['no_such_column'] }] }),
-    'a stage referencing a missing column is rejected',
-  );
-  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id });
-  assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
-});
+// (Feature C, the incremental build_pipeline_model — start with its columns, add the funnel stage,
+// preview, materialize 12/8/5/3 — is end-to-end.test.js 3a; the columns add_steps lists for the
+// next stage, the partition key carried, are test/unit/build-pipeline-model.test.js's 'add_steps
+// propagates columns'. The materialized rows equal the all-at-once build above. A rejected stage
+// leaving the draft untouched, and a dry run returning SQL without building, are unit tests there
+// too: neither reads the warehouse.)
 
 // #4a: a column of the rows (session_number — a physical column, not a payload property) is
 // usable in a step's where, the grammar of every where.
 test('match_recognize takes a column in a step condition', opts, async (t) => {
   if (skip(t)) return;
   const colCond = { column: 'session_number', op: 'gte', value: 2 };
-  const base = await pipe([matchActivation()]);
+  const base = await activation();
   const stepFiltered = await pipe([matchActivation({ steps: [{ ...activationSteps[0], where: [colCond] }, ...activationSteps.slice(1)] })]);
   const truth = (await wh.query("select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'first_launch' and session_number >= 2")).rows[0];
   assert.equal(reached(stepFiltered.rows, 'launch'), num(truth.n));
@@ -268,20 +244,6 @@ test('funnel flexible partition: a declared relationship and a per-(user,session
   const composite = await pipe([matchActivation({ partition_by: ['player_id_of_internal', 'session_number'], steps: activationSteps.slice(0, 2) })]);
   assert.ok('player_id_of_internal' in composite.rows[0] && 'session_number' in composite.rows[0], 'both partition keys exposed');
   assert.equal(reached(composite.rows, 'launch'), 12);
-});
-
-test('funnel: furthest_step_name distribution sums to 12; tut3 = 3', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await pipe([matchActivation()]);
-  assert.equal(out.rows.length, 12); // one row per user who entered (launched)
-  assert.equal(out.rows.filter((r) => String(r.furthest_step_name) === 'tut3').length, 3);
-});
-
-test('funnel: conversion launch→tut1 = 8/12 (computed from per-user reached flags)', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await pipe([matchActivation()]);
-  const cr = reached(out.rows, 'tut1') / reached(out.rows, 'launch');
-  assert.ok(Math.abs(cr - 8 / 12) < 1e-9, `cr=${cr}`);
 });
 
 test('funnel sliced by a user attribute: join dim_users → reached_tut1 by country sums to 8', opts, async (t) => {
@@ -332,22 +294,9 @@ test('a wide where before the funnel keeps all data: 12 / 8', opts, async (t) =>
   assert.equal(reached(out.rows, 'tut1'), 8);
 });
 
-test('funnel + prepare compute (array_length): n_words captured at level 1 averages 3', opts, async (t) => {
-  if (skip(t)) return;
-  // A compute stage runs BEFORE match_recognize; its column is referenceable in a step's
-  // where and in a capture.
-  const out = await pipe([
-    { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
-    { stage: 'match_recognize', partition_by: ['player_id_of_internal'],
-      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
-      capture: [{ name: 'words', step: 'lvl1', column: 'n_words' }] },
-  ]);
-  assert.equal(reached(out.rows, 'lvl1'), 12);
-  const vals = out.rows.filter((r) => tru(r.reached_lvl1)).map((r) => num(r.words));
-  const avg = vals.reduce((s, v) => s + v, 0) / vals.length;
-  assert.ok(Math.abs(avg - 3) < 1e-9, `avg n_words=${avg}`);
-});
-
+// A compute stage runs BEFORE match_recognize; its column is referenceable in a step's where and in
+// a capture (array_length's n_words captured at level 1 averages 3 — the plain-named version of
+// this case was a test of its own).
 test('a funnel whose partition, order and capture columns are SQL keywords (group / order / select) runs: 12 reach level 1, n_words averages 3', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([
@@ -375,41 +324,8 @@ test('funnel + prepare compute (array_contains): step filtered by derived boolea
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'
 });
 
-test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await pipe([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
-  ]);
-  const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
-  assert.equal(by.US, 35); assert.equal(by.GB, 25); assert.equal(by.BR, 25);
-});
-
-test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await pipe([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'pivot', group_by: [], on: 'country', measure: { agg: 'sum', column: 'price' }, values: [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }] },
-  ]);
-  assert.equal(out.rows.length, 1);
-  assert.equal(num(out.rows[0].us), 35);
-  assert.equal(num(out.rows[0].gb), 25);
-});
-
-test('_buildPipeline: dry_run returns SQL without building', opts, async (t) => {
-  if (skip(t)) return;
-  const dr = await engine._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] }] } });
-  assert.equal(dr.dry_run, true);
-  assert.equal(dr.kind, 'pipeline');
-  assert.equal(typeof dr.model_sql, 'string');
-  // SQL is rendered in the ACTIVE warehouse dialect only — no second-dialect blob.
-  assert.equal(dr.dialect, engine.catalog.dialect);
-  assert.equal(dr.model_sql_bigquery, undefined);
-});
+// (IAP revenue by country through a point-in-time join — US 35 / GB 25 / BR 25 — aggregated and
+// pivoted into per-country columns: pipeline.test.js, the same stages.)
 
 test('_buildPipeline: same name in two contexts → distinct relations', opts, async (t) => {
   if (skip(t)) return;

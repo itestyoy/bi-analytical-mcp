@@ -3,7 +3,8 @@
 // with its own recipes silently lost every shipped one, python ones included.
 //
 // Input-validation / surface guard (the allowed non-data kind): what is offered, to whom, and why
-// one is withheld. Nothing here runs a recipe — that is recipes-parse.test.js on the warehouse.
+// one is withheld. Nothing here runs a recipe on the warehouse — that is recipes-parse.test.js and
+// the tests test/helpers/recipe-coverage.js names; only the recipes that need none are checked at the end.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -195,4 +196,50 @@ test('a deployment recipe with the earlier flat experiment block is served with 
   const current = { action: 'analyze', metric: 'proportion', group_field: 'g', arm: { n: 'n', conversions: 'conv' } };
   const now = deploymentFile([{ id: 'now', task_type: 'experiment', title: 'now', when_to_use: '', hack: '', experiment: current }]);
   assert.deepEqual(loadRecipes(SYSTEM, now).get('now').experiment, current);
+});
+
+// The shipped recipes whose checks never read the warehouse (moved here from
+// test/integration/recipes-parse.test.js). A REFERENCE entry (generated from an extracted fact sheet)
+// is not a payload to build: it is the library's own surface, offered by id so it can be fetched
+// mid-write. What can rot here is its content — an empty sheet, or a version it cannot name.
+for (const r of loadRecipes(SYSTEM).list.filter((x) => x.reference)) {
+  test(`recipe '${r.id}': a reference names its version, carries its lists and says how to use it`, () => {
+    assert.ok(r.reference.version, `${r.id}: a reference must name the version it was read from`);
+    assert.ok(Object.keys(r.reference).length > 3, `${r.id}: the reference carries no lists`);
+    assert.ok(r.approach && r.instead_of && r.hack, `${r.id}: a reference still says how to use it`);
+    assert.ok(!r.pipeline_payload, `${r.id}: a reference declares no model`);
+  });
+}
+
+// A tool-only recipe (no warehouse), e.g. power/sample-size planning: each declared tool call runs
+// and computes a successful result. (A python-model recipe is test/unit/python-stage.test.js's.)
+for (const r of loadRecipes(SYSTEM).list.filter((x) => !x.reference && x.requires !== 'python_models' && x.tool_calls)) {
+  test(`recipe '${r.id}': each declared tool call computes a successful result`, async () => {
+    const { loadCatalog } = await import('../../src/catalog.js');
+    const { ContextManager } = await import('../../src/context-manager.js');
+    const { Engine } = await import('../../src/engine.js');
+    const { settle } = await import('../helpers/settle.js');
+    const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+    const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-tool-')) }) }));
+    for (const call of r.tool_calls) {
+      const res = engine[call.tool](call.args);
+      assert.equal(res.ok, true, `${r.id}: tool ${call.tool} failed: ${JSON.stringify(res)}`);
+    }
+  });
+}
+
+// recipes-parse.test.js skips a recipe another integration test proves on its numbers
+// (test/helpers/recipe-coverage.js). Each one it skips must still be a shipped recipe — one removed
+// from config/recipes.json would otherwise leave a skip that hides nothing — and must name the test
+// file that holds it.
+test('every recipe the recipe suite leaves to another test is a shipped recipe, held by an existing test file', async () => {
+  const { existsSync } = await import('node:fs');
+  const { DATA_TESTED } = await import('../helpers/recipe-coverage.js');
+  const ids = loadRecipes(SYSTEM).ids();
+  assert.ok(Object.keys(DATA_TESTED).length > 0, 'the coverage map is loaded');
+  for (const [id, where] of Object.entries(DATA_TESTED)) {
+    assert.ok(ids.includes(id), `DATA_TESTED names '${id}', which config/recipes.json no longer ships`);
+    const file = where.slice(0, where.indexOf(':'));
+    assert.ok(existsSync(fileURLToPath(new URL(`../integration/${file}`, import.meta.url))), `'${id}' is said to be held by ${file}, which does not exist`);
+  }
 });

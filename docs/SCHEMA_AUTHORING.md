@@ -904,6 +904,13 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `tool_calls` | каждый вызов возвращает `ok: true` |
 | `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: запрос на старт отправляется как есть, затем `preview` — стадии рендерятся, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после, цепочка моделей раскладывается; плюс наличие `read_first`, `hack`, `notes` |
 
+Где что проверяется: формы, которым склад не нужен, — в unit-тестах (`requires: python_models` — в
+`test/unit/python-stage.test.js`, `tool_calls` и сгенерированные справочные записи — в
+`test/unit/recipes-layers.test.js`). Рецепт, который другой интеграционный тест уже строит из его же
+payload и проверяет на точных числах, перечислен в `test/helpers/recipe-coverage.js` (`DATA_TESTED`,
+рецепт → тест), и `recipes-parse.test.js` его не гоняет повторно; всё остальное, в том числе любой
+новый рецепт, по-прежнему гоняет `recipes-parse.test.js`.
+
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не
 проходит тест и не попадает в поставку. `required_*` при этом **никем не проверяются** — это
@@ -945,7 +952,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 - [ ] для A/B: результат отсортирован по группе, контроль первой строкой, сопоставление полей полное;
 - [ ] `required_*` заполнены честно, `required_roles` — если нужна роль кроме событий и пользователей;
 - [ ] `hack` заканчивается «Extrapolate: …»; `notes` — про чтение результата, не про payload;
-- [ ] `npm run test:integration -- test/integration/recipes-parse.test.js` зелёный.
+- [ ] `npm run test:integration -- test/integration/recipes-parse.test.js` зелёный (рецепт python-моделей или
+      `tool_calls` — `npm test`).
 
 ---
 

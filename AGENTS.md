@@ -123,7 +123,7 @@ Completed task notes should not be treated as source of truth. Search archived t
 
 - Run the smallest useful check for the affected area.
 - If checks are skipped or unavailable, say so clearly in the final message.
-- This repository's checks: `npm run lint:names` and `npm test` (unit), `npm run test:integration` (DuckDB + dbt + MetricFlow, on the named dbt environments), `npm run eval:check` (every eval case's SQL against the fixture warehouse). Tests assert on data, never on generated text — see [Testing](#testing-hard-rule).
+- This repository's checks: while working, `npm run test:quick` (lint:names, the unit tests and the integration files with the most coverage per minute, about 5 min) and `npm run test:integration -- <name>` for the integration files of the area touched (those whose file name contains `<name>`); once at the end, the full set — `npm run lint:names` and `npm test` (unit), `npm run test:integration` (every DuckDB + dbt + MetricFlow file on the named dbt environments, heaviest first, four side by side: `scripts/run-tests.mjs`), `npm run eval:check` (every eval case's SQL against the fixture warehouse). Tests assert on data, never on generated text — see [Testing](#testing-hard-rule).
 
 ## Git
 

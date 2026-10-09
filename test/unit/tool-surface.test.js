@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -13,6 +14,7 @@ import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 import { settle, stepNotes } from '../helpers/settle.js';
 import { deref, field } from '../helpers/schema-nav.js';
+import { mcp } from '../helpers/catalog-doc.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -219,6 +221,40 @@ test('a group-by path onto an unloaded FACT is refused with the fix: an item { f
   );
 });
 
+// A structured reference names only what is there: an attribute the model lacks, the events
+// source's session key (no join key is an attribute by name) and a `via` that is not a relationship
+// onto that model are each refused by the schema, listing what the model does have — before
+// anything runs.
+test('a group-by attribute or via the model does not have is refused, listing the real ones', async () => {
+  const e = engine();
+  const evu = await e.build_semantic_model({
+    name: 'evu',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+  });
+  const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, metrics: [metric], group_by: [ref] });
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'users', attribute: 'shoe_size' }),
+    /`group_by.0.attribute` must be one of: .*country/s, 'an attribute the model does not have is refused, listing the ones it has');
+  assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'events', attribute: 'session_number' }),
+    /`group_by.0.attribute` must be one of/, 'the session key is not a groupable path of the events source');
+  // the crash source OWNS ad_funnel here (type: unique): ad_funnel is a relationship onto it, 'session' is not
+  const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
+  const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
+  mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
+  mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
+  const at = join(mkdtempSync(join(tmpdir(), 'surf-own-')), 'catalog.yml');
+  writeFileSync(at, yaml.dump(doc));
+  const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  const own = await owner.build_semantic_model({
+    name: 'own',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+  });
+  await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { model: 'crashlytics', attribute: 'app_version', via: 'session' }),
+    /`group_by.0.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
+});
+
 // The relationship a model OWNS is reported as owned — its governed path ends here — not as
 // "pipeline only" (the two conditions used to be tested in the wrong order).
 test('semantic_index({ source }) reports an owned relationship as owned, with a governed path', async () => {
@@ -229,7 +265,9 @@ test('semantic_index({ source }) reports an owned relationship as owned, with a 
   assert.match(rel.use, /^owned here — other models point at it/);
   assert.ok(!/No model owns 'user'/.test(users.join_note || ''), users.join_note);
   const events = await e.semantic_index({ source: 'events' });
-  assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
+  const evUser = events.relationships.find((r) => r.entity === 'user');
+  assert.equal(evUser.use, 'metric query + pipeline');
+  assert.equal(evUser.joins, 'users', 'the events side points at the model that owns the relationship');
 });
 
 // What a note is about is the PAIR the tool itself emits. A name on its own has no spelling at all — so
@@ -241,6 +279,9 @@ test('memory about: { source, property } and { source, event } resolve; a bare n
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
+  // …and on the qualified crash property it is about as well
+  const crashProp = await e.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
+  assert.ok((crashProp.memory || []).some((m) => /fires once per completed impression/.test(m.note)), `the finding surfaces on the crash property: ${JSON.stringify(crashProp.memory)}`);
   // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
   await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/);
   const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', about: [{ source: 'users', property: 'app_version' }, { source: 'crashlytics', property: 'app_version' }] }] })).notes[0];
@@ -265,8 +306,8 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   const e = engine();
   const g = await e.semantic_index({ guide: true });
   const t = g.routing_triggers.find((x) => /alternative columns/.test(x.if));
-  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
-  assert.ok(!g.routing_triggers.some((x) => /crash/.test(x.if)), 'no domain-specific crash trigger');
+  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_interstitial/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
+  assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
   for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
   const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));

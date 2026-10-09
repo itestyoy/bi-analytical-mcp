@@ -66,24 +66,23 @@ test('resilient re-read: once the in-memory response is gone, query_semantic_mod
   assert.equal(num(r.rows[0].mon_revenue), 85); // recomputes nothing — reads the table
 });
 
-test('the call that starts a query never waits: a task_id now, the rows from query_semantic_model({ task_id })', opts, async (t) => {
+// ONE materialized revenue-by-country task carries what three tests each materialized it for: the call
+// that starts it never waits, a pipeline started FROM it re-slices it without recomputing, and it is
+// paged with query_semantic_model({ task_ids }) to its end. Each check is labelled with its old test.
+test('one materialized revenue-by-country task: started without waiting, read back (sum 85), re-sliced by pipelines from its task, and paged to its end', opts, async (t) => {
   if (skip(t)) return;
+  // 'the call that starts a query never waits: a task_id now, the rows from query_semantic_model({ task_id })'
   const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.ok(isStartedTask(started), JSON.stringify(started));
-  const res = await taskResult(engine, started.task_id);
-  assert.equal(res.ok, true, JSON.stringify(res.error));
-  assert.equal(res.status, 'done');
-  const total = res.rows.reduce((s, x) => s + num(x.mon_revenue), 0);
-  assert.equal(total, 85); // revenue by country sums to the grand total
-});
+  assert.ok(isStartedTask(started), `[never waits] a task_id now: ${JSON.stringify(started)}`);
+  const m = await taskResult(engine, started.task_id);
+  assert.equal(m.ok, true, JSON.stringify(m.error));
+  assert.equal(m.status, 'done', '[never waits] the rows from the task');
+  assert.equal(m.rows.reduce((s, x) => s + num(x.mon_revenue), 0), 85, '[never waits] revenue by country sums to the grand total');
 
-test('a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)', opts, async (t) => {
-  if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(m.status, 'done', JSON.stringify(m));
+  // 'a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)'
   const from = async (name, stages) => {
     const d = await engine.build_pipeline_model({ action: 'start', name, from_task: m.task_id });
-    assert.equal(d.reads, m.table, 'the draft reads the task\'s table');
+    assert.equal(d.reads, m.table, '[from_task] the draft reads the task\'s table');
     await engine.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages });
     const built = await engine.build_pipeline_model({ action: 'materialize', context_id: d.context_id });
     assert.equal(built.status, 'done', JSON.stringify(built.error));
@@ -91,17 +90,34 @@ test('a pipeline started FROM a stored result re-slices it without recomputing (
   };
   // (a) compress to a single total
   const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'mon_revenue' }] }]);
-  assert.equal(num(total.total), 85);
+  assert.equal(num(total.total), 85, '[from_task] (a) the total');
   // (b) one country -> exact seed value (US revenue = 35)
   const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] }]);
-  assert.equal(num(us.rev), 35);
+  assert.equal(num(us.rev), 35, '[from_task] (b) US');
   // (c) group, then keep the groups whose total clears a bar
   const big = await from('big', [
     { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] },
     { stage: 'where', conditions: [{ column: 'rev', op: 'gte', value: 25 }] },
   ]);
-  assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25));
-  assert.ok(big.reduce((s, r) => s + num(r.rev), 0) <= 85);
+  assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25), '[from_task] (c) the groups that clear the bar');
+  assert.ok(big.reduce((s, r) => s + num(r.rev), 0) <= 85, '[from_task] (c) within the total');
+
+  // 'a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it'
+  const full = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 1000 }));
+  const rowCount = full.row_count;
+  assert.ok(rowCount >= 2, `[paged] expected multiple country rows, got ${rowCount}`);
+  // page through in chunks of 2; has_more drives the loop and must terminate.
+  const collected = [];
+  let offset = 0; let last; let guard = 0;
+  do {
+    last = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 2, offset }));
+    assert.equal(last.ok, true, JSON.stringify(last.error));
+    collected.push(...last.rows);
+    offset += 2;
+  } while (last.page.has_more && guard++ < 20);
+  assert.equal(last.page.has_more, false, '[paged] terminates on the last page');
+  assert.equal(collected.length, rowCount, '[paged] pages cover every row exactly');
+  assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85, '[paged] the pages sum to the total');
 });
 
 test('a drawn card reads its views from its own task: a row opens into a level that adds up to it, a path value is bound as a literal', opts, async (t) => {
@@ -199,27 +215,6 @@ test('query_pipeline_model: conditional aggregates and a second level count the 
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // a second level reads the first's columns only
   await assert.rejects(() => engine.query_pipeline_model({ context_id: s.context_id, transform: { group_by: ['player_id_of_internal'], measures: [{ agg: 'count', name: 'n' }], then: { measures: [{ agg: 'sum', column: 'event_name', name: 's' }] } } }), /then\.measures/);
-});
-
-test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {
-  if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(m.status, 'done', JSON.stringify(m));
-  const full = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 1000 }));
-  const total = full.row_count;
-  assert.ok(total >= 2, `expected multiple country rows, got ${total}`);
-  // page through in chunks of 2; has_more drives the loop and must terminate.
-  const collected = [];
-  let offset = 0; let last; let guard = 0;
-  do {
-    last = await one(engine.query_semantic_model({ task_ids: [m.task_id], limit: 2, offset }));
-    assert.equal(last.ok, true, JSON.stringify(last.error));
-    collected.push(...last.rows);
-    offset += 2;
-  } while (last.page.has_more && guard++ < 20);
-  assert.equal(last.page.has_more, false);                 // terminates on the last page
-  assert.equal(collected.length, total);                   // pages cover every row exactly
-  assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85);
 });
 
 // PAGING IS THE READ'S: a read's offset/limit are row numbers of the task's result. A query keeps the

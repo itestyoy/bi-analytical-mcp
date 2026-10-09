@@ -1,9 +1,10 @@
 // DB-level A/B integration test: compute the per-variant PRELIMINARY AGGREGATES
 // in the warehouse (DuckDB + dbt) by materializing each A/B recipe's pipeline as a
 // real model, read back the per-variant rows, then compute the FINAL STATISTICS
-// (proportion / mean / CUPED) via experiment({ action: 'analyze' }). We assert on the NUMBERS the
+// (mean / CUPED / ratio) via experiment({ action: 'analyze' }). We assert on the NUMBERS the
 // tool returns — derived by hand from the seed — proving the full path:
 //   events + experiments  ──pipeline──▶  per-variant rows  ──experiment analyze──▶  stats.
+// The proportion recipe (experiment_conversion) and the SRM check run in end-to-end.test.js (5a–5c).
 //
 // Seed facts (window = experiment assignment 2026-01-01 → 2026-02-01):
 //   experiments  control  = {u1,u3,u5,u7,u9,u11}   variant_b = {u2,u4,u6,u8,u10,u12}
@@ -66,27 +67,6 @@ async function aggregatesFor(id) {
 // Turn one per-variant row into an experiment arm using the recipe's arm template.
 const arm = armFrom;
 
-test('conversion: DB aggregates → two-proportion z-test (control 6/6 vs variant 1/6)', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
-  try {
-    // preliminary counts computed IN the warehouse
-    assert.equal(Number(byGroup.control.n), 6);
-    assert.equal(Number(byGroup.variant_b.n), 6);
-    assert.equal(Number(byGroup.control.conversions), 6);   // all six controls purchased
-    assert.equal(Number(byGroup.variant_b.conversions), 1); // only u10 in variant_b
-
-    const res = engine._analyzeExperiment({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
-    assert.equal(res.ok, true);
-    const v = res.results[0];
-    close(v.control_rate, 1.0);
-    close(v.variant_rate, 1 / 6);
-    close(v.absolute_lift, 1 / 6 - 1);
-    assert.equal(v.significant, true); // 100% vs 17% on n=6 is a clear drop
-    assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine._deletePipelineModel({ context_id }); }
-});
-
 test('revenue/user: DB aggregates → Welch t-test (means 10.833 vs 3.333)', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
   const { map, byGroup, context_id } = await aggregatesFor('experiment_revenue');
@@ -146,18 +126,5 @@ test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 1
     close(v.variant_ratio, 10 / 12);      // ≈ 0.8333
     close(v.absolute_lift, 10 / 12 - 15 / 16);
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
-  } finally { await engine._deletePipelineModel({ context_id }); }
-});
-
-test('SRM: per-variant sizes computed in the DB pass the guardrail (6 vs 6)', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { map, byGroup, context_id } = await aggregatesFor('experiment_conversion');
-  try {
-    // feed the warehouse-computed group sizes into the SRM check — a clean 6/6 split
-    const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.arm.n]) }));
-    const res = engine._checkSplit({ groups });
-    assert.equal(res.ok, true);
-    close(res.chi_square, 0);             // 6 vs 6 against an even split
-    assert.equal(res.srm_detected, false);
   } finally { await engine._deletePipelineModel({ context_id }); }
 });

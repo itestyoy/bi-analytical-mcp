@@ -24,6 +24,11 @@ const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 
 let wh; let engine;
+// The context the first test declares; the ordering and cancel tests run on it rather than declaring
+// TASK again (what they prove does not depend on a fresh context). A run that skips the first test
+// declares one for itself.
+let monCtx;
+const monContext = async () => monCtx ?? (monCtx = (await engine.build_semantic_model(TASK)).context_id);
 const TASK = {
   name: 'mon',
   semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
@@ -62,6 +67,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
   if (skip(t)) return;
   // the declaration is still being parsed when the batch is started
   const created = await engine.raw.build_semantic_model(TASK);
+  monCtx = created.context_id;
   const started = await engine.raw.query_semantic_model({
     context_id: created.context_id,
     queries: [
@@ -117,9 +123,9 @@ test('a batch of projections over a built pipeline model: count, non-NULL count 
 
 test('a query issued after a batch runs once the whole batch is done, and reads the same data', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model(TASK);
-  const batch = await engine.raw.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
-  const after = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  const context_id = await monContext();
+  const batch = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
+  const after = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
   // by the time the later query is done, every member of the batch is too
   const peek = await engine.raw.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
   assert.equal(peek.status, 'done');
@@ -132,13 +138,13 @@ test('a query issued after a batch runs once the whole batch is done, and reads 
 
 test('a cancelled query ends as cancelled and the context goes on: the next query reads the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model(TASK);
-  const doomed = await engine.raw.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
+  const context_id = await monContext();
+  const doomed = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
   const out = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, cancel: true });
   assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
   const read = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
   assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled']);
-  const next = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  const next = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
   const g = revenueBy(next.rows);
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
 });

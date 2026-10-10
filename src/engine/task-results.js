@@ -47,8 +47,9 @@ export const taskResultMethods = {
     return this._readTable(dir, table, kept);
   },
 
-  /** Run a (optionally projected) read over a materialized result table: `limit` rows from row `offset`.
-   *  `ordered` is what a read with no transform knows of its rows' order (false: none). */
+  /** Run a (optionally projected) read over a materialized result table: `limit` rows from row `offset`,
+   *  as the warehouse cuts them. `ordered` is what a read with no transform knows of its rows' order
+   *  (false: none). */
   async _readTable(dir, table, limit, transform, { ordered } = {}, offset = 0, sample = false, samplePercent = 10) {
     const ref = `{{ ref('${table}') }}`;
     const d = getDialect(this.catalog.dialect);
@@ -61,15 +62,28 @@ export const taskResultMethods = {
       if (!res.ok) return { ok: false, status: 'error', table, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
       return { ok: true, status: 'ready', table, sampled: true, sampling: samplingNote(samplePercent / 100), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
     }
-    // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
-    // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).
-    const res = await this.runner.show(dir, base, limit + offset + 1);
-    if (!res.ok) return { ok: false, status: 'error', table, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-    const pageRows = res.rows.slice(offset, offset + limit);
-    // the read reached the end of the table when it fetched no row past the page: then every row is
-    // counted (a page that starts past the end too)
-    const more = res.rows.length > offset + limit;
-    return { ok: true, status: 'ready', table, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: pageBlock({ offset, limit, returned: pageRows.length, has_more: more, total: more ? null : res.rows.length, ordered: transform ? !!transform.order_by?.length : ordered }), ...(transform ? { projected: true } : {}) };
+    // A PAGE IS CUT BY THE WAREHOUSE (LIMIT … OFFSET), one row past it fetched to know whether more
+    // follow — never the rows before it, which a deep page of a large table would pull every time. The
+    // rows come in the order every read of them comes in: a transform's order_by, else the stored
+    // table's own (on DuckDB its insertion order, which LIMIT and OFFSET keep). A page past the first is
+    // read as a relation, since dbt show writes a `limit` of its own after the SQL it is given, and that
+    // may not follow an OFFSET.
+    const fetch = limit + 1;
+    const sql = offset > 0 ? `select * from (${buildProjection(ref, { ...(transform || {}), limit: fetch, offset }, d)}) _page` : base;
+    const failed = (r) => ({ ok: false, status: 'error', table, error: { stage: 'fetch', message: formatDbtError(r.stdout, r.stderr) } });
+    const res = await this.runner.show(dir, sql, fetch);
+    if (!res.ok) return failed(res);
+    const pageRows = res.rows.slice(0, limit);
+    const more = res.rows.length > limit;
+    // a page that reaches the end counts the rows there are; one that starts past the end holds none,
+    // and they are counted for it
+    let total = more ? null : offset + pageRows.length;
+    if (!more && !pageRows.length && offset > 0) {
+      const counted = await this.runner.show(dir, `select count(*) as n from (${base}) _all`, 1);
+      if (!counted.ok) return failed(counted);
+      total = Number(counted.rows[0]?.n ?? 0);
+    }
+    return { ok: true, status: 'ready', table, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: pageBlock({ offset, limit, returned: pageRows.length, has_more: more, total, ordered: transform ? !!transform.order_by?.length : ordered }), ...(transform ? { projected: true } : {}) };
   },
 
   /** The side a task belongs to (semantic | pipeline), from the tool that started it (persisted with the task). */
@@ -237,13 +251,12 @@ export const taskResultMethods = {
     }
     if (stored) {
       // a stored table: a page past the rows held is read from it, whether or not the answer is still
-      // held — with what the answer said of the rows' order, and of where they come from (its build's
-      // SQL, assumptions and warnings were said once, with its first page). A read that names no page
-      // (a card's, once the answer is gone) reads the rows the task kept.
+      // held — with what the answer said of the rows' order, and what a page carries of it (pageAround).
+      // A read that names no page (a card's, once the answer is gone) reads the rows the task kept.
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
       const read = await this._readTable(this.ctxs.dir(job.contextId), job.table, page?.limit ?? job.keptRows ?? KEPT_ROWS, undefined, { ordered: held?.page?.ordered }, page?.offset ?? 0);
       if (read.ok === false) return { ...head, ...read, status: 'error' };
-      return { ...head, ...identityOf(held), ...read, status: 'done', ...this._showHint(id, read) };
+      return { ...head, ...pageAround(held, page?.offset ?? 0), ...read, status: 'done', ...this._showHint(id, read) };
     }
     // a task that FAILED answers with its failure — paged or not: it has no rows to page, and telling
     // the caller to build again hides why the build did not stand
@@ -254,8 +267,8 @@ export const taskResultMethods = {
 
   /**
    * One page of the rows a task's answer holds — its result's rows `page.offset`.. by their row
-   * numbers. Past the rows held, a result that was not stored has nothing more: the page says how many
-   * there are, and how to have the rest.
+   * numbers, in the shape of a page read from a stored table (pageAround). Past the rows held, a result
+   * that was not stored has nothing more: the page says how many there are, and how to have the rest.
    */
   _heldPage(job, held, page, stored) {
     const { offset, limit } = page;
@@ -267,10 +280,11 @@ export const taskResultMethods = {
     const cut = !stored && more && offset + limit >= count;
     const block = pageBlock({ offset, limit, returned: rows.length, has_more: end < count || more, total: more ? null : count, ordered: held.page?.ordered === false ? false : undefined });
     if (cut) delete block.next_offset; // its next rows were not kept: no row number reads them
+    const around = pageAround(held, offset);
     return {
-      ...held, ok: true, rows, row_count: rows.length, status: 'done',
+      ...around, ok: true, status: 'done', ...(held.columns !== undefined ? { columns: held.columns } : {}), rows, row_count: rows.length,
       page: stored ? block : { ...block, held_rows: count },
-      ...(cut ? { warnings: [...(held.warnings || []), `the task keeps the first ${count} row(s) of its result — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
+      ...(cut ? { warnings: [...(around.warnings || []), `the task keeps the first ${count} row(s) of its result — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
     };
   },
 
@@ -363,11 +377,23 @@ export const taskResultMethods = {
   },
 };
 
-/** What a page read from a stored table carries of the task's answer, when it is still held: where the
- *  rows come from (the model, the provenance, a sample's note) — not what was said once with its first
- *  page (a build's SQL, assumptions and warnings). */
+/** Where a result's rows come from (the model, the provenance, a sample's note) — what every page of it
+ *  carries, wherever its rows were read. */
 function identityOf(held) {
   return held ? Object.fromEntries(['model', 'provenance', 'sampling'].filter((k) => held[k] !== undefined).map((k) => [k, held[k]])) : {};
+}
+
+/**
+ * ONE PAGE SHAPE: what a page of a task's result carries of its answer besides its own rows, columns and
+ * page — the same whether its rows are the ones the answer holds or were read from the task's table. The
+ * first page (offset 0) is the answer: it says the rest of it once (a build's SQL, assumptions, warnings,
+ * output columns); every other page says only where its rows come from (identityOf).
+ */
+function pageAround(held, offset) {
+  if (!held) return {};
+  if (offset > 0) return identityOf(held);
+  const { rows: _rows, row_count: _count, page: _page, columns: _columns, ...answer } = held;
+  return answer;
 }
 
 /**

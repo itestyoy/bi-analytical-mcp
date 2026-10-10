@@ -6,7 +6,7 @@
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { formatDbtError, dbtFailure } from '../dbt/index.js';
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from '../python-model.js';
-import { renderPipeline, sqlRunHints } from '../pipeline.js';
+import { renderPipeline, sqlRunHints, columnList } from '../pipeline.js';
 import { currentSpelling } from '../pipeline/earlier.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { samplingNote, pageBlock } from './helpers.js';
@@ -183,14 +183,20 @@ export const pipelineMaterializeMethods = {
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
-    const stages = draft.stages.map((s) => JSON.parse(JSON.stringify(s)));
+    const fixed = draft.stages.slice();
     // the in-flight marker goes up BEFORE anything awaits, so a second call made meanwhile is refused
-    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null, steps: stages.length };
-    let columns;
+    draft.building = { started_at: new Date().toISOString(), model: modelName, task_id: null, steps: fixed.length };
+    let rendered;
     try {
-      // the list the checkpoint keeps: each column's type with the warehouse's word on it (physical)
-      columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages), { stored: true });
+      rendered = this._draftRender({ ...draft, stages: fixed }, await this.probe.grounding(draft.source, fixed));
     } catch (e) { delete draft.building; throw e; }
+    // each step this build renders is kept from now on in the spelling it is built in, as an accepted
+    // edit keeps it (src/pipeline/earlier.js) — the steps its checkpoint will stand for among them
+    const spelled = (st) => rendered.current.get(st) ?? st;
+    draft.stages = draft.stages.map(spelled);
+    const stages = fixed.map((s) => JSON.parse(JSON.stringify(spelled(s))));
+    // the list the checkpoint keeps: each column's type with the warehouse's word on it (physical)
+    const columns = columnList(rendered.columns);
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
     const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {
       let result;

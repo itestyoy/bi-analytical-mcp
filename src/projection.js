@@ -37,24 +37,24 @@ function ident(x) {
 function writer(d) {
   const col = (x) => d.quoteIdent(ident(x));
   const predicate = (c) => comparison(col(c.column), c.op, c.value);
-  // ONE WRITER PER FUNCTION: a measure here is the aggregate stage's, written by its aggExpr — what a
-  // read checks first is only what it says in its own words (the list it takes, a name, a column)
+  // ONE WRITER PER FUNCTION: a measure here is the aggregate stage's, written by its aggExpr, which
+  // holds the measure's own rules (a column for every function but a count, a percentile in (0,1)).
+  // What a read checks first is only what is its own: the list it takes and the name a measure produces.
   const aggSql = (a) => {
     if (!AGGS.has(a.agg)) throw new Error(`unsupported agg: ${a.agg}`);
     if (!a.name) throw new Error(`${a.agg}: every measure names the column it produces (name)`);
-    // only a count may go without a column (it counts rows); every other function folds one
-    if (a.agg !== 'count' && !a.column) throw new Error(`${a.agg} needs a column to fold`);
-    if (a.agg === 'percentile' && !(typeof a.percentile === 'number' && a.percentile > 0 && a.percentile < 1)) throw new Error('percentile needs `percentile` in (0,1)');
     // a CONDITIONAL aggregate folds only the rows its `where` holds for
     const cond = a.where?.length ? conditionsSql(a.where, predicate).join(' and ') : null;
-    return aggExpr(d, a.agg, a.column ? ident(a.column) : null, a.percentile, cond);
+    try { return aggExpr(d, a.agg, a.column ? ident(a.column) : null, a.percentile, cond); }
+    catch (e) { throw new Error(`measure '${a.name}': ${e.message}`); } // the rule's own words, named by the measure they refuse
   };
   return { col, predicate, aggSql };
 }
 
 /**
  * @param relation  SQL relation expression (e.g. `{{ ref('qr_x') }}`).
- * @param t         { where[], group_by[], measures[{ name, agg, column?, percentile?, where? }], having[], order_by[{ key, direction?, nulls? }], limit }
+ * @param t         { where[], group_by[], measures[{ name, agg, column?, percentile?, where? }], having[], order_by[{ key, direction?, nulls? }], limit, offset }
+ *                  (`limit` and `offset` are the read's page, not the caller's: the rows `offset`.. of the result)
  * @param d         the warehouse's dialect — every name is written quoted, every statistic its way
  */
 export function buildProjection(relation, t = {}, d) {
@@ -62,8 +62,8 @@ export function buildProjection(relation, t = {}, d) {
   // a SECOND level (then): the same projection over this one's result — the groups it made, counted,
   // summed or filtered again (how many cycles passed the having; how many reached a step)
   if (t.then) {
-    const { then, limit, ...inner } = t;
-    return buildProjection(`(${buildProjection(relation, inner, d)}) level1`, { ...then, ...(typeof limit === 'number' ? { limit } : {}) }, d);
+    const { then, limit, offset, ...inner } = t;
+    return buildProjection(`(${buildProjection(relation, inner, d)}) level1`, { ...then, ...(typeof limit === 'number' ? { limit, offset } : {}) }, d);
   }
   const { col, predicate, aggSql } = writer(d);
   const groupCols = (t.group_by || []).map(col);
@@ -76,7 +76,8 @@ export function buildProjection(relation, t = {}, d) {
   if (t.having?.length) sql = `select * from (${sql}) grouped where ${conditionsSql(t.having, predicate).join(' and ')}`;
   // a sort key as the order_by stage writes it: NULLs last unless asked first, on every warehouse
   if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => d.orderKey(col(o.key), o.direction, o.nulls)).join(', ')}`;
-  if (typeof t.limit === 'number') sql += ` limit ${Math.trunc(t.limit)}`;
+  // the page, at the level that orders the rows (an offset goes with a limit on every warehouse)
+  if (typeof t.limit === 'number') sql += ` limit ${Math.trunc(t.limit)}${t.offset > 0 ? ` offset ${Math.trunc(t.offset)}` : ''}`;
   return sql;
 }
 

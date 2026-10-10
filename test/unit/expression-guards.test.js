@@ -98,11 +98,27 @@ test('a step stored by an earlier version is built in this version\'s spelling �
   const built = renderPipeline(catalog, catalog.dialect, 'events', keptSteps, { physicalCols: new Set([...COLS, 'event_data']) });
   assert.deepEqual(keptSteps.map((s) => built.current.get(s)), [parsed, { stage: 'unnest', column: 'arr', name: 'w' }, { stage: 'limit', limit: 5 }]);
   assert.equal(built.current.get(parsed), parsed, 'a step in today\'s spelling is kept as it is');
-  assert.deepEqual(Engine.prototype._draftSteps.call({ catalog }, { source: 'events', stages: [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, { stage: 'unnest', source: 'arr', name: 'v' }] }), [
+  // the view is the render's own spelling, not a guess beside it: each step as its build renders it
+  const view = Object.assign(Object.create(Engine.prototype), { catalog });
+  const physSet = new Set([...COLS, 'event_data']);
+  const draftSteps = [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, parsed, { stage: 'unnest', source: 'arr', name: 'v' }];
+  assert.deepEqual(view._draftSteps({ source: 'events', stages: draftSteps }, physSet), [
     { index: 1, stage: 'limit', limit: 5 },
     { index: 2, stage: 'unnest', property: 'words_collected', name: 'w' },
-    { index: 3, stage: 'unnest', column: 'arr', name: 'v' },
+    { index: 3, ...parsed },
+    { index: 4, stage: 'unnest', column: 'arr', name: 'v' },
   ]);
+  // a kept funnel's step condition on a name that is both an event property and a column of the rows
+  // is the column, as its build resolves it — so the step copied into edit_step reads that column
+  const onLevel = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['level_started'] }, { name: 'b', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }] };
+  const levelCols = new Set([...COLS, 'level_id_of_event_data']);
+  const [shown] = view._draftSteps({ source: 'events', stages: [onLevel] }, levelCols);
+  const { index: _i, ...shownStep } = shown;
+  assert.deepEqual(shownStep, renderPipeline(catalog, catalog.dialect, 'events', [onLevel], { physicalCols: levelCols }).current.get(onLevel));
+  assert.deepEqual(shownStep.steps[1].where, [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }]);
+  // a step that no longer builds is shown as stored, the steps before it as built
+  const broken = view._draftSteps({ source: 'events', stages: [{ stage: 'limit', n: 5 }, { stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }, physSet);
+  assert.deepEqual(broken.map(({ index: _n, ...s }) => s), [{ stage: 'limit', limit: 5 }, { stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }]);
   // a kept one that named a scalar property — which the schema no longer offers — is refused by its build, saying what the property is
   assert.throws(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'unnest', source: 'price_in_usd_of_event_data', name: 'w' }], { physicalCols: new Set([...COLS, 'price_in_usd_of_event_data']) }), /'price_in_usd_of_event_data' is declared as numeric, not an array/);
   // a derive stage is the compute stage reading the same event property — a column of its own, or a key of the payload

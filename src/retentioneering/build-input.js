@@ -5,8 +5,8 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { userKeyColumn, sourceColumns, NAME } from './schema.js';
-import { ES_COLUMNS } from './eventstream.js';
+import { userKeyColumn, sourceColumns, checkConstant, NAME } from './schema.js';
+import { ES_COLUMNS } from './names.js';
 import { eachCondition } from '../conditions.js';
 
 export function suggest(value, known) {
@@ -63,7 +63,7 @@ export function validateBuild(engine, input, physical = null) {
   (input.events?.split || []).forEach((rule, i) => {
     checkEvents(c, source, [rule.event], `events.split.${i}.event`);
     if (rule.by) checkRef(rule.by, `events.split.${i}.by`);
-    for (const cs of rule.cases || []) eachCondition(cs.when, (w) => { checkRef(w, `events.split.${i}.cases.when`); checkBetween(w, `events.split.${i}.cases.when`); });
+    for (const cs of rule.cases || []) eachCondition(cs.when, (w) => { checkRef(w, `events.split.${i}.cases.when`); checkConstant(w, `events.split.${i}.cases.when`); });
   });
   // what one path is, when not the user: columns and properties of the source
   (input.path || []).forEach((ref) => checkRef(ref, 'path'));
@@ -97,21 +97,9 @@ export function validateBuild(engine, input, physical = null) {
       const known = [...own, ...segNames];
       throw new ToolError(`where filters on a column of '${source}' or a declared segment — '${w.column}' is neither${suggest(w.column, known)} (columns: ${own.join(', ') || 'none'}; segments: ${segNames.join(', ') || 'none'})`, { stage: 'validate', field });
     }
-    checkWhereValue(w);
+    checkConstant(w, 'where.value');
   });
   return { ...input, segments };
-}
-
-/** A between condition takes [low, high]. */
-export function checkBetween(w, field) {
-  if (w.op === 'between' && !(Array.isArray(w.value) && w.value.length === 2)) throw new ToolError('between takes [low, high] (both included)', { stage: 'validate', field });
-}
-
-/** A row filter's value, as its operator takes it: one, a list (in / not_in), [low, high] (between), or none (is_null / is_not_null). */
-export function checkWhereValue(w) {
-  if (!['is_null', 'is_not_null'].includes(w.op) && w.value === undefined) throw new ToolError(`where ${w.op} on '${w.column ?? w.property}' needs a value`, { stage: 'validate', field: 'where.value' });
-  if (['in', 'not_in'].includes(w.op) && !Array.isArray(w.value)) throw new ToolError(`where ${w.op} takes an array value`, { stage: 'validate', field: 'where.value' });
-  if (w.op === 'between' && !(Array.isArray(w.value) && w.value.length === 2)) throw new ToolError('where between takes [low, high] (both included)', { stage: 'validate', field: 'where.value' });
 }
 
 /** A segment's name, once: not one of the eventstream's own columns, nor another segment's. */
@@ -147,7 +135,7 @@ export function validateTaskBuild(input, base) {
     for (const cs of rule.cases || []) eachCondition(cs.when, (w) => {
       if (w.property !== undefined) noCatalog(`a case of events.split.${i} names the event property '${w.property}'`, `events.split.${i}.cases.when`);
       known(w.column, `events.split.${i}.cases.when`);
-      checkBetween(w, `events.split.${i}.cases.when`);
+      checkConstant(w, `events.split.${i}.cases.when`);
     });
   });
   const segNames = [];
@@ -162,7 +150,7 @@ export function validateTaskBuild(input, base) {
   eachCondition(input.where, (w) => {
     if (w.property !== undefined) noCatalog(`where names the event property '${w.property}'`, 'where.property');
     if (!segNames.includes(w.column)) known(w.column, 'where.column');
-    checkWhereValue(w);
+    checkConstant(w, 'where.value');
   });
   return { ...input, segments };
 }

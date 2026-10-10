@@ -304,6 +304,44 @@ test('the tool that started a task is persisted with it, so its side survives a 
   b.close();
 });
 
+// A STORED RESULT IS PAGED BY THE WAREHOUSE, IN ONE PAGE SHAPE: a page is the rows the read of it
+// returns — a deep page never pulls the rows before it — one that starts past the end counts the
+// table's rows, and every page carries the same of its answer wherever its rows come from (the rows the
+// task holds, or its table): the build's details with the first page, where its rows come from on each.
+test('a stored result is paged by the warehouse, each page in one shape, the build\'s details with the first', async () => {
+  const ids = (from, n) => Array.from({ length: n }, (_, i) => ({ event_id: from + i }));
+  let replies = [];
+  const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return replies.length > 1 ? replies.shift() : replies[0]; } };
+  const e = engine(runner);
+  // the build's answer holds the table's first 50 rows, and more follow
+  replies = [{ ok: true, columns: [{ name: 'event_id' }], rows: ids(0, 51) }];
+  const build = await e.build_pipeline_model({ action: 'start', name: 'events_page', source: 'events', stages: [WHERE_EVENT], materialize: true });
+  const id = build.materialize.task_id;
+  const first = await taskResult(e, id);
+  assert.deepEqual([first.status, first.rows.length, first.page.has_more], ['done', 50, true]);
+  const details = ['model_sql', 'assumptions', 'output_columns', 'build'];
+  for (const k of details) assert.ok(first[k] !== undefined, `the first page says the build's ${k}`);
+  // a page within the rows held and a page read from the table: the same shape, with where the rows come from
+  const held = await one(e.query_pipeline_model({ task_ids: [id], offset: 10, limit: 5 }));
+  replies = [{ ok: true, columns: [{ name: 'event_id' }], rows: ids(45, 11) }];
+  const read = await one(e.query_pipeline_model({ task_ids: [id], offset: 45, limit: 10 }));
+  assert.deepEqual(held.rows, ids(10, 5));
+  assert.deepEqual(read.rows, ids(45, 10));
+  assert.deepEqual(Object.keys(held).sort(), Object.keys(read).sort());
+  for (const page of [held, read]) {
+    for (const k of details) assert.equal(page[k], undefined, `${k} is said once, with the first page`);
+    assert.deepEqual([page.model, page.provenance], [first.model, first.provenance]);
+  }
+  // a deep page is the rows its read returns, the one past them telling that more follow
+  replies = [{ ok: true, columns: [{ name: 'event_id' }], rows: ids(100000, 3) }];
+  const deep = await one(e.query_pipeline_model({ task_ids: [id], offset: 100000, limit: 2 }));
+  assert.deepEqual([deep.rows, deep.page.has_more, deep.page.next_offset], [ids(100000, 2), true, 100002]);
+  // a page that starts past the last row holds none, and counts the rows there are
+  replies = [{ ok: true, columns: [{ name: 'event_id' }], rows: [] }, { ok: true, columns: [{ name: 'n' }], rows: [{ n: 1234 }] }];
+  const past = await one(e.query_pipeline_model({ task_ids: [id], offset: 5000 }));
+  assert.deepEqual([past.rows, past.page.has_more, past.page.total_rows], [[], false, 1234]);
+});
+
 test('a drawn pivot keeps opening after a restart, and whatever envelope the host puts on its read', async () => {
   const { runTool } = await import('../../src/mcp-surface.js');
   const root = mkdtempSync(join(tmpdir(), 'drawn-'));

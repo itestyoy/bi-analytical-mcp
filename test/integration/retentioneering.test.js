@@ -184,8 +184,7 @@ test('a metric asked for at two aggs — or twice — in one overview is compute
     assert.ok(values(both, 'length_mean').length > 1);
   }
   // …and the platform sizes are the warehouse's users per platform, as for any overview
-  const size = values('both', 'segment_size');
-  assert.deepEqual(Object.fromEntries(r.analyses.both.levels.map((l, i) => [l, size[i]])), perPlatform);
+  assert.deepEqual(sizes(r.analyses.both, 'both'), perPlatform);
 });
 
 test('display draws one analysis once — the card model is built from the stored numbers', opts, async (t) => {
@@ -503,6 +502,17 @@ test('filter_events.where: every operator, a number compared as a number, a nega
     'T16 mid_levels: a range, a text pattern, an or',
   );
 
+  // T16 — a substring is matched as written: a % or _ in it is that character, not a wildcard (read as
+  // a LIKE pattern, 'ad%' would keep ad_started and ad_finished, and 'e_s' new_session and end_session)
+  const asWritten = (x) => x.e === 'tutorial' || x.e.startsWith('ad%') || x.e.includes('e_s') || x.e.endsWith('_started');
+  const asWildcards = (x) => x.e === 'tutorial' || /^ad/.test(x.e) || /e.s/.test(x.e) || /._started$/.test(x.e);
+  assert.notDeepEqual(tally(own.filter(asWildcards)), tally(own.filter(asWritten)), 'guard: the wildcard reading keeps other rows');
+  assert.deepEqual(
+    await kept('as_written', [{ or: [{ column: 'event', op: 'eq', value: 'tutorial' }, { column: 'event', op: 'starts_with', value: 'ad%' }, { column: 'event', op: 'contains', value: 'e_s' }, { column: 'event', op: 'ends_with', value: '_started' }] }]),
+    tally(own.filter(asWritten)),
+    'T16 as_written: a substring\'s % and _ are those characters',
+  );
+
   // T16 — a step an earlier version kept in its own tree — { op, conditions }, { not } — is re-checked
   // (here, as the step before it is deleted) and keeps the rows it kept then: a missing value matches
   // nothing, so the negation keeps it
@@ -559,10 +569,10 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   const a = await readDone(q.task_id, { detail: 'full' });
   assert.equal(a.status, 'done', JSON.stringify(a.error));
   assert.deepEqual(a.analyses.transition_graph.nodes.map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort(), 'T21: a fork of the earlier eventstream keeps reading its rows');
-  // a full read holds the library's own records: each level and, beside its metrics, its segment_size
-  const overview = a.analyses.segment_overview;
-  const segmentSize = overview.metrics.find((m) => m.metric === 'segment_size');
-  assert.deepEqual(Object.fromEntries(overview.levels.map((l, i) => [l, segmentSize.values[i]])), perPlatform, 'T23: an overview of the keyword segment');
+  // a full read holds the overview as this server reshapes the library's rows — the level names, and
+  // each metric's values level by level, segment_size among them (the library's own tables are under
+  // `tables`)
+  assert.deepEqual(sizes(a.analyses.segment_overview, 'T23: an overview of the keyword segment'), perPlatform, 'T23: an overview of the keyword segment');
   // …and the first build's task still says them
   const reread = await readDone(first.task_id);
   assert.equal(reread.events, first.events, 'T21: the first build\'s task still says its rows');

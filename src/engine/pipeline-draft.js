@@ -6,7 +6,6 @@
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
 import { operandsMisspelled } from '../pipeline/sql.js';
-import { currentSpelling } from '../pipeline/earlier.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 
 export const pipelineDraftMethods = {
@@ -240,10 +239,16 @@ export const pipelineDraftMethods = {
    *  checkpoint keeps, with each column's `physical` mark (columnList) — not what an answer shows. */
   _draftColumns(draft, physSet, { stored = false } = {}) {
     if (!draft.stages.length) return draft.base ? draft.base.columns.map((c) => (stored ? { ...c } : { name: c.name, type: c.type })) : this._groundedDeclared(draft.source, physSet).cols;
+    const { columns } = this._draftRender(draft, physSet);
+    return stored ? columnList(columns) : [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+  },
+
+  /** The draft's steps rendered as its build renders them now — from the last live checkpoint, else from
+   *  where the draft starts (renderPipeline's { columns, current, … }). */
+  _draftRender(draft, physSet) {
     const plan = this._renderPlan(draft);
-    let columns;
     try {
-      ({ columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from }));
+      return renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from });
     } catch (e) {
       // the steps the draft HOLDS no longer build (written before a rule changed): refused as an added
       // step is — at compile, naming the step — with how to mend it
@@ -251,7 +256,6 @@ export const pipelineDraftMethods = {
       const step = at != null ? plan.stepOf(at) : null;
       throw new ToolError(`${step ? `step ${step}: ` : ''}${e.message} — a step this draft already holds; fix it with edit_step${step ? ` (index: ${step})` : ''}`, { stage: 'compile', field: 'stages' });
     }
-    return stored ? columnList(columns) : [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   },
 
   /**
@@ -294,13 +298,28 @@ export const pipelineDraftMethods = {
     return conditions ? [{ stage: 'where', conditions }, ...draft.stages] : draft.stages;
   },
 
-  /** The draft's steps as an answer shows them: each in this version's spelling, so a step copied into
-   *  edit_step is one the tool takes (a step kept from an earlier version, src/pipeline/earlier.js). */
-  _draftSteps(draft) {
-    // with no render at hand, a name is read as the build reads it when the step builds: an event
-    // property of the source where it is one, else a column of the rows
-    const cols = { has: (n) => { try { return !this.catalog.propertyFor(draft.source, n)?.spec; } catch { return false; } } };
-    return draft.stages.map((s, i) => ({ index: i + 1, ...currentSpelling(s, { catalog: this.catalog, source: draft.source, cols }) }));
+  /** The draft's steps as an answer shows them: each as its build renders it (_draftSpelling), so a step
+   *  copied into edit_step is the step that was built (one kept from an earlier version is shown in this
+   *  version's spelling, src/pipeline/earlier.js). `physSet`: the grounding the build renders with. */
+  _draftSteps(draft, physSet = null) {
+    if (!draft.stages.length) return [];
+    const current = this._draftSpelling(draft, physSet);
+    return draft.stages.map((s, i) => ({ index: i + 1, ...(current.get(s) ?? s) }));
+  },
+
+  /**
+   * Each step of the draft (by identity) in the spelling its build renders it in — the render's own
+   * (renderPipeline's `current`), from where the draft starts: the steps a checkpoint stands for were
+   * rendered by its build, as these are. A step the render does not reach (the first that no longer
+   * builds, and those after it) has none: it is shown as stored.
+   */
+  _draftSpelling(draft, physSet = null) {
+    const stages = this._draftEffectiveStages(draft);
+    const from = draft.base ? { model: draft.base.model, columns: draft.base.columns } : null;
+    const spell = (list) => renderPipeline(this.catalog, this.catalog.dialect, draft.source, list, { physicalCols: physSet, from }).current;
+    try { return spell(stages); } catch { /* the steps before the first that no longer builds, below */ }
+    const at = this._failingStepIndex(draft.source, stages, physSet, from);
+    try { return at > 1 ? spell(stages.slice(0, at - 1)) : new Map(); } catch { return new Map(); }
   },
 
   async _draftStart(input) {
@@ -391,7 +410,7 @@ export const pipelineDraftMethods = {
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const after = this._draftColumns(draft, physSet);
     // the steps just added — the caller has the earlier ones; the whole list with include_steps or preview
-    const all = this._draftSteps(draft);
+    const all = this._draftSteps(draft, physSet);
     const resp = {
       context_id: ctx.id, action: 'add_steps', added: effects.length,
       ...(includeSteps ? { steps: all } : { steps_added: all.slice(-effects.length), steps_count: all.length }),
@@ -493,7 +512,7 @@ export const pipelineDraftMethods = {
     const resp = {
       context_id: ctx.id, action: 'fork', forked_from: input.context_id, name, source: ctx.state.draft.source,
       materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
-      steps: this._draftSteps(ctx.state.draft), column_count: cols.length,
+      steps: this._draftSteps(ctx.state.draft, physSet), column_count: cols.length,
       ...(inherited.length ? { inherited_checkpoints: inherited } : {}),
       next: 'Continue editing this NEW draft (add_steps / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
       recommendations: [
@@ -558,7 +577,8 @@ export const pipelineDraftMethods = {
     }
     // a step an earlier version stored is kept from now on in the spelling it was built in — the
     // render's, resolved against the columns before it (src/pipeline/earlier.js); a step the render
-    // did not reach (a materialized prefix) stays as stored, and is shown in this spelling (_draftSteps)
+    // did not reach (a materialized prefix) was respelled by the build that made its checkpoint, and is
+    // shown as the build renders it (_draftSteps)
     draft.stages = rendered ? newStages.map((st) => rendered.current.get(st) ?? st) : newStages;
     // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
     // the files of the ones nobody else reads go with them.
@@ -571,7 +591,7 @@ export const pipelineDraftMethods = {
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
-    const allSteps = this._draftSteps(draft);
+    const allSteps = this._draftSteps(draft, physSet);
     // add_steps is APPEND-ONLY: the AI already saw every prior step in earlier responses, so echoing
     // the whole (growing) steps list each call is O(n²) waste across a build. Return only the applied
     // step + a count by default; the full list is available via include_steps:true or preview.
@@ -646,7 +666,7 @@ export const pipelineDraftMethods = {
   async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
-    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
+    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_steps first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
     // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.

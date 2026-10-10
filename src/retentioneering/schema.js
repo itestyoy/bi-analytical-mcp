@@ -21,10 +21,10 @@ import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
 import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, timeRange } from '../schema-kit.js';
-import { OPS, conditionsSql, comparison } from '../conditions.js';
+import { OPS, TEXT_OPS, conditionsSql, comparison } from '../conditions.js';
 import { CTX, NAME as CORE_NAME, TASK_READ } from '../schema/fields.js';
 import { cardTitle } from '../schema/display.js';
-import { ES_COLUMNS } from './eventstream.js';
+import { ES_COLUMNS } from './names.js';
 
 let factsCache;
 /** The facts sheet (read once). */
@@ -56,9 +56,12 @@ export const analysisKinds = () => Object.keys(retentioneeringFacts().analyses);
 export const offeredOps = () => Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
 
 export const NAME = '^[a-z][a-z0-9_]*$';
-/** An eventstream's own name — bounded as every name the server makes a model of is (the core's NAME):
- *  it goes into the file names of the eventstream's models. */
-const EVENTSTREAM_NAME = CORE_NAME;
+/** A NEW eventstream's name (start, fork) — bounded as every name the server makes a model of is (the
+ *  core's NAME): it goes into the file names of the eventstream's models. */
+const NEW_EVENTSTREAM = CORE_NAME;
+/** An eventstream a context already holds, as it is named there: an earlier version took names of any
+ *  length, and a kept context still holds them — so a reference is held to NAME alone. */
+const EVENTSTREAM_REF = NAME;
 /** A column of an eventstream: an identifier the warehouse stores (a segment, a path column, a custom one). */
 const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
 /** The library's per-path column, which this wrapper names `path` (see pathField). */
@@ -188,12 +191,12 @@ export function buildSchema(catalog) {
     description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task, with its path and columns).',
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
-      eventstream: { type: 'string', pattern: EVENTSTREAM_NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
+      eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
       step: { ...stepSchema(), description: 'edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
       steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: the library\'s own steps — one or several, applied in order, each { type: <op>, ...its parameters under the library\'s names }.' },
       index,
       after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
-      name: { type: 'string', pattern: EVENTSTREAM_NAME, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
+      name: { type: 'string', pattern: NEW_EVENTSTREAM, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
       source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it.' },
       from_task: {
         type: 'string', pattern: TASK_ID_PATTERN,
@@ -461,17 +464,20 @@ const ident = (name, field) => {
 /** The operators that negate another — each tested as NOT of the one it negates, so a row whose value
  *  is missing (which matches nothing) is kept by it. */
 const NEGATED = { neq: 'eq', not_in: 'in', not_like: 'like' };
-/** The operators whose constant is a text pattern: the column is read as text. */
-const TEXT_OPS = new Set(['like', 'not_like', 'contains', 'starts_with', 'ends_with']);
 
-/** The kind a condition's constant is compared as — 'string', 'number' or 'boolean' — with its shape
- *  held to what the operator takes (a list of one kind for in / not_in, [low, high] for between, a
- *  string for a text operator, none for a null check); a constant that is not one is refused here. */
-function constantKind(c, field) {
-  const say = (what) => { throw new ToolError(`condition on '${c.column}': ${c.op} ${what}`, { stage: 'validate', field }); };
+/** A refusal of condition `c`'s constant: what its operator takes instead. */
+const refuseConstant = (c, field, what) => { throw new ToolError(`condition on '${c.column ?? c.property}': ${c.op} ${what}`, { stage: 'validate', field }); };
+
+/** A condition's constant held to what its operator takes — the one rule for every `where` of the
+ *  feature (a start's, a split case's `when`, filter_events'): none for is_null / is_not_null, a list
+ *  for in / not_in, [low, high] for between (both included), one constant for any other, a string for
+ *  a text operator, and never null (a missing value is picked out with is_null). Refused here, at
+ *  `field`, rather than when the SQL runs. */
+export function checkConstant(c, field) {
+  const say = (what) => refuseConstant(c, field, what);
   if (c.op === 'is_null' || c.op === 'is_not_null') {
     if (c.value !== undefined) say('takes no value');
-    return null;
+    return;
   }
   if (c.value === undefined) say('needs a value');
   const many = c.op === 'in' || c.op === 'not_in' || c.op === 'between';
@@ -481,11 +487,17 @@ function constantKind(c, field) {
   if (c.op === 'between' && list.length !== 2) say('takes [low, high] (both included)');
   if (list.some((v) => v === null)) say('takes no null — a missing value is picked out with is_null');
   if (list.some((v) => typeof v === 'number' && !Number.isFinite(v))) say(`takes a number a comparison can take, not ${list.find((v) => typeof v === 'number' && !Number.isFinite(v))}`);
-  const kinds = new Set(list.map((v) => typeof v));
-  if (kinds.size > 1) say('takes constants of one kind — a list is compared as that kind');
-  const kind = [...kinds][0];
-  if (TEXT_OPS.has(c.op) && kind !== 'string') say('takes a string (a text pattern)');
-  return kind;
+  if (TEXT_OPS.has(c.op) && typeof c.value !== 'string') say('takes a string');
+}
+
+/** The kind filter_events compares a condition's column as — 'string', 'number' or 'boolean', its
+ *  constant's (null for a null check): the constant held to checkConstant, and a list to one kind. */
+function constantKind(c, field) {
+  checkConstant(c, field);
+  if (c.value === undefined) return null;
+  const kinds = new Set([].concat(c.value).map((v) => typeof v));
+  if (kinds.size > 1) refuseConstant(c, field, 'takes constants of one kind — a list is compared as that kind');
+  return [...kinds][0];
 }
 
 /** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, every
@@ -612,7 +624,7 @@ export function querySchema() {
   const f = retentioneeringFacts();
   const F = {
     context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
-    eventstream: { type: 'string', pattern: EVENTSTREAM_NAME, description: 'Which eventstream of the context (optional when it holds one).' },
+    eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'Which eventstream of the context (optional when it holds one).' },
     analyses: { type: 'array', minItems: 1, items: { anyOf: analysisSchemas() }, description: 'The analyses to run, computed together in one run.' },
     // a read is the core's (src/schema/fields.js TASK_READ); what it answers with is this side's: each
     // analysis summarized, or every record

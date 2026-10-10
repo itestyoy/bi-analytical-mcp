@@ -87,6 +87,20 @@ test('a field in another path\'s spelling is refused as the form that names it, 
   }
 });
 
+// …and only where that field means the same thing. explore_errors' `source` is where an error came from
+// (tool | task | startup), not a catalog model: { model: 'events' } there is refused as a field the page
+// of errors does not take, not sent on to `source: 'events'`, which would be refused next.
+test('a field in another path\'s spelling is told its name only where that field takes the value written', () => {
+  const e = engine();
+  const errors = refusal(e, 'explore_errors', { model: 'events' });
+  assert.match(errors, /request has an unexpected property 'model' — a page of errors takes time_range, source,/);
+  assert.doesNotMatch(errors, /here that field is called 'source'/);
+  // where `source` names a catalog model, the same spelling is told its name — a view, a note's about, a pipeline
+  assert.match(refusal(e, 'semantic_index', { model: 'events' }), /request has an unexpected property 'model' — here that field is called 'source'/);
+  assert.match(refusal(e, 'memory', { action: 'record', notes: [{ note: 'x', about: [{ model: 'users', property: 'country' }] }] }), /`notes\.0\.about\.0` has an unexpected property 'model' — here that field is called 'source'/);
+  assert.match(refusal(e, 'build_pipeline_model', { name: 'm', model: 'events', stages: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
+});
+
 // A form pinned to one source is further off than the form of the source named that lacks a field:
 // a stray field beside a users property is said as that, not as "`source` must be events".
 test('a field a source\'s form does not take is refused as that source\'s form, not steered to another source', () => {

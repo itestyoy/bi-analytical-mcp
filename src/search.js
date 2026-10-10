@@ -115,18 +115,21 @@ export class CatalogSearch {
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.
     // Each hit names its SOURCE plus the property within it — so "rewarded" resolves to the
     // property that carries it, and a mistyped "germny" still surfaces 'Germany'.
-    const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
+    // An indexed value belongs to (source, property): an event property of that source, or one of its
+    // attribute columns. Which, is decided here once — by the catalog, as the { source, property } view
+    // decides it — and carried as `kind` for the recommendation to word.
+    const matched = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
       const base = { value: v.value, freq: v.freq, source: v.source, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      // An indexed value belongs to (source, property): an event property of that source, or one
-      // of its dimension columns.
-      const isEventProp = c.isFact(v.source) && c.eventProps(v.source).includes(v.property);
-      if (isEventProp) {
-        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
+      if (c.attributeKind(v.source, v.property) === 'property') {
+        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null, kind: 'property' };
       }
-      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null };
+      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null, kind: 'attribute' };
     });
+    const recommendations = this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches: matched, recipe_matches });
+    // `kind` stays internal: a match is { value, freq, source, property, score, match, type, events }
+    const value_matches = matched.map(({ kind: _kind, ...m }) => m);
 
-    return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations: this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) };
+    return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations };
   }
 
   /** Concrete next-move guidance from the matches (≤4), with a did-you-mean note. */
@@ -134,9 +137,8 @@ export class CatalogSearch {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      // an attribute is a column of its model; a property rides on that source's events
-      const attribute = !(this.catalog.isFact(top.source) && this.catalog.eventProps(top.source).includes(top.property));
-      recs.push(`Value '${top.value}' lives in ${attribute ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}' } }).`);
+      // an attribute is a column of its model; a property rides on that source's events (run() says which)
+      recs.push(`Value '${top.value}' lives in ${top.kind} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}' } }).`);
       if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
     if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.`);

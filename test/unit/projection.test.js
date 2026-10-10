@@ -42,6 +42,22 @@ test('a read folds with the aggregate stage\'s functions, but makes no sketch', 
     assert.equal(typeof buildProjection('t', { group_by: ['g'], measures: [{ agg, column: 'x', name: 'v' }] }, q), 'string', agg);
   }
   for (const agg of ['hll_init', 'hll_merge_partial']) assert.throws(() => buildProjection('t', { group_by: ['g'], measures: [{ agg, column: 'x', name: 'v' }] }, q), /unsupported agg/, agg);
-  assert.throws(() => buildProjection('t', { measures: [{ agg: 'sum', name: 'v' }] }, q), /needs a column/);
-  assert.throws(() => buildProjection('t', { measures: [{ agg: 'percentile', column: 'x', name: 'v' }] }, q), /percentile/);
+});
+
+// a read's measure is refused by the aggregate stage's own rule (src/pipeline/sql.js aggExpr), named by
+// the measure it refuses — one copy of each rule, the same words wherever a measure is written
+test('a read\'s measure is refused by the measure\'s own rule, naming the measure', async () => {
+  const { aggExpr } = await import('../../src/pipeline/sql.js');
+  const ruleOf = (fn) => { try { fn(); } catch (e) { return e.message; } return null; };
+  for (const [measure, rule] of [
+    [{ agg: 'sum', name: 'v' }, () => aggExpr(q, 'sum', null)],
+    [{ agg: 'percentile', column: 'x', name: 'v' }, () => aggExpr(q, 'percentile', 'x', undefined)],
+    [{ agg: 'percentile', column: 'x', percentile: 1.5, name: 'v' }, () => aggExpr(q, 'percentile', 'x', 1.5)],
+  ]) {
+    const said = ruleOf(rule);
+    assert.ok(said, JSON.stringify(measure));
+    assert.throws(() => buildProjection('t', { measures: [measure] }, q), (e) => e.message === `measure 'v': ${said}`, JSON.stringify(measure));
+  }
+  // a count goes without a column: it counts rows
+  assert.equal(typeof buildProjection('t', { measures: [{ agg: 'count', name: 'n' }] }, q), 'string');
 });

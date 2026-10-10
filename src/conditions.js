@@ -11,11 +11,28 @@ import { sqlLiteral, isNumericType } from './dialects/base.js';
 /** The comparison operators, as the tools spell them → SQL. */
 export const COMPARE_SQL = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
-/** A text pattern operator → the LIKE pattern of its constant. */
-const PATTERN = { like: (v) => v, not_like: (v) => v, contains: (v) => `%${v}%`, starts_with: (v) => `${v}%`, ends_with: (v) => `%${v}` };
+/** like / not_like: the caller's own LIKE pattern, % and _ its wildcards. */
+const LIKE_SQL = { like: 'LIKE', not_like: 'NOT LIKE' };
+
+/**
+ * A substring test → its SQL over the written constant `s`. The constant is the text it says: a % or _
+ * in it is that character, never a wildcard. Written with the functions DuckDB and BigQuery both name
+ * alike (STARTS_WITH, ENDS_WITH, STRPOS), so one text serves every warehouse — an escaped LIKE would
+ * not: BigQuery's LIKE escapes with a backslash and takes no ESCAPE clause, DuckDB's has no escape
+ * character without one. An empty constant is in every string (STRPOS's answer for it is not one both
+ * warehouses document).
+ */
+const SUBSTRING = {
+  contains: (lhs, s, v) => (v === '' ? `${lhs} LIKE '%'` : `STRPOS(${lhs}, ${s}) > 0`),
+  starts_with: (lhs, s) => `STARTS_WITH(${lhs}, ${s})`,
+  ends_with: (lhs, s) => `ENDS_WITH(${lhs}, ${s})`,
+};
+
+/** The operators whose constant is text — a LIKE pattern or a substring — whatever the column is. */
+export const TEXT_OPS = new Set([...Object.keys(LIKE_SQL), ...Object.keys(SUBSTRING)]);
 
 /** EVERY operator a condition takes — one vocabulary, the same in every place a condition is written. */
-export const OPS = [...Object.keys(COMPARE_SQL), 'in', 'not_in', 'between', 'is_null', 'is_not_null', ...Object.keys(PATTERN)];
+export const OPS = [...Object.keys(COMPARE_SQL), 'in', 'not_in', 'between', 'is_null', 'is_not_null', ...TEXT_OPS];
 
 /**
  * A list of conditions (src/schema-kit.js conditionList) → one SQL per item, all of which hold: a
@@ -43,9 +60,9 @@ export function eachCondition(list, fn) {
 
 /**
  * `lhs op value` → SQL. `op`: eq | neq | gt | gte | lt | lte, in | not_in (a list, or one value),
- * between ([low, high]), is_null | is_not_null, like | not_like | contains | starts_with | ends_with
- * (a string). `lit` writes one constant (sqlLiteral unless the
- * caller binds a type to it — typedLiteral); an operator outside this set is refused.
+ * between ([low, high]), is_null | is_not_null, like | not_like (a LIKE pattern) | contains |
+ * starts_with | ends_with (a substring, matched as written). `lit` writes one constant (sqlLiteral
+ * unless the caller binds a type to it — typedLiteral); an operator outside this set is refused.
  */
 export function comparison(lhs, op, value, { lit = sqlLiteral } = {}) {
   if (op === 'is_null') return `${lhs} IS NULL`;
@@ -58,10 +75,10 @@ export function comparison(lhs, op, value, { lit = sqlLiteral } = {}) {
     if (!Array.isArray(value) || value.length !== 2) throw new Error("'between' needs value: [low, high]");
     return `${lhs} BETWEEN ${lit(value[0])} AND ${lit(value[1])}`;
   }
-  // a pattern is text whatever the column is: written as a string, never typed to the column
-  if (PATTERN[op]) {
+  // a pattern or a substring is text whatever the column is: written as a string, never typed to the column
+  if (TEXT_OPS.has(op)) {
     if (typeof value !== 'string') throw new Error(`${op} needs a string value`);
-    return `${lhs} ${op === 'not_like' ? 'NOT LIKE' : 'LIKE'} ${sqlLiteral(PATTERN[op](value))}`;
+    return LIKE_SQL[op] ? `${lhs} ${LIKE_SQL[op]} ${sqlLiteral(value)}` : SUBSTRING[op](lhs, sqlLiteral(value), value);
   }
   if (!COMPARE_SQL[op]) throw new Error(`unsupported comparison op: ${op}`);
   return `${lhs} ${COMPARE_SQL[op]} ${lit(value)}`;

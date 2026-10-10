@@ -40,8 +40,26 @@ export const table = (result, name) => {
   return t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
 };
 
-/** A segment overview's sizes, level by level. */
-export const sizes = (overview) => Object.fromEntries(overview.levels.map((l) => [l.name, l.size]));
+/**
+ * A segment overview's (or a clustering's) sizes, level by level, from either read: the summary's groups
+ * ({ name, size, … } under levels, or clusters) or a full read's level names with the segment_size
+ * metric beside them. An analysis that failed, or a result of neither shape, fails the test saying what
+ * it holds, under `label`.
+ */
+export const sizes = (overview, label = 'sizes') => {
+  assert.ok(overview, `${label}: no such analysis in the result`);
+  assert.equal(overview.error, undefined, `${label}: the analysis failed — ${JSON.stringify(overview.error)}`);
+  const groups = overview.levels ?? overview.clusters;
+  assert.ok(Array.isArray(groups) && groups.length, `${label}: no levels or clusters (has ${Object.keys(overview).join(', ')})`);
+  if (groups.every((g) => g && typeof g === 'object')) {
+    assert.ok(groups.every((g) => 'name' in g && 'size' in g), `${label}: a group without name and size — ${JSON.stringify(groups[0])}`);
+    return Object.fromEntries(groups.map((g) => [g.name, g.size]));
+  }
+  const size = overview.metrics?.find((m) => m.metric === 'segment_size');
+  assert.ok(size, `${label}: level names without a segment_size metric (metrics: ${(overview.metrics || []).map((m) => m.metric).join(', ') || 'none'})`);
+  assert.equal(size.values.length, groups.length, `${label}: segment_size has a value per level`);
+  return Object.fromEntries(groups.map((l, i) => [l, size.values[i]]));
+};
 
 /**
  * The world one test file runs in: the warehouse built, the engine, the rows, `paths` built (its

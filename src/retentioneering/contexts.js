@@ -3,8 +3,7 @@
 // path columns a build's spec declares.
 
 import { ToolError } from '../validate.js';
-import { ES_COLUMNS } from './eventstream.js';
-import { BUILD } from './names.js';
+import { BUILD, ES_COLUMNS } from './names.js';
 
 export function contextFor(engine, input) {
   if (!input.context_id) {

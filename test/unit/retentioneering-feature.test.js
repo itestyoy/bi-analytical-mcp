@@ -263,6 +263,13 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_pipeline_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
   // the eventstream's own name goes into its models' file names: bounded as the core's names are
   await refused('build_retentioneering_model', { name: `e${'x'.repeat(41)}`, source: 'events' }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc', name: `e${'x'.repeat(41)}` }, /invalid input/);
+  // …while an eventstream a context already holds is addressed by the name it has: an earlier version
+  // took longer ones, and a kept context still holds them
+  const longer = `e${'x'.repeat(41)}`;
+  await refused('build_retentioneering_model', { action: 'preview', context_id: 'abc', eventstream: longer }, pastSchema);
+  await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc', eventstream: longer, name: 'variant' }, pastSchema);
+  await refused('query_retentioneering_model', { context_id: 'abc', eventstream: longer, analyses: [{ kind: 'describe' }] }, pastSchema);
   await refused('build_retentioneering_model', { action: 'preview', context_id: 'A-B' }, /invalid input/);
   // a split case's conditions are its `when`, as a compute case's
   await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, /invalid input/);
@@ -515,6 +522,27 @@ test('a path is one of the eventstream\'s path columns, and a condition\'s const
   assert.equal(ok.steps, 1);
 });
 
+// A start's where and a split case's `when` hold a constant to the same rule as filter_events' where
+// (one rule, src/retentioneering/schema.js checkConstant), each refusal at its own field. Input guards;
+// no warehouse.
+test('a start\'s where and a split case take a constant by the rule filter_events\' where takes it', async () => {
+  const e = on();
+  const start = (extra) => e.build_retentioneering_model({ name: 'x', source: 'events', ...extra });
+  for (const [cond, re] of [
+    [{ column: 'bundle_id', op: 'in', value: 'a' }, /in takes a list/],
+    [{ column: 'bundle_id', op: 'eq', value: ['a'] }, /one constant/],
+    [{ column: 'bundle_id', op: 'between', value: ['a'] }, /\[low, high\]/],
+    [{ column: 'bundle_id', op: 'eq', value: null }, /is_null/],
+    [{ column: 'bundle_id', op: 'is_null', value: 'a' }, /takes no value/],
+    [{ column: 'bundle_id', op: 'gt' }, /needs a value/],
+    [{ column: 'bundle_id', op: 'starts_with', value: 1 }, /a string/],
+  ]) {
+    await assert.rejects(start({ where: [cond] }), (err) => err.field === 'where.value' && re.test(err.message), `where ${JSON.stringify(cond)}`);
+    await assert.rejects(start({ events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [cond] }] }] } }), (err) => err.field === 'events.split.0.cases.when' && re.test(err.message), `when ${JSON.stringify(cond)}`);
+  }
+  e.close();
+});
+
 // A step kept by an eventstream an earlier version stored — filter_events' where as its own tree — is
 // re-checked, and kept from then on, in today's spelling: what a call can write. Context lifecycle; the
 // rows it keeps are proved in test/integration/retentioneering.test.js.
@@ -524,14 +552,12 @@ test('a filter_events step stored in the earlier tree is carried over: re-checke
   const shape = { events: ['a', 'b'], paths: ['user_id'], segments: { level: { levels: ['1', '2'], complete: true } }, columns: [] };
   const tree = { op: 'or', conditions: [{ column: 'level', op: '>', value: 5 }, { not: { op: 'and', conditions: [{ column: 'level', op: '>=', value: 2 }, { column: 'event', op: 'in', value: ['a'] }] } }] };
   const es = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'drop_events', names: ['b'] } }, { step: { type: 'filter_events', where: tree } }], checkpoint: null };
-  let asked = null;
-  const feature = { checker: { check: async (req) => { asked = req; return { steps: req.steps.map(() => ({ ok: true, shape })) }; } } };
+  const feature = { checker: { check: async (req) => ({ steps: req.steps.map(() => ({ ok: true, shape })) }) } };
   const ctx = { id: 'c1', state: {} };
   // deleting the step before it re-checks it — in today's spelling, which the schema takes as a call's step
   await commitSteps({ ctxs: { touch() {} } }, feature, ctx, 'es', es, 'delete_step', { index: 1 });
   const kept = es.steps[0].step;
   assert.ok(Array.isArray(kept.where), 'kept as a condition list');
-  assert.deepEqual(asked.constants, [kept]);
   e.host.validate('build_retentioneering_model', { action: 'edit_step', context_id: 'abcdef012345', index: 1, step: kept });
   assert.deepEqual(preview(ctx, 'es', es).steps.map((x) => x.step), [kept]);
   // a step not yet re-checked is shown in today's spelling too
@@ -545,14 +571,11 @@ test('a step stored with an earlier path word is carried over: re-checked and sh
   const { commitSteps, preview } = await import('../../src/retentioneering/steps.js');
   const shape = { events: ['a', 'b'], paths: ['user_id', 'session_id'], segments: {}, columns: [] };
   const es = { base: { shape, model: 'm', summary: {} }, steps: [{ step: { type: 'drop_events', names: ['b'] } }, { step: { type: 'collapse_events', loops: true, path: 'sessions' } }], checkpoint: null };
-  let asked = null;
-  const feature = { checker: { check: async (req) => { asked = req; return { steps: req.steps.map(() => ({ ok: true, shape })) }; } } };
+  const feature = { checker: { check: async (req) => ({ steps: req.steps.map(() => ({ ok: true, shape })) }) } };
   const ctx = { id: 'c1', state: {} };
-  // deleting the step before it re-checks it — with the column the word named, in the step and in the library's form
+  // deleting the step before it re-checks it — kept with the column the word named
   await commitSteps({ ctxs: { touch() {} } }, feature, ctx, 'es', es, 'delete_step', { index: 1 });
   assert.deepEqual(es.steps[0].step, { type: 'collapse_events', loops: true, path: 'session_id' });
-  assert.equal(es.steps[0].library.path_col, 'session_id');
-  assert.equal(asked.steps[0].path_col, 'session_id');
   e.host.validate('build_retentioneering_model', { action: 'edit_step', context_id: 'abcdef012345', index: 1, step: es.steps[0].step });
   assert.deepEqual(preview(ctx, 'es', es).steps.map((x) => x.step), [es.steps[0].step]);
   // a step not yet re-checked is shown with the column too

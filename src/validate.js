@@ -46,7 +46,8 @@ export const CROSS_PATH_SPELLING = {
   explain: 'dry_run',
   draft_id: 'context_id',
   aggregations: 'measures',
-  // what a note is about, a substring filter, a time window, a catalog model on its own
+  // what a note is about, a substring filter, a time window, a catalog model on its own (hinted only
+  // where `source` takes the model named: HINT_WHERE_VALUE_TAKEN)
   targets: 'about',
   text: 'search',
   since: 'time_range',
@@ -61,12 +62,33 @@ export const CROSS_PATH_SPELLING = {
   mode: 'between_steps',
 };
 
-/** What this path calls `used`, when it has a name for it at all. */
-function otherSpelling(used, allowed) {
+/**
+ * A HINT NAMES THE SAME THING, OR NOTHING. A field this server spells one way may still mean another
+ * thing in another tool: `source` is a catalog model where a view, a pipeline or a note is about one,
+ * and where an error came from (tool | task | startup) in explore_errors. A spelling listed here is
+ * hinted only where the field it names takes the value written under it — `model: 'events'` is called
+ * `source` where `source` takes 'events' — and, having no value to test, never as a value of an enum.
+ */
+const HINT_WHERE_VALUE_TAKEN = new Set(['model']);
+
+/**
+ * What this path calls `used`, when it has a name for it at all. `takes(alt)` says whether the field
+ * `alt` here takes the value written under `used`; it is asked only for HINT_WHERE_VALUE_TAKEN.
+ */
+function otherSpelling(used, allowed, takes = null) {
   if (typeof used !== 'string') return null;
   const alt = CROSS_PATH_SPELLING[used];
-  if (!alt) return null;
-  return allowed.includes(alt) ? alt : null;
+  if (!alt || !allowed.includes(alt)) return null;
+  if (HINT_WHERE_VALUE_TAKEN.has(used) && !takes?.(alt)) return null;
+  return alt;
+}
+
+/** `takes` for otherSpelling over a form's fields: whether the field `alt` of `node` takes `value`. */
+function fieldTakes(root, node, value) {
+  return (alt) => {
+    const field = deref(root, node?.properties?.[alt]);
+    return isPlainObject(field) && nodeValidator(root, field)(value);
+  };
 }
 
 /** Read the value the error is about out of the input (ajv reports the path, not the value). */
@@ -124,7 +146,7 @@ function describe(e, ctx = {}) {
       const used = e.params.additionalProperty;
       // A field this path spells differently: say its name here rather than only that it is unknown.
       const node = deref(ctx.schema, e.parentSchema) || (ctx.schema ? atPointer(ctx.schema, e.schemaPath.replace(/\/additionalProperties$/, '')) : null);
-      const alt = otherSpelling(used, Object.keys(node?.properties || {}));
+      const alt = otherSpelling(used, Object.keys(node?.properties || {}), ctx.schema && fieldTakes(ctx.schema, node, valueAt(ctx.input, e.instancePath)?.[used]));
       // a form of a union names what it takes: the field is not one of them (src/schema-kit.js form)
       const fields = Object.keys(node?.properties || {});
       const takes = node?.title && node.properties ? ` — ${node.title} takes ${fields.length ? fields.join(', ') : 'no fields'}` : '';
@@ -396,7 +418,7 @@ function explainNode(root, n, value, memo) {
   const respelled = (b) => {
     const fields = Object.keys(b?.properties || {});
     const out = new Map();
-    if (isPlainObject(value)) for (const k of Object.keys(value)) { const alt = !fields.includes(k) && otherSpelling(k, fields); if (alt) out.set(k, alt); }
+    if (isPlainObject(value)) for (const k of Object.keys(value)) { const alt = !fields.includes(k) && otherSpelling(k, fields, fieldTakes(root, b, value[k])); if (alt) out.set(k, alt); }
     return out;
   };
   // How far a form is from the value, field by field, in three steps. Furthest: a field it lacks that

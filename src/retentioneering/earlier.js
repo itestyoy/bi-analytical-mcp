@@ -19,6 +19,8 @@
 //     number — the earlier tree kept it, as no comparison held; is_null does not).
 // What is in the current spelling passes through unchanged.
 
+import { ES_COLUMNS } from './names.js';
+
 /** The earlier tree's operators, in the one vocabulary. */
 const EARLIER_OP = { '=': 'eq', '==': 'eq', '!=': 'neq', '>': 'gt', '>=': 'gte', '<': 'lt', '<=': 'lte', in: 'in', not_in: 'not_in', is_null: 'is_null', is_not_null: 'is_not_null' };
 /** Each operator's negation where one operator says it; an order comparison's opposite holds only
@@ -65,9 +67,8 @@ export function currentWhere(where) {
   return conditionList(formula(where, false));
 }
 
-/** The earlier path words, as the columns they named — ES_COLUMNS.user / ES_COLUMNS.session
- *  (src/retentioneering/eventstream.js, not imported: it imports this file). */
-const EARLIER_PATH = { users: 'user_id', sessions: 'session_id' };
+/** The earlier path words, as the columns they named. */
+const EARLIER_PATH = { users: ES_COLUMNS.user, sessions: ES_COLUMNS.session };
 
 /** One stored step in the current spelling. */
 export function currentStep(step) {

@@ -9,6 +9,7 @@ import { ValueIndex } from '../../src/value-index.js';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { CatalogSearch } from '../../src/search.js';
 import { settle } from '../helpers/settle.js';
 
 // ── rankFuzzy adapter (over Fuse.js) ──────────────────────────────────────────
@@ -98,6 +99,25 @@ test('semantic_index: fuzzy belongs to { search } and nowhere else', async () =>
   const e = engine();
   // the { source } view does not take `fuzzy` — that is the SCHEMA's statement, not a check
   await assert.rejects(() => e.semantic_index({ source: 'events', fuzzy: true }), /unexpected property 'fuzzy'/);
+});
+
+// A value match says where the value lives in the words of the view it points at: an attribute column of
+// its model, or a property on that source's events — decided once, as each match is made, and kept out of
+// the matches themselves (their shape is the answer's).
+test('{ search }: a value is said to live in an attribute or a property, as the catalog has it', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const idx = new ValueIndex();
+  idx.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 10, values: [{ value: 'Germany', freq: 10 }] });
+  idx.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 1, totalCount: 7, values: [{ value: 'rewarded', freq: 7 }] });
+  const search = new CatalogSearch({ catalog, recipes: null, valueIndex: idx });
+  const attr = search.run({ search: 'Germany' });
+  assert.ok(attr.recommendations.some((r) => r.startsWith("Value 'Germany' lives in attribute 'country' of source 'users'")), JSON.stringify(attr.recommendations));
+  const prop = search.run({ search: 'rewarded' });
+  assert.ok(prop.recommendations.some((r) => r.startsWith("Value 'rewarded' lives in property 'ad_type_of_event_data' of source 'events'")), JSON.stringify(prop.recommendations));
+  for (const m of [...attr.value_matches, ...prop.value_matches]) {
+    assert.deepEqual(Object.keys(m).sort(), ['events', 'freq', 'match', 'property', 'score', 'source', 'type', 'value']);
+  }
+  idx.close();
 });
 
 test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', async () => {

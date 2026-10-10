@@ -216,6 +216,31 @@ test('preview reports the prefix it retired instead of dropping it silently', as
   assert.deepEqual(draftOf(e, context_id).checkpoints, []);
 });
 
+// A STEP AN EARLIER VERSION STORED is kept, from the build that renders it on, in the spelling that
+// build used (as an accepted edit keeps it) — so the steps a checkpoint stands for are kept so too —
+// and a draft shows each step as its build renders it, a prefix an earlier build left as it was
+// included: a step copied into edit_step is the step that was built.
+test('materialize keeps each step in the spelling it was built in, and a draft shows its prefix so', async () => {
+  const e = engine();
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [funnel] });
+  // the funnel as an earlier version stored it: a step condition on `property`, on a name that is an
+  // event property and a column of the rows alike — which its build reads as the column
+  const kept = { ...funnel, steps: [funnel.steps[0], { ...funnel.steps[1], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }] };
+  const asBuilt = [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }];
+  draftOf(e, context_id).stages = [kept];
+  const built = await e.build_pipeline_model({ action: 'materialize', context_id });
+  assert.equal(built.checkpoint.at, 1);
+  assert.deepEqual(draftOf(e, context_id).stages[0].steps[1].where, asBuilt, 'the draft keeps the step as it was built');
+  assert.deepEqual(e.ctxs.get(context_id).state.pipeline_origin.stages[0].steps[1].where, asBuilt, 'and so does the snapshot a fork starts from');
+  // a prefix an earlier version's build left in the earlier spelling: shown as the build renders it
+  draftOf(e, context_id).stages = [kept];
+  const pv = await e.build_pipeline_model({ action: 'preview', context_id });
+  assert.equal(pv.from_checkpoint.model, built.model, 'the step is in the prefix the checkpoint stands for');
+  assert.deepEqual(pv.steps[0].steps[1].where, asBuilt);
+  const fork = await e.build_pipeline_model({ action: 'fork', context_id });
+  assert.deepEqual(fork.steps[0].steps[1].where, asBuilt);
+});
+
 // A cold index has no marker to compare: the FIRST scan completing observed the same data the
 // prefix was built from, so it is not evidence that anything moved.
 test('a prefix built before the first index scan is not retired by that scan', async () => {

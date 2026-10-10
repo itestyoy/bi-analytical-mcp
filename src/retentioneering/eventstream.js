@@ -22,9 +22,8 @@ import { getDialect } from '../dialects/index.js';
 import { userKeyColumn } from './schema.js';
 import { mapConditions, eachCondition } from '../conditions.js';
 import { currentSpec } from './earlier.js';
+import { ES_COLUMNS } from './names.js';
 
-/** The fixed columns of every eventstream (segment columns come after them). */
-export const ES_COLUMNS = { user: 'user_id', event: 'event', time: 'event_time', session: 'session_id' };
 export const OTHER_EVENT = 'other';
 const SAMPLE_BUCKETS = 10000;
 

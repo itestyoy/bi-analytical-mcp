@@ -4,14 +4,14 @@
 // seeded and run on the feature's own dbt environment (`retentioneering`: dbt 1.x + the library), an
 // engine with the feature on, the rows every expectation is counted from, and the users' paths
 // (`paths`: platform as a segment, sessions at 30-minute gaps) built once. Each file opens a world of
-// its own — its own warehouse file, project copy and engine — so the two run side by side.
+// its own — its own warehouse file, project copy and engine — so the two run side by side. The fixture
+// warehouse is built by the feature's dbt once per run (buildWarehouse's fixture cache), and each file
+// gets a copy of it.
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { createDbt } from '../../src/dbt/index.js';
@@ -19,9 +19,7 @@ import { Engine } from '../../src/engine.js';
 import { createRetentioneeringFeature } from '../../src/retentioneering/index.js';
 import { settle, one } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
-import { fixtureProject, startWarehouse } from './warehouse-harness.js';
-
-const execFileP = promisify(execFile);
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 
 export const ENV = dbtEnv('retentioneering');
 export const opts = { timeout: 900000 };
@@ -67,10 +65,8 @@ export const sizes = (overview, label = 'sizes') => {
  */
 export async function openWorld() {
   const BASE = fixtureProject('dbt_project');
-  const wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(ENV.dbtBin, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 1 << 26 });
-  await execFileP(ENV.dbtBin, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 1 << 26 });
+  // seeded and run by the feature's own dbt (1.x), the one the engine below runs on
+  const wh = await buildWarehouse(BASE, { dbtBin: ENV.dbtBin });
   const runner = createDbt({ environment: ENV, profilesDir: BASE, timeout: 600000 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-ctx-')), timeSpineDialect: 'duckdb' });

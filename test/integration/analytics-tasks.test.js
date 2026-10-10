@@ -21,20 +21,17 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, startAndBuild } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 600000 };
 
@@ -44,13 +41,21 @@ let engine;
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
+/** The sum of a measure per value of ONE group column of a result grouped by several (NaN where no row has a value). */
+const marginal = (rows, keyCol, valCol) => {
+  const out = {};
+  for (const r of rows) {
+    const k = String(r[keyCol]);
+    const v = num(r[valCol]);
+    if (!(k in out)) out[k] = NaN;
+    if (Number.isFinite(v)) out[k] = (Number.isFinite(out[k]) ? out[k] : 0) + v;
+  }
+  return out;
+};
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
@@ -338,19 +343,20 @@ test('TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment', opts, async 
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'ratio_metric');
   const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases', 'monetization_aov'] });
-  const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
-  const byCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
+  // revenue is a sum, so the product and the country splits are the marginals of ONE query grouped by both
+  const byProductCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }, { model: 'users', attribute: 'country' }] });
+  // (the recipe's first example, as it is served)
   const byDay = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  for (const r of [totals, byProduct, byCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  assert.equal(num(totals.rows[0].monetization_revenue), 85);          // revenue 85
-  assert.equal(num(totals.rows[0].monetization_payers), 7);            // payers 7
-  assert.equal(num(totals.rows[0].monetization_purchases), 8);         // purchases 8
-  assert.ok(Math.abs(num(totals.rows[0].monetization_aov) - 85 / 8) < 1e-6, 'AOV 85/8'); // AOV 10.625
-  const pm = mapCol(byProduct.rows, 'events_product_id_of_event_data', 'monetization_revenue');
+  for (const r of [totals, byProductCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
+  assert.equal(num(totals.rows[0].monetization_revenue), 85, '[totals] revenue 85');
+  assert.equal(num(totals.rows[0].monetization_payers), 7, '[totals] payers 7');
+  assert.equal(num(totals.rows[0].monetization_purchases), 8, '[totals] purchases 8');
+  assert.ok(Math.abs(num(totals.rows[0].monetization_aov) - 85 / 8) < 1e-6, '[totals] AOV 85/8'); // AOV 10.625
+  const pm = marginal(byProductCountry.rows, 'events_product_id_of_event_data', 'monetization_revenue');
   // (also the plain by-product revenue the monetization suites asked of their own `mon` task)
   assert.equal(pm.p1, 15, '[by product] p1'); assert.equal(pm.p2, 30, '[by product] p2'); assert.equal(pm.p3, 40, '[by product] p3');
-  assert.equal(sumCol(byCountry.rows, 'monetization_revenue'), 85);    // country sum == grand total
-  assert.equal(sumCol(byDay.rows, 'monetization_revenue'), 85);        // per-day sum == grand total
+  assert.equal(sumCol(byProductCountry.rows, 'monetization_revenue'), 85, '[by country] the country sum == grand total');
+  assert.equal(sumCol(byDay.rows, 'monetization_revenue'), 85, '[by day] the per-day sum == grand total');
 });
 
 // ── 9. metric_types: payload_property_measure_and_dimension ──────────────────
@@ -375,13 +381,13 @@ test('TASK payload_property_measure_and_dimension: ad revenue & impressions by n
 test('TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source split', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'two_event_scopes_and_a_net');
-  const totals = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'] });
   const bySource = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
-  // the recipe's first example (net coins by day), with both of its inputs beside it
+  // the recipe's first example (net coins by day), with both of its inputs beside it — both are sums,
+  // so the day split also carries the totals
   const byDay = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out', 'economy_net_coins'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  for (const r of [totals, bySource, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  const coinsIn = num(totals.rows[0].economy_coins_in);
-  const coinsOut = num(totals.rows[0].economy_coins_out);
+  for (const r of [bySource, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
+  const coinsIn = sumCol(byDay.rows, 'economy_coins_in');
+  const coinsOut = sumCol(byDay.rows, 'economy_coins_out');
   assert.equal(coinsIn, 510, '[totals] coins in 510');
   assert.equal(coinsOut, 140, '[totals] coins out 140');
   assert.equal(coinsIn - coinsOut, 370, '[totals] net coins 370');

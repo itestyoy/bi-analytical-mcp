@@ -41,7 +41,7 @@ and OpenAI APIs, so a client is shown the whole schema the server checks.
 AI ──► build_semantic_model (enum-constrained)
           └─ compile → render YAML → .mcp/ctx/<id>/models/generated/context.yml → dbt parse
 AI ──► query_semantic_model (enum-constrained)
-          └─ mf query (dbt Core) in the context overlay → rows
+          └─ mf query (dbt Core, MetricFlow kept warm) in the context overlay → rows
 ```
 
 - **Catalog → enums** (`src/catalog.js`, `src/schema.js`): every column/property/
@@ -55,9 +55,13 @@ AI ──► query_semantic_model (enum-constrained)
   context (base template + task additions).
 - **Contexts** (`src/context-manager.js`): per-context overlay dbt project +
   persistent, disk-reconciled registry, leases, teardown.
-- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and `mf query` (NOT
+- **Runner** (the dbt client, `src/dbt/`): shells `dbt parse` and runs `mf query` (NOT
   `dbt sl query`, which is dbt-platform/remote and incompatible with local
-  per-context isolation). The integration tests run the same client, so the numbers
+  per-context isolation). `mf query` runs in MetricFlow KEPT WARM (`src/dbt/metricflow-server.js`
+  → `python/mf_server.py`): a long-lived process on the MetricFlow environment runs the CLI's own
+  `query` command with the CLI's arguments, so its CSV, SQL, plan and errors are `mf query`'s, without
+  the 3–4 s start of a fresh `mf` per query (imports, `dbt debug`, the manifest) — a query answers in
+  about a tenth of a second. The integration tests run the same client, so the numbers
   they prove are the ones production returns.
 - **Time spine** is a predefined model **always present** in every context:
   `ContextManager.ensureTimeSpine` writes a dialect-aware `metricflow_time_spine`

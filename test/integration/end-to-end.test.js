@@ -23,21 +23,18 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, readTable, one, stepEffect } from '../helpers/settle.js';
 import { armFrom } from '../helpers/experiment-arm.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
@@ -63,10 +60,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'e2e-')), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
@@ -148,7 +142,10 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
-test('4b. build_semantic_model action update adds a payers metric; re-query = 7 distinct payers', opts, async (t) => {
+// The two updates are made one after the other — a payers metric, then three derived metrics that
+// read the task's metrics as stored — and ONE ungrouped query reads the payers and the derived
+// metrics side by side (one mf call); the by-day query is the distinct-by-time recommendation's.
+test('4b. build_semantic_model action update adds a payers metric (re-query = 7 distinct payers), and derived metrics added by an update read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
@@ -156,25 +153,9 @@ test('4b. build_semantic_model action update adds a payers metric; re-query = 7 
     metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
-  assert.ok(upd.metrics.includes('e2e_mon_payers'), 'new metric registered');
+  assert.ok(upd.metrics.includes('e2e_mon_payers'), '[payers] new metric registered');
 
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].e2e_mon_payers), 7); // distinct payers = 7 (SEED_DATA §3)
-  // Provenance #1: real data_freshness (latest event time) + an open-ended window flags
-  // staleness (the tail past the latest data is empty/partial).
-  assert.equal(r.provenance.tier, 'governed_metric');
-  assert.ok(typeof r.provenance.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data_freshness = latest event time');
-  assert.ok(r.recommendations.some((x) => /current only through/i.test(x)), `open-ended window flags freshness: ${JSON.stringify(r.recommendations)}`);
-
-  // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
-  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
-});
-
-test('4b2. derived metrics added by an update read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
-  if (skip(t)) return;
-  const upd = await engine.build_semantic_model({ action: 'update',
+  const derived = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
     metrics: [
       { name: 'per_payer_stored', type: 'derived', expr: 'e2e_mon_revenue / e2e_mon_payers', metrics: ['e2e_mon_revenue', 'e2e_mon_payers'] },
@@ -182,12 +163,23 @@ test('4b2. derived metrics added by an update read the task\'s metrics by stored
       { name: 'per_payer_mixed', type: 'derived', expr: 'e2e_mon_revenue / payers', metrics: ['e2e_mon_revenue', 'payers'] },
     ],
   });
-  assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
+  assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
   const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: names });
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers', ...names] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].e2e_mon_payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
+  // Provenance #1: real data_freshness (latest event time) + an open-ended window flags
+  // staleness (the tail past the latest data is empty/partial).
+  assert.equal(r.provenance.tier, 'governed_metric');
+  assert.ok(typeof r.provenance.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data_freshness = latest event time');
+  assert.ok(r.recommendations.some((x) => /current only through/i.test(x)), `open-ended window flags freshness: ${JSON.stringify(r.recommendations)}`);
+  // [derived] the three spellings read the same two stored metrics: 85 / 7
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);
+
+  // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
+  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {

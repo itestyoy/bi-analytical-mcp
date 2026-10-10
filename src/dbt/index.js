@@ -9,7 +9,8 @@
 //   relationColumns(projectDir, model)    → { ok, columns: [{ name, dtype }] }  (the project's mcp_relation_columns
 //                                           macro; dtype an array's own type — ARRAY<…> — not its element's)
 //   query(projectDir, opts)               → { ok, command, columns, rows } | explain: { ok, sql, plan? }
-//   validate(projectDir)                  → { ok, stdout, stderr }
+//                                           (`mf query`, run by MetricFlow kept warm — below)
+//   validate(projectDir)                  → { ok, stdout, stderr }  (`mf validate-configs`, a process of its own)
 //   warehouse(projectDir)                 → { adapter, singleWriter, turn }
 //   semanticSpec                          → 'legacy' | 'latest'   (the semantic YAML this dbt reads)
 //   semanticManifest(projectDir)          → the semantic manifest the last parse wrote, or null
@@ -22,6 +23,18 @@
 // dbt failure: `ok: false` with what dbt printed. The cancellation of the call or task in progress
 // stops its process (src/request-context.js), and a warehouse that takes one process at a time is
 // given one (src/dbt/process.js).
+//
+// METRICFLOW IS KEPT WARM (src/dbt/metricflow-server.js → python/mf_server.py): a metric query, its
+// compiled SQL and plan, and the list of what a metric can be grouped by are requests to a long-lived
+// Python process on the MetricFlow environment — not a fresh `mf` each, whose start (imports, `dbt
+// debug`, the manifest) is seconds against a query's tenth of one. It runs the CLI's own `query`
+// command with the arguments built for the CLI, so its output and exit code are `mf query`'s, read
+// back here exactly as before; it is the only way a metric query runs (no fallback to a process), and
+// one that cannot start fails the query with the reason. It takes the warehouse's turn and the call's
+// cancellation like a process (a stopped request kills its process: MetricFlow cannot interrupt a
+// query), keeps each project's setup and manifest (reloaded when the file changes) and lets go of the
+// warehouse after every request. It is shared by every client on that MetricFlow environment and lives
+// as long as the server: idle, it holds neither the warehouse nor the event loop.
 //
 // Implemented: dbt 1.x (src/dbt/v1.js — the latest semantic YAML spec from 1.12, the legacy one
 // before it) and dbt v2 (src/dbt/v2.js, the latest spec).

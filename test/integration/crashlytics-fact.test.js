@@ -7,20 +7,17 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, stepEffect } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
@@ -33,15 +30,18 @@ let bothCtx; // one context carrying metrics from BOTH facts
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
+/** The sum of a measure per value of ONE group column of a result grouped by several. */
+const marginal = (rows, keyCol, valCol) => {
+  const out = {};
+  for (const r of rows) { const k = String(r[keyCol]); out[k] = (out[k] ?? 0) + (Number.isFinite(num(r[valCol])) ? num(r[valCol]) : 0); }
+  return out;
+};
 // The dimension column as MetricFlow actually returned it (it entity-qualifies some paths).
 const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-crash-')), timeSpineDialect: 'duckdb' });
@@ -76,28 +76,24 @@ const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...inpu
 
 // SEED_DATA §10: fatal crashes by issue -> NullPointer 4, OutOfMemory 2. The dimension is an
 // event-scoped PAYLOAD property of the crash fact, resolved against that fact only.
-test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'crashlytics', attribute: 'issue_title_of_event_data' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'stab_fatal'), 'stab_fatal');
-  assert.equal(by.NullPointer, 4);
-  assert.equal(by.OutOfMemory, 2);
-  assert.equal(sumCol(r.rows, 'stab_fatal'), 6);
-});
-
 // SEED_DATA §10 + §13: the crash source reaches dim_users by the player key, and dim_users is
 // SLOWLY-CHANGING, so the attribution is POINT-IN-TIME — the version valid when the crash was
 // reported. u1 moved US -> GB on 2026-01-03 and all three of its fatal crashes are later, so
 // they count as GB; u2 stays US (2), u3 is GB (1).
-test('fatal crashes by users.country are attributed point-in-time = US 2 / GB 4', opts, async (t) => {
+// A count, so both splits are the marginals of ONE query grouped by both — and a version fan-out
+// would inflate its total as it would either split's.
+test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2, and by users.country attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'users', attribute: 'country' }] });
+  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'crashlytics', attribute: 'issue_title_of_event_data' }, { model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'stab_fatal'), 'stab_fatal');
-  assert.equal(by.US, 2, 'u2 only — u1 had already moved to GB');
-  assert.equal(by.GB, 4, 'u1 x3 (after the move) + u3');
-  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, 'still 6 crashes: no version fan-out');
+  const byIssue = marginal(r.rows, r.group_by_resolved['crashlytics.issue_title_of_event_data'], 'stab_fatal');
+  assert.equal(byIssue.NullPointer, 4, '[by issue] NullPointer');
+  assert.equal(byIssue.OutOfMemory, 2, '[by issue] OutOfMemory');
+  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, '[by issue] 6 fatal crashes');
+  const byCountry = marginal(r.rows, r.group_by_resolved['users.country'], 'stab_fatal');
+  assert.equal(byCountry.US, 2, '[point-in-time country] u2 only — u1 had already moved to GB');
+  assert.equal(byCountry.GB, 4, '[point-in-time country] u1 x3 (after the move) + u3');
+  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, '[point-in-time country] still 6 crashes: no version fan-out');
 });
 
 // SEED_DATA §10: anr_duration_of_event_data exists ONLY on `anr` (3 rows, 5.5+8.0+12.5 = 26).

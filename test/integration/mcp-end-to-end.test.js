@@ -210,27 +210,26 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
 
 test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funnels apart', opts, async (t) => {
   if (skip(t)) return;
-  const rowsFor = async (variant) => (await mcpPipeline('crashlytics', [
+  // ONE build per format: the joined pairs (crash, event) — a table of a few rows, so its row count
+  // is the join's size and k1's own pairs are read off the same rows
+  const pairsFor = async (variant) => mcpPipeline('crashlytics', [
     { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
-  ])).rows[0].n;
-  assert.equal(num(await rowsFor('rewarded')), 14);
-  assert.equal(num(await rowsFor('interstitial')), 12);
-  assert.equal(num(await rowsFor('banner')), 8);
+    { stage: 'project', keep: ['crash_id', 'event_id'] },
+  ]);
+  const built = { rewarded: await pairsFor('rewarded'), interstitial: await pairsFor('interstitial'), banner: await pairsFor('banner') };
+  assert.equal(num(built.rewarded.row_count), 14, '[rows] rewarded');
+  assert.equal(num(built.interstitial.row_count), 12, '[rows] interstitial');
+  assert.equal(num(built.banner.row_count), 8, '[rows] banner');
 
   // u1 crashed having seen a rewarded funnel AND an interstitial one; each variant returns its
   // own pair, and the banner column is empty so it returns nothing.
-  const idsFor = async (variant) => {
-    const built = await mcpPipeline('crashlytics', [
-      { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
-      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: [{ column: 'event_id' }] },
-      { stage: 'project', keep: ['event_id'] },
-    ]);
-    return new Set(built.rows.map((r) => String(r.event_id)));
+  const idsFor = (variant) => {
+    assert.equal(built[variant].rows.length, num(built[variant].row_count), `[k1] every ${variant} pair is read back`);
+    return new Set(built[variant].rows.filter((r) => String(r.crash_id) === 'k1').map((r) => String(r.event_id)));
   };
-  assert.deepEqual(await idsFor('rewarded'), new Set(['e129', 'e130']));
-  assert.deepEqual(await idsFor('interstitial'), new Set(['e131', 'e132']));
-  assert.deepEqual(await idsFor('banner'), new Set());
+  assert.deepEqual(idsFor('rewarded'), new Set(['e129', 'e130']), '[k1] its rewarded pair');
+  assert.deepEqual(idsFor('interstitial'), new Set(['e131', 'e132']), '[k1] its interstitial pair');
+  assert.deepEqual(idsFor('banner'), new Set(), '[k1] no banner funnel');
 });
 
 // ═══════════ 5. what the caller asked for is what the caller gets ═══════════

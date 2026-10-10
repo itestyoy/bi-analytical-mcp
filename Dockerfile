@@ -43,8 +43,8 @@ RUN npm ci --omit=dev || npm install --omit=dev
 # volumes + env in docker-compose. Only infra defaults live here.
 #
 # `python/` is SERVER CODE, not project data: the static gate the python pipeline stage runs
-# before submitting a model (python/ast_gate.py) and the script that asks MetricFlow what a metric
-# can be grouped by (python/mf_group_bys.py). Nothing imports them, so an image built from src/ alone looks fine and
+# before submitting a model (python/ast_gate.py) and MetricFlow kept warm, which runs every metric
+# query and lists what a metric can be grouped by (python/mf_server.py). Nothing imports them, so an image built from src/ alone looks fine and
 # then fails at the first call that shells out to one. src/runtime-assets.js declares the set and
 # test/unit/runtime-assets.test.js checks that this COPY covers it.
 COPY src ./src

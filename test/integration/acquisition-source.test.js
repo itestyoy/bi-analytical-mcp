@@ -8,20 +8,17 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { loadRecipes } from '../../src/recipes.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
@@ -30,16 +27,17 @@ const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
-const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
-const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
+/** The sum of a measure per key (`keyOf(row)`) over a result grouped by several columns. */
+const marginal = (rows, keyOf, valCol) => {
+  const out = {};
+  for (const r of rows) { const k = keyOf(r); out[k] = (out[k] ?? 0) + (Number.isFinite(num(r[valCol])) ? num(r[valCol]) : 0); }
+  return out;
+};
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-acq-')), timeSpineDialect: 'duckdb' });
@@ -117,38 +115,32 @@ test('every aggregation the task chose over the marked amounts, in one ungrouped
 });
 
 // SEED_DATA §11: cost by channel — meta 5.75, applovin 8.25, google 3.50, organic 0.
-test('grouped by an attribute of the same source: cost by media_source', opts, async (t) => {
+// meta.mcp.is_time gives a NON-events source its own time axis, so metric_time works on it.
+// SEED_DATA §11 per day: 1.50 / 3.25 / 3.50 / 4.25 / 5.00.
+// cost is a sum, so the channel and the day splits are the marginals of ONE query grouped by both;
+// its time_range is the source's whole span (01-01..01-05: every spend row, 17.50), so the channel
+// split is the unwindowed one.
+test('grouped by an attribute of the same source: cost by media_source; and the declared time axis drives metric_time on a non-events source', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'acquisition', attribute: 'media_source' }] });
+  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'acquisition', attribute: 'media_source' }, { time: 'metric_time', grain: 'day' }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'uacq_cost'), 'uacq_cost');
-  assert.ok(near(by.meta, 5.75), `meta=${by.meta}`);
-  assert.ok(near(by.applovin, 8.25), `applovin=${by.applovin}`);
-  assert.ok(near(by.google, 3.5), `google=${by.google}`);
-  assert.ok(near(by.organic, 0), `organic=${by.organic}`);
-  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5));
+  const by = marginal(r.rows, (row) => String(row[r.group_by_resolved['acquisition.media_source']]), 'uacq_cost');
+  assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
+  assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);
+  assert.ok(near(by.google, 3.5), `[by media_source] google=${by.google}`);
+  assert.ok(near(by.organic, 0), `[by media_source] organic=${by.organic}`);
+  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), '[by media_source] the channels sum to 17.50');
+  const byDay = marginal(r.rows, (row) => String(row.metric_time_day).slice(0, 10), 'uacq_cost');
+  assert.ok(near(byDay['2026-01-01'], 1.5), `[time axis] ${JSON.stringify(byDay)}`);
+  assert.ok(near(byDay['2026-01-02'], 3.25), `[time axis] ${JSON.stringify(byDay)}`);
+  assert.ok(near(byDay['2026-01-03'], 3.5), `[time axis] ${JSON.stringify(byDay)}`);
+  assert.ok(near(byDay['2026-01-04'], 4.25), `[time axis] ${JSON.stringify(byDay)}`);
+  assert.ok(near(byDay['2026-01-05'], 5.0), `[time axis] ${JSON.stringify(byDay)}`);
+  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), '[time axis] the days sum to 17.50');
 });
 
 // (Spend by users.country, attributed POINT-IN-TIME to the install version valid on the spend day —
 // US 6.75 / GB 5.00 / DE 4.00 / BR 1.75 — is mcp-end-to-end.test.js #1, the same measure over MCP.)
-
-// meta.mcp.is_time gives a NON-events source its own time axis, so metric_time works on it.
-// SEED_DATA §11 per day: 1.50 / 3.25 / 3.50 / 4.25 / 5.00.
-test('the declared time axis drives metric_time on a non-events source', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: [{ time: 'metric_time', grain: 'day' }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = Object.fromEntries(r.rows.map((row) => {
-    const day = String(row[groupCol(r, 'uacq_cost')]).slice(0, 10);
-    return [day, num(row.uacq_cost)];
-  }));
-  assert.ok(near(by['2026-01-01'], 1.5), JSON.stringify(by));
-  assert.ok(near(by['2026-01-02'], 3.25), JSON.stringify(by));
-  assert.ok(near(by['2026-01-03'], 3.5), JSON.stringify(by));
-  assert.ok(near(by['2026-01-04'], 4.25), JSON.stringify(by));
-  assert.ok(near(by['2026-01-05'], 5.0), JSON.stringify(by));
-  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5));
-});
 
 // A COMPOSITE join key is what keeps a per-day table from fanning out: u1 has spend on TWO
 // days (SEED_DATA §11), so joining 12 first_launch events on the player alone yields 13 rows,
@@ -219,17 +211,14 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
 
-  // it groups like any other measure — by the source's own attribute…
-  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'acquisition', attribute: 'media_source' }] });
+  // it groups like any other measure — by the source's own attribute, and through a declared
+  // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
+  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'acquisition', attribute: 'media_source' }, { model: 'users', attribute: 'country' }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
-  const by = mapCol(g.rows, groupCol(g, 'gov_total_spend'), 'gov_total_spend');
-  assert.ok(near(by.applovin, 8.25), `applovin=${by.applovin}`);
-  assert.ok(near(by.meta, 5.75), `meta=${by.meta}`);
-  assert.ok(near(by.google, 3.5), `google=${by.google}`);
-  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5));
-
-  // …and through a declared relationship, exactly as a task measure does.
-  const byCountry = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(byCountry.ok, true, JSON.stringify(byCountry.error));
-  assert.ok(near(sumCol(byCountry.rows, 'gov_total_spend'), 17.5), 'the point-in-time join keeps the total');
+  const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'gov_total_spend');
+  assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);
+  assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
+  assert.ok(near(by.google, 3.5), `[by media_source] google=${by.google}`);
+  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5), '[by media_source] the channels sum to 17.50');
+  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5), '[by users.country] the point-in-time join keeps the total');
 });

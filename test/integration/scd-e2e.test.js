@@ -30,6 +30,12 @@ const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 const byKey = (rows, k, v) => rows.map((r) => [String(r[k]), num(r[v])]);
 const mapOf = (rows, k, v) => Object.fromEntries(byKey(rows, k, v));
+/** The sum of `v` per value of ONE group column `k` of a result grouped by several (rows with no value add nothing). */
+const marginalOf = (rows, k, v) => {
+  const out = {};
+  for (const [key, n] of byKey(rows, k, v)) out[key] = (out[key] ?? 0) + (Number.isFinite(n) ? n : 0);
+  return out;
+};
 
 let wh; let engine; let backend;
 
@@ -52,7 +58,9 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 // 2) The governed SCD path relies on an auto-generated + auto-materialized time spine — scd_project
 //    has no metricflow_time_spine model of its own, so this is the one data proof of it — exercised
 //    via a metric_time series (would error "no time spine" if the spine were missing/unbuilt).
-// One task serves both (the series was a task of its own); plain queries read the numbers.
+// One task serves both (the series was a task of its own), and ONE query reads every number: revenue
+// is a sum, so the total, the country split and the month buckets are all its marginals — and a
+// fan-out of the point-in-time join would inflate each of them.
 test('governed SCD join on a project with no time spine of its own: point-in-time revenue by country (50 / 20 / 30, total 100) and a metric_time month series (100)', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
@@ -64,22 +72,18 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
   const ctx = created.context_id;
 
   // 'governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)'
-  const total = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'] });
-  assert.equal(total.status, 'done', JSON.stringify(total));
-  assert.equal(num(total.rows[0].scd_rev_revenue), 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
-
-  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
+  // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
+  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { time: 'metric_time', grain: 'month' }] });
   assert.equal(seg.status, 'done', JSON.stringify(seg));
-  const by = mapOf(seg.rows, 'users_country', 'scd_rev_revenue');
+  const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.scd_rev_revenue)) ? num(x.scd_rev_revenue) : 0), 0);
+  assert.equal(total, 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
+  const by = marginalOf(seg.rows, 'users_country', 'scd_rev_revenue');
   assert.equal(by.US, 50, `[point-in-time] US = u1's pre-move $10 + u3 $40 = 50 (got ${JSON.stringify(by)})`);
   assert.equal(by.GB, 20, "[point-in-time] GB = u1's post-move $20");
   assert.equal(by.DE, 30, '[point-in-time] DE = u2 $30');
   assert.equal(Object.values(by).reduce((a, b) => a + b, 0), 100, '[point-in-time] segments sum to the point-in-time total');
-
-  // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
-  const series = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ time: 'metric_time', grain: 'month' }] });
-  assert.equal(series.status, 'done', JSON.stringify(series));
-  assert.equal(series.rows.reduce((s, x) => s + num(x.scd_rev_revenue), 0), 100, '[time spine] all revenue lands in the month buckets, summing to 100');
+  const months = marginalOf(seg.rows, 'metric_time_month', 'scd_rev_revenue');
+  assert.equal(Object.values(months).reduce((a, b) => a + b, 0), 100, '[time spine] all revenue lands in the month buckets, summing to 100');
 });
 
 // 3) A measure declared on the SCD users model is illegal in MetricFlow (measures + validity_params).

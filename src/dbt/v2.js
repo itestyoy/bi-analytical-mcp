@@ -8,8 +8,8 @@
 //   * its manifest's percentiles are put back as asked — the same correction dbt 1.12 needs on the
 //     latest spec (src/dbt/v1.js restorePercentiles), so it lives in the shared parse;
 //   * Python models: not on DuckDB ("Python models are not supported for duckdb adapter").
-// Metric queries still go through MetricFlow's `mf` (a Python install of its own), which reads the
-// semantic_manifest.json v2 writes.
+// Metric queries still go through MetricFlow's `mf query` (a Python install of its own, kept warm —
+// src/dbt/metricflow-server.js), which reads the semantic_manifest.json v2 writes.
 
 import { DbtV1 } from './v1.js';
 

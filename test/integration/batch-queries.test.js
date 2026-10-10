@@ -5,20 +5,17 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, one } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 const num = (v) => Number(v);
@@ -39,10 +36,7 @@ const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_c
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'batch-')), timeSpineDialect: 'duckdb' });
   const runner = createDbt({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner }));
@@ -121,30 +115,26 @@ test('a batch of projections over a built pipeline model: count, non-NULL count 
   assert.deepEqual(byEvent.rows.map((r) => [r.event_name, num(r.amount)]), [['iap_purchase_completed', 85], ['iap_purchase_failed', 35]]);
 });
 
-test('a query issued after a batch runs once the whole batch is done, and reads the same data', opts, async (t) => {
-  if (skip(t)) return;
-  const context_id = await monContext();
-  const batch = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
-  const after = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
-  // by the time the later query is done, every member of the batch is too
-  const peek = await engine.raw.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
-  assert.equal(peek.status, 'done');
-  assert.deepEqual(peek.results.map((r) => r.status), ['done', 'done']);
-  assert.equal(num(peek.results[0].rows[0].mon_revenue), 85);
-  const g = revenueBy(after.rows);
-  assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
-  assert.deepEqual(revenueBy(peek.results[1].rows), g, 'the batch member grouped the same way reads the same numbers');
-});
-
-test('a cancelled query ends as cancelled and the context goes on: the next query reads the warehouse\'s numbers', opts, async (t) => {
+// A CANCEL, THEN A BATCH AND A QUERY AFTER IT, on the same context: the cancelled tasks end as
+// cancelled and the context goes on — the next work (a batch, then a query issued after it) reads the
+// warehouse's numbers, and the later query runs once the whole batch is done.
+test('a cancelled query ends as cancelled and the context goes on; a query issued after a batch runs once the whole batch is done — each reads the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
   const context_id = await monContext();
   const doomed = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
   const out = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, cancel: true });
-  assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
+  assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] both end as cancelled');
   const read = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
-  assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled']);
-  const next = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
-  const g = revenueBy(next.rows);
-  assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
+  assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] and read back as cancelled');
+  // the context goes on: a batch, and a query issued after it
+  const batch = await engine.raw.query_semantic_model({ context_id, queries: [{ metrics: ['mon_revenue'] }, { metrics: ['mon_revenue'], group_by: byCountry }] });
+  const after = await engine.query_semantic_model({ context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  // by the time the later query is done, every member of the batch is too
+  const peek = await engine.raw.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
+  assert.equal(peek.status, 'done', '[after a batch] the batch is done');
+  assert.deepEqual(peek.results.map((r) => r.status), ['done', 'done'], '[after a batch] every member is done');
+  assert.equal(num(peek.results[0].rows[0].mon_revenue), 85, '[after a batch] the batch total');
+  const g = revenueBy(after.rows);
+  assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25], '[cancel] the next query reads the warehouse\'s numbers');
+  assert.deepEqual(revenueBy(peek.results[1].rows), g, '[after a batch] the batch member grouped the same way reads the same numbers');
 });

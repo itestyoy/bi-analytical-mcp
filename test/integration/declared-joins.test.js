@@ -84,6 +84,14 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
 const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
+/** A metric per value of ONE attribute's result column (a NULL is 'none'), summed over a result that may be grouped by several. */
+const splitBy = (res, attribute, metric) => {
+  const key = res.columns.map((c) => c.name).find((n) => n.includes(attribute));
+  assert.ok(key, `a result column for ${attribute}: ${res.columns.map((c) => c.name)}`);
+  const out = {};
+  for (const x of res.rows) { const k = x[key] == null ? 'none' : String(x[key]); out[k] = (out[k] ?? 0) + num(x[metric]); }
+  return out;
+};
 
 /** The validity window of the install record, stated per the source's own time column. */
 const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
@@ -327,18 +335,9 @@ test('13. events by country are attributed point-in-time: US 67 / GB 57 / DE 31 
   assert.equal(sumCol(rows, 'n'), 184);
 });
 
-// 14. The governed path agrees, without anyone writing a window.
-test('14. governed = pipeline for events too', opts, async (t) => {
-  if (skip(t)) return;
-  const r = await q(evCtx, { metrics: ['jev_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'jev_evts'), 'jev_evts');
-  assert.equal(by.US, 67);
-  assert.equal(by.GB, 57);
-  assert.equal(by.DE, 31);
-  assert.equal(by.BR, 29);
-  assert.equal(sumCol(r.rows, 'jev_evts'), 184);
-});
+// (14. The governed path agrees, without anyone writing a window — events by users.country, US 67 /
+// GB 57 / DE 31 / BR 29 as the pipeline's 13 — is asserted on 41's query, the same events x users
+// layer grouped the same way: '[14]'.)
 
 // 15. The crash source reaches installs the same way — nothing is specific to one source.
 test('15. crash reports join installs point-in-time: 13 rows, no duplicates', opts, async (t) => {
@@ -495,7 +494,7 @@ test('an unowned relationship offers no governed group-by path', opts, async (t)
   if (skip(t)) return;
   const r = await q(evCtx, { metrics: ['jev_evts'], group_by: [{ model: 'users', attribute: 'country', via: 'ad_funnel_rewarded' }] }).catch((e) => ({ ok: false, error: String(e.message || e) }));
   assert.equal(r.ok, false, 'the funnel key must not be groupable in a metric query');
-  // (…while the owned player key is, and answers: the same query is 14's, by country.)
+  // (…while the owned player key is, and answers: the same query is 41's, by country — 14's numbers.)
 });
 
 // (The join guards — an undeclared relationship, a self-join and a top-level on, all refused at
@@ -866,7 +865,7 @@ test('40. governed: spend and events from two sources, sliced by the same instal
 // 41. A governed join path is not free-floating: the model that OWNS the relationship has to be
 //     loaded into the task. Refused with the fix, not answered from somewhere else — and the
 //     same task WITH the model answers.
-test('41. a join path without its owning model is refused, and works once loaded', opts, async (t) => {
+test('41. a join path without its owning model is refused, and works once loaded — and (14) governed = pipeline for events too', opts, async (t) => {
   if (skip(t)) return;
   const bare = await engine.build_semantic_model({
     name: 'jbare',
@@ -889,7 +888,14 @@ test('41. a join path without its owning model is refused, and works once loaded
   const viaUpdate = await engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(viaUpdate.ok, true, JSON.stringify(viaUpdate.error));
   assert.equal(sumCol(viaUpdate.rows, 'jbare_evts'), 184);
-  // (…and the context that DID load it returns the point-in-time breakdown: 14, by country.)
+  // '14. governed = pipeline for events too': the point-in-time breakdown by country, as 13's pipeline
+  // attributes it — MetricFlow applies the window itself
+  const by = mapCol(viaUpdate.rows, groupCol(viaUpdate, 'jbare_evts'), 'jbare_evts');
+  assert.equal(by.US, 67, '[14] US');
+  assert.equal(by.GB, 57, '[14] GB');
+  assert.equal(by.DE, 31, '[14] DE');
+  assert.equal(by.BR, 29, '[14] BR');
+  assert.equal(sumCol(viaUpdate.rows, 'jbare_evts'), 184, '[14] every event once');
 });
 
 // 42. Chaining has a rule worth pinning: `via` resolves its LEFT key on the pipeline's OWN
@@ -1068,32 +1074,26 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
 
 // 50. The governed path reaches the owning fact's attributes: 176 events matched no report,
 //     14 matched one — split by the app version the crash was reported from.
-test('50. a fact that owns a key exposes its attributes to a governed group-by', opts, async (t) => {
-  if (skip(t)) return;
-  assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', 'the crash source is the target');
-  const r = await ownerEngine.query_semantic_model({
-    context_id: ownerCtx, metrics: ['jown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }],
-  });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const key = r.columns.map((c) => c.name).find((n) => n.includes('app_version'));
-  const by = Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jown_evts)]));
-  assert.deepEqual(by, { none: 176, '1.0.0': 6, '1.1.0': 8 });
-});
-
 // 51. …and the total says what the claim cost: 190 against an honest 184. u1's two funnel
 //     events match FOUR of its crash reports, so they are counted four times. Where the owning
 //     side really does hold one row per key, the same query totals exactly.
-test('51. `unique` is a claim nobody checks: a false one inflates 184 to 190', opts, async (t) => {
+// Both attributes come through the SAME join (ad_funnel onto the crash row), so 50's app-version
+// split and 51's device-model total are the marginals of ONE query grouped by both — a count, and
+// the inflation is the join's, whichever attributes of the joined row are kept.
+test('50. a fact that owns a key exposes its attributes to a governed group-by; 51. `unique` is a claim nobody checks: a false one inflates 184 to 190', opts, async (t) => {
   if (skip(t)) return;
+  assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', '[50] the crash source is the target');
+  const r = await ownerEngine.query_semantic_model({
+    context_id: ownerCtx, metrics: ['jown_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }, { model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.deepEqual(splitBy(r, 'app_version', 'jown_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, '[50] events per crash app_version, via ad_funnel');
+
   const flat = await ownerEngine.query_semantic_model({ context_id: ownerCtx, metrics: ['jown_evts'] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
-  assert.equal(num(flat.rows[0].jown_evts), 184, 'ungrouped, nothing is joined and the count is honest');
+  assert.equal(num(flat.rows[0].jown_evts), 184, '[51] ungrouped, nothing is joined and the count is honest');
 
-  const grouped = await ownerEngine.query_semantic_model({
-    context_id: ownerCtx, metrics: ['jown_evts'], group_by: [{ model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
-  });
-  assert.equal(grouped.ok, true, JSON.stringify(grouped.error));
-  assert.equal(sumCol(grouped.rows, 'jown_evts'), 190, 'the join added 6 rows: 2 events x 4 reports of one funnel');
+  assert.equal(sumCol(r.rows, 'jown_evts'), 190, '[51] the join added 6 rows: 2 events x 4 reports of one funnel');
   // the same key is genuinely NOT unique on the owning side — which is why.
   const dup = await wh.query(`SELECT count(*) AS n FROM (
     SELECT rewarded_tracking_id, player_id_of_internal FROM main.fct_crashlytics_events
@@ -1110,28 +1110,22 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
   assert.deepEqual(oneCatalog.entityKey('crashlytics', 'ad_funnel'), [{ column: 'rewarded_tracking_id' }]);
   assert.deepEqual(oneCatalog.entityKey('events', 'ad_funnel'), [{ column: 'tracking_id' }]);
 
+  // both attributes through the one join, in one query (as 50's): each split is a marginal of it
   const r = await oneEngine.query_semantic_model({
-    context_id: oneCtx, metrics: ['jone_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }],
+    context_id: oneCtx, metrics: ['jone_evts'], group_by: [{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }, { model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const key = r.columns.map((c) => c.name).find((n) => n.includes('app_version'));
-  const by = Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jone_evts)]));
-  assert.deepEqual(by, { none: 176, '1.0.0': 6, '1.1.0': 8 }, 'same numbers as the two-column key');
-
-  const dev = await oneEngine.query_semantic_model({
-    context_id: oneCtx, metrics: ['jone_evts'], group_by: [{ model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
-  });
-  assert.equal(dev.ok, true, JSON.stringify(dev.error));
-  const dk = dev.columns.map((c) => c.name).find((n) => n.includes('device_model'));
-  assert.deepEqual(Object.fromEntries(dev.rows.map((x) => [x[dk] == null ? 'none' : String(x[dk]), num(x.jone_evts)])),
-    { none: 176, iphone: 14 });
+  assert.deepEqual(splitBy(r, 'app_version', 'jone_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, 'same numbers as the two-column key');
+  assert.deepEqual(splitBy(r, 'device_model', 'jone_evts'), { none: 176, iphone: 14 }, 'by device_model, the same as the two-column key');
 });
 
 // 53. NOTHING IS ADVERTISED THAT CANNOT BE ANSWERED. Whatever the catalog lists under the owned
-//     relationship is queried here, one path at a time, driven off the catalog itself — so a
-//     newly declared attribute is covered without touching this test. Each one must come back
-//     with rows; the owner's OWN attributes must also total exactly 184, since a truthful
-//     many-to-one join cannot add a row.
+//     relationship is queried here, driven off the catalog itself — so a newly declared attribute
+//     is covered without touching this test. Each one must come back with rows; the owner's OWN
+//     attributes must also total exactly 184, since a truthful many-to-one join cannot add a row.
+//     Every path goes through the ONE relationship, so they are asked in ONE query (one mf call),
+//     each a column of it and each split a marginal of its rows; only when that query is refused
+//     is each path asked on its own, so a refusal names the path it is about.
 test('53. every attribute the catalog advertises for an owned relationship answers, and a truthful `unique` never duplicates: 184 stays 184', opts, async (t) => {
   if (skip(t)) return;
   const refs = trueCatalog.reachableAttributes().filter((r) => r.model === 'crashlytics' && r.via === 'ad_funnel');
@@ -1141,16 +1135,23 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   assert.deepEqual(refs.map((r) => r.attribute).sort(), [...own].sort(), 'exactly the owner\'s attributes are advertised through the relationship');
 
   const refused = []; const totals = {}; const answered = {};
-  for (const ref of refs) {
-    let r;
+  const ask = async (group_by) => {
     try {
-      r = await trueEngine.query_semantic_model({ context_id: trueCtx, metrics: ['jtrue_evts'], group_by: [ref] });
-    } catch (e) { refused.push(`${ref.model}.${ref.attribute}: threw ${e.message}`); continue; }
-    if (!r.ok) { refused.push(`${ref.model}.${ref.attribute}: ${JSON.stringify(r.error)}`); continue; }
-    if (!r.rows.length) { refused.push(`${ref.model}.${ref.attribute}: answered with no rows`); continue; }
-    totals[ref.attribute] = sumCol(r.rows, 'jtrue_evts');
-    answered[ref.attribute] = r;
+      const r = await trueEngine.query_semantic_model({ context_id: trueCtx, metrics: ['jtrue_evts'], group_by });
+      if (!r.ok) return { why: JSON.stringify(r.error) };
+      if (!r.rows.length) return { why: 'answered with no rows' };
+      return { r };
+    } catch (e) { return { why: `threw ${e.message}` }; }
+  };
+  const together = await ask(refs);
+  if (together.r) for (const ref of refs) answered[ref.attribute] = together.r;
+  else {
+    for (const ref of refs) {
+      const alone = await ask([ref]);
+      if (alone.r) answered[ref.attribute] = alone.r; else refused.push(`${ref.model}.${ref.attribute}: ${alone.why}`);
+    }
   }
+  for (const [a, r] of Object.entries(answered)) totals[a] = Object.values(splitBy(r, a, 'jtrue_evts')).reduce((s, n) => s + n, 0);
   assert.deepEqual(refused, [], 'the catalog must not offer an attribute the engine refuses');
   for (const a of own) assert.equal(totals[a], 184, `${a} must not inflate`);
 
@@ -1158,7 +1159,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   // many-to-one join fan out". It cannot. Section K's 190 came from a FALSE claim; here the owning
   // column really does hold one row per value (checked against the warehouse), and the very same
   // generated join keeps the count at exactly 184 — 24 events find their one crash report, 160
-  // find none. The rows are the ones the loop above read; every grouped total is 184 there.
+  // find none. The rows are the ones read above; every attribute's split totals 184 there.
   const dup = await wh.query(`SELECT count(*) AS n FROM (
     SELECT funnel_tracking_id FROM main.fct_crashlytics_events
     WHERE funnel_tracking_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1) d`);
@@ -1166,8 +1167,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   const split = (attribute) => {
     const r = answered[attribute];
     assert.ok(r, `[54] ${attribute} is advertised through ad_funnel and answered`);
-    const key = r.columns.map((c) => c.name).find((n) => n.includes(attribute));
-    return Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jtrue_evts)]));
+    return splitBy(r, attribute, 'jtrue_evts');
   };
   assert.deepEqual(split('app_version'), { none: 160, '1.0.0': 16, '1.1.0': 8 }, '[54] by app_version: 24 matched, none twice');
   assert.deepEqual(split('device_model'), { none: 160, iphone: 12, pixel: 8, galaxy: 4 }, '[54] by device_model');

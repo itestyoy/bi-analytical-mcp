@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "lint:names": "node scripts/check-name-identity.mjs",
     "pretest": "npm run lint:names",
-    "test": "node --test test/unit/*.test.js",
+    "test": "node scripts/run-tests.mjs unit",
     "test:quick": "npm run lint:names && node scripts/run-tests.mjs quick",
     "test:integration": "node scripts/run-tests.mjs integration",
     "test:all": "node scripts/run-tests.mjs all",

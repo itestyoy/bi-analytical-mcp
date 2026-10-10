@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { loadProjectSemantics, PROJECT_STORE } from '../../src/project-semantics.js';
 import { mergeModelEntry } from '../../src/semantic-latest.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { deref, field } from '../helpers/schema-nav.js';
@@ -48,7 +48,8 @@ function declareLegacyLayer() {
   writeFileSync(join(core, LEGACY_FILE), readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'project_semantic_layer.legacy.yml'), 'utf8'));
 }
 
-/** The thin views the layer reads (a project's own models). */
+/** The thin views the layer reads (a project's own models) — the only models the layer adds. */
+const THIN_VIEWS = ['fct_project_acquisition', 'fct_project_media_sources', 'fct_project_channels'];
 function writeThinViews(core) {
   // (a column named the way a project names its amounts — with `__` in it, which nothing may rewrite)
   // two different channels, so the two ways to project_channels give different numbers: the one a spend
@@ -75,14 +76,14 @@ function declareProjectLayer() {
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
+  // the fixture as every file has it (the run's one build, copied) — built BEFORE the layer is declared,
+  // so this copy is the plain fixture's; only the layer's own thin views are run into it below
+  wh = await buildWarehouse(BASE);
   backend = testDbt({ profilesDir: BASE });
   // the layer in the spec the tests' dbt reads: the latest (v2), or the legacy one (dbt 1.x) — the same
   // models and metrics, so every number below holds on both
   if (backend.semanticSpec === 'latest') declareProjectLayer(); else declareLegacyLayer();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  await runModels(BASE, THIN_VIEWS);
   ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-')), timeSpineDialect: 'duckdb' });
   // what the server does at start, before the tools are served
   loaded = await loadProjectSemantics({ runner: backend, contextManager: ctxs });
@@ -176,16 +177,19 @@ test('by day, a distinct count, a ratio and a filter — each the rows\' own num
   const axis = (await preview({ context_id: EV, metric: 'project_events_per_player' })).metrics.find((m) => m.name === 'project_events_per_player').group_by.metric_time;
   assert.deepEqual(axis, { grain: 'day' }, '[ratio time axis]');
   const perDay = (await wh.query("select cast(device_time as date) as d, count(distinct player_id_of_internal) as p, count(event_id) as n from fct_analytics_events group by 1")).rows;
-  const byDay = rowsOf(await q(EV, { metrics: ['project_active_players', 'project_events_per_player'], group_by: [{ time: 'metric_time', grain: axis.grain }] }));
+  // ONE query by metric_time AND the project's own time dimension, both at a day: event_at is the
+  // semantic model's agg_time_dimension, so the two name the same day and every row is one day — a
+  // distinct count per row is that day's own
+  const byDay = rowsOf(await q(EV, { metrics: ['project_active_players', 'project_events_per_player', 'project_events_total'], group_by: [{ time: 'metric_time', grain: axis.grain }, { semantic_model: [EV], dimension: 'event_at', grain: 'day' }] }));
   const day = (v) => String(v).slice(0, 10);
-  assert.deepEqual(Object.fromEntries(byDay.map((r) => [day(r.metric_time_day), num(r.project_active_players)])), Object.fromEntries(perDay.map((r) => [day(r.d), num(r.p)])));
+  assert.ok(byDay.every((r) => day(r.metric_time_day) === day(r.project_events_event_at_day)), '[one day per row] metric_time and event_at name the same day');
+  assert.deepEqual(Object.fromEntries(byDay.map((r) => [day(r.metric_time_day), num(r.project_active_players)])), Object.fromEntries(perDay.map((r) => [day(r.d), num(r.p)])), '[by day] active players');
   for (const r of byDay) {
     const w = perDay.find((x) => day(x.d) === day(r.metric_time_day));
-    assert.ok(Math.abs(num(r.project_events_per_player) - num(w.n) / num(w.p)) < 1e-9, day(r.metric_time_day));
+    assert.ok(Math.abs(num(r.project_events_per_player) - num(w.n) / num(w.p)) < 1e-9, `[ratio time axis] ${day(r.metric_time_day)}`);
   }
   // the project's own time dimension, at a grain
-  const byEventDay = rowsOf(await q(EV, { metrics: ['project_events_total'], group_by: [{ semantic_model: [EV], dimension: 'event_at', grain: 'day' }] }));
-  assert.deepEqual(Object.fromEntries(byEventDay.map((r) => [day(r.project_events_event_at_day), num(r.project_events_total)])), Object.fromEntries(perDay.map((r) => [day(r.d), num(r.n)])));
+  assert.deepEqual(Object.fromEntries(byDay.map((r) => [day(r.project_events_event_at_day), num(r.project_events_total)])), Object.fromEntries(perDay.map((r) => [day(r.d), num(r.n)])), '[own time dimension] events by event_at day');
   // a where on its dimension
   const [one] = (await wh.query("select count(event_id) as n from fct_analytics_events where event_name in ('tutorial', 'level_started')")).rows;
   const filtered = rowsOf(await q(EV, { metrics: ['project_events_total'], where: [{ field: { semantic_model: [EV], dimension: 'event_name' }, op: 'in', value: ['tutorial', 'level_started'] }] }));
@@ -339,7 +343,12 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
   const listed = m.group_by.dimensions.map((d) => JSON.stringify(d));
   for (const ref of [joined, direct, chain]) assert.ok(listed.includes(JSON.stringify(ref)), `[listed] ${JSON.stringify(ref)} in ${listed}`);
   const checkedBelow = [joined, direct, chain, mediaSource].map((c) => JSON.stringify(c));
-  for (const cut of cuts.filter((c) => !checkedBelow.includes(JSON.stringify(c)))) sumsToTotal(rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [cut] })), cut);
+  // the cuts not checked further below, all in ONE query: each is taken as the preview spells it, and
+  // project_cost is a sum over joins onto unique keys, so the rows grouped by all of them still sum to
+  // the total — a cut that fanned out would inflate it as it would alone
+  const rest = cuts.filter((c) => !checkedBelow.includes(JSON.stringify(c)));
+  const byRest = rest.length ? rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: rest })) : [];
+  for (const cut of rest) sumsToTotal(byRest, cut);
 
   // [a dimension of another semantic model is named by where it lives — MetricFlow makes the join — and is the warehouse's own join]
   // named as if it were the context's own, it is refused saying where it lives
@@ -555,8 +564,11 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   assert.equal(raw.jobs.get(running.task_id).status, 'running');
   assert.equal((await preview({ context_id: out.context_id })).status.building, undefined);
   const firstCut = await taskResult(raw, running.task_id);
+  // (the cuts after the first in ONE query: a count, so grouped by all of them it is still the whole count)
+  const others = cuts.slice(1);
+  const otherRows = others.length ? rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: others, time_range: WINDOW })) : [];
   for (const [i, cut] of cuts.entries()) {
-    const rows = i === 0 ? rowsOf(firstCut) : rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: [cut], time_range: WINDOW }));
+    const rows = i === 0 ? rowsOf(firstCut) : otherRows;
     assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), JSON.stringify(cut));
   }
   // a build that is running is

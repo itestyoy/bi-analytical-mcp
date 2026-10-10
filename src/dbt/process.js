@@ -1,6 +1,7 @@
-// STARTING A dbt / MetricFlow PROCESS — the one place the dbt clients spawn one.
+// STARTING A dbt / MetricFlow PROCESS — the one place the dbt clients spawn one, or ask a warm one
+// (MetricFlow, src/dbt/metricflow-server.js) a request.
 //
-// Two things ride along with every process:
+// Two things ride along with every process, and every request to a warm one:
 //   * the CANCELLATION of the call or task it works for (src/request-context.js): a call the client
 //     abandoned, or a task cancelled with { task_id, cancel: true }, stops its process instead of
 //     letting it scan the warehouse to the end — and one asked for after that is not started;
@@ -8,7 +9,7 @@
 //     file that ONE process may hold open ("Could not set lock on file … Conflicting lock is held"):
 //     two dbt processes on it at once — a batch of queries, a card's drill-down during a build, the
 //     value index — fail. Such a warehouse gets one FIFO turn per database, shared by every client
-//     on it (a context's queries, the indexer, the MetricFlow group-by script), and a process waits for it.
+//     on it (a context's queries, the indexer, MetricFlow's list of group-by items), and a process waits for it.
 
 import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
@@ -70,7 +71,7 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
 
 /**
  * Run `bin args` with `input` written to its stdin (then closed), and collect what it printed — for a
- * process that takes its request on stdin (python/mf_group_bys.py, asked once). Waits for `turn` like
+ * process that takes its request on stdin (python/ast_gate.py, asked once). Waits for `turn` like
  * runProcess, stops with the call's cancellation, and never throws: { ok, code, cancelled?, stdout,
  * stderr, error? }.
  */
@@ -98,6 +99,30 @@ export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, tur
     child.stdin.on('error', () => { /* the process may exit before reading */ });
     child.stdin.end(input);
   });
+  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
+  if (!turn) return start().then(done);
+  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+}
+
+/**
+ * Ask a WARM process one request (MetricFlow kept warm, src/dbt/metricflow-server.js) under the same
+ * discipline as a process run by runProcess: `turn` (a database key) makes it wait for that warehouse's
+ * turn first, the call's cancellation stops it, and a task's progress and DBT_TIMING_LOG name it by
+ * `bin args` — the command it stands for (`mf query`). `ask(signal)` sends the request and resolves with
+ * its outcome ({ ok, … }); this never throws, and a call cancelled while waiting for the turn is
+ * answered { ok: false, cancelled: true, error } without asking.
+ */
+export function runWarm(bin, args, ask, { turn = null } = {}) {
+  const signal = currentSignal();
+  const report = reporter(bin, args, turn);
+  const asked = Date.now();
+  let began = asked;
+  const start = () => {
+    began = Date.now();
+    report.running();
+    if (signal?.aborted) return Promise.resolve(cancelledResult('not started — the call was cancelled'));
+    return ask(signal);
+  };
   const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
   if (!turn) return start().then(done);
   return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);

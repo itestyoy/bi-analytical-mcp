@@ -1,15 +1,18 @@
-// dbt 1.x — the `dbt` CLI (dbt-core) for parse / run / show / seed / run-operation, and MetricFlow's
-// `mf` CLI for metric queries (it reads target/semantic_manifest.json, which `dbt parse` writes).
-// Each context runs in its own overlay project dir, so target/ is naturally isolated. NOT
-// `dbt sl query` (that is dbt platform/remote and incompatible with local per-context isolation).
+// dbt 1.x — the `dbt` CLI (dbt-core) for parse / run / show / seed / run-operation, and MetricFlow for
+// metric queries: `mf query`, run by MetricFlow kept warm (src/dbt/metricflow-server.js — the CLI's own
+// command in a long-lived process on the MetricFlow environment, so a query does not pay MetricFlow's
+// start), over target/semantic_manifest.json, which `dbt parse` writes. Each context runs in its own
+// overlay project dir, so target/ is naturally isolated. NOT `dbt sl query` (that is dbt
+// platform/remote and incompatible with local per-context isolation).
 
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { inIsolatedTarget } from '../request-context.js';
-import { runProcess, runWithInput } from './process.js';
-import { assetPath, missingAssetMessage } from '../runtime-assets.js';
+import { runProcess, runWarm } from './process.js';
+import { metricflowServer, mfOutcome } from './metricflow-server.js';
+import { assetPath } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
 import { knownDbtVersion } from './version.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
@@ -162,6 +165,30 @@ export class DbtV1 {
     return runProcess(bin, args, { cwd: projectDir, env: { ...this._env(projectDir), ...env }, timeout, turn: this.warehouse(projectDir).turn });
   }
 
+  /** The Python of the MetricFlow environment — the one beside its `mf` — that MetricFlow is kept warm on. */
+  get metricflowPython() {
+    const beside = this.mfBin ? join(dirname(this.mfBin), 'python') : null;
+    if (beside && existsSync(beside)) return beside;
+    return this.pythonBin || this.environment?.pythonBin || null;
+  }
+
+  /**
+   * A request to MetricFlow kept warm (src/dbt/metricflow-server.js) about `projectDir`: run in that
+   * directory with the environment a process there gets, under the warehouse's turn and the call's
+   * cancellation (src/dbt/process.js runWarm). `label` is the command it stands for.
+   */
+  _metricflow(projectDir, label, request) {
+    const python = this.metricflowPython;
+    const env = { ...process.env, ...this._env(projectDir) };
+    const ask = (signal) => metricflowServer(python).request({ ...request, cwd: projectDir, env }, { signal, timeout: this.timeout });
+    return runWarm(label[0], label.slice(1), ask, { turn: this.warehouse(projectDir).turn });
+  }
+
+  /** `mf <args>` in `projectDir`, as the CLI runs it — by MetricFlow kept warm → { ok, code, stdout, stderr, error? }. */
+  async _mf(projectDir, args) {
+    return mfOutcome(await this._metricflow(projectDir, [this.mfBin || 'mf', ...args], { op: 'mf', argv: args }));
+  }
+
   /**
    * A dbt command other than parse. Run as one of several concurrent tasks on a context (a batch of
    * queries, src/request-context.js isolatedTarget), it writes its artifacts (manifest, run results,
@@ -218,22 +245,15 @@ export class DbtV1 {
   /**
    * What each of `metrics` can be grouped by, as MetricFlow itself lists it over `projectDir`'s parsed
    * semantic manifest (its `list_group_bys`: each dimension with its semantic model and entity path,
-   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through
-   * python/mf_group_bys.py, in the MetricFlow environment. The `mf` CLI prints only names.
+   * each entity, metric_time with its grain) — asked of MetricFlow kept warm (python/mf_server.py), in
+   * the MetricFlow environment. The `mf` CLI prints only names.
    * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
    */
   async groupBys(projectDir, metrics) {
-    const python = this.pythonBin || this.environment?.pythonBin;
-    if (!python) return { ok: false, error: 'no MetricFlow Python to ask: the dbt environment names no MetricFlow environment (MF_ENV)' };
-    const script = assetPath('mfGroupBys');
-    if (!script) return { ok: false, error: missingAssetMessage('mfGroupBys') };
-    const request = { id: 'group_bys', op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics };
-    const r = await runWithInput(python, [script], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
-    const line = (r.stdout || '').split('\n').find((l) => l.trim().startsWith('{'));
-    let out = null;
-    try { out = line ? JSON.parse(line) : null; } catch { /* said below */ }
+    const label = [this.metricflowPython || 'python', assetPath('mfServer') || 'mf_server.py', 'group_bys'];
+    const out = await this._metricflow(projectDir, label, { op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics });
     if (out?.ok) return { ok: true, group_bys: out.group_bys || {} };
-    return { ok: false, error: out?.error || r.error || (r.stderr || '').trim().split('\n').slice(-3).join(' ') || 'MetricFlow could not list the group-by items' };
+    return { ok: false, error: out?.error || 'MetricFlow could not list the group-by items' };
   }
 
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */
@@ -300,18 +320,18 @@ export class DbtV1 {
     return args;
   }
 
-  /** A metric query through MetricFlow (`mf query`), or its compiled SQL/plan with `explain`. */
+  /** A metric query through MetricFlow (`mf query`, kept warm), or its compiled SQL/plan with `explain`. */
   async query(projectDir, opts) {
     if (opts.explain) {
       const args = this.buildQueryArgs({ ...opts, explain: true, plan: opts.plan });
-      const r = await this._proc(this.mfBin, projectDir, args);
+      const r = await this._mf(projectDir, args);
       return { ok: r.ok, command: `mf ${args.join(' ')}`, sql: extractSql(r.stdout), ...(opts.plan ? { plan: extractPlan(r.stdout) } : {}), stdout: r.stdout, stderr: r.stderr };
     }
     const tmpDir = mkdtempSync(join(tmpdir(), 'mfq-'));
     const csvFile = join(tmpDir, 'out.csv');
     const args = this.buildQueryArgs({ ...opts, csvFile });
     try {
-      const r = await this._proc(this.mfBin, projectDir, args);
+      const r = await this._mf(projectDir, args);
       let columns = [];
       let rows = [];
       if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));

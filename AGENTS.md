@@ -587,10 +587,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
 ### Warehouses and dbt
 - TWO WAREHOUSES, TWO DIALECTS: `bigquery` (production) and `duckdb` (local work, the tests, the
   default compose setup) — `src/dialects/{bigquery,duckdb}.js`. There is no Postgres. A DuckDB
-  database is a FILE one process at a time may hold, so every dbt / MetricFlow process on it takes
-  the warehouse's turn (`src/dbt/process.js`, keyed by the database file read from the profile), the
-  MetricFlow script (python/mf_group_bys.py) lets go of it after its request, and a batch's members run one after another
-  there (side by side on BigQuery).
+  database is a FILE one process at a time may hold, so every dbt process and every request to
+  MetricFlow on it takes the warehouse's turn (`src/dbt/process.js`, keyed by the database file read
+  from the profile), MetricFlow kept warm (python/mf_server.py) lets go of it after every request, and
+  a batch's members run one after another there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
   / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn / unparsedSqlConfig) over the installed dbt, each major version its own implementation
@@ -603,7 +603,14 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   do not change. What the latest spec's parse writes differently into the manifest is corrected in
   the client's parse (a percentile is always approximate there: `config.meta.mcp_percentile` puts the
   request back).
-  Metric queries go through MetricFlow's `mf` on either version.
+  Metric queries go through MetricFlow's `mf query` on either version, KEPT WARM
+  (`src/dbt/metricflow-server.js` → python/mf_server.py): a long-lived process per MetricFlow
+  environment runs the CLI's own `query` command with the arguments built for the CLI — its CSV, its
+  SQL and plan, its errors and exit code are `mf query`'s, read back as before — keeping each project's
+  `dbt debug` setup and its parsed manifest (reloaded when the file changes) and building the engine
+  anew for every query (its node numbering, the SQL's aliases, is a fresh `mf`'s). It is the ONE path:
+  no fallback to a process; a server that cannot start fails the query with the reason, and a request
+  cancelled or past its timeout kills its process (MetricFlow cannot interrupt a query).
 - THE PROJECT'S OWN SEMANTIC LAYER IS READ AT START, NEVER BUILT (`src/project-semantics.js`): the
   semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file names and
   layout under its model-paths — a model's only entry may be the one that carries its semantic model;
@@ -653,9 +660,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v1`
   (used unless DBT_ENV names another — TEMPORARILY: every dbt v2 on PyPI lists a BigQuery dataset one
   object at a time, dbt-labs/dbt#16423; `DEFAULT_ENV` says when to go back), `dbt-v2`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
-  (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and python/mf_group_bys.py's
-  Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
-  binary. `npm run dbt:env -- create|list` manages them.
+  (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf`'s Python, which
+  python/mf_server.py runs on — since dbt-metricflow brings the Python dbt-core, which cannot share a
+  venv with a dbt v2 binary. `npm run dbt:env -- create|list` manages them.
 - WHAT IS IN AN ENVIRONMENT IS THIS TOOL'S DECISION (HARD RULE): `src/dbt/environment-specs.js` names
   each one's packages at EXACT versions and `create` installs exactly those; the image builds them at
   `docker build`. Every environment carries the adapters of BOTH warehouses (dbt picks one from the
@@ -673,8 +680,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   client of its own over it, so turning the feature on changes nothing the core runs; its test file
   (test/integration/retentioneering.test.js) runs on it and skips when it is not built.
 - The integration tests query through the server's own dbt client contract (`testDbt`, test/helpers/
-  dbt-env.js → `createDbt` over `TEST_ENV`): the numbers they prove come from `mf query` and `dbt show`
-  as the server calls them — on the test environment's dbt, so the client of another major version
+  dbt-env.js → `createDbt` over `TEST_ENV`): the numbers they prove come from `mf query` (kept warm,
+  as production runs it) and `dbt show` as the server calls them — on the test environment's dbt, so the client of another major version
   (production's `DEFAULT_ENV`) is proven only by a run with DBT_ENV naming it. Do NOT add a query
   backend only the tests use.
 - THE EVALS ARE THE PRODUCTION SURFACE WITH A MODEL IN IT (evals/): golden questions — direct,

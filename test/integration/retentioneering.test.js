@@ -5,9 +5,11 @@
 // filter_events grammar, the starts from a pipeline's tasks. An eventstream's steps and the specs a start
 // takes are retentioneering-steps.test.js; both stand on retentioneering-harness.js and run side by side.
 //
-// Most of the analyses are ONE call (Q1, in before()): each test below reads its own of them, from the
-// summary or from the one read of every record. A check that names an earlier test (T8, T17, …) in its
-// message is that test's, merged into a scenario that shares its builds and runs.
+// Every analysis of the users' paths is ONE call (Q1, in before()) — the charted ones, the diffs and the
+// ones without a card alike: each test below reads its own of them, from the summary or from the one read
+// of every record. A check that names an earlier test (T8, T17, …) in its message is that test's, merged
+// into a scenario that shares its builds and runs. What one python model costs is a dbt process and the
+// library's import, so a check rides on a run that happens anyway wherever it can.
 //
 // Skipped when the environment is not built (npm run dbt:env -- create retentioneering).
 
@@ -28,7 +30,7 @@ const paths = () => w.paths();
 const mean = () => ({ metric: 'length', agg: 'mean' });
 const median = () => ({ metric: 'length', agg: 'median' });
 const features = () => [{ metric: 'event_count_bulk' }];
-/** The clustering Q1 runs, and Q2 again. */
+/** The clustering Q1 runs, and the context test's call again (T9). */
 const clusters = () => ({ kind: 'cluster_analysis', features: features(), method_args: { n_clusters: [2, 3] }, overview_metrics: [mean()] });
 
 /** How many of these paths reach each FUNNEL step in order. */
@@ -55,10 +57,21 @@ before(async () => {
   const follows = (a, b) => lists.some((l) => { const i = l.indexOf(a); return i >= 0 && l.slice(i + 1).includes(b); });
   const pair = events.flatMap((a) => events.map((b) => [a, b])).find(([a, b]) => a !== b && !follows(a, b));
   assert.ok(pair, 'T15: the fixture has two events never in that order');
-  // Q1: every analysis the readers below check, in one call
+  const [p1, p2] = platforms;
+  // Q1: every analysis the readers below check, in one call. The order matters: show_to_user names the
+  // first analysis that can be drawn and is not yet — the two without a card come first (T31: passed
+  // over), then the funnel's diff (T17: offered), then the anchored diff (T33: offered next)
   const q = await engine.query_retentioneering_model({
     context_id: built.context_id, eventstream: 'paths',
     analyses: [
+      // T31 + T34: the analyses no card draws
+      { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' },
+      { kind: 'path_metrics', metrics: [{ metric: 'length' }, { metric: 'has_event', metric_args: { event: 'shop_opened' } }] },
+      // T17 / T33 / T32 / T35: every diff kind and a distribution comparison, each group the rows' own
+      { kind: 'funnel', name: 'funnel_diff', steps: FUNNEL, diff: ['platform', p1, p2] },
+      { kind: 'step_matrix', name: 'step_matrix_diff', max_steps: 3, diff: ['platform', p1, p2], path_pattern: 'tutorial->.*->level_completed' },
+      { kind: 'transition_graph', name: 'graph_diff', edge_weight: 'count', diff: ['platform', p1, p2] },
+      { kind: 'metric_distribution', segment_col: 'platform', metric: { metric: 'length' }, segment_levels: [p1, p2] },
       { kind: 'transition_graph' },
       { kind: 'step_matrix', max_steps: 5 },
       { kind: 'step_sankey', max_steps: 4 },
@@ -253,32 +266,23 @@ test('what the library refuses in an analysis is refused by the library itself b
   assert.deepEqual(Object.fromEntries(built.segment_levels.platform.levels.map((l) => [l.level, l.users])), perPlatform);
 });
 
-// Q2 — one call of every diff kind and a distribution comparison (the order matters: show_to_user names
-// the first analysis that can be drawn and is not yet), each group checked against the rows of its own
-// users, each diff drawn in its own form; and the analyses Q1 also ran give Q1's numbers.
-test('one call of diffs and a distribution — each group the rows\' own, each diff drawn in its form — and the same analyses again give the same numbers', opts, async (t) => {
+// Q1's diffs — every diff kind and a distribution comparison, each group checked against the rows of its
+// own users, each diff drawn in its own form. (T9 — the same analyses in another call give the same
+// numbers — is the context test's: its call runs Q1's clustering and graph again over the same rows.)
+test('diffs and a distribution in one call — each group the rows\' own, each diff drawn in its form', opts, async (t) => {
   if (skip(t)) return;
   const [p1, p2] = platforms;
-  const q = await engine.query_retentioneering_model({
-    context_id: built.context_id, eventstream: 'paths',
-    analyses: [
-      { kind: 'funnel', steps: FUNNEL, diff: ['platform', p1, p2] },
-      { kind: 'step_matrix', max_steps: 3, diff: ['platform', p1, p2], path_pattern: 'tutorial->.*->level_completed' },
-      { kind: 'transition_graph', name: 'graph_diff', edge_weight: 'count', diff: ['platform', p1, p2] },
-      { kind: 'metric_distribution', segment_col: 'platform', metric: { metric: 'length' }, segment_levels: [p1, p2] },
-      clusters(),
-      { kind: 'transition_graph' },
-    ],
-  });
-  const r = await readDone(q.task_id);
+  const q = { task_id: analyses.task_id };
+  const r = analyses.read;
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   /** The paths of one platform's users. */
   const of = (platform) => [...paths()].filter(([u]) => platformOf.get(String(u)) === platform).map(([, list]) => list);
 
   // T17 — a funnel's diff has a card: both groups on the same steps, each the funnel of that group alone
-  assert.equal(r.show_to_user?.arguments.request.analysis, 'funnel', 'T17: the diff is offered as a card');
-  const df = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel' });
-  const vf = retentioneeringViewModel(df, { task_id: q.task_id, analysis: 'funnel' });
+  // (the read was made before anything of the call was drawn)
+  assert.equal(r.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T17: the diff is offered as a card');
+  const df = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel_diff' });
+  const vf = retentioneeringViewModel(df, { task_id: q.task_id, analysis: 'funnel_diff' });
   assert.equal(vf.kind, 'funnel_diff', 'T17: drawn as a funnel diff');
   assert.deepEqual([vf.groups.segment, vf.groups.first, vf.groups.second], ['platform', p1, p2], 'T17: its groups');
   // each group's steps are the funnel of that group's paths alone, as the rows reach them (the rule the funnel test holds the library to)
@@ -286,18 +290,18 @@ test('one call of diffs and a distribution — each group the rows\' own, each d
   assert.deepEqual(vf.steps.map((s) => s.second.value), reach(of(p2)), `T17: ${p2} alone`);
   for (const s of vf.steps) assert.equal(s.delta.value, s.first.value - s.second.value, 'T17: the difference');
   // the default read carries the same numbers: each step for both groups and their difference
-  const sm = r.analyses.funnel;
+  const sm = r.analyses.funnel_diff;
   assert.deepEqual([sm.diff, sm.groups], [true, { segment: 'platform', first: p1, second: p2 }], 'T17: the summary says the diff and its groups');
   assert.deepEqual(sm.steps.map((s) => [s.first.unique_paths, s.second.unique_paths, s.difference.unique_paths]), vf.steps.map((s) => [s.first.value, s.second.value, s.delta.value]), 'T17: the summary\'s steps are the card\'s');
 
   // T33 — once the funnel is drawn, the anchored diff is the card offered next
   const again = await readDone(q.task_id);
-  assert.equal(again.show_to_user?.arguments.request.analysis, 'step_matrix', 'T33: the anchored diff is offered as a card');
-  const all = await readDone(q.task_id, { detail: 'full' });
+  assert.equal(again.show_to_user?.arguments.request.analysis, 'step_matrix_diff', 'T33: the anchored diff is offered as a card');
+  const all = analyses.full;
   assert.equal(all.status, 'done', JSON.stringify(all.error));
 
   // T33 — a diff around an anchor, block by block: each difference is its first group minus its second
-  const m = all.analyses.step_matrix;
+  const m = all.analyses.step_matrix_diff;
   assert.equal(m.diff, true, 'T33: a diff');
   const blocks = [...new Set(m.tables.filter((x) => x.role === 'diff').map((x) => x.block))];
   assert.ok(blocks.length >= 1, 'T33: a block per anchor of the pattern');
@@ -309,7 +313,7 @@ test('one call of diffs and a distribution — each group the rows\' own, each d
       assert.ok(Math.abs(row[k + 1] - (value(first, row[0], k + 1) - value(second, row[0], k + 1))) < 1e-9, `T33: block ${b} ${row[0]} step ${diff.columns[k + 1]}`);
     });
   }
-  const dm = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix' }), {});
+  const dm = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix_diff' }), {});
   assert.equal(dm.kind, 'diff', 'T33: drawn as tables');
   assert.equal(dm.tables.filter((x) => x.diverging).length, blocks.length, 'T33: each block\'s difference on a diverging scale');
 
@@ -351,26 +355,16 @@ test('one call of diffs and a distribution — each group the rows\' own, each d
     const expected = edges.slice(1).map((hi, i) => ls.filter((x) => x >= edges[i] && (x < hi || (i === edges.length - 2 && x <= hi))).length);
     assert.deepEqual(h.series[k].values, expected, `T35: ${platform}'s bins`);
   }
-
-  // T9 — the same analyses in another call give the same numbers
-  assert.deepEqual(r.analyses.cluster_analysis, analyses.read.analyses.cluster_analysis, 'T9: the clusters of Q1');
-  assert.deepEqual(r.analyses.transition_graph, analyses.read.analyses.transition_graph, 'T9: the transition graph of Q1');
 });
 
-// Q3 — the analyses no card draws: their numbers are in the read (a summary by default, every record
-// with detail: "full"), and a draw asked for anyway is refused without leaving a mark.
+// Q1's analyses no card draws: their numbers are in the read (a summary by default, every record with
+// detail: "full"), and a draw asked for anyway is refused without leaving a mark.
 test('analyses without a card: the library\'s tables, the rows\' numbers, a summary by default and every record in full — and a refused draw leaves no mark', opts, async (t) => {
   if (skip(t)) return;
-  const q = await engine.query_retentioneering_model({
-    context_id: built.context_id, eventstream: 'paths',
-    analyses: [
-      { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' },
-      { kind: 'path_metrics', metrics: [{ metric: 'length' }, { metric: 'has_event', metric_args: { event: 'shop_opened' } }] },
-    ],
-  });
-  const summary = await readDone(q.task_id);
+  const q = { task_id: analyses.task_id };
+  const summary = analyses.read;
   assert.equal(summary.status, 'done', JSON.stringify(summary.error));
-  const all = await readDone(q.task_id, { detail: 'full' });
+  const all = analyses.full;
   assert.equal(all.status, 'done', JSON.stringify(all.error));
   const a = all.analyses;
 
@@ -385,8 +379,11 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
   }
   const [row] = table(a.conversion_rate, 'result');
   assert.deepEqual({ paths_with_start: row.paths_with_start, converted: row.converted }, { paths_with_start: withStart, converted }, 'T31: the conversion is the rows\'');
-  // neither has a card: none is offered, and one asked for is refused — the numbers are in the read
-  assert.equal(summary.show_to_user, undefined, 'T31: no card is offered');
+  // neither has a card: none is offered, and one asked for is refused — the numbers are in the read. The
+  // offer names the first analysis of the call that can be drawn (the read was made before any was): the
+  // two listed first are passed over for the funnel's diff listed after them
+  assert.deepEqual(Object.keys(summary.analyses).slice(0, 3), ['conversion_rate', 'path_metrics', 'funnel_diff'], 'guard: the read lists the two without a card first, then one with a card');
+  assert.equal(summary.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T31: no card is offered');
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), (e) => e.field === 'analysis' && /no card/.test(e.message), 'T31: a card asked for is refused');
   // T27 — the refusal leaves nothing behind: no mark, nothing held
   const ctx = engine.ctxs.get(built.context_id);
@@ -408,39 +405,13 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
   assert.equal(a.path_metrics.tables[0].rows.length, built.users, 'T34: detail "full" reads every row');
 });
 
-// I — two starts of one sampled spec: a share of the users and a share of one event's rows, each by a
-// hash, so both builds hold the same users and the same rows; every other event of those users whole.
-test('a sample is drawn by a hash — the same users and the same rows of an event on every build, every other event whole', opts, async (t) => {
-  if (skip(t)) return;
-  const build = async (name) => {
-    const b = await engine.build_retentioneering_model({ name, source: 'events', sample: { share: 0.5, events: { level_started: 0.5, first_launch: 1 } } });
-    const r = await readDone(b.task_id);
-    assert.equal(r.status, 'done', `${name}: ${JSON.stringify(r.error)}`);
-    return r;
-  };
-  const [a, b] = [await build('sampled_a'), await build('sampled_b')];
-  const usersOf = async (r) => (await wh.query(`select distinct user_id from ${r.model} order by 1`)).rows.map((x) => x.user_id);
-  const users = await usersOf(a);
-  assert.ok(users.length > 0 && users.length < built.users, `T9: a sample keeps some users, not all (${users.length})`);
-  assert.deepEqual(await usersOf(b), users, 'T9: a user sample keeps the same users on every build');
-  // the counts expected of the sampled event and of the others: over the users the table holds
-  const held = new Set(users.map(String));
-  const theirs = rows.filter((x) => held.has(String(x.u)));
-  const total = (name) => theirs.filter((x) => x.e === name).length;
-  const vocab = (r) => new Map(r.vocabulary.map((v) => [v.event, v.events]));
-  const kept = vocab(a).get('level_started');
-  assert.ok(kept > 0 && kept < total('level_started'), `T39: a share of level_started is kept (${kept} of ${total('level_started')})`);
-  assert.equal(vocab(b).get('level_started'), kept, 'T39: the same rows on a second build');
-  for (const [e, n] of vocab(a)) if (e !== 'level_started') assert.equal(n, total(e), `T39: ${e} is whole`);
-  assert.equal(a.events, theirs.length - total('level_started') + kept, 'T39: every other event whole, the sampled one at its share');
-  assert.deepEqual(a.sample.events, { level_started: 0.5 }, 'T39: the summary says what was sampled (a share of 1 is no sample)');
-  // an event the source does not have is refused before anything runs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', sample: { events: { no_such_event: 0.5 } } }), /no_such_event|invalid input/, 'T39: an event the source does not have');
-});
+// (A sample drawn by a hash — two starts of one sampled spec — is retentioneering-steps.test.js's, with
+// the other specs a start takes.)
 
-// E — filter_events.where on an eventstream of its own (a level segment from an event property), one
-// fork per where, each materialized: the events its table holds are the rows the condition keeps,
-// counted here from the warehouse.
+// E — filter_events.where on an eventstream of its own (a level segment from an event property), each
+// where on a fork of it, materialized: the events its table holds are the rows the condition keeps,
+// counted here from the warehouse. Three forks carry the five checks: two of them join the wheres of two
+// checks by an or, with guards that each part's own exclusion still shows in the counts.
 test('filter_events.where: every operator, a number compared as a number, a negation keeps a missing value, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l, device_time as t from fct_analytics_events')).rows;
@@ -466,11 +437,11 @@ test('filter_events.where: every operator, a number compared as a number, a nega
     return materialized(name);
   };
 
-  // T16 — a number compared as a number
-  assert.deepEqual(await kept('above_5', [{ column: 'level', op: 'gt', value: 5 }]), tally(own.filter((x) => x.l != null && Number(x.l) > 5)), 'T16 above_5: a level compared as a number');
-
   // T14 + T16 — what keep / drop cannot say: a day boundary in the middle of the data, the most frequent
-  // event left out, and two negations on the level (not_in, neq) — each keeping the rows with no level
+  // event left out, and two negations on the level (not_in, neq) — each keeping the rows with no level —
+  // or (T16 above_5) a level above 5, compared as a number: the day boundary holds for all of it, the
+  // negations together or the level. (The level 10 started on a later day is kept by the number alone: the
+  // most frequent event is a start, and as text '10' is below '5'.)
   const day = (x) => new Date(x.t).toISOString().slice(0, 10);
   const days = [...new Set(own.map(day))].sort();
   const from = days[Math.floor(days.length / 2)];
@@ -482,35 +453,57 @@ test('filter_events.where: every operator, a number compared as a number, a nega
     ['level not_in', (x) => num(x) == null || num(x) !== 1],
     ['level neq', (x) => num(x) == null || num(x) !== 2],
   ];
-  const keptBy = (conds) => own.filter((x) => conds.every(([, f]) => f(x)));
-  const want = tally(keptBy(holds));
-  // guards: each condition leaves out rows the others keep, and rows with no level are among those kept —
-  // so each operator's exclusion, and a negation keeping a missing value, show in the counts
-  for (const c of holds) assert.notDeepEqual(tally(keptBy(holds.filter((x) => x !== c))), want, `guard: ${c[0]} leaves out rows the other conditions keep`);
-  assert.ok(keptBy(holds).some((x) => x.l == null), 'guard: rows with no level pass every condition');
+  const aboveAsNumber = (x) => num(x) != null && num(x) > 5;
+  const aboveAsText = (x) => num(x) != null && String(num(x)) > '5';
+  /** The rows the where keeps — the day boundary, and the negations or the level above 5 — with any of
+   *  `holds` left out (`without`) and the level read as `above` reads it. */
+  const keptBy = ({ without = null, above = aboveAsNumber } = {}) => {
+    const conds = holds.filter((c) => c !== without);
+    const [time, ...negations] = holds;
+    const holdsOf = (c) => (x) => !conds.includes(c) || c[1](x);
+    return own.filter((x) => holdsOf(time)(x) && (negations.every((c) => holdsOf(c)(x)) || above(x)));
+  };
+  const want = tally(keptBy());
+  // guards: each condition leaves out rows the rest of the where keeps, the level keeps rows the negations
+  // leave out — and only as a number — and rows with no level are among those kept: so each operator's
+  // exclusion, a number compared as a number, and a negation keeping a missing value show in the counts
+  for (const c of holds) assert.notDeepEqual(tally(keptBy({ without: c })), want, `guard: ${c[0]} leaves out rows the rest of the where keeps`);
+  assert.notDeepEqual(tally(keptBy({ above: () => false })), want, 'guard: the level above 5 keeps rows the negations leave out');
+  assert.notDeepEqual(tally(keptBy({ above: aboveAsText })), want, 'guard: the level above 5 read as text keeps other rows');
+  assert.ok(keptBy().some((x) => x.l == null), 'guard: rows with no level pass every condition');
   assert.deepEqual(await kept('negations', [
     { column: 'event_time', op: 'gte', value: from },
-    { column: 'event', op: 'not_in', value: [top] },
-    { column: 'level', op: 'not_in', value: [1] },
-    { column: 'level', op: 'neq', value: 2 },
-  ]), want, 'T14 + T16 negations: the rows the warehouse keeps — a negation keeps the rows with no level');
+    { or: [
+      { and: [{ column: 'event', op: 'not_in', value: [top] }, { column: 'level', op: 'not_in', value: [1] }, { column: 'level', op: 'neq', value: 2 }] },
+      { column: 'level', op: 'gt', value: 5 },
+    ] },
+  ]), want, 'T14 + T16 negations, and T16 above_5: the rows the warehouse keeps — a negation keeps the rows with no level, a level is compared as a number');
 
-  // T16 — every operator a where takes: a range (both ends), a text pattern, and conditions of which one holds
-  assert.deepEqual(
-    await kept('mid_levels', [{ column: 'level', op: 'between', value: [2, 9] }, { or: [{ column: 'event', op: 'starts_with', value: 'level' }, { column: 'level', op: 'gte', value: 9 }] }]),
-    tally(own.filter((x) => num(x) != null && num(x) >= 2 && num(x) <= 9 && (x.e.startsWith('level') || num(x) >= 9))),
-    'T16 mid_levels: a range, a text pattern, an or',
-  );
-
-  // T16 — a substring is matched as written: a % or _ in it is that character, not a wildcard (read as
-  // a LIKE pattern, 'ad%' would keep ad_started and ad_finished, and 'e_s' new_session and end_session)
+  // T16 — every operator a where takes: a range (both ends), a text pattern, and conditions of which one
+  // holds (mid_levels: a level between 2 and 9 that is a level's event or at least 9 — written as the two
+  // ways it holds) — or (T16 as_written) a substring matched as written: a % or _ in it is that character,
+  // not a wildcard (read as a LIKE pattern, 'ad%' would keep ad_started and ad_finished, and 'e_s'
+  // new_session and end_session)
+  const midLevels = (x) => num(x) != null && num(x) >= 2 && num(x) <= 9 && (x.e.startsWith('level') || num(x) >= 9);
   const asWritten = (x) => x.e === 'tutorial' || x.e.startsWith('ad%') || x.e.includes('e_s') || x.e.endsWith('_started');
   const asWildcards = (x) => x.e === 'tutorial' || /^ad/.test(x.e) || /e.s/.test(x.e) || /._started$/.test(x.e);
+  const either = (a, b) => (x) => a(x) || b(x);
+  const want2 = tally(own.filter(either(midLevels, asWritten)));
+  // guards: the wildcard reading keeps other rows; the range keeps rows the substrings do not, and each of
+  // its ends leaves out rows they do not keep (a level 1, a level 10 that is not a start)
+  const widened = (lo, hi) => (x) => num(x) != null && num(x) >= lo && num(x) <= hi && (x.e.startsWith('level') || num(x) >= 9);
   assert.notDeepEqual(tally(own.filter(asWildcards)), tally(own.filter(asWritten)), 'guard: the wildcard reading keeps other rows');
+  assert.notDeepEqual(tally(own.filter(either(midLevels, asWildcards))), want2, 'guard: the wildcard reading keeps other rows beside the range');
+  assert.notDeepEqual(tally(own.filter(asWritten)), want2, 'guard: the range keeps rows the substrings do not');
+  for (const [end, range] of [['lower', widened(1, 9)], ['upper', widened(2, 10)]]) assert.notDeepEqual(tally(own.filter(either(range, asWritten))), want2, `guard: the range's ${end} end leaves out rows the rest of the where keeps`);
   assert.deepEqual(
-    await kept('as_written', [{ or: [{ column: 'event', op: 'eq', value: 'tutorial' }, { column: 'event', op: 'starts_with', value: 'ad%' }, { column: 'event', op: 'contains', value: 'e_s' }, { column: 'event', op: 'ends_with', value: '_started' }] }]),
-    tally(own.filter(asWritten)),
-    'T16 as_written: a substring\'s % and _ are those characters',
+    await kept('mid_levels', [{ or: [
+      { and: [{ column: 'level', op: 'between', value: [2, 9] }, { column: 'event', op: 'starts_with', value: 'level' }] },
+      { and: [{ column: 'level', op: 'between', value: [2, 9] }, { column: 'level', op: 'gte', value: 9 }] },
+      { column: 'event', op: 'eq', value: 'tutorial' }, { column: 'event', op: 'starts_with', value: 'ad%' }, { column: 'event', op: 'contains', value: 'e_s' }, { column: 'event', op: 'ends_with', value: '_started' },
+    ] }]),
+    want2,
+    'T16 mid_levels: a range, a text pattern, an or — and T16 as_written: a substring\'s % and _ are those characters',
   );
 
   // T16 — a step an earlier version kept in its own tree — { op, conditions }, { not } — is re-checked
@@ -564,11 +557,17 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   const atRestart = await described();
   assert.deepEqual([atRestart.origin, atRestart.origin_copy], [undefined, 'every event'], 'T21: the description went with the eventstream it was given to');
 
-  // the fork reads the rows it was made from (T21), the keyword segment among them (T23)
-  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'origin_copy', analyses: [{ kind: 'transition_graph' }, { kind: 'segment_overview', segment_col: 'group', metrics: [mean()] }] });
+  // the fork reads the rows it was made from (T21), the keyword segment among them (T23) — and Q1's
+  // clustering and graph run again over them (T9)
+  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'origin_copy', analyses: [{ kind: 'transition_graph' }, { kind: 'segment_overview', segment_col: 'group', metrics: [mean()] }, clusters()] });
   const a = await readDone(q.task_id, { detail: 'full' });
   assert.equal(a.status, 'done', JSON.stringify(a.error));
   assert.deepEqual(a.analyses.transition_graph.nodes.map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort(), 'T21: a fork of the earlier eventstream keeps reading its rows');
+  // T9 — the same analyses in another call give the same numbers: the rows are the users' paths Q1 read
+  // (every event of every user; this eventstream has no sessions, and names its platform segment `group`)
+  assert.deepEqual([first.events, first.users], [built.events, built.users], 'guard: the fork holds the rows of the users\' paths');
+  assert.deepEqual(a.analyses.cluster_analysis, full('cluster_analysis'), 'T9: the clusters of Q1');
+  assert.deepEqual(a.analyses.transition_graph, full('transition_graph'), 'T9: the transition graph of Q1');
   // a full read holds the overview as this server reshapes the library's rows — the level names, and
   // each metric's values level by level, segment_size among them (the library's own tables are under
   // `tables`)

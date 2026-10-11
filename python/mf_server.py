@@ -4,10 +4,9 @@ dbt client (src/dbt/metricflow-server.js), one JSON line per request and one per
 
 `mf query` spends seconds before it reads a row: importing MetricFlow and dbt, `dbt debug` over the
 project, loading the semantic manifest and building the engine over it. A query itself takes a tenth of
-a second. So this process pays the imports once, keeps each project's dbt setup (its profile and adapter)
-and its parsed manifest with the engine built over it, and runs the CLI's OWN `query` command in-process
-with the arguments the client built for the CLI — the CSV it writes, the SQL and dataflow plan it prints,
-an error as it prints it, its exit code: the CLI's, by construction.
+a second. So this process pays the imports once, and runs the CLI's OWN `query` command in-process with
+the arguments the client built for the CLI — the CSV it writes, the SQL and dataflow plan it prints, an
+error as it prints it, its exit code: the CLI's, by construction.
 
   {"id", "op": "mf", "argv": ["query", ...], "cwd", "env": {...}}
       -> {"id", "ok", "code", "stdout", "stderr"}     what `mf <argv>` run in `cwd` with `env` prints
@@ -16,13 +15,24 @@ an error as it prints it, its exit code: the CLI's, by construction.
          what each metric can be grouped by, as MetricFlow lists it (list_group_bys) — the `mf` CLI
          prints only names; a dimension {kind, name, dunder_name, semantic_model, entity_links, type,
          grain}, an entity {kind, name, semantic_model, entity_links}
+  an answer may also say {"retire": "<why>"}: the process could not let go of the warehouse after the
+  request, and exits right after answering (below)
 
-A request carries the environment the CLI would have run with (`env`) and its working directory
-(`cwd`): both are applied before it runs, and what is kept is kept per (directory, environment, the
-project's dbt_project.yml and profiles.yml as they are). The semantic manifest is reloaded when its file
-changes (path + mtime + size). After EVERY request the warehouse is let go of — the adapter's connections
-closed, and dbt-duckdb's process-wide database with them: a DuckDB file admits one process at a time, and
-the next dbt process on it must find it free (the client holds the warehouse's turn for the request).
+EVERY REQUEST GETS A CONFIGURATION OF ITS OWN, built as a fresh `mf` builds it — the CLI's
+CLIConfiguration, with whatever caches it has, new each time — over the pieces its project keeps, and
+only those, each of which was shown to leave the output byte for byte a fresh `mf`'s: the project's
+`dbt debug` setup (profile + project) and the adapter it registered, the parsed semantic manifest
+(reloaded when its file changes: path + mtime + size + inode) and the SemanticManifestLookup built over
+that manifest (it caches what it resolves, not the node ids the SQL's aliases are made of). The ENGINE
+is never kept: it caches dataflow plans and their nodes, and a query planned after another would number
+its subqueries differently from a fresh `mf` (subq_4 for subq_5). A project is keyed by (directory,
+environment, the project's dbt_project.yml and profiles.yml as they are); a setup that fails keeps
+nothing, and the next request tries again, as `mf` would.
+
+After EVERY request the warehouse is let go of — the adapter's connections closed, and dbt-duckdb's
+process-wide database with them: a DuckDB file admits one process at a time, and the next dbt process
+on it must find it free (the client holds the warehouse's turn for the request). A process that cannot
+let go says so in its answer ("retire") and exits after it: it never waits idle holding the file.
 
 One request at a time. A request that has to stop (cancelled, past its timeout) stops this process: the
 client kills it and starts another on the next request — MetricFlow has no way to interrupt a query.
@@ -107,6 +117,7 @@ from dbt.adapters.factory import get_adapter_by_type  # noqa: E402
 from dbt_metricflow.cli.cli_configuration import CLIConfiguration  # noqa: E402
 from dbt_metricflow.cli.dbt_connectors.dbt_config_accessor import dbtArtifacts  # noqa: E402
 from dbt_metricflow.cli.main import query as _QUERY_COMMAND  # noqa: E402
+from metricflow_semantics.model.semantic_manifest_lookup import SemanticManifestLookup  # noqa: E402
 
 # the one command this process runs: a metric query (with --explain, its SQL and dataflow plan)
 _COMMANDS = {"query": _QUERY_COMMAND}
@@ -121,74 +132,116 @@ def _stamp(path):
     return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
-class _WarmConfiguration(CLIConfiguration):
-    """The CLI's configuration, kept between requests. The adapter is the one `dbt debug` registered
-    for THIS project's profile, taken right after its setup (dbt keeps one adapter per type, and the
-    next project's setup replaces it); the semantic manifest is read as the CLI reads it, lazily, and
-    forgotten when its file changes, with what is built over it."""
+class _Kept:
+    """What one project keeps between requests — only what a fresh `mf` would build the same: its setup
+    (`dbt debug`: profile + project), the adapter that setup registered for ITS profile (dbt keeps one
+    adapter per type, and the next project's setup replaces it), and the parsed semantic manifest with
+    the lookup over it, both forgotten when the manifest's file changes."""
 
     def __init__(self):
-        super().__init__()
-        self._adapter = None
-        self._manifest_stamp = None
+        self.metadata = None
+        self.adapter = None
+        self._manifest = None  # [stamp, manifest, lookup or None]
 
-    def setup(self, *args, **kwargs):
-        super().setup(*args, **kwargs)
-        self._adapter = get_adapter_by_type(self.dbt_project_metadata.profile.credentials.type)
+    def set_up(self, metadata, adapter):
+        self.metadata, self.adapter = metadata, adapter
+
+    def manifest(self, project_path):
+        # where MetricFlow reads it (dbtArtifacts.build_semantic_manifest_from_dbt_project_root)
+        stamp = _stamp(Path(project_path, "target", "semantic_manifest.json").resolve())
+        if self._manifest is None or self._manifest[0] != stamp:
+            self._manifest = None
+            manifest = dbtArtifacts.build_semantic_manifest_from_dbt_project_root(project_root=project_path)
+            self._manifest = [stamp, manifest, None]
+        return self._manifest[1]
+
+    def lookup(self, manifest):
+        entry = self._manifest
+        if entry is None or entry[1] is not manifest:
+            return SemanticManifestLookup(manifest)
+        if entry[2] is None:
+            entry[2] = SemanticManifestLookup(manifest)
+        return entry[2]
+
+
+class _RequestConfiguration(CLIConfiguration):
+    """The CLI's configuration for ONE request — new, as a fresh `mf` makes it — taking from its
+    project's _Kept only what that keeps: everything else the CLI builds (the SQL client, the engine,
+    any cache a later dbt-metricflow adds) is built for this request alone."""
+
+    def __init__(self, kept, key):
+        super().__init__()
+        self._kept = kept
+        self._key = key
+
+    def setup(self, dbt_profiles_path=None, dbt_project_path=None, configure_file_logging=True):
+        kept = self._kept
+        if kept.metadata is None:
+            _LOGGING_FOR[0] = None  # a setup that runs points the logging at its project; one that fails: unknown
+            super().setup(dbt_profiles_path=dbt_profiles_path, dbt_project_path=dbt_project_path, configure_file_logging=configure_file_logging)
+            try:
+                adapter = get_adapter_by_type(self.dbt_project_metadata.profile.credentials.type)
+            except BaseException:
+                self._is_setup = False  # not set up without its adapter: nothing is kept, the next request tries again
+                raise
+            kept.set_up(self.dbt_project_metadata, adapter)
+            if configure_file_logging:
+                _LOGGING_FOR[0] = self._key
+            return
+        self._dbt_project_metadata = kept.metadata
+        if configure_file_logging and _LOGGING_FOR[0] != self._key:
+            # the CLI logs each run to its project's logs/metricflow.log (set up with the configuration)
+            self._configure_logging(log_file_path=self.log_file_path)
+            _LOGGING_FOR[0] = self._key
+        self._is_setup = True
 
     @property
     def dbt_artifacts(self):
         if self._dbt_artifacts is None:
             meta = self.dbt_project_metadata
-            stamp = _stamp(self.manifest_path)
-            manifest = dbtArtifacts.build_semantic_manifest_from_dbt_project_root(project_root=meta.project_path)
-            self._dbt_artifacts = dbtArtifacts(profile=meta.profile, project=meta.project, adapter=self._adapter, semantic_manifest=manifest)
-            self._manifest_stamp = stamp
+            self._dbt_artifacts = dbtArtifacts(profile=meta.profile, project=meta.project, adapter=self._kept.adapter, semantic_manifest=self._kept.manifest(meta.project_path))
         return self._dbt_artifacts
 
     @property
-    def manifest_path(self):
-        # where MetricFlow reads it (dbtArtifacts.build_semantic_manifest_from_dbt_project_root)
-        return Path(self.dbt_project_metadata.project_path, "target", "semantic_manifest.json").resolve()
-
-    def refresh(self):
-        """Before a request: what is built over the manifest is built anew — the lookup and the engine
-        number the nodes they make as they go (the SQL's aliases), and caches built by one query would
-        number the next one's differently from a fresh `mf`; building them is a few hundredths of a
-        second. The parsed manifest itself is kept while its file is the one read."""
-        self._semantic_manifest_lookup = None
-        self._sql_client = None
-        self._mf = None
-        if self._dbt_artifacts is not None and _stamp(self.manifest_path) != self._manifest_stamp:
-            self._dbt_artifacts = None
-
-    def release(self):
-        """Let go of the warehouse: the adapter's connections, and dbt-duckdb's process-wide database
-        (it holds the file open after its connections close)."""
-        try:
-            if self._adapter is not None:
-                self._adapter.cleanup_connections()
-        except Exception:  # noqa: BLE001
-            pass
-        _release_duckdb()
+    def semantic_manifest_lookup(self):
+        return self._kept.lookup(self.semantic_manifest)
 
 
 def _release_duckdb():
+    """dbt-duckdb keeps one database per process, open after its connections close: closed here."""
     try:
         from dbt.adapters.duckdb.connections import DuckDBConnectionManager
-    except Exception:  # noqa: BLE001 — not a DuckDB install
+    except ImportError:  # not a DuckDB install
         return
     with DuckDBConnectionManager._LOCK:
         env = DuckDBConnectionManager._ENV
         DuckDBConnectionManager._ENV = None
         if env is not None:
-            try:
-                env.close()
-            except Exception:  # noqa: BLE001
-                pass
+            env.close()
 
 
-# ---- what is kept: one configuration per (directory, environment, project + profile files) ---------
+# why this process could not let go of the warehouse after the request it answers (then it exits)
+_HOLDING = [None]
+
+
+def _let_go(adapter):
+    """Let go of the warehouse after a request: the adapter's connections, and dbt-duckdb's process-wide
+    database. What fails is noted, and the process leaves after its answer (serve)."""
+    failed = []
+    if adapter is not None:
+        try:
+            adapter.cleanup_connections()
+        except Exception as e:  # noqa: BLE001
+            failed.append(f"closing the adapter's connections: {_stringify_exc(e)}")
+    try:
+        _release_duckdb()
+    except Exception as e:  # noqa: BLE001
+        failed.append(f"closing the DuckDB database: {_stringify_exc(e)}")
+    if failed:
+        _HOLDING[0] = "; ".join(failed)
+
+
+# ---- what is kept: one _Kept per (directory, environment, project + profile files) -------------------
 _KEPT = {}
 _KEEP_AT_MOST = 32
 _LOGGING_FOR = [None]
@@ -220,19 +273,14 @@ def _enter(req):
         os.chdir(cwd)
 
 
-def _configuration(key):
-    cfg = _KEPT.pop(key, None) or _WarmConfiguration()
-    _KEPT[key] = cfg  # the most recently used last
+def _configuration(req):
+    """The request's own configuration, over what its project keeps."""
+    key = _key(req)
+    kept = _KEPT.pop(key, None) or _Kept()
+    _KEPT[key] = kept  # the most recently used last
     while len(_KEPT) > _KEEP_AT_MOST:
-        old = _KEPT.pop(next(iter(_KEPT)))
-        old.release()
-    cfg.refresh()
-    return cfg
-
-
-def _forget(key, cfg):
-    if _KEPT.get(key) is cfg:
-        del _KEPT[key]
+        _KEPT.pop(next(iter(_KEPT)))
+    return _RequestConfiguration(kept, key)
 
 
 def _run_mf(req):
@@ -241,12 +289,7 @@ def _run_mf(req):
     if command is None:
         return {"ok": False, "code": 2, "stdout": "", "stderr": f"this server runs only: mf {' | '.join(_COMMANDS)} (asked: mf {' '.join(argv)})\n"}
     _enter(req)
-    key = _key(req)
-    cfg = _configuration(key)
-    if cfg.is_setup and _LOGGING_FOR[0] != key:
-        # the CLI logs each run to its project's logs/metricflow.log (set up with the configuration)
-        cfg._configure_logging(log_file_path=cfg.log_file_path)
-        _LOGGING_FOR[0] = key
+    cfg = _configuration(req)
     _OUT.begin()
     _ERR.begin()
     code = 0
@@ -268,17 +311,13 @@ def _run_mf(req):
                 _SPINNER_EXITS.pop()()  # as atexit runs them: the last registered first
             except Exception:  # noqa: BLE001
                 pass
-        # a setup that ran in the command pointed the logging at this project (one that failed: unknown)
-        _LOGGING_FOR[0] = key if cfg.is_setup else None
-        cfg.release()
+        _let_go(cfg._kept.adapter)
         stdout, stderr = _OUT.end(), _ERR.end()
     if code is None:
         code = 0
     elif not isinstance(code, int):
         stderr += f"{code}\n"
         code = 1
-    if not cfg.is_setup:
-        _forget(key, cfg)  # a setup that failed is tried again by the next request, as `mf` would
     return {"ok": code == 0, "code": code, "stdout": stdout, "stderr": stderr}
 
 
@@ -310,22 +349,18 @@ def _group_by_item(item):
 
 def _group_bys(req):
     _enter(req)
-    key = _key(req)
-    cfg = _configuration(key)
+    cfg = _configuration(req)
     _OUT.begin()
     _ERR.begin()
     try:
-        if not cfg.is_setup:
-            _, project, profiles = _project_dirs(req)
-            cfg.setup(dbt_profiles_path=Path(profiles), dbt_project_path=Path(project), configure_file_logging=False)
+        _, project, profiles = _project_dirs(req)
+        cfg.setup(dbt_profiles_path=Path(profiles), dbt_project_path=Path(project), configure_file_logging=False)
         # asked of MetricFlow itself, one metric at a time: what each can be grouped by
         return {"ok": True, "group_bys": {m: [_group_by_item(i) for i in cfg.mf.list_group_bys(metric_names=[m])] for m in req.get("metrics") or []}}
     finally:
-        cfg.release()
+        _let_go(cfg._kept.adapter)
         _OUT.end()
         _ERR.end()
-        if not cfg.is_setup:
-            _forget(key, cfg)
 
 
 _OPS = {"mf": _run_mf, "group_bys": _group_bys}
@@ -356,8 +391,16 @@ def serve():
         except Exception as e:  # noqa: BLE001 — a request that cannot be served is answered, not fatal
             out = {"ok": False, "error": _stringify_exc(e)}
         out["id"] = rid
+        if _HOLDING[0]:
+            out["retire"] = _HOLDING[0]
         _ANSWERS.write(json.dumps(out, default=str) + "\n")
         _ANSWERS.flush()
+        if _HOLDING[0]:
+            # a warehouse it could not let go of (a DuckDB file still locked) is let go of by leaving: the
+            # client gives the answer once this process has ended, and the next request starts another
+            _REAL_STDERR.write(f"mf_server: leaving — could not let go of the warehouse: {_HOLDING[0]}\n")
+            _REAL_STDERR.flush()
+            os._exit(1)
 
 
 if __name__ == "__main__":

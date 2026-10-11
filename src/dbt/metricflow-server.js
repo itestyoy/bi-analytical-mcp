@@ -2,52 +2,37 @@
 // every list of what a metric can be grouped by is asked of a long-lived Python process on the MetricFlow
 // environment (python/mf_server.py), never of a fresh `mf`: `mf query` spends 3–4 s importing MetricFlow
 // and dbt, running `dbt debug` over the project and loading the semantic manifest, and a tenth of a
-// second on the query. The process keeps all of that, per project directory, and runs the CLI's own
+// second on the query. The process keeps what can be kept, per project directory, and runs the CLI's own
 // `query` command in-process with the arguments built for the CLI — so the CSV it writes, the SQL and
 // plan it prints, an error as it prints it and its exit code are `mf query`'s.
 //
 // One pool per MetricFlow environment (its Python), shared by every dbt client of this process and kept
-// as long as it runs: a request takes an idle process, or starts one (the first answer includes the
-// imports). Requests that come together run side by side, each on a process of its own, as `mf`
-// processes did; a process left idle while another is alive is retired after IDLE_RETIRE_MS. A request that has to stop — its call cancelled, past its timeout — stops its process
-// (MetricFlow cannot interrupt a query): it is killed, and the answer waits until it has exited, so the
-// DuckDB file it held is free for whatever runs next. Idle, a process holds nothing open — not the
-// warehouse (it lets go after every request) and not the event loop (the server, or a test, exits with
-// it running).
+// as long as it runs. A request takes the idle process, or starts one (the first answer includes the
+// imports); requests that come together run side by side, each on a process of its own, as `mf`
+// processes did — at most MAX_WORKERS at once (each holds MetricFlow and dbt, ~170 MB), the rest
+// waiting for one to be free. One process is kept warm between requests; any other is retired as soon
+// as it is idle. The processes themselves — spawning, reading their answers, a request stopped by its
+// call's cancellation or its timeout (the process is killed: MetricFlow cannot interrupt a query, and
+// the answer waits until it has exited, so the DuckDB file it held is free for whatever runs next), a
+// process that ends or cannot start — are src/warm-process.js's. Idle, a process holds nothing open:
+// not the warehouse (it lets go after every request, and leaves when it cannot) and not the event loop
+// (the server, or a test, exits with it running).
 //
 // The warehouse's turn, the call's cancellation, a task's progress and DBT_TIMING_LOG are applied around
 // each request by src/dbt/process.js (runWarm), exactly as around a process.
 
-import { spawn } from 'node:child_process';
+import { availableParallelism } from 'node:os';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
-
-/** How long a process may sit idle while another is alive before it is retired. */
-export const IDLE_RETIRE_MS = 60000;
-/** How long a process asked to stop (SIGTERM) has before it is killed outright. */
-const KILL_GRACE_MS = 5000;
-/** How much of a process's stderr is kept, to say why it ended. */
-const STDERR_TAIL = 4000;
+import { WarmProcess } from '../warm-process.js';
 
 /**
- * The complete lines of `buffer` read as answers — one JSON object per line; a line that is not one
- * (nothing else writes to the channel, but a half-written line must never be read as an answer) is
- * skipped — and the unfinished rest. → { replies, rest }
+ * At most this many MetricFlow processes at once, per environment: the CPU count, at least 2 and at
+ * most 8. A query's plan is built, and on DuckDB run, inside the process (CPU-bound), and every process
+ * holds ~170 MB — so more processes than CPUs buy little and cost memory; on DuckDB one database takes
+ * one request at a time anyway (the warehouse's turn), and a BigQuery batch beyond the cap waits for a
+ * free process instead of starting another.
  */
-export function readReplies(buffer) {
-  const replies = [];
-  let rest = buffer;
-  let nl;
-  while ((nl = rest.indexOf('\n')) >= 0) {
-    const line = rest.slice(0, nl).trim();
-    rest = rest.slice(nl + 1);
-    if (!line) continue;
-    try {
-      const reply = JSON.parse(line);
-      if (reply && typeof reply === 'object' && !Array.isArray(reply)) replies.push(reply);
-    } catch { /* not an answer */ }
-  }
-  return { replies, rest };
-}
+export const MAX_WORKERS = Math.max(2, Math.min(8, availableParallelism()));
 
 /**
  * What a `mf` request answered, as runProcess reports a process: { ok, code, stdout, stderr, error? }.
@@ -64,100 +49,15 @@ export function mfOutcome(reply) {
   return { ok: false, code: null, stdout: '', stderr: error, error, ...(reply?.cancelled ? { cancelled: true } : {}), ...(reply?.killed ? { killed: true } : {}) };
 }
 
-class Worker {
-  constructor(pool) {
-    this.pool = pool;
-    this.alive = true;
-    this.leaving = false;
-    this.pending = null;
-    this.buffer = '';
-    this.stderr = '';
-    this.retire = null;
-    this.exited = new Promise((resolve) => { this._exited = resolve; });
-    const proc = spawn(pool.python, [pool.script], { stdio: ['pipe', 'pipe', 'pipe'] });
-    this.proc = proc;
-    proc.stdout.setEncoding('utf8');
-    proc.stdout.on('data', (chunk) => {
-      const { replies, rest } = readReplies(this.buffer + chunk);
-      this.buffer = rest;
-      for (const reply of replies) if (this.pending && reply.id === this.pending.id) this.pending.answer(reply);
-    });
-    proc.stderr.setEncoding('utf8');
-    proc.stderr.on('data', (chunk) => { this.stderr = (this.stderr + chunk).slice(-STDERR_TAIL); });
-    proc.stdin.on('error', () => { /* it exited: said by 'exit' */ });
-    proc.on('error', (e) => this._gone(`could not start (${pool.python}): ${e.message}`));
-    proc.on('exit', (code, signal) => this._gone(signal ? `was stopped by ${signal}` : `exited with code ${code}`));
-    this.hold(false);
-  }
-
-  /** The process keeps the event loop alive only while it is answering. */
-  hold(busy) {
-    const how = busy ? 'ref' : 'unref';
-    try {
-      this.proc[how]();
-      for (const s of [this.proc.stdin, this.proc.stdout, this.proc.stderr]) s?.[how]?.();
-    } catch { /* gone */ }
-  }
-
-  _gone(how) {
-    if (!this.alive) return;
-    this.alive = false;
-    clearTimeout(this.retire);
-    this.pool._forget(this);
-    this._exited();
-    // a request it was answering, and was not asked to stop, gets why it ended
-    if (this.pending && !this.pending.stopping) {
-      const tail = this.stderr.trim().split('\n').slice(-12).join('\n');
-      this.pending.answer({ ok: false, error: `the MetricFlow server ${how} before it answered${tail ? `:\n${tail}` : ''}` });
-    }
-  }
-
-  kill() {
-    this.leaving = true;
-    if (!this.alive) return;
-    try { this.proc.kill('SIGTERM'); } catch { /* gone */ }
-    const hard = setTimeout(() => { try { this.proc.kill('SIGKILL'); } catch { /* gone */ } }, KILL_GRACE_MS);
-    hard.unref?.();
-    this.exited.then(() => clearTimeout(hard));
-  }
-
-  /** Send one request; its answer, or why there is none. */
-  ask(request, { signal, timeout }) {
-    return new Promise((resolve) => {
-      let timer = null;
-      const finish = (out) => {
-        clearTimeout(timer);
-        signal?.removeEventListener?.('abort', onAbort);
-        this.pending = null;
-        this.hold(false);
-        resolve(out);
-      };
-      // stopped: killed, and answered once it has exited (a DuckDB file it held is free by then)
-      const stop = (out) => {
-        if (!this.pending || this.pending.stopping) return;
-        this.pending.stopping = true;
-        this.kill();
-        this.exited.then(() => finish(out));
-      };
-      const onAbort = () => stop({ ok: false, cancelled: true, killed: true, error: 'MetricFlow stopped — the tool call was cancelled' });
-      this.pending = { id: request.id, stopping: false, answer: (reply) => { if (!this.pending?.stopping) finish(reply); } };
-      if (!this.alive) return finish({ ok: false, error: 'the MetricFlow server is not running' });
-      timer = setTimeout(() => stop({ ok: false, killed: true, error: `MetricFlow killed — hit the ${timeout}ms runner timeout (query did not finish)` }), timeout);
-      signal?.addEventListener?.('abort', onAbort, { once: true });
-      this.hold(true);
-      this.proc.stdin.write(`${JSON.stringify(request)}\n`);
-    });
-  }
-}
-
 /** The warm MetricFlow processes of ONE MetricFlow environment (its Python). */
 export class MetricFlowServer {
-  constructor(python, { script = assetPath('mfServer'), idleRetireMs = IDLE_RETIRE_MS } = {}) {
+  constructor(python, { script = assetPath('mfServer'), maxWorkers = MAX_WORKERS } = {}) {
     this.python = python;
     this.script = script;
-    this.idleRetireMs = idleRetireMs;
-    this.workers = new Set();
-    this.idle = [];
+    this.maxWorkers = Math.max(1, maxWorkers);
+    this.workers = new Set(); // running: idle or answering
+    this.idle = null; // the one kept warm between requests
+    this.waiting = []; // requests waiting for a free process
     this.seq = 0;
   }
 
@@ -166,50 +66,77 @@ export class MetricFlowServer {
 
   /**
    * One request ({ op, … } — python/mf_server.py), answered with the process's own answer, or with
-   * { ok: false, error, cancelled?, killed? } when it gave none: it could not start, it ended, or the
-   * request was stopped — by `signal`, or after `timeout` ms. Never throws.
+   * { ok: false, error, … } when it gave none (src/warm-process.js: it could not start, it ended, or the
+   * request was stopped — by `signal`, or after `timeout` ms). Never throws.
    */
   async request(request, { signal, timeout = 600000 } = {}) {
     if (!this.python) return { ok: false, error: 'no MetricFlow Python to run the query on: the dbt environment names no MetricFlow environment (MF_ENV)' };
     if (!this.script) return { ok: false, error: missingAssetMessage('mfServer') };
-    if (signal?.aborted) return { ok: false, cancelled: true, killed: true, error: 'MetricFlow not asked — the tool call was cancelled' };
-    const worker = this.idle.pop() || this._start();
-    clearTimeout(worker.retire);
-    const out = await worker.ask({ ...request, id: ++this.seq }, { signal, timeout });
-    if (worker.alive && !worker.leaving) this._rest(worker);
-    return out;
+    if (signal?.aborted) return { ok: false, cancelled: true, error: 'MetricFlow not asked — the tool call was cancelled' };
+    let worker = null;
+    try {
+      worker = await this._take(signal);
+      if (!worker) return { ok: false, cancelled: true, error: 'MetricFlow not asked — the tool call was cancelled while it waited for a free MetricFlow process' };
+      return await worker.ask({ ...request, id: ++this.seq }, { signal, timeout });
+    } catch (e) {
+      return { ok: false, error: `the MetricFlow server could not be asked: ${e?.message || e}` };
+    } finally {
+      if (worker) this._give(worker);
+    }
+  }
+
+  /** A process for one request: the idle one, a new one under the cap, or the next one freed (null: cancelled while waiting). */
+  _take(signal) {
+    const idle = this.idle;
+    this.idle = null;
+    if (idle?.alive) return Promise.resolve(idle);
+    if (this.workers.size < this.maxWorkers) return Promise.resolve(this._start());
+    return new Promise((resolve) => {
+      const waiter = {
+        take: (worker) => { signal?.removeEventListener?.('abort', waiter.abort); resolve(worker); },
+        abort: () => { this.waiting = this.waiting.filter((w) => w !== waiter); resolve(null); },
+      };
+      signal?.addEventListener?.('abort', waiter.abort, { once: true });
+      this.waiting.push(waiter);
+    });
   }
 
   _start() {
-    const worker = new Worker(this);
+    const worker = new WarmProcess(this.python, [this.script], { name: 'the MetricFlow server' });
     this.workers.add(worker);
+    worker.exited.then(() => this._forget(worker));
     return worker;
   }
 
-  /** A worker back from a request waits for the next one; one of several is retired if it waits long. */
-  _rest(worker) {
-    this.idle.push(worker);
-    worker.retire = setTimeout(() => {
-      // out of the pool at once, not at its exit: the next one to wait as long counts it gone
-      if (this.workers.size > 1 && this.idle.includes(worker)) {
-        this._forget(worker);
-        worker.kill();
-      }
-    }, this.idleRetireMs);
-    worker.retire.unref?.();
+  /** A process back from a request: to the next request waiting, else kept warm if none is, else retired. */
+  _give(worker) {
+    // ended, or put out of the pool while it answered (close)
+    if (!worker.alive || !this.workers.has(worker)) return this._forget(worker);
+    const next = this.waiting.shift();
+    if (next) return next.take(worker);
+    if (!this.idle) { this.idle = worker; return; }
+    this._forget(worker);
+    worker.kill();
   }
 
+  /** A process out of the pool (ended, or retired): a request waiting for a free one may start one now. */
   _forget(worker) {
     this.workers.delete(worker);
-    this.idle = this.idle.filter((w) => w !== worker);
+    if (this.idle === worker) this.idle = null;
+    this._serveWaiting();
+  }
+
+  _serveWaiting() {
+    while (this.waiting.length && this.workers.size < this.maxWorkers) this.waiting.shift().take(this._start());
   }
 
   /** Stop every process (a request asked after this starts a new one). */
   close() {
-    for (const worker of [...this.workers]) {
-      this._forget(worker);
-      worker.kill();
-    }
+    const all = [...this.workers];
+    this.workers.clear();
+    this.idle = null;
+    for (const worker of all) worker.kill();
+    this._serveWaiting();
   }
 }
 

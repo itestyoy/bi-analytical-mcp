@@ -330,7 +330,7 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
   const [{ total }] = (await wh.query('select sum(cost) as total from fct_player_acquisition')).rows;
   const cuts = [...m.group_by.dimensions, ...m.group_by.entities];
   assert.ok(cuts.length >= 3, JSON.stringify(m.group_by));
-  // every cut, spelled as the preview gives it, is taken by the query and sums to the total
+  // every cut, spelled as the preview gives it, is taken by a query of its own and sums to the total
   const sumsToTotal = (rows, cut) => {
     const sum = rows.reduce((a, r) => a + num(r.project_cost ?? 0), 0);
     assert.ok(Math.abs(sum - num(total)) < 1e-9, `[every cut sums to the total] ${JSON.stringify(cut)}: ${sum} vs ${total}`);
@@ -343,12 +343,8 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
   const listed = m.group_by.dimensions.map((d) => JSON.stringify(d));
   for (const ref of [joined, direct, chain]) assert.ok(listed.includes(JSON.stringify(ref)), `[listed] ${JSON.stringify(ref)} in ${listed}`);
   const checkedBelow = [joined, direct, chain, mediaSource].map((c) => JSON.stringify(c));
-  // the cuts not checked further below, all in ONE query: each is taken as the preview spells it, and
-  // project_cost is a sum over joins onto unique keys, so the rows grouped by all of them still sum to
-  // the total — a cut that fanned out would inflate it as it would alone
-  const rest = cuts.filter((c) => !checkedBelow.includes(JSON.stringify(c)));
-  const byRest = rest.length ? rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: rest })) : [];
-  for (const cut of rest) sumsToTotal(byRest, cut);
+  // the cuts not checked further below, each in a query of its own, as the preview spells it
+  for (const cut of cuts.filter((c) => !checkedBelow.includes(JSON.stringify(c)))) sumsToTotal(rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [cut] })), cut);
 
   // [a dimension of another semantic model is named by where it lives — MetricFlow makes the join — and is the warehouse's own join]
   // named as if it were the context's own, it is refused saying where it lives
@@ -564,12 +560,10 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   assert.equal(raw.jobs.get(running.task_id).status, 'running');
   assert.equal((await preview({ context_id: out.context_id })).status.building, undefined);
   const firstCut = await taskResult(raw, running.task_id);
-  // (the cuts after the first in ONE query: a count, so grouped by all of them it is still the whole count)
-  const others = cuts.slice(1);
-  const otherRows = others.length ? rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: others, time_range: WINDOW })) : [];
+  // (the cuts after the first, each in a query of its own)
   for (const [i, cut] of cuts.entries()) {
-    const rows = i === 0 ? rowsOf(firstCut) : otherRows;
-    assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), JSON.stringify(cut));
+    const rows = i === 0 ? rowsOf(firstCut) : rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: [cut], time_range: WINDOW }));
+    assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), `[every cut gives back the whole count] ${JSON.stringify(cut)}`);
   }
   // a build that is running is
   const rebuilding = await (engine.raw || engine).build_semantic_model({ action: 'update', context_id: out.context_id, semantic_models: [{ from: 'events', measures: [{ name: 'more', agg: 'count' }] }], metrics: [{ name: 'more', type: 'simple', measure: 'more' }] });

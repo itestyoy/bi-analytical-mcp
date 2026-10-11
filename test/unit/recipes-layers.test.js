@@ -3,8 +3,9 @@
 // with its own recipes silently lost every shipped one, python ones included.
 //
 // Input-validation / surface guard (the allowed non-data kind): what is offered, to whom, and why
-// one is withheld. Nothing here runs a recipe on the warehouse — that is recipes-parse.test.js and
-// the tests test/helpers/recipe-coverage.js names; only the recipes that need none are checked at the end.
+// one is withheld. Nothing here runs a recipe on the warehouse — that is the recipe loop of
+// test/integration/model-results.test.js and the tests test/helpers/recipe-coverage.js names; only the
+// recipes that need none are checked at the end.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -83,7 +84,7 @@ test('a recipe is offered only where this deployment can run it', () => {
 
 // A pipeline recipe's payload is the build_pipeline_model start request itself, handed over as it
 // stands: build_pipeline_model({ request: <pipeline_payload> }). Every shipped one is held to the
-// tool's own schema here (input validation — what they compute is recipes-parse.test.js's), on a
+// tool's own schema here (input validation — what they compute is model-results.test.js's), on a
 // deployment that runs python models, so the python ones are offered their stage.
 test('every shipped pipeline_payload is a build_pipeline_model start request the tool accepts as it stands', async () => {
   await import('../../src/engine.js'); // the engine registers the funnel and python stages, as a server does
@@ -198,8 +199,8 @@ test('a deployment recipe with the earlier flat experiment block is served with 
   assert.deepEqual(loadRecipes(SYSTEM, now).get('now').experiment, current);
 });
 
-// The shipped recipes whose checks never read the warehouse (moved here from
-// test/integration/recipes-parse.test.js). A REFERENCE entry (generated from an extracted fact sheet)
+// The shipped recipes whose checks never read the warehouse (moved here from the recipe loop of the
+// integration suite, now in test/integration/model-results.test.js). A REFERENCE entry (generated from an extracted fact sheet)
 // is not a payload to build: it is the library's own surface, offered by id so it can be fetched
 // mid-write. What can rot here is its content — an empty sheet, or a version it cannot name.
 for (const r of loadRecipes(SYSTEM).list.filter((x) => x.reference)) {
@@ -228,7 +229,7 @@ for (const r of loadRecipes(SYSTEM).list.filter((x) => !x.reference && x.require
   });
 }
 
-// recipes-parse.test.js skips a recipe another integration test proves on its numbers
+// The recipe loop (model-results.test.js) skips a recipe another integration test proves on its numbers
 // (test/helpers/recipe-coverage.js). Each one it skips must still be a shipped recipe — one removed
 // from config/recipes.json would otherwise leave a skip that hides nothing — and must name the test
 // file that holds it.

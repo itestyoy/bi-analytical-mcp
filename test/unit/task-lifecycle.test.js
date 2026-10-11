@@ -4,7 +4,7 @@
 // (a query issued right after its task was declared runs once the declaration is parsed); a result
 // is drawn once; a pipeline starts only from a finished task that stored a table. Lifecycle and
 // input-validation checks with a stub runner — the numbers these tasks produce are proven against
-// the warehouse in test/integration/task-results.test.js and materialize.test.js.
+// the warehouse in test/integration/task-results.test.js and model-results.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

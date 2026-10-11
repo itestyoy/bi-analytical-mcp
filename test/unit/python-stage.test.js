@@ -794,8 +794,8 @@ test('the preparation nudge does not fire where the stage reads a table rather t
   assert.deepEqual(nudges([PY_STAGE], { timeRange: { start: '2026-01-01' } }), []);
 });
 
-// Every shipped recipe for a PYTHON model (moved here from test/integration/recipes-parse.test.js: it
-// never read the warehouse). A python recipe cannot run where the warehouse runs no dbt python models
+// Every shipped recipe for a PYTHON model (moved here from the recipe loop of the integration suite,
+// now in test/integration/model-results.test.js: it never read the warehouse). A python recipe cannot run where the warehouse runs no dbt python models
 // (the DuckDB fixtures). It is still checked where it can rot — the payload must COMPILE for a
 // deployment that does run them: the stages render, the chain is laid out, the function bodies pass
 // the static gate and the declared output columns propagate to the SQL stages after it. (A generated

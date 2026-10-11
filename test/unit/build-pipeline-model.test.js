@@ -490,9 +490,9 @@ test('an event of the other fact is rejected in a crash-fact funnel', async () =
   assert.match(String(a.error.message), /first_launch/);
 });
 
-// (from test/integration/crashlytics-complex-types.test.js, 14.) A complex op on a column that is
-// not complex is refused, naming what the column IS — rather than building array SQL over text and
-// failing in the warehouse.
+// (#14 of the complex payload types in test/integration/pipeline-stages.test.js, moved here.) A complex
+// op on a column that is not complex is refused, naming what the column IS — rather than building array
+// SQL over text and failing in the warehouse.
 test('14. complex ops on a scalar column are refused with what it actually is', async () => {
   const e = engine();
   // an unnest names only an array property: a scalar one is not among those it offers
@@ -517,8 +517,8 @@ test('14. complex ops on a scalar column are refused with what it actually is', 
   );
 });
 
-// (from test/integration/match-recognize.test.js) A dry run renders the pipeline and builds nothing:
-// no runner is wired here, so nothing could be built.
+// (moved here from the funnels of test/integration/pipeline-stages.test.js) A dry run renders the
+// pipeline and builds nothing: no runner is wired here, so nothing could be built.
 test('_buildPipeline: dry_run returns SQL without building', async () => {
   const e = engine();
   const dr = await e._buildPipeline({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] }] } });

@@ -6,13 +6,15 @@
 //    which builds the index over the same fixture.)
 //   3. PIPELINE — build_pipeline_model (start/add_steps/preview/commit) builds the
 //                    activation funnel; rows read back via query_pipeline_model (12/8/5/3,
-//                    the same counts match-recognize.test.js proves on the all-at-once build).
+//                    the same counts the funnels of pipeline-stages.test.js prove on the
+//                    all-at-once build).
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
 //                    country → build_semantic_model action update adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
 //   5. A/B         — build_pipeline_model fed the conversion recipe's stages one-at-a-
 //                    time → materialize → per-variant aggregates → experiment analyze + check_split +
-//                    plan: the conversion recipe's data proof (ab-test.test.js runs the others).
+//                    plan: the conversion recipe's data proof (model-results.test.js runs the
+//                    others).
 //   6. RECIPES     — semantic_index overview list + semantic_index({ recipe: id }).
 //   7. TEARDOWN    — delete_context({ what: semantic_model | pipeline_model | context }), then
 //                    context({list}) shows the dropped context gone.
@@ -47,7 +49,7 @@ const close = (a, b, tol = 1e-3) => assert.ok(Math.abs(a - b) <= tol, `${a} ≈ 
 let wh; let engine; let backend; let recipes;
 const S = {}; // S.semCtx, S.draftId, S.pipeCtx, S.pipeTable, S.abCtx
 
-// The canonical 4-step activation funnel (copied verbatim from match-recognize.test.js).
+// The canonical 4-step activation funnel (the same steps as the funnels of pipeline-stages.test.js).
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
   { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
@@ -252,7 +254,7 @@ test('5c. experiment({check_split}) on the warehouse-computed split: clean 6 vs 
 test('5d. experiment({plan}) matches the recipe tool_calls outputs (data-grounded)', opts, async (t) => {
   if (skip(t)) return;
   // Use the experiment_power recipe's declared tool_calls so the asserted numbers are
-  // the recipe's own ground truth (the recipes-parse suite runs these too).
+  // the recipe's own ground truth (test/unit/recipes-layers.test.js runs these too).
   const power = recipes.list.find((x) => x.id === 'experiment_power');
   for (const call of power.tool_calls) {
     const res = engine[call.tool](call.args);

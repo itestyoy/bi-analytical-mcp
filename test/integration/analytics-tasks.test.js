@@ -8,10 +8,11 @@
 // in ONE query (one mf call), each check with a message naming it.
 //
 // This file is the one home of the semantic monetization / progression / funnel / DAU numbers: the
-// platform and country cuts and the per-level progression of behavior-funnels.test.js are asserted
-// here ('[behavior: …]'), as is the tutorial step funnel, and the cumulative-window test shares its
-// warehouse. Each recipe it builds is listed in test/helpers/recipe-coverage.js, so
-// recipes-parse.test.js does not run that recipe again.
+// platform and country cuts and the per-level progression of the behavior funnels are asserted here
+// ('[behavior: …]'), as is the tutorial step funnel, and the cumulative metric over a partitioned
+// source (11.) shares its warehouse. Each recipe it builds is listed in
+// test/helpers/recipe-coverage.js, so the recipe loop of model-results.test.js does not run that
+// recipe again.
 //
 // Only the two documented data sources exist (events fact + user attributes);
 // joins are 1-hop events.user -> dim_users. NO text/SQL/command assertions.
@@ -297,7 +298,8 @@ test('a task dimension over a time column is read at its grain (week), or at the
 
 // ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────
 // (A did / didn't split by a Metric() filter is not tested here: no tool takes one — a query's where is
-// the structured condition grammar, and caller Jinja stays literal text, jinja-inert.test.js.)
+// the structured condition grammar, and caller Jinja stays literal text: CALLER TEXT IS NEVER JINJA in
+// pipeline-stages.test.js.)
 test('TASK boolean_condition_as_measure: did-purchase and session counts as counts with a condition (8 of 21)', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'boolean_condition_as_measure');

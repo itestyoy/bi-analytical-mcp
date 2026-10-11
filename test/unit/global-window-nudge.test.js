@@ -11,7 +11,7 @@
 //
 // These are the same kind of checks as the python-preparation nudge: what the server SAYS about a
 // declared stage, plus input validation on the two forms of least/greatest. Nothing here asserts on
-// generated SQL — the numbers are proven in test/integration/pipeline.test.js.
+// generated SQL — the numbers are proven in test/integration/pipeline-stages.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

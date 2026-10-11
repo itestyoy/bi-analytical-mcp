@@ -220,5 +220,14 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
   assert.ok(near(by.google, 3.5), `[by media_source] google=${by.google}`);
   assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5), '[by media_source] the channels sum to 17.50');
-  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5), '[by users.country] the point-in-time join keeps the total');
+  // the country is the install version valid on the spend day (SEED_DATA §13): u1's two spend rows fall
+  // in two versions (01-01 US 1.50, 01-03 GB 0.50), so the split is US 6.75 / GB 5.00 / DE 4.00 / BR 1.75
+  // — u1's first version for both days would make it US 7.25 / GB 4.50, its last US 5.25 / GB 6.50, and
+  // the key alone would count u1's rows twice (the countries would sum to 19.50, not 17.50)
+  const byCountry = marginal(g.rows, (row) => String(row[g.group_by_resolved['users.country']]), 'gov_total_spend');
+  assert.deepEqual(Object.keys(byCountry).sort(), ['BR', 'DE', 'GB', 'US'], `[by users.country] every spend row has the country valid on its day: ${JSON.stringify(byCountry)}`);
+  assert.ok(near(byCountry.US, 6.75), `[by users.country] US=${byCountry.US}`);
+  assert.ok(near(byCountry.GB, 5.0), `[by users.country] GB=${byCountry.GB}`);
+  assert.ok(near(byCountry.DE, 4.0), `[by users.country] DE=${byCountry.DE}`);
+  assert.ok(near(byCountry.BR, 1.75), `[by users.country] BR=${byCountry.BR}`);
 });

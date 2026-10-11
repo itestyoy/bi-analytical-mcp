@@ -115,7 +115,7 @@ dbt semantic model and verified by a query:
 > Each of these is ASSEMBLED from the technique recipes shipped in
 > `config/recipes.json` (a metric type, a join, a pipeline stage pattern — the
 > system layer is per technique, not per business task), and the assembled shapes
-> are exercised by the integration suites (`behavior-funnels.test.js`,
+> are exercised by the integration suites (`model-results.test.js`,
 > `analytics-tasks.test.js`). The point: a fixed, **tested** way to build each
 > model and compute each metric, so the agent can assemble them reliably — and a
 > deployment that wants the finished business shape as one call puts it in its own

@@ -165,11 +165,15 @@ export class DbtV1 {
     return runProcess(bin, args, { cwd: projectDir, env: { ...this._env(projectDir), ...env }, timeout, turn: this.warehouse(projectDir).turn });
   }
 
-  /** The Python of the MetricFlow environment — the one beside its `mf` — that MetricFlow is kept warm on. */
+  /**
+   * The Python of the MetricFlow environment, that MetricFlow is kept warm on: the one this client was
+   * given (`pythonBin` — named, or its environment's, createDbt), else the one beside its `mf`.
+   */
   get metricflowPython() {
+    if (this.pythonBin) return this.pythonBin;
     const beside = this.mfBin ? join(dirname(this.mfBin), 'python') : null;
     if (beside && existsSync(beside)) return beside;
-    return this.pythonBin || this.environment?.pythonBin || null;
+    return this.environment?.pythonBin || null;
   }
 
   /**

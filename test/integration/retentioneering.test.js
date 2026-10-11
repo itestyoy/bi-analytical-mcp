@@ -7,9 +7,11 @@
 //
 // Every analysis of the users' paths is ONE call (Q1, in before()) — the charted ones, the diffs and the
 // ones without a card alike: each test below reads its own of them, from the summary or from the one read
-// of every record. A check that names an earlier test (T8, T17, …) in its message is that test's, merged
-// into a scenario that shares its builds and runs. What one python model costs is a dbt process and the
-// library's import, so a check rides on a run that happens anyway wherever it can.
+// of every record — but for one call of analyses without a card only (T31: a call with nothing to draw
+// offers no card, which no call that has a card can show). A check that names an earlier test (T8, T17,
+// …) in its message is that test's, merged into a scenario that shares its builds and runs. What one
+// python model costs is a dbt process and the library's import, so a check rides on a run that happens
+// anyway wherever it can.
 //
 // Skipped when the environment is not built (npm run dbt:env -- create retentioneering).
 
@@ -32,6 +34,11 @@ const median = () => ({ metric: 'length', agg: 'median' });
 const features = () => [{ metric: 'event_count_bulk' }];
 /** The clustering Q1 runs, and the context test's call again (T9). */
 const clusters = () => ({ kind: 'cluster_analysis', features: features(), method_args: { n_clusters: [2, 3] }, overview_metrics: [mean()] });
+/** Two analyses no card draws (T31): Q1 runs them among the others, and a call of its own alone. */
+const cardless = () => [
+  { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' },
+  { kind: 'path_metrics', metrics: [{ metric: 'length' }, { metric: 'has_event', metric_args: { event: 'shop_opened' } }] },
+];
 
 /** How many of these paths reach each FUNNEL step in order. */
 const reach = (lists) => {
@@ -60,13 +67,13 @@ before(async () => {
   const [p1, p2] = platforms;
   // Q1: every analysis the readers below check, in one call. The order matters: show_to_user names the
   // first analysis that can be drawn and is not yet — the two without a card come first (T31: passed
-  // over), then the funnel's diff (T17: offered), then the anchored diff (T33: offered next)
+  // over for one that has a card), then the funnel's diff (T17: offered), then the anchored diff (T33:
+  // offered next)
   const q = await engine.query_retentioneering_model({
     context_id: built.context_id, eventstream: 'paths',
     analyses: [
       // T31 + T34: the analyses no card draws
-      { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' },
-      { kind: 'path_metrics', metrics: [{ metric: 'length' }, { metric: 'has_event', metric_args: { event: 'shop_opened' } }] },
+      ...cardless(),
       // T17 / T33 / T32 / T35: every diff kind and a distribution comparison, each group the rows' own
       { kind: 'funnel', name: 'funnel_diff', steps: FUNNEL, diff: ['platform', p1, p2] },
       { kind: 'step_matrix', name: 'step_matrix_diff', max_steps: 3, diff: ['platform', p1, p2], path_pattern: 'tutorial->.*->level_completed' },
@@ -358,8 +365,9 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
 });
 
 // Q1's analyses no card draws: their numbers are in the read (a summary by default, every record with
-// detail: "full"), and a draw asked for anyway is refused without leaving a mark.
-test('analyses without a card: the library\'s tables, the rows\' numbers, a summary by default and every record in full — and a refused draw leaves no mark', opts, async (t) => {
+// detail: "full"), no card is offered for them — passed over in Q1, and none at all for a call of them
+// alone — and a draw asked for anyway is refused without leaving a mark.
+test('analyses without a card: the library\'s tables, the rows\' numbers, a summary by default and every record in full — none offered, and a refused draw leaves no mark', opts, async (t) => {
   if (skip(t)) return;
   const q = { task_id: analyses.task_id };
   const summary = analyses.read;
@@ -383,7 +391,14 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
   // offer names the first analysis of the call that can be drawn (the read was made before any was): the
   // two listed first are passed over for the funnel's diff listed after them
   assert.deepEqual(Object.keys(summary.analyses).slice(0, 3), ['conversion_rate', 'path_metrics', 'funnel_diff'], 'guard: the read lists the two without a card first, then one with a card');
-  assert.equal(summary.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T31: no card is offered');
+  assert.equal(summary.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T31: the analyses without a card are passed over for the first one that has one');
+  // …and a call made of them alone offers no card at all: nothing in it can be drawn
+  const alone = await engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', analyses: cardless() });
+  const aloneRead = await readDone(alone.task_id);
+  assert.equal(aloneRead.status, 'done', JSON.stringify(aloneRead.error));
+  assert.deepEqual(Object.keys(aloneRead.analyses), ['conversion_rate', 'path_metrics'], 'guard: the call holds the two alone');
+  for (const k of ['conversion_rate', 'path_metrics']) assert.deepEqual(aloneRead.analyses[k].tables, summary.analyses[k].tables, `guard: ${k} alone has the numbers it has in Q1`);
+  assert.equal(aloneRead.show_to_user, undefined, 'T31: a call of analyses without a card offers none');
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), (e) => e.field === 'analysis' && /no card/.test(e.message), 'T31: a card asked for is refused');
   // T27 — the refusal leaves nothing behind: no mark, nothing held
   const ctx = engine.ctxs.get(built.context_id);

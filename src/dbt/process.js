@@ -1,5 +1,7 @@
-// STARTING A dbt / MetricFlow PROCESS — the one place the dbt clients spawn one, or ask a warm one
-// (MetricFlow, src/dbt/metricflow-server.js) a request.
+// STARTING A dbt / MetricFlow PROCESS — where the dbt clients spawn a one-shot process (dbt, `mf
+// validate-configs`, a Python script asked once) or ask a warm one (MetricFlow kept warm), all under one
+// discipline (underTurn). The one-shot processes are spawned here; the warm ones — MetricFlow's
+// (src/dbt/metricflow-server.js) and the retentioneering check's — by src/warm-process.js.
 //
 // Two things ride along with every process, and every request to a warm one:
 //   * the CANCELLATION of the call or task it works for (src/request-context.js): a call the client
@@ -54,19 +56,35 @@ function waitFor(promise, signal) {
 export const warehouseTurns = new Turns();
 
 /**
+ * Run `start(signal)` — what spawns a process, or asks a warm one — under the discipline every dbt /
+ * MetricFlow process shares: `turn` (a database key) makes it wait for that warehouse's turn first; the
+ * call's cancellation (passed to `start`) stops it, and one cancelled before it starts is not started; a
+ * task's progress and DBT_TIMING_LOG name it by `bin args`. Never throws: what `start` resolves with is
+ * the outcome, a cancellation while waiting is { ok: false, cancelled: true, … }, and anything `start`
+ * throws is a failure with its reason — never reported as a cancellation.
+ */
+function underTurn(bin, args, start, { turn = null } = {}) {
+  const signal = currentSignal();
+  const report = reporter(bin, args, turn);
+  const asked = Date.now();
+  let began = asked;
+  const run = async () => {
+    began = Date.now();
+    report.running();
+    if (signal?.aborted) return cancelledResult('not started — the call was cancelled');
+    return start(signal);
+  };
+  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
+  return (turn ? warehouseTurns.run(turn, run, signal) : run()).catch(failedResult).then(done);
+}
+
+/**
  * Run `bin args` and collect what it printed. `turn` (a database key) makes it wait for that
  * warehouse's turn first. Never throws: the outcome is { ok, code, killed, signal, cancelled?,
  * stdout, stderr, error }.
  */
 export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null } = {}) {
-  const signal = currentSignal();
-  const report = reporter(bin, args, turn);
-  const asked = Date.now();
-  let began = asked;
-  const start = () => { began = Date.now(); report.running(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
-  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
-  if (!turn) return start().then(done);
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+  return underTurn(bin, args, (signal) => spawnOnce(bin, args, { cwd, env, timeout, signal }), { turn });
 }
 
 /**
@@ -76,56 +94,36 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
  * stderr, error? }.
  */
 export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, turn = null } = {}) {
-  const signal = currentSignal();
-  const report = reporter(bin, args, turn);
-  const asked = Date.now();
-  let began = asked;
-  const start = () => new Promise((resolve) => {
-    began = Date.now();
-    report.running();
-    if (signal?.aborted) return resolve(cancelledResult('not started — the call was cancelled'));
+  return underTurn(bin, args, (signal) => new Promise((resolve) => {
     const child = spawn(bin, args, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    let timer = null;
     child.on('error', (e) => { clearTimeout(timer); resolve(signal?.aborted ? cancelledResult('the call was cancelled') : { ok: false, code: null, stdout, stderr, error: e.message }); });
     child.on('close', (code, sig) => {
       clearTimeout(timer);
       if (signal?.aborted) return resolve(cancelledResult('the call was cancelled'));
       resolve({ ok: code === 0, code, killed: !!sig, signal: sig, stdout, stderr, ...(code === 0 ? {} : { error: sig ? `killed (${sig}) — it ran past ${Math.round(timeout / 1000)}s` : `exited with code ${code}` }) });
     });
+    // no standard streams (EMFILE / ENFILE): its 'error', above, says why
+    if (!child.stdin || !child.stdout || !child.stderr) return;
+    timer = setTimeout(() => child.kill('SIGTERM'), timeout);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
     child.stdin.on('error', () => { /* the process may exit before reading */ });
     child.stdin.end(input);
-  });
-  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
-  if (!turn) return start().then(done);
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+  }), { turn });
 }
 
 /**
  * Ask a WARM process one request (MetricFlow kept warm, src/dbt/metricflow-server.js) under the same
- * discipline as a process run by runProcess: `turn` (a database key) makes it wait for that warehouse's
- * turn first, the call's cancellation stops it, and a task's progress and DBT_TIMING_LOG name it by
- * `bin args` — the command it stands for (`mf query`). `ask(signal)` sends the request and resolves with
- * its outcome ({ ok, … }); this never throws, and a call cancelled while waiting for the turn is
- * answered { ok: false, cancelled: true, error } without asking.
+ * discipline as a process run by runProcess; a task's progress and DBT_TIMING_LOG name it by `bin args`
+ * — the command it stands for (`mf query`). `ask(signal)` sends the request and resolves with its
+ * outcome ({ ok, … }); this never throws, and a call cancelled while waiting for the turn is answered
+ * { ok: false, cancelled: true, error } without asking.
  */
 export function runWarm(bin, args, ask, { turn = null } = {}) {
-  const signal = currentSignal();
-  const report = reporter(bin, args, turn);
-  const asked = Date.now();
-  let began = asked;
-  const start = () => {
-    began = Date.now();
-    report.running();
-    if (signal?.aborted) return Promise.resolve(cancelledResult('not started — the call was cancelled'));
-    return ask(signal);
-  };
-  const done = (r) => { report.done(); timing(bin, args, asked, began, r); return r; };
-  if (!turn) return start().then(done);
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+  return underTurn(bin, args, ask, { turn });
 }
 
 /**
@@ -161,8 +159,14 @@ function cancelledResult(message) {
   return { ok: false, code: null, killed: true, signal: 'SIGTERM', cancelled: true, stdout: '', stderr: '', error: message };
 }
 
+/** What a start that threw is: a cancellation only when it was one (the wait for the turn, cancelled); else a failure with its reason. */
+function failedResult(e) {
+  if (e?.cancelled) return cancelledResult(e.message || 'cancelled');
+  const error = `could not run: ${e?.message || e}`;
+  return { ok: false, code: null, killed: false, signal: null, stdout: '', stderr: error, error };
+}
+
 function spawnOnce(bin, args, { cwd, env, timeout, signal }) {
-  if (signal?.aborted) return Promise.resolve(cancelledResult('dbt not started — the tool call was cancelled'));
   return new Promise((resolve) => {
     execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
       // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,

@@ -181,7 +181,8 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
 
 // (A funnel runs over ONE fact: an event of the OTHER fact in a crash-fact funnel is refused at
 // add_steps — test/unit/build-pipeline-model.test.js. Unnesting the crash fact's breadcrumbs —
-// 20 elements, net_retry 4 — is crashlytics-complex-types.test.js #1, with the whole map.)
+// 20 elements, net_retry 4 — is #1 of the complex payload types in pipeline-stages.test.js, with the
+// whole map.)
 
 // A BOOL column compared with a constant written as text ("true", as a caller often writes it): the
 // constant is written as the column's own type — a warehouse compares a BOOL only with a BOOL

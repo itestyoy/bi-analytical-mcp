@@ -13,7 +13,8 @@ import { settle, taskResult } from '../helpers/settle.js';
 // Allowed non-data tests: a CHECKPOINT's invalidation is draft STATE (positional — we own the
 // edit sequence), stage availability is an input-validation guard, and the file/reference
 // bookkeeping is context LIFECYCLE. No warehouse is wired here and nothing is executed; the
-// NUMBERS a continued pipeline returns are proven in test/integration/pipeline-checkpoint.test.js.
+// NUMBERS a continued pipeline returns are proven in the CHECKPOINTS of
+// test/integration/pipeline-stages.test.js.
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 
 function engine() {
@@ -293,7 +294,7 @@ test('the idle GC does not reclaim a context whose prefix a fork reads', async (
 // draft starts from — stands for the steps before it, so its columns keep that word: the same
 // condition is written the same way before the prefix is built and after it, in either form of the
 // condition. Shown here by what such a column refuses (an order comparison with a boolean); the rows
-// are proven against the warehouse in test/integration/condition-grammar.test.js.
+// are proven against the warehouse in ONE CONDITION GRAMMAR of test/integration/pipeline-stages.test.js.
 test('a text flag of the warehouse stays text after a checkpoint and in a draft started from the build', async () => {
   const dtypes = { event_id: 'VARCHAR', player_id_of_internal: 'VARCHAR', event_name: 'VARCHAR', device_time: 'TIMESTAMP', event_date: 'DATE', event_data: 'JSON', is_clicked_of_event_data: 'VARCHAR' };
   const runner = {

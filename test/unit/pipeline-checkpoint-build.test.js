@@ -6,7 +6,8 @@
 //
 // Allowed non-data tests: what a second materialize is REFUSED with (input validation) and what the
 // draft/registry/job records hold (context lifecycle). No SQL/YAML text is asserted anywhere; the
-// numbers a continued pipeline returns are proven in test/integration/pipeline-checkpoint.test.js.
+// numbers a continued pipeline returns are proven in the CHECKPOINTS of
+// test/integration/pipeline-stages.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

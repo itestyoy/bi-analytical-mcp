@@ -20,7 +20,7 @@ test('rejects unsupported agg / operator', () => {
 
 // Valid structured input (incl. a value carrying a quote + SQL) is accepted and
 // builds without throwing. We do NOT assert on the generated SQL text here; the
-// escaping is proven on DATA in test/integration/materialize.test.js (a quoted
+// escaping is proven on DATA in test/integration/model-results.test.js (a quoted
 // injection value is bound as a literal -> runs safely, matches nothing).
 test('accepts valid structured input (incl. quoted value) and builds output', () => {
   const sql = buildProjection("{{ ref('qr') }}", {
@@ -36,7 +36,7 @@ test('accepts valid structured input (incl. quoted value) and builds output', ()
 });
 
 // a read's measure takes the aggregate stage's functions but for the sketch PRODUCERS: a read returns
-// values, and merges a sketch a pipeline stored with hll_merge (its numbers: test/integration/materialize.test.js)
+// values, and merges a sketch a pipeline stored with hll_merge (its numbers: test/integration/model-results.test.js)
 test('a read folds with the aggregate stage\'s functions, but makes no sketch', () => {
   for (const agg of ['approx_count_distinct', 'hll_merge', 'median', 'count_distinct']) {
     assert.equal(typeof buildProjection('t', { group_by: ['g'], measures: [{ agg, column: 'x', name: 'v' }] }, q), 'string', agg);

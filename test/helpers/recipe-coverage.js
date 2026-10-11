@@ -1,8 +1,9 @@
 // The shipped recipes another integration test builds FROM ITS OWN PAYLOAD and proves on its numbers:
 // the recipe's first example query (or one with the same group_by and more metrics), or its pipeline
-// started as it is served, asserted on exact values. recipes-parse.test.js skips these — running them
-// again there would only re-check that a query that is already proven returns rows — so every recipe
-// NOT listed here (a new one included) is still built and run by its loop.
+// started as it is served, asserted on exact values. The recipe loop of model-results.test.js (EVERY
+// RECIPE RUNS) skips these — running them again there would only re-check that a query that is already
+// proven returns rows — so every recipe NOT listed here (a new one included) is still built and run by
+// that loop.
 //
 // Each value names the test that holds the recipe: '<file under test/integration>:<test title>'.
 // test/unit/recipes-layers.test.js holds every id to config/recipes.json, so a recipe removed there

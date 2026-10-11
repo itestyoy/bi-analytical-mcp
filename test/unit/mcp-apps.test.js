@@ -13,9 +13,12 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
-import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, pivotRows, pivotStages } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 import { displayProblems } from '../../src/display-check.js';
+import { currentDisplay } from '../../src/earlier-spelling.js';
+import { loadCatalog } from '../../src/catalog.js';
+import { renderRead } from '../../src/pipeline.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 import { defineTool, toolRegistry } from '../../src/tools/define.js';
 import { fieldNames } from '../helpers/schema-nav.js';
@@ -379,14 +382,40 @@ test('display guard: a sankey that loops back, or KPI tiles over many rows with 
   assert.equal(displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
 });
 
+// A view's read is the pipeline's own stages over the stored table: what a read takes, built over its columns.
+const STORED = [{ name: 'country', type: 'string' }, { name: 'platform', type: 'string' }, { name: 'channel', type: 'string' }, { name: 'day', type: 'time' }, { name: 'revenue', type: 'numeric' }, { name: 'users', type: 'int' }, { name: 'dau', type: 'int' }];
+const readColumns = (stages) => [...renderRead(loadCatalog(new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname, {}), "{{ ref('t') }}", STORED, stages).columns.keys()];
+const stageOf = (stages, kind) => stages.find((st) => st.stage === kind);
+
 test('pivot: one level is the rows under a path, grouped by the next level; its rows keep the key as it came', () => {
-  const display = { kind: 'pivot', levels: [{ column: 'country' }, { column: 'platform' }, { column: 'channel' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max' }] };
-  const t = pivotTransform(display, ['US', null]);
-  assert.deepEqual(t.where, [{ column: 'country', op: 'eq', value: 'US' }, { column: 'platform', op: 'is_null' }]);
-  assert.deepEqual(t.group_by, ['channel']);
-  assert.deepEqual(t.measures, [{ agg: 'sum', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
+  const display = { kind: 'pivot', levels: [{ column: 'country' }, { column: 'platform' }, { column: 'channel' }], values: [{ column: 'revenue' }, { column: 'users', fn: 'max' }] };
+  const stages = pivotStages(display, ['US', null]);
+  assert.deepEqual(stages.map((st) => st.stage), ['where', 'aggregate', 'order_by']);
+  assert.deepEqual(stageOf(stages, 'where').conditions, [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }, { fn: 'is_null', args: [{ column: 'platform' }] }]);
+  assert.deepEqual(stageOf(stages, 'aggregate').group_by, ['channel']);
+  assert.deepEqual(stageOf(stages, 'aggregate').measures, [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }, { name: 'users', expr: { fn: 'max', args: [{ column: 'users' }] } }]);
+  // a level read is a read the stored table takes; the top level has no path to filter by
+  assert.deepEqual(readColumns(stages), ['channel', 'revenue', 'users']);
+  assert.deepEqual(pivotStages(display, []).map((st) => st.stage), ['aggregate', 'order_by']);
   const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
   assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
+});
+
+test('a display kept from an earlier version is read in this version\'s spelling: a card\'s fold is `fn`', () => {
+  const kept = { kind: 'pivot', levels: [{ column: 'country' }, { column: 'platform' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max' }] };
+  assert.deepEqual(currentDisplay(kept), { ...kept, values: [{ column: 'revenue' }, { column: 'users', fn: 'max' }] });
+  const bar = { kind: 'bar', x: 'country', y: ['revenue'], drill: { levels: [{ column: 'platform' }], agg: 'average' } };
+  assert.deepEqual(currentDisplay(bar), { ...bar, drill: { levels: [{ column: 'platform' }], fn: 'average' } });
+  // one in today's spelling is the same object
+  const today = { kind: 'bar', x: 'country', y: ['revenue'], drill: { levels: [{ column: 'platform' }], fn: 'max' } };
+  assert.equal(currentDisplay(today), today);
+  // …and a kept one draws its views as today's does
+  assert.deepEqual(drillView(currentDisplay({ ...today, drill: { levels: [{ column: 'platform' }], agg: 'max' } })).stages, drillView(today).stages);
+});
+
+test('a pivot whose value is also one of its levels is refused when it is drawn: its views would fold the column they group by', () => {
+  assert.equal(displayProblems({ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v' }] }, ['a', 'v']).length, 0);
+  assert.equal(displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'v' }], values: [{ column: 'v' }] }, ['a', 'v']).length, 1);
 });
 
 test('view model: what a chart leaves out is said in numbers — categories past the cap, series by size or by column order, amounts not drawn', () => {
@@ -416,25 +445,32 @@ test('view model: what a chart leaves out is said in numbers — categories past
 
 test('drill: a view is the stored rows under the path, grouped by what it draws; a pie stays a pie, a line can split over time', () => {
   const levels = [{ column: 'platform', label: 'Platform' }, { column: 'channel' }];
-  const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, agg: 'max' } };
+  const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, fn: 'max' } };
   // the chart as declared: folded over the drill levels
-  assert.deepEqual(drillView(bar).transform.group_by, ['country']);
-  assert.deepEqual(drillView(bar).transform.measures, [{ agg: 'max', column: 'revenue', name: 'revenue' }, { agg: 'max', column: 'users', name: 'users' }]);
+  const declared = drillView(bar).stages;
+  assert.equal(stageOf(declared, 'where'), undefined, 'nothing to filter by yet');
+  assert.deepEqual(stageOf(declared, 'aggregate').group_by, ['country']);
+  assert.deepEqual(stageOf(declared, 'aggregate').measures, [{ name: 'revenue', expr: { fn: 'max', args: [{ column: 'revenue' }] } }, { name: 'users', expr: { fn: 'max', args: [{ column: 'users' }] } }]);
+  assert.deepEqual(readColumns(declared), ['country', 'revenue', 'users']);
   // a bar of US opened by Platform: filtered to US, one bar per platform, Channel left to step into
   const step = drillView(bar, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'breakdown' });
-  assert.deepEqual(step.transform.where, [{ column: 'country', op: 'eq', value: 'US' }]);
-  assert.deepEqual(step.transform.group_by, ['platform']);
+  assert.deepEqual(stageOf(step.stages, 'where').conditions, [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }]);
+  assert.deepEqual(stageOf(step.stages, 'aggregate').group_by, ['platform']);
+  assert.deepEqual(readColumns(step.stages), ['platform', 'revenue', 'users']);
   assert.deepEqual([step.display.kind, step.display.x, step.display.y], ['bar', 'platform', ['revenue', 'users']]);
   assert.deepEqual(step.display.drill.levels, [{ column: 'channel' }]);
-  // a slice opens into slices
+  // a slice opens into slices; the empty one is the rows where the key is missing
   const pie = drillView({ kind: 'pie', label_column: 'country', value_column: 'revenue', drill: { levels } }, [{ column: 'country', value: null }], { level: { column: 'channel' }, mode: 'breakdown' });
-  assert.deepEqual([pie.display.kind, pie.display.label_column, pie.transform.where[0].op], ['pie', 'channel', 'is_null']);
+  assert.deepEqual([pie.display.kind, pie.display.label_column, stageOf(pie.stages, 'where').conditions[0]], ['pie', 'channel', { fn: 'is_null', args: [{ column: 'country' }] }]);
+  // the fold is sum unless the drill says
+  assert.deepEqual(stageOf(pie.stages, 'aggregate').measures, [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }]);
   // a line: that moment broken down into bars, or the line split over time
   const line = { kind: 'line', x: 'day', y: ['dau'], series_column: 'country', drill: { levels } };
-  assert.deepEqual(drillView(line).transform.group_by, ['day', 'country']);
+  assert.deepEqual(stageOf(drillView(line).stages, 'aggregate').group_by, ['day', 'country']);
   const trend = drillView(line, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'trend' });
   assert.deepEqual([trend.display.kind, trend.display.x, trend.display.series_column], ['line', 'day', 'platform']);
-  assert.deepEqual(trend.transform.group_by, ['day', 'platform']);
+  assert.deepEqual(stageOf(trend.stages, 'aggregate').group_by, ['day', 'platform']);
+  assert.deepEqual(readColumns(trend.stages), ['day', 'platform', 'dau']);
   const moment = drillView(line, [{ column: 'country', value: 'US' }, { column: 'day', value: '2026-09-01' }], { level: { column: 'platform' }, mode: 'breakdown' });
   assert.equal(moment.display.kind, 'bar');
 });

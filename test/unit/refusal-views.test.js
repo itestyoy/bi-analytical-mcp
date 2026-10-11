@@ -58,7 +58,7 @@ test('a field the value gives at its own level still decides first', () => {
 test('a batch of queries with one bad item is refused at that item, not as a single query', () => {
   const e = engine();
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) {
-    const item = tool === 'query_semantic_model' ? { metrics: ['x'] } : { transform: {} };
+    const item = tool === 'query_semantic_model' ? { metrics: ['x'] } : { stages: [{ stage: 'limit', limit: 5 }] };
     const msg = refusal(e, tool, { context_id: 'abc123', queries: [{ ...item, bogus: 1 }, item] });
     assert.match(msg, /`queries\.0` has an unexpected property 'bogus'/, tool);
     assert.doesNotMatch(msg, /unexpected property 'queries'/, tool);

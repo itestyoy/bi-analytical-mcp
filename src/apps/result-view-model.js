@@ -17,27 +17,43 @@
 export const PIVOT_LEVEL_ROWS = 200;
 
 /**
+ * ONE VIEW OF A STORED RESULT, AS A READ: the pipeline's own stages over the table (query_pipeline_model
+ * reads in the same words) — a where keeping the rows under the path taken (a key that is missing is
+ * matched by is_null, since no value equals it), an aggregate grouping them by what the view draws and
+ * folding each value column with `fn` under its own name, and the order the view lists them in.
+ */
+function viewStages(path, groupBy, columns, fn, orderBy) {
+  const at = path.map(({ column, value }) => (value === null ? { fn: 'is_null', args: [{ column }] } : { fn: 'eq', args: [{ column }, { value }] }));
+  return [
+    ...(at.length ? [{ stage: 'where', conditions: at }] : []),
+    { stage: 'aggregate', group_by: groupBy, measures: columns.map(({ column, fn: f }) => ({ name: column, expr: { fn: f || fn, args: [{ column }] } })) },
+    { stage: 'order_by', keys: orderBy },
+  ];
+}
+
+/**
  * A drill-down's read of one level (display kind pivot): the rows of the stored result under `path`
  * (the keys of the rows opened above, top level first), grouped by the next level, each value folded
- * with its agg, the largest first. The engine reads the top level with it and the card each level it
+ * with its fn, the largest first. The engine reads the top level with it and the card each level it
  * opens — one definition of what a level is.
  */
-export function pivotTransform(display, path) {
-  return {
-    where: path.map((key, i) => (key === null ? { column: display.levels[i].column, op: 'is_null' } : { column: display.levels[i].column, op: 'eq', value: key })),
-    group_by: [display.levels[path.length].column],
-    measures: display.values.map((v) => ({ agg: v.agg || 'sum', column: v.column, name: v.column })),
+export function pivotStages(display, path) {
+  return viewStages(
+    path.map((value, i) => ({ column: display.levels[i].column, value })),
+    [display.levels[path.length].column],
+    display.values,
+    'sum',
     // the largest first, an empty value last — the same on every warehouse
-    order_by: [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
-  };
+    [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
+  );
 }
 
 /**
  * A CHART WITH A DRILL-DOWN (display.drill) reads a stored result at a coarser grain than it holds:
  * the table carries the drill levels too, so every view is that table filtered to the path taken so
- * far and grouped by what the view draws, each value folded with drill.agg (sum by default).
+ * far and grouped by what the view draws, each value folded with drill.fn (sum by default).
  * `drillView` is one such view — the chart as declared (path []), or a step into a drill level — as
- * the READ (transform) and the DECLARATION the rows are then drawn with. The engine reads the first
+ * the READ (stages) and the DECLARATION the rows are then drawn with. The engine reads the first
  * view with it and the card each step; one definition of what a view is.
  */
 export const DRILL_ROWS = 1000;
@@ -46,10 +62,9 @@ const drillYs = (display) => (display.kind === 'pie' ? [display.value_column] : 
 const drillX = (display) => (display.kind === 'pie' ? display.label_column : display.x);
 
 export function drillView(display, path = [], step = null) {
-  const agg = display.drill?.agg || 'sum';
+  const fn = display.drill?.fn || 'sum';
   const ys = drillYs(display);
-  const where = path.map((f) => (f.value === null ? { column: f.column, op: 'is_null' } : { column: f.column, op: 'eq', value: f.value }));
-  const measures = ys.map((y) => ({ agg, column: y, name: y }));
+  const values = ys.map((column) => ({ column }));
   const used = new Set(path.map((f) => f.column));
   // the levels left to step into from here
   const rest = (display.drill?.levels || []).filter((l) => !used.has(l.column) && (!step || l.column !== step.level.column));
@@ -59,24 +74,24 @@ export function drillView(display, path = [], step = null) {
     // the chart as declared: its own dimensions
     const group = [drillX(display), ...(display.series_column ? [display.series_column] : [])];
     const timeLike = display.kind === 'line' || display.kind === 'area';
-    return { transform: { where, group_by: group, measures, order_by: timeLike ? [{ key: display.x, direction: 'asc' }] : byValue }, display };
+    return { stages: viewStages(path, group, values, fn, timeLike ? [{ key: display.x, direction: 'asc' }] : byValue), display };
   }
   const level = step.level.column;
   if (step.mode === 'trend' && (display.kind === 'line' || display.kind === 'area')) {
     // the same axis, one line (or band) per value of the level
     return {
-      transform: { where, group_by: [display.x, level], measures: measures.slice(0, 1), order_by: [{ key: display.x, direction: 'asc' }] },
+      stages: viewStages(path, [display.x, level], values.slice(0, 1), fn, [{ key: display.x, direction: 'asc' }]),
       display: { kind: display.kind, x: display.x, y: [ys[0]], series_column: level, drill },
     };
   }
   // a breakdown by the level: a pie stays a pie (shares of what was chosen), anything else is bars
   return {
-    transform: { where, group_by: [level], measures, order_by: byValue },
+    stages: viewStages(path, [level], values, fn, byValue),
     display: display.kind === 'pie' ? { kind: 'pie', label_column: level, value_column: ys[0], drill } : { kind: 'bar', x: level, y: ys, drill },
   };
 }
 
-/** The rows of one drill-down level read with pivotTransform: the key as it came (to filter by), and the values. */
+/** The rows of one drill-down level read with pivotStages: the key as it came (to filter by), and the values. */
 export function pivotRows(result, display, depth) {
   const level = display.levels[depth].column;
   const rows = Array.isArray(result?.rows) ? result.rows : [];
@@ -421,7 +436,7 @@ export function buildViewModel(toolName, result, toolInput) {
           title: declaredTitle || 'Pivot',
           display: d,
           levels: d.levels.map((l) => ({ column: l.column, label: typeof l.label === 'string' && l.label ? l.label : l.column })),
-          values: d.values.map((v) => ({ column: v.column, label: typeof v.label === 'string' && v.label ? v.label : v.column, agg: v.agg || 'sum', format: v.format || 'number', currency: v.currency || 'USD' })),
+          values: d.values.map((v) => ({ column: v.column, label: typeof v.label === 'string' && v.label ? v.label : v.column, fn: v.fn || 'sum', format: v.format || 'number', currency: v.currency || 'USD' })),
           rows: pivotRows(result, d, 0),
           has_more: !!result.page?.has_more,
           source: result.drill_source,

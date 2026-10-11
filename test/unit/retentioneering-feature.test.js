@@ -24,6 +24,7 @@ import { CONFIG_ERRORS } from '../../src/retentioneering/checker.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { deref, field, fieldNames, forms, pinned } from '../helpers/schema-nav.js';
+import { stageBranch } from '../helpers/stage-schema.js';
 
 /** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
 function sharedSources() {
@@ -154,22 +155,29 @@ test('the schemas offer exactly what the library does — every choice from the 
   const bins = field(b0, ops.get('add_segment')[0], 'metric_bins');
   assert.deepEqual([...byTag(b0, field(b0, bins, 'metric'), 'metric').keys()], f.metric_bins.metrics);
   assert.equal(forms(b0, field(b0, bins, 'bins')).find((x) => x.title === 'equal quantiles').minItems, f.metric_bins.min_quantile_bins);
-  // the build: the source's events and the models' attributes are enums from the catalog
+  // the build: a start is the pipeline's own stages that keep the rows events — a where, a compute, a
+  // join (one form per model, as build_pipeline_model offers it) — then the eventstream's roles, each
+  // named as a column of the rows those stages leave
   const start = forms(b0, b0).find((x) => x.title === 'start from an events source');
-  assert.ok(deref(b0, field(b0, field(b0, start, 'events'), 'include').items).enum?.includes('level_started'), 'an events source: its events, as an enum');
-  const segs = forms(b0, field(b0, start, 'segments').items);
-  const seg = segs.find((x) => x.title === 'users');
-  assert.ok(field(b0, seg, 'attribute').enum.includes('platform'));
-  // a segment of a related model is offered for a model another source reaches — never the source itself
-  // (its columns are { column }) — and `via` only where several relationships lead to the model
-  for (const src of e.catalog.facts) assert.ok(!segs.some((x) => x.title === src), `no join of ${src} onto itself`);
-  assert.equal(seg.properties.via, undefined, 'one relationship leads to users: no via');
-  // a start from a task's table: its path named by its own columns, its event and time in columns, no window
+  const stages = forms(b0, field(b0, start, 'stages').items);
+  assert.deepEqual([...new Set(stages.map((x) => pinned(b0, x, 'stage')[0]))], ['where', 'compute', 'join']);
+  const bp = e.schemas.build_pipeline_model;
+  assert.deepEqual(stages.filter((x) => pinned(b0, x, 'stage')[0] === 'join').map((x) => x.title), forms(bp, stageBranch(bp, 'join')).map((x) => x.title));
+  assert.deepEqual(Object.keys(field(b0, start, 'columns').properties).sort(), ['event', 'time']);
+  for (const k of ['path', 'segments']) assert.equal(deref(b0, field(b0, start, k).items).type, 'string', `${k}: column names`);
+  assert.equal(field(b0, start, 'top').type, 'integer');
+  for (const k of ['where', 'events']) assert.ok(!fieldNames(b0, b0).includes(k), `the earlier ${k} is no field of the build`);
+  // filter_events' where is the one grammar at its own level: the eventstream's columns and constants, no raw
+  const where = deref(b0, field(b0, ops.get('filter_events')[0], 'where').items);
+  assert.deepEqual(forms(b0, where).filter((x) => !x.properties?.fn).map((x) => x.title), ['a column — { column }', 'a constant — { value }']);
+  assert.ok(!forms(b0, where).some((x) => pinned(b0, x, 'fn').includes('raw') || pinned(b0, x, 'fn').includes('row_number')));
+  // a start from a task's table: its path and its event and time named by its own columns, no window
   const fromTask = forms(b0, b0).find((x) => x.title === 'start from a task\'s table');
   assert.deepEqual([...fromTask.required].sort(), ['columns', 'from_task', 'name', 'path']);
   assert.deepEqual(Object.keys(field(b0, fromTask, 'columns').properties).sort(), ['event', 'time']);
+  assert.deepEqual([...field(b0, fromTask, 'columns').required].sort(), ['event', 'time']);
   assert.ok(!('time_range' in fromTask.properties));
-  assert.deepEqual(forms(b0, field(b0, fromTask, 'path').items).map((x) => Object.keys(x.properties)), [['column']]);
+  assert.equal(deref(b0, field(b0, fromTask, 'path').items).type, 'string');
 });
 
 test('the facts sheet is what the installed library says (where the feature\'s environment is built)', (t) => {
@@ -186,10 +194,27 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { name: 'x', source: 'nope' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'Bad Name', source: 'events' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'x', source: 'events', sample: { share: 0 } }, /invalid input/);
-  // a typo in an event or an attribute is refused by the schema itself, which lists what exists
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { include: ['levl_started'] } }, /invalid input.*level_started/);
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', segments: [{ model: 'users', attribute: 'no_such' }] }, /invalid input.*platform/);
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', where: [{ column: 'country', op: 'eq', value: 'US' }] }, (err) => err.field === 'where.column');
+  // a start in an earlier spelling is refused with the start written today, at the first earlier field
+  const earlier = (field, today) => (err) => err.field === field && err.message.includes(`the start is written in an earlier spelling — write ${JSON.stringify(today)}`);
+  const events = { name: 'x', source: 'events' };
+  await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, earlier('events', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }] }));
+  await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, earlier('where', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }));
+  // a users attribute as a segment is the join stage it was, point-in-time on the slowly-changing model
+  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between }], segments: ['platform'] }));
+  // a column the start names that its rows do not have is refused with the columns there are — and how one is brought in
+  await refused('build_retentioneering_model', { ...events, segments: ['country'] }, (err) => err.field === 'segments' && /'country' is not a column of 'events' — a related model's attribute is brought in by a join stage/.test(err.message));
+  await refused('build_retentioneering_model', { ...events, path: ['nope'] }, (err) => err.field === 'path' && /'nope' is not a column of 'events'/.test(err.message));
+  await refused('build_retentioneering_model', { ...events, columns: { event: 'ev' } }, (err) => err.field === 'columns.event' && /'ev' is not a column of 'events' — did you mean/.test(err.message));
+  await refused('build_retentioneering_model', { ...events, segments: ['event_time'] }, (err) => err.field === 'segments' && /a name the eventstream uses for its own column/.test(err.message));
+  // an event of a sample the source does not have is refused with the near one (the source names its events itself)
+  await refused('build_retentioneering_model', { ...events, sample: { events: { levl_started: 0.5 } } }, (err) => err.field === 'sample.events' && /did you mean 'level_started'/.test(err.message));
+  // a start's stages keep the rows events: a stage that changes the grain, or draws rows at random, is not one
+  for (const stage of [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { stage: 'sample', share: 0.5 }]) {
+    await refused('build_retentioneering_model', { ...events, stages: [stage] }, /`stages\.0\.stage` must be one of: where, compute, join/);
+  }
+  // …and a join of a slowly-changing model states the version it reads: without it each event would repeat per version
+  await refused('build_retentioneering_model', { ...events, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }] }], segments: ['platform'] }, (err) => err.field === 'stages[0]' && err.message.includes(`between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }`));
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis' }] }, /invalid input/); // features: required by the library
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'has_event', metric_args: { events: ['a'] } }] }] }, /invalid input/);
@@ -242,24 +267,38 @@ test('input the schema refuses is refused before anything starts', async () => {
     await refused('build_retentioneering_model', { context_id: 'abc', ...input }, pastSchema);
   }
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
-  // filter_events' where is the one condition grammar: a list of conditions, the operators every where takes
+  // filter_events' where is the one expression grammar: a list of conditions over the eventstream's
+  // columns — the functions every where takes, and / or / not nested
   const where = (w) => step({ type: 'filter_events', where: w });
-  await refused('build_retentioneering_model', where({ op: 'and', conditions: [{ column: 'platform', op: '=', value: 'ios' }] }), /invalid input/);
-  await refused('build_retentioneering_model', where([{ column: 'platform', op: '==', value: 'ios' }]), /invalid input/);
-  await refused('build_retentioneering_model', where([{ not: { column: 'platform', op: 'eq', value: 'ios' } }]), /invalid input/);
-  await refused('build_retentioneering_model', where([{ column: 'platform', op: 'eq', value: 'ios' }, { or: [{ column: 'level', op: 'between', value: [1, 3] }, { and: [{ column: 'event', op: 'starts_with', value: 'level' }, { column: 'level', op: 'is_null' }] }] }]), pastSchema);
+  const col = (column) => ({ column });
+  const val = (value) => ({ value });
+  await refused('build_retentioneering_model', where([{ fn: 'eq', args: [col('platform'), val('ios')] }, { fn: 'or', args: [{ fn: 'between', args: [col('level'), val(1), val(3)] }, { fn: 'and', args: [{ fn: 'starts_with', args: [col('event'), val('level')] }, { fn: 'is_null', args: [col('level')] }] }] }, { fn: 'not', args: [{ fn: 'in', args: [col('event'), val('a'), val('b')] }] }]), pastSchema);
+  // the earlier tree and list are refused with the conditions written today — a negation as not(…),
+  // which keeps a missing value as the earlier one did (neq is present-and-different now)
+  const earlierWhere = (today) => (err) => err.field === 'steps[0].where' && err.message.includes(`steps[0].where is written in an earlier spelling — write ${JSON.stringify(today)}`);
+  await refused('build_retentioneering_model', where({ op: 'and', conditions: [{ column: 'platform', op: '=', value: 'ios' }] }), earlierWhere([{ fn: 'eq', args: [col('platform'), val('ios')] }]));
+  await refused('build_retentioneering_model', where([{ column: 'platform', op: 'neq', value: 'ios' }]), earlierWhere([{ fn: 'not', args: [{ fn: 'eq', args: [col('platform'), val('ios')] }] }]));
+  // the library runs it as SQL: no SQL of the call's own, no window, no operator of another language, no event property
+  for (const w of [
+    [{ fn: 'raw', sql: '1=1' }],
+    [{ fn: 'gt', args: [{ fn: 'row_number', over: {} }, val(1)] }],
+    [{ fn: '==', args: [col('platform'), val('ios')] }],
+    [{ fn: 'eq', args: [{ property: 'platform' }, val('ios')] }],
+  ]) await refused('build_retentioneering_model', where(w), /invalid input/);
   // a path is a path column of the eventstream, named as it is there: the schema takes the name, the
   // eventstream decides (below); an analysis's own name is `name`
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'describe', id: 'shape' }] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'describe', name: 'shape' }, { kind: 'transition_graph', path: 'session_id' }] }, pastSchema);
-  // a start from a task's table names its path in path ([{ column }]) and takes no window
-  const fromTask = { name: 'x', from_task: 'a0a0a0a0a0a0', path: [{ column: 'u' }], columns: { event: 'e', time: 't' } };
+  // a start from a task's table names its path (column names) and its event and time columns, and takes no window
+  const fromTask = { name: 'x', from_task: 'a0a0a0a0a0a0', path: ['u'], columns: { event: 'e', time: 't' } };
   await refused('build_retentioneering_model', fromTask, /unknown task_id/);
   const { path: _path, ...noPath } = fromTask;
-  await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, /invalid input/);
-  await refused('build_retentioneering_model', noPath, /invalid input/);
-  await refused('build_retentioneering_model', { ...fromTask, path: [{ property: 'level_id_of_event_data' }] }, /invalid input/);
+  await refused('build_retentioneering_model', noPath, /invalid input.*missing required property 'path'/);
+  await refused('build_retentioneering_model', { ...fromTask, columns: { event: 'e' } }, /invalid input.*missing required property 'time'/);
   await refused('build_retentioneering_model', { ...fromTask, time_range: { start: '2026-01-01' } }, /invalid input/);
+  // the path an earlier version named in columns, or as [{ column }], is refused with the start written today
+  await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, earlier('columns', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
+  await refused('build_retentioneering_model', { ...fromTask, path: [{ column: 'u' }] }, earlier('path', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
   await refused('build_pipeline_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
   // the eventstream's own name goes into its models' file names: bounded as the core's names are
   await refused('build_retentioneering_model', { name: `e${'x'.repeat(41)}`, source: 'events' }, /invalid input/);
@@ -271,8 +310,12 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc', eventstream: longer, name: 'variant' }, pastSchema);
   await refused('query_retentioneering_model', { context_id: 'abc', eventstream: longer, analyses: [{ kind: 'describe' }] }, pastSchema);
   await refused('build_retentioneering_model', { action: 'preview', context_id: 'A-B' }, /invalid input/);
-  // a split case's conditions are its `when`, as a compute case's
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, /invalid input/);
+  // an event split by a parameter is a compute stage's case, the column it makes the event column
+  await refused('build_retentioneering_model', { ...events, events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, earlier('events', {
+    ...events,
+    stages: [{ stage: 'compute', name: 'es_event', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('event_name'), val('level_completed')] }, { fn: 'eq', args: [{ property: 'result_of_event_data' }, val('lose')] }], then: val('lost') }], else: col('event_name'), type: 'string' } }],
+    columns: { event: 'es_event' },
+  }));
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel', title: 'Onboarding funnel, Sep 1–23' }, /unknown task_id/);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /invalid input/); // not a task id at all
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel' }, /unknown task_id/);
@@ -454,9 +497,16 @@ test('a segment joined from a related model is compared in the type the warehous
   };
   e.probe.physicalColumns = async (k) => asText(k);
   // users.country kept as text, filtered as a flag: a boolean is compared with text by its spellings
-  // alone, so one mixed with another constant is refused at the start, naming the segment as the call does
-  const start = { name: 'x', source: 'events', segments: [{ model: 'users', attribute: 'country', name: 'flag' }], where: [{ column: 'flag', op: 'in', value: [true, 'x'] }] };
-  await assert.rejects(e.build_retentioneering_model(start), (err) => err.stage === 'validate' && /'flag' is a text column in the warehouse/.test(err.message));
+  // alone, so one mixed with another constant is refused at the start, naming the column as the call does
+  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+  const start = {
+    name: 'x', source: 'events', segments: ['flag'],
+    stages: [
+      { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'flag' }], between },
+      { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'flag' }, { value: true }, { value: 'x' }] }] },
+    ],
+  };
+  await assert.rejects(e.build_retentioneering_model(start), (err) => err.stage === 'validate' && err.field === 'stages[1]' && /'flag' is a text column in the warehouse/.test(err.message));
   e.close();
 });
 
@@ -488,8 +538,9 @@ test('add_steps lists each added step with what it changed and why one was not c
 });
 
 // What a path names and what a filter_events condition holds are checked against the eventstream as
-// the step is added — before the library's check, before anything runs. Input guards; no warehouse.
-test('a path is one of the eventstream\'s path columns, and a condition\'s constant is what its operator takes', async () => {
+// the step is added — before the library's check, before anything runs — by the one writer every where
+// is written by. Input guards; no warehouse.
+test('a path is one of the eventstream\'s path columns, and a condition\'s constant is what its function takes', async () => {
   const { validateAnalyses } = await import('../../src/retentioneering/query.js');
   const { commitSteps } = await import('../../src/retentioneering/steps.js');
   const shape = { events: ['a', 'b'], paths: ['user_id', 'session_id'], segments: { level: { levels: ['1', '2'], complete: true } }, columns: [] };
@@ -507,38 +558,39 @@ test('a path is one of the eventstream\'s path columns, and a condition\'s const
   // two analyses of one name are refused, the name said as the caller gives it
   assert.throws(() => validateAnalyses(es, shape, [{ kind: 'describe', name: 'x' }, { kind: 'transition_graph', name: 'x' }]), (e) => e.field === 'analyses.name');
   const add = (where) => commitSteps({ ctxs: { touch() {} } }, { checker: { check: async () => null } }, { id: 'c1', state: {} }, 'es', { base: { shape, model: 'm', summary: {} }, steps: [], checkpoint: null }, 'add_steps', { steps: [{ type: 'filter_events', where }] });
+  const level = (fn, ...values) => ({ fn, args: [{ column: 'level' }, ...values.map((value) => ({ value }))] });
   for (const [where, re] of [
-    [[{ column: 'level', op: 'in', value: 3 }], /in takes a list/],
-    [[{ column: 'level', op: 'eq', value: [3] }], /one constant/],
-    [[{ column: 'level', op: 'between', value: [1] }], /\[low, high\]/],
-    [[{ column: 'level', op: 'in', value: [1, '2'] }], /one kind/],
-    [[{ column: 'level', op: 'contains', value: 1 }], /a string/],
-    [[{ column: 'level', op: 'eq', value: null }], /is_null/],
-    [[{ column: 'level', op: 'is_null', value: 1 }], /takes no value/],
-    [[{ column: 'level', op: 'gt' }], /needs a value/],
+    [[level('in', 1, '2')], /takes constants of one kind — the column is compared as that kind/],
+    [[{ fn: 'eq', args: [{ column: 'level' }, { value: [3] }] }], /a list is written as arguments of their own/],
+    [[level('between', 1)], /between takes 3 arguments \[a, low, high\]/],
+    [[level('contains', 1)], /contains takes text as its second argument/],
+    [[level('eq', null)], /a missing value is tested with is_null/],
+    [[level('is_null', 1)], /is_null takes 1 argument/],
+    [[level('gt')], /gt takes 2 arguments/],
+    [[level('eq', 1), { value: 1 }], /a where takes conditions/],
   ]) await assert.rejects(add(where), (e) => e.field === 'steps[0].where' && re.test(e.message), JSON.stringify(where));
   // …and one that is, is taken (the check could not run here: nothing refused, nothing ran)
-  const ok = await add([{ column: 'level', op: 'gte', value: 2 }, { or: [{ column: 'event', op: 'not_in', value: ['a'] }, { column: 'level', op: 'is_null' }] }]);
+  const ok = await add([level('gte', 2), { fn: 'or', args: [{ fn: 'not', args: [{ fn: 'in', args: [{ column: 'event' }, { value: 'a' }] }] }, level('is_null')] }]);
   assert.equal(ok.steps, 1);
 });
 
-// A start's where and a split case's `when` hold a constant to the same rule as filter_events' where
-// (one rule, src/retentioneering/schema.js checkConstant), each refusal at its own field. Input guards;
-// no warehouse.
-test('a start\'s where and a split case take a constant by the rule filter_events\' where takes it', async () => {
+// A start's stages are the pipeline's: a where and a compute case's `when` hold a constant to the rule
+// every where is written by (the one writer, src/pipeline/compute.js), each refusal at its stage.
+// Input guards; no warehouse.
+test('a start\'s where and a compute case take a constant by the rule every where takes it', async () => {
   const e = on();
-  const start = (extra) => e.build_retentioneering_model({ name: 'x', source: 'events', ...extra });
+  const start = (stages) => e.build_retentioneering_model({ name: 'x', source: 'events', stages });
+  const bundle = (fn, ...values) => ({ fn, args: [{ column: 'bundle_id' }, ...values.map((value) => ({ value }))] });
   for (const [cond, re] of [
-    [{ column: 'bundle_id', op: 'in', value: 'a' }, /in takes a list/],
-    [{ column: 'bundle_id', op: 'eq', value: ['a'] }, /one constant/],
-    [{ column: 'bundle_id', op: 'between', value: ['a'] }, /\[low, high\]/],
-    [{ column: 'bundle_id', op: 'eq', value: null }, /is_null/],
-    [{ column: 'bundle_id', op: 'is_null', value: 'a' }, /takes no value/],
-    [{ column: 'bundle_id', op: 'gt' }, /needs a value/],
-    [{ column: 'bundle_id', op: 'starts_with', value: 1 }, /a string/],
+    [bundle('eq', null), /a missing value is tested with is_null/],
+    [bundle('in', 'a', null), /a missing value is tested with is_null/],
+    [bundle('starts_with', 1), /starts_with takes text as its second argument/],
+    [{ fn: 'gt', args: [{ column: 'session_number' }, { value: 'many' }] }, /'session_number' is a number: compare it with a number/],
+    [{ column: 'bundle_id' }, /a where takes conditions/],
   ]) {
-    await assert.rejects(start({ where: [cond] }), (err) => err.field === 'where.value' && re.test(err.message), `where ${JSON.stringify(cond)}`);
-    await assert.rejects(start({ events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [cond] }] }] } }), (err) => err.field === 'events.split.0.cases.when' && re.test(err.message), `when ${JSON.stringify(cond)}`);
+    await assert.rejects(start([{ stage: 'where', conditions: [cond] }]), (err) => err.field === 'stages[0]' && /^stages\[0\] \(where\): /.test(err.message) && re.test(err.message), `where ${JSON.stringify(cond)}`);
+    const split = { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [cond], then: { value: 'lost' } }], else: { column: 'event_name' } } };
+    await assert.rejects(start([split]), (err) => err.field === 'stages[0]' && /^stages\[0\] \(compute\): /.test(err.message) && re.test(err.message), `when ${JSON.stringify(cond)}`);
   }
   e.close();
 });
@@ -585,20 +637,74 @@ test('a step stored with an earlier path word is carried over: re-checked and sh
 });
 
 // A start from a task's table an earlier version stored names its path in columns.path: it is read as
-// today's path: [{ column }] — the key a summary says, whatever the steps materialized after it. Pure
+// today's path: [column] — the key a summary says, whatever the steps materialized after it. Pure
 // translation; the rows of such an eventstream are proved in test/integration/retentioneering.test.js.
-test('a start stored with columns.path is read as path: [{ column }]', async () => {
+test('a start stored with columns.path is read as path: [column]', async () => {
   const { currentSpec } = await import('../../src/retentioneering/earlier.js');
   const { pathKey } = await import('../../src/retentioneering/query.js');
   const { summarizeEventstream } = await import('../../src/retentioneering/steps.js');
   const stored = { name: 'from_pipe', from_task: 'a0a0a0a0a0a0', columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', name: 'app' }] };
-  const now = currentSpec(stored);
-  assert.deepEqual(now.path, [{ column: 'player_id_of_internal' }]);
+  const now = currentSpec(stored, loadCatalog(CATALOG, {}));
+  assert.deepEqual(now.path, ['player_id_of_internal']);
   assert.deepEqual(now.columns, { event: 'ev', time: 'device_time' });
-  assert.deepEqual(pathKey(stored), ['player_id_of_internal']);
+  // a segment renamed is a compute copy, carried under its name
+  assert.deepEqual(now.segments, ['app']);
+  assert.deepEqual(now.stages, [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }]);
+  assert.deepEqual(pathKey(now), ['player_id_of_internal']);
   // the summary a materialize answers with says the path as the stored spec meant it (the warehouse's
   // answers are stubs: one event, two paths)
   const runner = { show: async () => ({ ok: true, rows: [{ events: 3, users: 2, names: 1, event: 'a' }] }) };
-  const summary = await summarizeEventstream(runner, '/nowhere', 'm', { segments: [], paths: ['user_id'], spec: stored, dialect: 'duckdb' });
+  const summary = await summarizeEventstream(runner, '/nowhere', 'm', { segments: [], paths: ['user_id'], spec: now, dialect: 'duckdb' });
   assert.deepEqual([summary.path, summary.users], [['player_id_of_internal'], 2]);
+});
+
+// A start an earlier version stored is read in today's spelling at the one point a path-analysis context
+// is opened (pathContext): its rows' fields as the pipeline's stages, its segments and path as column
+// names — so every reader after it reads one spelling. One in today's spelling is left as it is.
+// Context lifecycle and pure translation; the rows such a start keeps are proved in test/integration/.
+test('a start stored in an earlier spelling is carried over when its context is opened; one written today is left as it is', async () => {
+  const e = on();
+  const { currentSpec, currentStep, currentWhere } = await import('../../src/retentioneering/earlier.js');
+  const { contextFor, pathContext } = await import('../../src/retentioneering/contexts.js');
+  const catalog = e.catalog;
+  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+  const eq = (column, value) => ({ fn: 'eq', args: [{ column }, { value }] });
+  const stored = {
+    name: 'paths', source: 'events',
+    events: { include: ['level_started', 'level_completed'], top: 5 },
+    segments: [{ model: 'users', attribute: 'platform' }],
+    where: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.wordsearch' }],
+    sessions: { gap_minutes: 30 },
+  };
+  const today = currentSpec(stored, catalog);
+  assert.deepEqual(today.stages, [
+    { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }, { value: 'level_completed' }] }] },
+    { stage: 'where', conditions: [eq('bundle_id', 'com.omg.wordsearch')] },
+    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between },
+  ]);
+  assert.deepEqual([today.segments, today.top, today.sessions], [['platform'], 5, { gap_minutes: 30 }]);
+  for (const k of ['where', 'events']) assert.equal(today[k], undefined, k);
+  // a start converted is one the tool takes, and converting it again changes nothing — by identity
+  e.host.validate('build_retentioneering_model', today);
+  assert.equal(currentSpec(today, catalog), today);
+  // the context: its kept start converted in place when it is opened, a start written today left alone
+  const ctx = contextFor(e, {});
+  const written = { name: 'today', source: 'events', stages: [{ stage: 'where', conditions: [eq('bundle_id', 'x')] }], segments: ['bundle_id'] };
+  ctx.state.retentioneering.eventstreams.old = { model: 'm', source: 'events', spec: stored, steps: [] };
+  ctx.state.retentioneering.eventstreams.now = { model: 'm2', source: 'events', spec: written, steps: [] };
+  pathContext(e, ctx.id);
+  assert.deepEqual(ctx.state.retentioneering.eventstreams.old.spec, today);
+  assert.equal(ctx.state.retentioneering.eventstreams.now.spec, written);
+  // a kept step: filter_events' earlier list in the grammar (a negation as not(…), which keeps a missing
+  // value as it did), the earlier path word as its column — and a step written today as it is
+  const step = { type: 'filter_events', where: [{ column: 'platform', op: 'not_in', value: ['ios'] }, { or: [{ column: 'level', op: 'gt', value: 2 }, { column: 'level', op: 'is_null' }] }] };
+  assert.deepEqual(currentStep(step), { type: 'filter_events', where: [
+    { fn: 'not', args: [{ fn: 'in', args: [{ column: 'platform' }, { value: 'ios' }] }] },
+    { fn: 'or', args: [{ fn: 'gt', args: [{ column: 'level' }, { value: 2 }] }, { fn: 'is_null', args: [{ column: 'level' }] }] },
+  ] });
+  assert.deepEqual(currentStep({ type: 'collapse_events', loops: true, path: 'sessions' }), { type: 'collapse_events', loops: true, path: 'session_id' });
+  const now = currentStep(step);
+  assert.equal(currentStep(now), now);
+  assert.equal(currentWhere(now.where), now.where);
+  e.close();
 });

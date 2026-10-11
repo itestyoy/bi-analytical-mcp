@@ -4,7 +4,7 @@
 // and the other fields must agree on — a split takes one value column, a funnel of step columns one
 // row — is checked at the call (src/display-check.js).
 
-import { AGGS as PROJECTION_AGGS } from '../projection.js';
+import { AGGREGATE_FNS, SKETCH_FNS } from '../pipeline/compute.js';
 
 // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card display_model_result draws in
 // a host that renders MCP Apps follows this when it is given. Every form
@@ -16,11 +16,13 @@ export const resultColumn = { type: 'string', minLength: 1, description: 'A colu
 
 /**
  * How the rows under a view of a drill-down fold into its values — a pivot's level, a chart's drill
- * step. Each view is a read of the stored result (src/apps/result-view-model.js pivotTransform /
- * drillView), so it takes what a read's measure takes, but for the percentile (a value names no quantile).
+ * step: the aggregate function a view's measure applies to the value column. Each view is a read of the
+ * stored result in the pipeline's own stages (src/apps/result-view-model.js pivotStages / drillView), so
+ * it takes the aggregate functions, but for those that make a sketch (a card shows values; a sketch a
+ * pipeline stored is merged with hll_merge) and the percentile (a value names no quantile).
  */
-export const CARD_AGGS = [...PROJECTION_AGGS].filter((a) => a !== 'percentile');
-const cardAgg = (description) => ({ enum: CARD_AGGS, default: 'sum', description: `${description} sum, count, min and max add up, as does hll_merge of a sketch column a pipeline stored (hll_init); a distinct count, an average, a median or a ratio does not (a user under two children counts twice).` });
+export const CARD_FNS = AGGREGATE_FNS.filter((f) => !SKETCH_FNS.has(f) && f !== 'percentile');
+const cardFn = (description) => ({ enum: CARD_FNS, default: 'sum', description: `${description} sum, count, min and max add up, as does hll_merge of a sketch column a pipeline stored (hll_init); a distinct count, an average, a median or a ratio does not (a user under two children counts twice).` });
 
 /** A dimension a drill-down opens into — a pivot's level, a chart's drill level: a column, and how it reads. */
 const level = (description) => ({
@@ -55,10 +57,10 @@ export const axis = { ...resultColumn, description: 'The axis column: time is pu
 // a chart the person can drill into: the dimensions a clicked point, bar or slice opens into
 export const drill = {
   type: 'object', additionalProperties: false, required: ['levels'],
-  description: 'Let the person drill down: a click on a mark offers these dimensions, and the chart is redrawn filtered to what was clicked, broken down by the one chosen — then one level deeper. Reads a stored result (materialize: true, or a pipeline build) whose rows carry these columns (group the query by them too). Each view re-aggregates with `agg`.',
+  description: 'Let the person drill down: a click on a mark offers these dimensions, and the chart is redrawn filtered to what was clicked, broken down by the one chosen — then one level deeper. Reads a stored result (materialize: true, or a pipeline build) whose rows carry these columns (group the query by them too). Each view re-aggregates the values with `fn`.',
   properties: {
     levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimensions offered, in the order the menu lists them.', items: level('A dimension the menu offers.') },
-    agg: cardAgg('How the rows under a view fold into its values:'),
+    fn: cardFn('How the rows under a view fold into its values — an aggregate function:'),
   },
 };
 
@@ -85,7 +87,7 @@ const pivotValue = {
   type: 'object',
   anyOf: numberFormats({
     column: resultColumn,
-    agg: cardAgg('How the rows under a level fold into its value:'),
+    fn: cardFn('How the rows under a level fold into its value — an aggregate function:'),
     label: { type: 'string', maxLength: 60, description: 'How the value reads to the person (default: the column name).' },
   }, ['column']),
 };
@@ -129,7 +131,7 @@ export const display = {
         items: kpiTile,
       },
     }, ['values']),
-    form('pivot', 'pivot — a table to drill into', 'A table to drill into: the card shows the top level, and each row opens the next on demand, read from the stored result (a query with materialize: true, or a pipeline build). Each level re-aggregates with the value\'s agg — prefer additive values (counts, sums, a ratio\'s numerator and denominator).', {
+    form('pivot', 'pivot — a table to drill into', 'A table to drill into: the card shows the top level, and each row opens the next on demand, read from the stored result (a query with materialize: true, or a pipeline build). Each level re-aggregates with the value\'s fn — prefer additive values (counts, sums, a ratio\'s numerator and denominator).', {
       levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimension columns, from the top level down.', items: level('A level: the rows of the one above, broken down by this column.') },
       values: { type: 'array', minItems: 1, maxItems: 6, description: 'The value columns, each re-aggregated per level.', items: pivotValue },
     }, ['levels', 'values']),

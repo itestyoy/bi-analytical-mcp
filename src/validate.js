@@ -8,6 +8,7 @@ import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
 import { rankFuzzy } from './fuzzy.js';
+import { currentOf } from './earlier-spelling.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -25,22 +26,23 @@ export function makeValidators(schemas) {
 }
 
 /**
- * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. Every path aggregates with
- * `agg`, the mean is `average`, a quantile is `percentile`, the name a step produces is `name`, a
+ * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. An aggregation is a function
+ * (`fn`), the mean is `average`, a quantile is `percentile`, the name a step produces is `name`, a
  * context is `context_id`, a list of measures is `measures`, what a note is about is `about`, a
  * substring filter is `search` and a time window `time_range`; a caller used to SQL or another tool
- * (or to an earlier version of this one) writes `avg`, `q`, `fn`, `as`, `draft_id`, `aggregations`,
+ * (or to an earlier version of this one) writes `avg`, `q`, `agg`, `as`, `draft_id`, `aggregations`,
  * `targets`, `text`, `since` — or a stage's earlier field: a limit's `n`, a sample's `percent`,
  * unpivot's `name_as` / `value_as`, a funnel's `mode` —
  * and the refusal says what this server calls it, when that name is allowed where it was written.
- * A hint, never an alias: the other spelling is refused.
+ * A hint, never an alias: the other spelling is refused. (A whole value of an earlier spelling — a
+ * condition, a measure — is shown converted instead: earlierSpellings below.)
  */
 export const CROSS_PATH_SPELLING = {
   avg: 'average',
   mean: 'average',
   q: 'percentile',
   quantile: 'percentile',
-  fn: 'agg',
+  agg: 'fn',
   as: 'name',
   alias: 'name',
   explain: 'dry_run',
@@ -183,10 +185,6 @@ function describe(e, ctx = {}) {
     case 'oneOfNamed': return `${at} must be exactly one of: ${e.params.names.join(' | ')}`;
     case 'requiresOneOf': return `${at} needs at least one of: ${e.params.keys.join(', ')}`;
     case 'unionOfValues': return `${at} must be ${e.params.title || `one of: ${e.params.names.join(' | ')}`}`;
-    case 'pattern':
-      // SQL's count(*) habit: a row count is the count with no column
-      if (e.data === '*' && /(column|field)$/.test(e.instancePath)) { const key = /field$/.test(e.instancePath) ? 'field' : 'column'; return `${at}: '*' is not a ${key} — leave \`${key}\` out to count rows`; }
-      return `${at} ${e.message}`;
     default: return `${at} ${e.message}`;
   }
 }
@@ -294,6 +292,14 @@ function rebased(node) {
 
 const within = (path, base) => path === base || path.startsWith(`${base}/`);
 
+/** A path and every path it lies within, itself first and the root last: '/a/b' → ['/a/b', '/a', '']. */
+function prefixes(path) {
+  const out = [path];
+  for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) out.push(path.slice(0, i));
+  if (path) out.push('');
+  return out;
+}
+
 // A union's own keywords beside its branches (a type, a closed object, a minLength), as one node —
 // kept per union, so its compiled validator is found again.
 const siblingsOf = new WeakMap();
@@ -335,6 +341,9 @@ function explain(root, node, value, memo) {
 
 const under = (at, errors) => errors.map((e) => ({ ...e, instancePath: `${at}${e.instancePath}`, ...(e.params?.at !== undefined ? { params: { ...e.params, at: `${at}${e.params.at}` } } : {}) }));
 
+/** How many forms a union may have before its refusal names only those the value came closest to. */
+const LONG_UNION = 8;
+
 function explainNode(root, n, value, memo) {
   const v = nodeValidator(root, n);
   if (v(value)) return [];
@@ -343,13 +352,16 @@ function explainNode(root, n, value, memo) {
     // a union inside this node is read on its own: its errors replace every error under it. Only the
     // OUTERMOST unions are read — one inside another is part of what reading the outer one decides
     // (ajv reports an inner union's errors too, from branches the outer reading may throw away).
+    // Found by walking each path's own prefixes, not by comparing every union with every other: a deep
+    // expression tree reports a union at each of its nodes, and pairwise that is quadratic in its size.
+    // Of several unions reported at one path the last is read (the outermost schema node reports last).
     const unions = errors.filter((e) => e.keyword === 'anyOf' && isPlainObject(e.parentSchema));
-    const outer = unions.filter((u, i) => !unions.some((o, j) => j !== i && (o.instancePath === u.instancePath ? j > i : within(u.instancePath, o.instancePath))));
-    let kept = errors.filter((e) => e.keyword !== 'anyOf');
-    for (const u of outer) {
-      kept = kept.filter((e) => !within(e.instancePath, u.instancePath));
-      kept.push(...under(u.instancePath, explain(root, u.parentSchema, valueAt(value, u.instancePath), memo)));
-    }
+    const lastAt = new Map();
+    unions.forEach((u, i) => lastAt.set(u.instancePath, i));
+    const outer = unions.filter((u, i) => lastAt.get(u.instancePath) === i && !prefixes(u.instancePath).slice(1).some((p) => lastAt.has(p)));
+    const outerAt = new Set(outer.map((u) => u.instancePath));
+    const kept = errors.filter((e) => e.keyword !== 'anyOf' && !prefixes(e.instancePath).some((p) => outerAt.has(p)));
+    for (const u of outer) kept.push(...under(u.instancePath, explain(root, u.parentSchema, valueAt(value, u.instancePath), memo)));
     return dedupe(kept);
   }
   // the node IS a union: what its own siblings say (a type, a closed object), then its branches
@@ -395,10 +407,19 @@ function explainNode(root, n, value, memo) {
       }
     }
     // then a field pinned in SOME branches, the others closed without it (an expression's `fn`: the
-    // function forms pin it, a column or a constant has no such field): the value given picks too
+    // function forms pin it, a column or a constant has no such field): the value given picks too — and
+    // a value none of them takes is refused as that, with the values there are (an unknown function)
     for (const key of Object.keys(value)) {
       const taking = candidates.filter((i) => pins[i].has(key) && pins[i].get(key).includes(value[key]));
       const closedWithout = (b) => b.additionalProperties === false && !(b.properties && key in b.properties);
+      // (of the forms that take every OTHER pinned value given: a { source: 'users', property } names
+      // the users form, whose properties are the ones to list — not every source's)
+      const pinning = candidates.filter((i) => pins[i].has(key) && Object.keys(value).every((k) => k === key || !pins[i].has(k) || pins[i].get(k).includes(value[k])));
+      // a tag of SEVERAL forms only: a field one form alone has (an enum of that form) is that form's
+      // field, and its refusal is that form's — its label, its missing fields, its type
+      if (!taking.length && pinning.length > 1 && candidates.every((i) => pins[i].has(key) || closedWithout(branches[i]))) {
+        return [...own, { keyword: 'pinnedNone', instancePath: `/${key}`, params: { at: `/${key}`, values: [...new Set(pinning.flatMap((i) => pins[i].get(key)))] } }];
+      }
       // …and only when those branches know every field given (a mix of two forms' fields is said as the union)
       // and take what every other pinned field given says (else the fields disagree, and the closest is said)
       const knowsAll = (i) => Object.keys(value).every((k) => branches[i].properties && k in branches[i].properties && (!pins[i].has(k) || pins[i].get(k).includes(value[k])));
@@ -442,14 +463,79 @@ function explainNode(root, n, value, memo) {
     return { i, es, lacksMode: strays.filter((k) => identifying.has(k)).length, mismatched: mismatched(i), unknown: strays.length, score: es.reduce((s, e) => s + weight(e), 0) };
   });
   const best = scored.sort((a, b) => a.lacksMode - b.lacksMode || a.mismatched - b.mismatched || a.unknown - b.unknown || a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
-  // the modes are named unless the value named its own — or meant the default one, which it need not name
-  const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(candidates.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
+  // the modes are named unless the value named its own — or meant the default one, which it need not name;
+  // a value that gives a pinned field (an expression's `fn`) is told the forms that take what it gave
+  // — or, where nothing given is pinned, the forms that know every field it gave; and of a long union
+  // (an expression's dozens of forms) the ones it came as close to as the closest. A field given that
+  // none of those knows names a form too (a `guide` beside a `source`), so the forms that take it are
+  // said with them: the caller mixed two forms, and both are what it may have meant.
+  const knows = (i, k) => !!branches[i].properties && k in branches[i].properties;
+  const agreeing = isPlainObject(value) ? candidates.filter((i) => Object.keys(value).some((k) => pins[i].has(k)) && Object.keys(value).every((k) => !pins[i].has(k) || pins[i].get(k).includes(value[k]))) : [];
+  const knowing = isPlainObject(value) && Object.keys(value).length ? candidates.filter((i) => Object.keys(value).every((k) => knows(i, k))) : [];
+  const tied = scored.filter((x) => x.lacksMode === best.lacksMode && x.mismatched === best.mismatched && x.unknown === best.unknown && x.score === best.score).map((x) => x.i);
+  const narrowed = agreeing.length ? agreeing : knowing.length ? knowing : candidates.length > LONG_UNION ? tied : candidates;
+  const unheard = isPlainObject(value) ? Object.keys(value).filter((k) => !narrowed.some((i) => knows(i, k))) : [];
+  const meant = [...narrowed, ...candidates.filter((i) => !narrowed.includes(i) && unheard.some((k) => knows(i, k)))];
+  const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(meant.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);
 }
 
 function dedupe(errors) {
   const seen = new Set();
   return errors.filter((e) => { const k = `${e.keyword}|${e.instancePath}|${JSON.stringify(e.params)}`; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+
+/** How many raw errors the validator finds in `value` (0: it validates). */
+function errorCount(validator, value) {
+  return validator(value) ? 0 : (validator.errors || []).length;
+}
+
+/** `value` with the node at `segs` replaced by `node` — copied along the path, the rest shared. */
+function replacedAt(value, segs, node) {
+  if (!segs.length) return node;
+  const [head, ...rest] = segs;
+  const key = Array.isArray(value) ? Number(head) : head;
+  const copy = Array.isArray(value) ? value.slice() : { ...value };
+  copy[key] = replacedAt(value?.[key], rest, node);
+  return copy;
+}
+
+/**
+ * A VALUE IN AN EARLIER SPELLING, SHOWN AS IT IS NOW. The closed forms refuse a condition, a measure or
+ * a read written as an earlier version took them, and what they say of it — a field the form does not
+ * take, another it lacks — does not say what to write. So the nearest value around each refused spot
+ * that converts (src/earlier-spelling.js, the converters a kept value is carried over by) is refused as
+ * a whole, with its conversion: "write { fn: "eq", args: [ … ] }". A conversion is said only where the
+ * input with it in place has fewer errors — a value that merely looks like an earlier one is left to the
+ * forms — and where a name could be a column or an event property, the reading the schema takes is
+ * said. Never an alias: the value is refused all the same. → Map(path → the value as it is now)
+ */
+function earlierSpellings(validator, input, errors) {
+  const found = new Map();
+  // nothing in the input converts, under either reading of a name: no spot of it is an earlier
+  // spelling, and trying each refused spot would revalidate the whole input for nothing
+  if (currentOf(input) === input && currentOf(input, { subject: () => 'property' }) === input) return found;
+  let working = input;
+  // the deepest spots first, so a whole request is converted only for what no spot inside it says
+  const paths = [...new Set(errors.map((e) => e.instancePath))].sort((a, b) => b.split('/').length - a.split('/').length);
+  for (const path of paths) {
+    const segs = path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
+    for (let n = segs.length; n >= 0; n -= 1) {
+      const at = n ? `/${path.split('/').filter(Boolean).slice(0, n).join('/')}` : '';
+      if ([...found.keys()].some((f) => within(at, f))) break;
+      const value = valueAt(working, at);
+      if (!value || typeof value !== 'object') continue;
+      const seen = new Set();
+      const candidates = [currentOf(value, { subject: () => 'property' }), currentOf(value)]
+        .filter((c) => c !== value && !seen.has(JSON.stringify(c)) && seen.add(JSON.stringify(c)));
+      if (!candidates.length) continue;
+      const before = errorCount(validator, working);
+      const scored = candidates.map((c) => ({ c, input: replacedAt(working, segs.slice(0, n), c) })).map((x) => ({ ...x, count: errorCount(validator, x.input) }));
+      const best = scored.reduce((a, b) => (b.count < a.count ? b : a));
+      if (best.count < before) { found.set(at, best.c); working = best.input; break; }
+    }
+  }
+  return found;
 }
 
 export function validateInput(validator, input) {
@@ -459,7 +545,15 @@ export function validateInput(validator, input) {
   const seen = new Set();
   const errors = [];
   const ctx = { input, schema: validator.schema };
-  for (const e of explain(validator.schema, validator.schema, input, new Map())) {
+  const explained = explain(validator.schema, validator.schema, input, new Map());
+  // a value of an earlier spelling is refused as that, with its conversion, instead of field by field
+  const earlier = earlierSpellings(validator, input, explained);
+  for (const [path, now] of earlier) {
+    const msg = `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(now)}`;
+    seen.add(msg); errors.push(msg);
+  }
+  for (const e of explained) {
+    if ([...earlier.keys()].some((p) => within(e.instancePath, p))) continue;
     const msg = describe(e, ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
   }

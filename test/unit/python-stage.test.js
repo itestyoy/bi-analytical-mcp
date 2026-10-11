@@ -38,7 +38,7 @@ const engine = () => {
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   return settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY }));
 };
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" };
 const PY_STAGE = { stage: 'python', imports: [{ package: 'numpy' }], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
 const decl = (over = {}) => ({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] }, ...over });
@@ -103,7 +103,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   const e = engine();
   const PY_OUT = { ...PY_STAGE, output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
   const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: "return df" }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
-  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', limit: 10 }] } });
+  const r = await e._buildPipeline({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue_z' }, { value: 0 }] }] }, { stage: 'limit', limit: 10 }] } });
   assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [
     [`${r.model}_s1`, 'python', 'fct_analytics_events'],   // python FIRST → dbt.ref of the source itself
     [`${r.model}_s2`, 'sql', `${r.model}_s1`],              // the aggregate reads the Python model
@@ -120,7 +120,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   assert.deepEqual(r.python.map((m) => m.input), ['fct_analytics_events', `${r.model}_s2`]);
   // a SQL stage that names a column the python stage did not declare is refused at validation
   const PY_NO_OUT = { ...PY_STAGE, output: undefined };
-  await assert.rejects(() => e._buildPipeline({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }] } }), /unknown column 'revenue_z'/);
+  await assert.rejects(() => e._buildPipeline({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue_z' }, { value: 0 }] }] }] } }), /unknown column 'revenue_z'/);
   // a rebuild with a SHORTER chain leaves no orphaned _sN model behind
   const r2 = await e._buildPipeline({ name: 'chain', context_id: r.context_id, pipeline: { source: 'events', stages: [AGG, PY_OUT] } });
   assert.deepEqual(pipeFiles(e, r.context_id), [`${r2.model}.py`, `${r2.model}.yml`, `${r2.model}_s1.sql`]);
@@ -734,7 +734,7 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 3. a where alone counts too — narrowing is preparation
   const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
   await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [AGG] });
   const scopedPy = await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, stages: [PY_STAGE] });
   assert.deepEqual(nudge(scopedPy), []);

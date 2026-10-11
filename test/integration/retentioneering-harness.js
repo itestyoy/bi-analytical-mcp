@@ -28,6 +28,11 @@ export const skip = (t) => { if (!ENV) { t.skip('dbt environment retentioneering
 
 export const FUNNEL = ['tutorial', 'level_started', 'shop_opened', 'iap_purchase_completed'];
 
+/** A start's stage that brings the user's platform: a join of the users model by the declared
+ *  relationship, at the event's time (the model is slowly changing — a start refuses it without). */
+export const usersJoin = (attrs) => ({ stage: 'join', with: 'users', via: 'user', attrs, between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } });
+export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
+
 /** Each user's event names in path order, collapsed runs of one event into one. */
 export const collapsed = (list) => list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]);
 
@@ -104,7 +109,9 @@ export async function openWorld() {
   try {
     // the rows every expectation is counted from: each event, its user, its time — in path order
     rows = (await wh.query('select player_id_of_internal as u, event_name as e, device_time as t from fct_analytics_events order by 1, 3, 2')).rows;
-    const b = await engine.build_retentioneering_model({ name: 'paths', source: 'events', segments: [{ model: 'users', attribute: 'platform' }], sessions: { gap_minutes: 30 } });
+    // the platform arrives by a join stage — users is slowly changing, so at each event's time — and
+    // is carried as a segment under its column's name
+    const b = await engine.build_retentioneering_model({ name: 'paths', source: 'events', stages: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
     built = await readDone(b.task_id);
     assert.equal(built.status, 'done', `the users' paths: ${JSON.stringify(built.error)}`);
     perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows

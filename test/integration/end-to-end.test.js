@@ -52,9 +52,9 @@ const S = {}; // S.semCtx, S.draftId, S.pipeCtx, S.pipeTable, S.abCtx
 // The canonical 4-step activation funnel (the same steps as the funnels of pipeline-stages.test.js).
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_1' }] }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_2' }] }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_3' }] }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps, ...extra });
 
@@ -114,8 +114,11 @@ test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_
   assert.equal(reached(r.rows, 'tut1'), 8);
   assert.equal(reached(r.rows, 'tut2'), 5);
   assert.equal(reached(r.rows, 'tut3'), 3);
-  // transform the stored table in place: count users whose furthest step is tut3 = 3
-  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], measures: [{ agg: 'count', name: 'n' }] } });
+  // read the stored table in stages, in place: count users whose furthest step is tut3 = 3
+  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { stages: [
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'furthest_step_name' }, { value: 'tut3' }] }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
+  ] });
   assert.equal(t3.ok, true, JSON.stringify(t3.error));
   assert.equal(num(t3.rows[0].n), 3);
 });
@@ -125,7 +128,7 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'e2e_mon',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -144,14 +147,14 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
-// The two updates are made one after the other — a payers metric, then three derived metrics that
-// read the task's metrics as stored — and ONE ungrouped query reads the payers and the derived
+// The two updates are made one after the other — a payers metric, then three derived metrics, each an
+// expression of { metric } leaves read as stored — and ONE ungrouped query reads the payers and the derived
 // metrics side by side (one mf call); the by-day query is the distinct-by-time recommendation's.
 test('4b. build_semantic_model action update adds a payers metric (re-query = 7 distinct payers), and derived metrics added by an update read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
-    semantic_models: [{ from: 'events', measures: [{ name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] } }] }],
     metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
@@ -160,9 +163,9 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   const derived = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
     metrics: [
-      { name: 'per_payer_stored', type: 'derived', expr: 'e2e_mon_revenue / e2e_mon_payers', metrics: ['e2e_mon_revenue', 'e2e_mon_payers'] },
-      { name: 'per_payer_declared', type: 'derived', expr: 'revenue / payers', metrics: ['revenue', 'payers'] },
-      { name: 'per_payer_mixed', type: 'derived', expr: 'e2e_mon_revenue / payers', metrics: ['e2e_mon_revenue', 'payers'] },
+      { name: 'per_payer_stored', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'e2e_mon_payers' }] } },
+      { name: 'per_payer_declared', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'payers' }] } },
+      { name: 'per_payer_mixed', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'payers' }] } },
     ],
   });
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));

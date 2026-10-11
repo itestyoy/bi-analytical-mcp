@@ -34,7 +34,7 @@ function orderedRunner() {
 }
 
 const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tasks-')) }), runner });
-const TASK = { name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
+const TASK = { name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
 const tick = () => new Promise((r) => { setTimeout(r, 5); });
 
 test('a call that starts work answers with its task only, and a query on the same context waits for the parse', async () => {
@@ -105,7 +105,7 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   const draft = await start(stored.task_id, { include_columns: true });
   assert.equal(draft.reads, done.table);
   assert.deepEqual(draft.available_columns.map((c) => c.name), ['task_cnt']);
-  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: draft.context_id, stages: [{ stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 1 }] }] });
+  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: draft.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }] });
   assert.equal(step.column_count, 1);
   // the table's owner cannot be dropped under the draft that reads it
   assert.throws(() => e._dropContext({ context_id: created.context_id }), /reads|READS|consumer|force/i);
@@ -146,12 +146,12 @@ function heldBuilds() {
   return r;
 }
 const until = async (cond) => { for (let i = 0; i < 400 && !cond(); i += 1) await tick(); };
-const WHERE_EVENT = { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] };
+const WHERE_EVENT = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] };
 /** The hints of an answer (its next, its recommendations, each step's) that send the caller to materialize. */
 const asksToMaterialize = (r) => [r.next, ...(r.recommendations || []), ...(r.step_effects || []).flatMap((s) => s.recommendations || [])]
   .filter((h) => typeof h === 'string' && /\bmaterialize\b(?!\.task_id)/.test(h));
 
-test('query_pipeline_model: the transform is checked in the call, and a query behind a build reads THAT build', async () => {
+test('query_pipeline_model: the stages are checked in the call, and a query behind a build reads THAT build', async () => {
   const runner = heldBuilds();
   const e = engine(runner);
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
@@ -160,9 +160,13 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   await assert.rejects(() => e.query_pipeline_model({ context_id }), /no built pipeline model/);
   const first = await e.build_pipeline_model({ action: 'materialize', context_id });
   // the first build is in flight: a query on it is accepted, checked against that build's columns
-  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { group_by: ['no_such_column'] } }), (err) => err.field === 'transform' && /no_such_column/.test(err.message));
-  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], order_by: [{ key: 'player_id_of_internal' }] } }), /order_by/);
-  const q1 = await e.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }], order_by: [{ key: 'count' }] } });
+  const byEvent = (groupBy = ['event_name']) => ({ stage: 'aggregate', group_by: groupBy, measures: [{ name: 'count', expr: { fn: 'count' } }] });
+  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [byEvent(['no_such_column'])] }), (err) => err.field === 'stages' && /^stages\[0\]: .*no_such_column/.test(err.message));
+  // an order on a column the regroup did not keep is refused at the stage that names it
+  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [byEvent(), { stage: 'order_by', keys: [{ key: 'player_id_of_internal' }] }] }), (err) => err.field === 'stages' && /^stages\[1\]: .*player_id_of_internal/.test(err.message));
+  // a stage that makes a new table is a build from the task, not a read
+  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }), /invalid input/);
+  const q1 = await e.query_pipeline_model({ context_id, stages: [byEvent(), { stage: 'order_by', keys: [{ key: 'count' }] }] });
   assert.ok(isStartedTask(q1) && q1.read_with === 'query_pipeline_model');
   await until(() => runner.held.length);
   runner.held.shift()();
@@ -177,8 +181,10 @@ test('query_pipeline_model: the transform is checked in the call, and a query be
   const built2 = await taskResult(e, second.task_id);
   assert.notEqual(built2.model, built1.model);
   assert.equal((await taskResult(e, q2.task_id)).model, built2.model);
-  // a sum needs a column: refused by the schema, in the call
-  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { measures: [{ agg: 'sum', name: 's' }] } }), /column/);
+  // a sum needs its argument: refused by the schema, in the call
+  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum' } }] }] }), /invalid input.*'args'/);
+  // and a read written as the earlier transform is refused with its stages
+  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }] } }), /invalid input/);
 });
 
 test('a draft starts with its first steps, and adding steps may start its build in the same call', async () => {
@@ -192,7 +198,7 @@ test('a draft starts with its first steps, and adding steps may start its build 
   const listed = await e.build_pipeline_model({ action: 'start', name: 'lvl2', source: 'events', stages: [WHERE_EVENT], include_steps: true });
   assert.deepEqual(listed.steps.map((s) => s.index), [1], 'include_steps: the whole list');
   // a step that cannot compile leaves the draft started, with none of the batch
-  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'stages[0]');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'stages[0]');
   const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, stages: [{ stage: 'limit', limit: 3 }], materialize: true });
   assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
   assert.deepEqual(asksToMaterialize(added), [], 'nothing asks for the build this call started');
@@ -350,7 +356,7 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
   const e1 = make(runner);
   const { context_id } = await e1.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e1.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }] });
+  await e1.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const build = await e1.build_pipeline_model({ action: 'materialize', context_id });
   await taskResult(e1, build.task_id);
   const display = { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'n' }] };

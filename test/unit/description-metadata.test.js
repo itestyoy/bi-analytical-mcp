@@ -26,7 +26,7 @@ const engine = () => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
   contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'descr-')) }),
 }));
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 
 test('a draft keeps its description, reports it, and hands it to the fork', async () => {
   const e = engine();
@@ -79,7 +79,7 @@ test('a governed task keeps its description per task name', async () => {
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'rev_task', description: 'revenue + payers for the monetization readout',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   const described = await e.context({ action: 'describe', context_id: out.context_id });
@@ -88,14 +88,14 @@ test('a governed task keeps its description per task name', async () => {
   // a SECOND task in the same context keeps its own note, and neither overwrites the other
   await e.build_semantic_model({ action: 'update',
     context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-    semantic_models: [{ from: 'events', measures: [{ name: 'sessions', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'sessions', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'new_session' }] }] }],
     metrics: [{ name: 'sessions', type: 'simple', measure: 'sessions' }],
   }).catch(async (e2) => {
     // build_semantic_model action update may require the task to exist; creating a second task is the same path
     assert.match(String(e2.message), /./);
     await e.build_semantic_model({
       context_id: out.context_id, name: 'sessions_task', description: 'session counts for the same readout',
-      semantic_models: [{ from: 'events', measures: [{ name: 'sessions', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'new_session' }] }],
+      semantic_models: [{ from: 'events', measures: [{ name: 'sessions', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'new_session' }] }] }],
       metrics: [{ name: 'sessions', type: 'simple', measure: 'sessions' }],
     });
   });

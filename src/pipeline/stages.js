@@ -3,15 +3,25 @@
 // `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
 // themselves (src/match-recognize.js, src/python-model.js).
 
-import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, EXPR, CONDITIONS, TYPE, SORT_KEY, measureSchema, sourceProp, condPred, aggExpr, addCol, requireCol } from './sql.js';
-import { exprSchema, exprSql, arrayEventPropertySchema } from './compute.js';
-import { form, strEnum, SCALAR } from '../schema-kit.js';
-import { conditionsSql } from '../conditions.js';
+import { NAME, statAccuracyNote, EXPR, TYPE, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
+import { exprSchema, exprSql, conditionListSql, isConditionCall, mapAggregates, FNS } from './compute.js';
+import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType } from '../catalog/column-types.js';
 
-/** The type of the column a measure produces: the earliest / latest of a column is of the column's
- *  type (a time stays a time), a sketch is a sketch, every other aggregate a number. */
-const measureType = (cols, m) => (SKETCH_FNS.has(m.agg) ? 'sketch' : (m.agg === 'min' || m.agg === 'max') && m.column ? (cols.get(m.column)?.type || 'unknown') : 'numeric');
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+/** A stage's measures, each { name, expr } folded over the rows' groups: the SQL of each, and the type
+ *  of the column it produces (what its expression yields). A name is one column: a group_by column or
+ *  another measure under it would be two. */
+function measuresSql({ d, catalog, cols, source }, groupBy, measures, at) {
+  const names = new Set(groupBy);
+  return measures.map((m) => {
+    if (names.has(m.name)) throw new Error(`${at}: '${m.name}' names ${groupBy.includes(m.name) ? 'a group_by column' : 'two measures'} — give each measure a column name of its own`);
+    names.add(m.name);
+    const r = exprSql(d, cols, m.expr, `${at} measure '${m.name}'`, { context: 'aggregate', groupBy, catalog, source });
+    return { as: m.name, expr: r.sql, type: r.type };
+  });
+}
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -19,22 +29,22 @@ export const STAGES = {
     keepsSourceRows: true,
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold; { or: [...] } holds when any of its items does (each a condition or { and: [...] }). A condition compares a column ({ column, op, … }) or another expression ({ left, op, … }: a function, now, a constant) with a constant (`value`) or an expression (`right`: a column, now, a function — eq … lte only), one of the two. Use it to scope to events, a segment or a value range, anywhere in the pipeline, after a window or an aggregate too. A constant is compared in the column\'s type (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse.',
+      description: 'Keep only rows where all conditions hold. A condition is an expression that is true or false: a comparison ({ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }), in / between / is_null / a text test, and / or / not over them, or a boolean column. Use it to scope to events, a segment or a value range, anywhere in the pipeline — after a window or an aggregate too. A constant is compared in the type of what it meets (a boolean column takes true / false, a numeric one a number); another type is refused here rather than by the warehouse, and a comparison with a missing value does not hold.',
       properties: {
         stage: { enum: ['where'] },
-        conditions: CONDITIONS('The conditions a row is kept by: all of them hold.'),
+        conditions: conditionSlot('#/$defs/expr', 'The conditions a row is kept by: all of them hold.'),
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => ({ op: { op: 'where', preds: conditionsSql(p.conditions, (c) => condPred(d, cols, c, { windows: false, catalog, source })) }, cols }),
+    build: ({ d, catalog, cols, source }, p) => ({ op: { op: 'where', preds: conditionListSql(d, cols, p.conditions, 'where conditions', { catalog, source }) }, cols }),
   },
 
   compute: {
     keepsSourceRows: true,
-    // the expression grammar, once: every stage that takes an operand references it
+    // the expression grammar, once: every stage that takes an expression references it
     defs: (catalog) => ({ expr: exprSchema(catalog) }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
-      description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a window function — nested, so a whole formula is one stage.',
+      description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a condition (a flag: true or false, never missing), a window function — nested, so a whole formula is one stage.',
       properties: {
         stage: { enum: ['compute'] },
         name: { type: 'string', pattern: NAME, description: 'The name of the column it adds.' },
@@ -43,56 +53,73 @@ export const STAGES = {
     }),
     build: ({ d, catalog, cols, source }, p) => {
       const { sql, type, physical } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source });
+      // a flag a condition computes is stored true or false: where the condition cannot be decided (a
+      // missing operand) it does not hold, as it does not hold in a where
       const out = addCol(cols, p.name, type);
       if (physical) out.get(p.name).physical = true; // a copy of a column is stored as that column is
-      return { op: { op: 'extend', cols: [{ name: p.name, expr: sql }] }, cols: out };
+      return { op: { op: 'extend', cols: [{ name: p.name, expr: isConditionCall(p.expr) ? `COALESCE(${sql}, FALSE)` : sql }] }, cols: out };
     },
   },
 
   unnest: {
-    // WHAT IT EXPLODES, one of two: an array event property of the source ({ property }, an enum of
-    // the catalog's properties declared as arrays, under the key every function that reads one names
-    // it by) or an array column of the rows here ({ column }) — two closed forms, each built by its own
-    // branch.
-    schema: (catalog) => {
-      const fields = {
+    // WHAT IT EXPLODES is an expression that yields an array: an array event property of the source
+    // ({ property }, read where it is stored — its flattened column or its key of the payload), an array
+    // column of the rows here ({ column }), or a function that makes one (json_parse_array). The
+    // element's own field and type are the stage's.
+    schema: () => ({
+      type: 'object', additionalProperties: false, required: ['stage', 'expr', 'name'],
+      description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }), an array column here ({ column }), or an expression that yields one (json_parse_array of a JSON text). For per-element analysis (items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
+      properties: {
         stage: { enum: ['unnest'] },
+        expr: { ...EXPR, description: 'The array: { property } of an array event property (semantic_index lists them), { column } of an array column, or an expression that yields an array.' },
         name: { type: 'string', pattern: NAME, description: 'The name the element column gets.' },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: TYPE,
-      };
-      return {
-        type: 'object',
-        description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }) or an array column here ({ column } — e.g. one a compute json_parse_array made). For per-element analysis (items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
-        anyOf: [
-          form({ title: 'an array event property — { property, name }', required: ['stage', 'property', 'name'], properties: { stage: fields.stage, property: arrayEventPropertySchema(catalog, 'An array event property of the pipeline\'s source (semantic_index lists them) — its flattened column or its key of the event_data payload.'), name: fields.name, field: fields.field, type: fields.type } }),
-          form({ title: 'an array column — { column, name }', required: ['stage', 'column', 'name'], properties: { stage: fields.stage, column: { type: 'string', description: 'An array column at this step: a native ARRAY unnests directly (one json_parse_array made, or a joined one).' }, name: fields.name, field: fields.field, type: fields.type } }),
-        ],
-      };
-    },
-    build: ({ catalog, cols, source }, p) => {
-      let column; let key; let encoding; let isStruct = false;
-      if (p.property !== undefined) {
-        const found = sourceProp(catalog, source, p.property);
+      },
+    }),
+    build: ({ d, catalog, cols, source }, p) => {
+      const e = p.expr;
+      const leaf = isObj(e) && e.fn === undefined;
+      const elementType = (isStruct) => (p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string')));
+      if (leaf && e.property !== undefined) {
+        if (e.field !== undefined || e.type !== undefined) throw new Error(`unnest: the element's field and type are the stage's own \`field\` and \`type\` — the expr names the array alone: { property: '${e.property}' }`);
+        if (!source) throw new Error(`unnest: { property: '${e.property}' } reads an event property of a pipeline's source, and these rows read none (a stored table) — unnest an array column of them ({ column })`);
+        const found = sourceProp(catalog, source, e.property);
         const spec = found?.spec;
-        if (!spec) throw new Error(`unnest: '${p.property}' is not an event property of '${source}' — an array column here is unnested as { column }`);
+        if (!spec) throw new Error(`unnest: '${e.property}' is not an event property of '${source}' — an array column here is unnested as { column }`);
         if (!isArrayPropertyType(spec.type)) {
-          throw new Error(`unnest: '${p.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with a compute json_field.`);
+          throw new Error(`unnest: '${e.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with { property, field }.`);
         }
-        isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
-        if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
-        else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // a property inside the JSON blob
-      } else {
-        requireCol(cols, p.column);
-        if (cols.get(p.column).type !== 'array') throw new Error(`unnest: '${p.column}' is ${cols.get(p.column).type || 'not typed'}, not an array column — make one with a compute json_parse_array, or unnest an array event property as { property }`);
-        column = p.column; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
+        const isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
+        // the column it explodes must still be HERE, exactly as a property read's must: after a stage that
+        // changed the grain (or on top of a materialized prefix built from one) the payload is gone
+        const column = spec.column || catalog.eventDataColumn(source);
+        requireCol(cols, column);
+        const type = elementType(isStruct);
+        const op = spec.column ? { column, key: null, encoding: spec.encoding || 'native' } : { column, key: found.name, encoding: 'blob' };
+        return { op: { op: 'unnest', ...op, as: p.name, field: p.field, type }, cols: addCol(cols, p.name, type) };
       }
-      // The column it explodes must still be HERE, exactly as an event_property read's must: after a stage
-      // that changed the grain (or on top of a materialized prefix built from one) the payload is
-      // gone, and the unnest would reference a column the relation does not have.
-      requireCol(cols, column);
-      const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
-      return { op: { op: 'unnest', column, key, as: p.name, field: p.field, type, encoding }, cols: addCol(cols, p.name, type) };
+      if (leaf && e.column !== undefined && Object.keys(e).length === 1) {
+        requireCol(cols, e.column);
+        if (cols.get(e.column).type !== 'array') throw new Error(`unnest: '${e.column}' is ${cols.get(e.column).type || 'not typed'}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
+        const type = elementType(false);
+        return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type, encoding: 'native' }, cols: addCol(cols, p.name, type) };
+      }
+      // an expression that yields an array: computed into a working column first, exploded, and the
+      // working column dropped — the columns after it are those before plus the element
+      const r = exprSql(d, cols, e, `unnest '${p.name}' expr`, { catalog, source, windows: false });
+      if (r.type && r.type !== 'array' && r.type !== 'unknown') throw new Error(`unnest: its expr yields ${r.type}, not an array — json_parse_array makes one from a JSON text`);
+      const work = `_unnest_${p.name}`;
+      const type = elementType(false);
+      const out = addCol(cols, p.name, type);
+      return {
+        ops: [
+          { op: 'extend', cols: [{ name: work, expr: r.sql }] },
+          { op: 'unnest', column: work, key: null, as: p.name, field: p.field, type, encoding: 'native' },
+          { op: 'project', cols: [...out.keys()] },
+        ],
+        cols: out,
+      };
     },
   },
 
@@ -255,42 +282,42 @@ export const STAGES = {
       // query execution", with analytic windows as the whole of the accounted memory, and it
       // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
       // global window. This stage is the cheap form of the same question.
-      description: `Group rows and compute measures — the grain collapses to the group keys. A table-wide number (a threshold, a mean) is this stage with no group_by — one row, then applied per row later as a { value }; a window with no partition_by keeps every row and runs out of memory on a large table ("Resources exceeded"). `
+      description: 'Group rows and compute measures — the grain collapses to the group keys. A measure is { name, expr }, its expr an aggregate — { fn: "sum", args: [{ column: "price" }] }, a count of rows { fn: "count" }, a conditional one with `where` — or a formula over aggregates (revenue per payer: div of a sum and a count_distinct). A table-wide number (a threshold, a mean) is this stage with no group_by — one row, then applied per row later as a { value }; a window with no partition_by keeps every row and runs out of memory on a large table ("Resources exceeded"). '
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: measureSchema({ aggs: AGG_FNS, column: { type: 'string' }, where: CONDITIONS('A conditional aggregate: fold only the rows these conditions hold for — count the failed loads, sum the revenue of payers.'), description: 'A measure. For distinct counts prefer the HLL sketch: approx_count_distinct (one shot), or hll_init per group → hll_merge (mergeable across buckets and segments); exact count_distinct does not re-aggregate across groups.' }) },
+        measures: {
+          type: 'array', minItems: 1, description: 'What each group folds to. For distinct counts prefer the HLL sketch: approx_count_distinct (one shot), or hll_init per group → hll_merge (mergeable across buckets and segments); exact count_distinct does not re-aggregate across groups.',
+          items: measureForm({ ref: '#/$defs/expr', pattern: NAME, exprDescription: 'An aggregate of the rows, or a formula over aggregates; a column outside every aggregate is one of group_by.' }),
+        },
       },
     }),
     build: ({ d, catalog, cols, source }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
-      const aggs = p.measures.map((m) => {
-        if (m.column) requireCol(cols, m.column);
-        // a measure's own where: it folds only the rows those conditions hold for (the grammar of a where stage)
-        const cond = m.where?.length ? conditionsSql(m.where, (c) => condPred(d, cols, c, { windows: false, catalog, source })).map((x) => `(${x})`).join(' AND ') : null;
-        return { as: m.name, expr: aggExpr(d, m.agg, m.column, m.percentile, cond) };
-      });
+      if (!(p.measures || []).length) throw new Error('aggregate: `measures` — what each group folds to (the distinct groups alone: a count of their rows, { name: "rows", expr: { fn: "count" } })');
+      const aggs = measuresSql({ d, catalog, cols, source }, groupBy, p.measures, 'aggregate');
       const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const m of p.measures) out.set(m.name, { type: measureType(cols, m) });
-      return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
+      for (const a of aggs) out.set(a.as, { type: a.type });
+      return { op: { op: 'aggregate', groupBy, aggs: aggs.map(({ as, expr }) => ({ as, expr })) }, cols: out };
     },
   },
 
   pivot: {
-    // ONE MEASURE PER CELL — the aggregate stage's measure, without its name (each value names its own
-    // column) and without its where (the cell's condition is `on` = the value): built as that stage's
-    // conditional measures, one per value, so it counts, sums and takes a percentile alike on every warehouse.
+    // ONE MEASURE PER CELL — an aggregate expression, as an aggregate stage's measure is: each value of
+    // `on` names its own column, and its cell is the measure with the cell's condition (`on` equals the
+    // value; is missing for null) added to the `where` of every aggregate in it — so it counts, sums and
+    // takes a percentile, or a formula of them, alike on every warehouse.
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'measure', 'values'],
-      description: 'Turn listed values of `on` into columns: one row per group_by group, and for each value a column holding `measure` over that group\'s rows where `on` equals it (count the rows, sum an amount…). The values are listed explicitly, each with the name of its column. For dashboard-ready matrices (revenue as one column per country, retention day as columns).',
+      description: 'Turn listed values of `on` into columns: one row per group_by group, and for each value a column holding `measure` over that group\'s rows where `on` equals it (count the rows, sum an amount, a ratio of two aggregates…). The values are listed explicitly, each with the name of its column. For dashboard-ready matrices (revenue as one column per country, retention day as columns).',
       properties: {
         stage: { enum: ['pivot'] },
         group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
         on: { type: 'string', description: 'The column whose values become columns.' },
-        measure: measureSchema({ aggs: AGG_FNS, column: { type: 'string' }, named: false, description: 'What each cell holds — a measure of the aggregate stage ({ agg, column?, percentile? }) over the group\'s rows where `on` equals the cell\'s value.' }),
+        measure: { ...EXPR, description: 'What each cell holds — an aggregate ({ fn: "count" }, { fn: "sum", args: [{ column: "revenue" }] }) or a formula over aggregates, over the group\'s rows where `on` equals the cell\'s value.' },
         values: {
           type: 'array', minItems: 1, uniqueItems: true,
           description: 'The values of `on` that become columns, each with its column\'s name.',
@@ -307,8 +334,6 @@ export const STAGES = {
     build: ({ d, catalog, cols, source }, p) => {
       const groupBy = p.group_by || [];
       [...groupBy, p.on].forEach((c) => requireCol(cols, c));
-      const m = p.measure || {};
-      if (m.column) requireCol(cols, m.column);
       const taken = new Set(groupBy); const seen = new Set();
       for (const v of p.values) {
         if (taken.has(v.name)) throw new Error(`pivot: '${v.name}' names ${groupBy.includes(v.name) ? 'a group_by column' : 'two values'} — give each value a column name of its own`);
@@ -317,14 +342,16 @@ export const STAGES = {
         if (seen.has(key)) throw new Error(`pivot: the value ${key} is listed twice`);
         seen.add(key);
       }
-      const aggs = p.values.map((v) => {
-        const cond = condPred(d, cols, v.value === null ? { column: p.on, op: 'is_null' } : { column: p.on, op: 'eq', value: v.value }, { windows: false, catalog, source });
-        return { as: v.name, expr: aggExpr(d, m.agg, m.column, m.percentile, `(${cond})`) };
+      // each cell: the measure, its every aggregate folding only the rows of that value
+      const cells = p.values.map((v) => {
+        const cell = v.value === null ? { fn: 'is_null', args: [{ column: p.on }] } : { fn: 'eq', args: [{ column: p.on }, { value: v.value }] };
+        return { name: v.name, expr: mapAggregates(p.measure, (agg) => ({ ...agg, where: [...(agg.where || []), cell] })) };
       });
+      const aggs = measuresSql({ d, catalog, cols, source }, groupBy, cells, 'pivot');
       const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const v of p.values) out.set(v.name, { type: measureType(cols, m) });
-      return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
+      for (const a of aggs) out.set(a.as, { type: a.type });
+      return { op: { op: 'aggregate', groupBy, aggs: aggs.map(({ as, expr }) => ({ as, expr })) }, cols: out };
     },
   },
 
@@ -439,4 +466,26 @@ export function pipelineStageSchema(catalog) {
   // each stage's schema pins `stage` to its own name, so exactly one branch is the stage asked for —
   // and the refusal of a bad stage is that stage's, not every stage's (src/validate.js)
   return { anyOf: availableStages(catalog).map((s) => s.schema(catalog)) };
+}
+
+/** The stages a READ takes — the pipeline's own, those that re-slice a stored table without making a new
+ *  one: a join, an unnest, a funnel or a python model reshapes the rows into a table to build. */
+export const READ_STAGES = ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project'];
+
+/** The functions a read's expression takes: every one but raw. Dialect SQL of the caller's is a build's
+ *  escape hatch (a step written into a model, refused or reviewed as one); a read runs under a tool that
+ *  only reads, which a client calls without asking first. */
+export const READ_FNS = Object.keys(FNS).filter((fn) => fn !== 'raw');
+
+/**
+ * Root-level `$defs` of a tool that READS a stored table in stages (query_pipeline_model, a drill):
+ * `expr` — the expression over the table's columns, constants and the current time (a stored table has
+ * no source: no { property }, no { entity } partition; no raw SQL, READ_FNS) — and `read_stage`, the
+ * union of READ_STAGES, each the pipeline's own stage schema referring to that `expr`.
+ */
+export function readStageDefs(catalog) {
+  return {
+    expr: exprSchema(catalog, { sourced: false, fns: READ_FNS }),
+    read_stage: { anyOf: READ_STAGES.map((k) => STAGES[k].schema(catalog)) },
+  };
 }

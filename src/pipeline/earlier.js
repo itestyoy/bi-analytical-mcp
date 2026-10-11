@@ -1,34 +1,28 @@
 // A STEP STORED BY AN EARLIER VERSION, CARRIED OVER ON READ. A draft outlives a deploy, and its steps
 // are rendered again on every edit; what an earlier version spelled another way is translated to this
-// version's spelling here, once, before a stage is built — the renames from the ONE table that also
-// tells a caller this server's spelling (src/validate.js CROSS_PATH_SPELLING: fn → agg, q → percentile,
-// avg → average, as → name), a computed column written as { op, …fields } to its expression, a derive
-// stage to the compute stage reading the same event property, a join's top-level `on` to via: { on },
-// a funnel step's condition on `property`
-// to the condition every where writes, and a python function body written as nested arrays of lines
-// (a nested array the block under the line before it) to its text. A funnel's `filter` and `metrics`
-// have no spelling here: such a kept draft builds as it did (src/match-recognize.js).
-// And the stage words of the one vocabulary: a pivot's agg + value_column + its values as names, now
-// one measure and { value, name } per value; unpivot's name_as / value_as, now name_column /
-// value_column; a funnel's `mode`, folded into between_steps (strict → none); a condition's column
-// written as left: { column }, now { column }, a constant written as right: { value }, now `value`, and
-// a `value` beside a `right` (the right was what it compared with); unnest's `source`, now { property }
-// or { column } as the build resolved it; a sample's percent, now a share; a join window's
-// between.value, now between.column; project's `columns`, now keep; limit's `n`, now limit.
-// A step in the current spelling passes through unchanged.
+// version's spelling here, once, before a stage is built. The grammar of what a stage holds — a
+// condition, a measure, an expression, an unnest's array, a pivot's measure — is converted by the ONE
+// table of those converters (src/earlier-spelling.js); a funnel step's condition on `property` reads a
+// column of the rows when there is one, else the event property, as the earlier build resolved it.
+// The stage words are this module's own: a computed column written as { op, …fields } is its
+// expression, a derive stage the compute stage reading the same event property, a join's top-level
+// `on` is via: { on } and its attrs' `as` their `name`, a join window's between.value is between.column;
+// a pivot's agg + value_column + its values as names is one measure and { value, name } per value;
+// unpivot's name_as / value_as are name_column / value_column; a funnel's `mode` is folded into
+// between_steps (strict → none); unnest's `as` is `name` and its `source` the array it names; a
+// sample's percent is a share; project's `columns` is keep; limit's `n` is limit; and a python function
+// body written as nested arrays of lines (a nested array the block under the line before it) is its
+// text. A funnel's `filter` and `metrics` have no spelling here: such a kept draft builds as it did
+// (src/match-recognize.js). A step in the current spelling passes through unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
-import { OPS } from '../conditions.js';
-import { columnAsLeft, constantAsRight } from './sql.js';
+import { currentConditions, currentExpression, currentMeasure, isEarlierMeasure, currentUnnest } from '../earlier-spelling.js';
 
-/** The object with each key the table renames given its current name, and an aggregation's old value its current one. */
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+/** The object with each of `keys` the table renames given its current name (`as` → `name`). */
 function respelled(obj, keys) {
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    const key = keys.includes(k) && SPELLING[k] ? SPELLING[k] : k;
-    out[key] = key === 'agg' && typeof v === 'string' && SPELLING[v] ? SPELLING[v] : v;
-  }
-  return out;
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [keys.includes(k) && SPELLING[k] ? SPELLING[k] : k, v]));
 }
 
 const ONE = new Set(['floor', 'ceil', 'abs', 'upper', 'lower', 'length', 'trim', 'unix_date', 'hll_extract', 'json_parse_array']);
@@ -78,71 +72,11 @@ function bodyText(items, depth = 0) {
 /** A derive stage (one column read from an event property) as the compute stage that reads it now. */
 function deriveExpr(st) {
   const type = st.type !== undefined ? { type: st.type } : {};
-  if (st.op === 'extract') return { fn: 'event_property', property: st.source, ...type };
-  if (st.op === 'struct_field') return { fn: 'event_property', property: st.source, field: st.field, ...type };
-  if (st.op === 'array_length') return { fn: 'array_length', property: st.source };
-  if (st.op === 'contains') return { fn: 'array_contains', property: st.source, item: st.value };
+  if (st.op === 'extract') return { property: st.source, ...type };
+  if (st.op === 'struct_field') return { property: st.source, field: st.field, ...type };
+  if (st.op === 'array_length') return { fn: 'array_length', args: [{ property: st.source }] };
+  if (st.op === 'contains') return { fn: 'array_contains', args: [{ property: st.source }, { value: st.value === undefined ? null : st.value }] };
   return null;
-}
-
-/** A list of conditions with each one rewritten by `f` — inside { or } and { and } groups too. */
-function mapConditions(list, f) {
-  return (list || []).map((c) => (c && c.or ? { or: mapConditions(c.or, f) } : c && c.and ? { and: mapConditions(c.and, f) } : f(c)));
-}
-
-/** Whether a condition of the list — inside { or } and { and } groups too — is one `pred` holds for. */
-function someCondition(list, pred) {
-  return Array.isArray(list) && list.some((c) => (c && c.or ? someCondition(c.or, pred) : c && c.and ? someCondition(c.and, pred) : pred(c)));
-}
-
-/** A funnel step's condition on `property` — a column of the rows when there is one, else the event
- *  property it named — as the condition every where writes, resolved as the earlier build resolved it. */
-function stepCondition(c, cols) {
-  if (!c || c.property === undefined) return c;
-  const { property, ...rest } = c;
-  return cols?.has(property) ? { column: property, ...rest } : { left: { fn: 'event_property', property }, ...rest };
-}
-
-/** A condition in this version's closed forms: a column written as left: { column } is `column`, a
- *  `value` beside a `right` is dropped (the right side is what the earlier build compared with), and a
- *  constant written as right: { value } is `value`. */
-function currentCondition(c) {
-  if (!c || typeof c !== 'object') return c;
-  let out = c;
-  if (columnAsLeft(out)) {
-    const { left, ...rest } = out;
-    out = { column: left.column, ...rest };
-  }
-  if (out.value !== undefined && out.right !== undefined) {
-    const { value: _dropped, ...rest } = out;
-    out = rest;
-  }
-  if (constantAsRight(out)) {
-    const { right, ...rest } = out;
-    out = { ...rest, value: right.value };
-  }
-  return { ...out, ...(out.left !== undefined ? { left: currentExpr(out.left) } : {}), ...(out.right !== undefined ? { right: currentExpr(out.right) } : {}) };
-}
-
-/** An expression with every condition inside it (a CASE's branches, at any depth) in the closed forms. */
-function currentExpr(e) {
-  if (!e || typeof e !== 'object' || Array.isArray(e) || e.fn === undefined) return e;
-  return {
-    ...e,
-    ...(Array.isArray(e.args) ? { args: e.args.map(currentExpr) } : {}),
-    ...(Array.isArray(e.cases) ? { cases: e.cases.map((cs) => (cs && typeof cs === 'object' ? { ...cs, when: mapConditions(cs.when, currentCondition), then: currentExpr(cs.then) } : cs)) } : {}),
-    ...(e.else !== undefined ? { else: currentExpr(e.else) } : {}),
-  };
-}
-
-/** A condition of an earlier form: its column written as left: { column }, `value` beside `right`, or
- *  its constant written as right: { value }. */
-const earlierCondition = (x) => columnAsLeft(x) || constantAsRight(x) || (OPS.includes(x.op) && x.value !== undefined && x.right !== undefined);
-
-/** Whether a stage carries a condition of an earlier form, anywhere in it. */
-function keptCondition(st) {
-  const walk = (x) => (Array.isArray(x) ? x.some(walk) : !!x && typeof x === 'object' && (earlierCondition(x) || Object.values(x).some(walk)));
-  return walk(st);
 }
 
 /** A pivot of the earlier { agg, value_column, values: [string] } form as the measure it computed and
@@ -150,10 +84,10 @@ function keptCondition(st) {
  *  prefixed with '_', as BigQuery's PIVOT names it. */
 function currentPivot(st) {
   const { agg, fn, value_column: column, values, ...rest } = st;
-  const a = agg ?? (SPELLING[fn] || fn);
+  const a = agg ?? fn;
   return {
     ...rest,
-    measure: { agg: a, ...(column !== undefined ? { column } : {}) },
+    measure: currentMeasure({ agg: a, ...(column !== undefined ? { column } : {}) }),
     values: (values || []).map((v) => (v && typeof v === 'object' ? v : { value: v, name: /^[A-Za-z_]/.test(String(v)) ? String(v) : `_${v}` })),
   };
 }
@@ -182,7 +116,6 @@ function currentStage(st, ctx) {
     const expr = computeExpr(st);
     return expr ? { stage: 'compute', name: st.name, expr } : st;
   }
-  if (st.stage === 'aggregate' && (st.measures || []).some((m) => m && (m.fn !== undefined || m.q !== undefined))) return { ...st, measures: st.measures.map((m) => respelled(m, ['fn', 'q'])) };
   if (st.stage === 'pivot' && st.measure === undefined && (st.agg !== undefined || st.fn !== undefined || st.value_column !== undefined)) return currentPivot(st);
   if (st.stage === 'unpivot' && (st.name_as !== undefined || st.value_as !== undefined)) {
     const { name_as: nameColumn, value_as: valueColumn, ...rest } = st;
@@ -198,14 +131,9 @@ function currentStage(st, ctx) {
     return { ...st, between: { column, ...rest } };
   }
   if (st.stage === 'unnest' && st.as !== undefined) return respelled(st, ['as']);
-  if (st.stage === 'unnest' && st.source !== undefined && st.property === undefined && st.column === undefined) {
+  if (st.stage === 'unnest' && st.source !== undefined && st.property === undefined && st.column === undefined && st.expr === undefined) {
     const { source: from, ...rest } = st;
     return { ...rest, ...(unnestsProperty(from, ctx) ? { property: from } : { column: from }) };
-  }
-  // a step condition of the earlier form carries `property` at its top level — not one that reads an
-  // event property as its left side ({ left: { fn: 'event_property', property } }), the form it became
-  if (st.stage === 'match_recognize' && (st.steps || []).some((x) => someCondition(x?.where, (c) => !!c && typeof c === 'object' && c.property !== undefined))) {
-    return { ...st, steps: st.steps.map((x) => (x?.where ? { ...x, where: mapConditions(x.where, (c) => stepCondition(c, ctx.cols)) } : x)) };
   }
   if (st.stage === 'match_recognize' && st.mode !== undefined) {
     const { mode, between_steps: between, ...rest } = st;
@@ -224,13 +152,18 @@ function currentStage(st, ctx) {
     const { n: limit, ...rest } = st;
     return { ...rest, limit };
   }
-  if (keptCondition(st)) {
-    if (st.stage === 'where') return { ...st, conditions: mapConditions(st.conditions, currentCondition) };
-    if (st.stage === 'aggregate') return { ...st, measures: (st.measures || []).map((m) => (m?.where ? { ...m, where: mapConditions(m.where, currentCondition) } : m)) };
-    if (st.stage === 'compute') return { ...st, expr: currentExpr(st.expr) };
-    if (st.stage === 'match_recognize') return { ...st, steps: (st.steps || []).map((x) => (x?.where ? { ...x, where: mapConditions(x.where, currentCondition) } : x)) };
-  }
   if (st.stage === 'python' && (st.functions || []).some((f) => Array.isArray(f?.body))) return { ...st, functions: st.functions.map((f) => (Array.isArray(f?.body) ? { ...f, body: bodyText(f.body).join('\n') } : f)) };
+  // what a stage holds, in the one grammar — the same value when it already is
+  if (st.stage === 'unnest') return currentUnnest(st);
+  if (st.stage === 'where' && Array.isArray(st.conditions)) return { ...st, conditions: currentConditions(st.conditions) };
+  if (st.stage === 'aggregate' && Array.isArray(st.measures)) return { ...st, measures: st.measures.map((m) => currentMeasure(m)) };
+  if (st.stage === 'compute' && st.expr !== undefined) return { ...st, expr: currentExpression(st.expr) };
+  if (st.stage === 'pivot' && st.measure !== undefined) return { ...st, measure: isEarlierMeasure(st.measure) ? currentMeasure(st.measure) : currentExpression(st.measure) };
+  if (st.stage === 'match_recognize' && Array.isArray(st.steps)) {
+    // a step's condition on `property` reads a column of the rows when there is one — as it did
+    const subject = (name) => (ctx.cols?.has(name) ? 'column' : 'property');
+    return { ...st, steps: st.steps.map((x) => (isObj(x) && x.where !== undefined ? { ...x, where: currentConditions(x.where, { subject }) } : x)) };
+  }
   return st;
 }
 

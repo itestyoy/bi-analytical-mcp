@@ -115,10 +115,10 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   const captured = funnel({ capture: [{ name: 'clicked', step: 'b', column: 'is_clicked_of_event_data' }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'gt', value: true }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'clicked' }, { value: true }] }] }] }),
     /'clicked' is a text column in the warehouse/,
   );
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ column: 'clicked', op: 'eq', value: true }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'clicked' }, { value: true }] }] }] });
   assert.equal(ok.steps_count, 2);
   // the column map the next stage reads: the capture is marked as the compute copy of the same column is
   for (const dialect of ['duckdb', 'bigquery']) {
@@ -149,11 +149,11 @@ test('at_<step> and first_seen_at are of the sequence axis\'s type: a moment by 
   const { context_id, types } = await columnsAfter(e, funnel({ order_by: 'session_number' }));
   assert.deepEqual(['first_seen_at', 'at_a', 'at_b'].map((c) => types.get(c)), ['numeric', 'numeric', 'numeric']);
   // two of them compare as numbers: a constant is written as one, and a date is refused as the number column it is
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'at_b', op: 'gt', right: { column: 'at_a' } }, { column: 'at_a', op: 'gte', value: '2' }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'at_b' }, { column: 'at_a' }] }, { fn: 'gte', args: [{ column: 'at_a' }, { value: '2' }] }] }] });
   assert.equal(ok.steps_count, 2);
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'at_a', op: 'gte', value: '2026-01-01' }] }] }),
-    /'at_a' is a numeric column/,
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'at_a' }, { value: '2026-01-01' }] }] }] }),
+    /'at_a' is a number: compare it with a number/,
   );
 });
 

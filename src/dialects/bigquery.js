@@ -149,8 +149,6 @@ export class BigQueryDialect extends Dialect {
 
   secondsBetween(from, to) { return `TIMESTAMP_DIFF(${to}, ${from}, SECOND)`; }
   timeSpineSelect(start, end) { return `select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d`; }
-  // block sampling on the table reference, then the projection over the sample
-  sampleQuery(ref, percent, project) { return project(`${ref} TABLESAMPLE SYSTEM (${Number(percent)} PERCENT)`); }
 
   // TIMESTAMP_DIFF counts the whole units elapsed, truncated toward zero (a DAY is 24 hours, not a
   // calendar boundary); both sides are read as TIMESTAMP, so a DATE column is its midnight, as on DuckDB

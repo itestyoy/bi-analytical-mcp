@@ -90,7 +90,9 @@ test('every tool schema compiles for a model with no groupable dimension', () =>
   const bsm = engine.schemas.build_semantic_model;
   const branch = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'from').includes('users'));
   assert.ok(branch, 'the users model can still carry a semantic model');
-  assert.equal(branch.properties.dimensions, undefined, 'no dimension to add → no field to fill in');
+  // no column to group by → the one dimension it can take is one computed from the row, { name, expr }
+  const dims = forms(bsm, field(bsm, branch, 'dimensions').items);
+  assert.deepEqual(dims.map((d) => Object.keys(d.properties).sort()), [['expr', 'label', 'name']]);
   assert.ok(field(bsm, branch, 'measures'), 'measures are unaffected');
 });
 

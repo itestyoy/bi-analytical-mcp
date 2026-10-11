@@ -278,12 +278,12 @@ test('the card declaration (display) is structural: each kind is a closed branch
     { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } },
     { kind: 'kpi', values: [{ column: 'revenue', format: 'currency', currency: 'EUR', good: 'up' }] },
     { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'n' },
-    { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max', format: 'number' }] },
+    { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform' }], values: [{ column: 'revenue' }, { column: 'users', fn: 'max', format: 'number' }] },
     // a pivot value is written as a KPI tile is: a currency goes with format currency
-    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'revenue', format: 'currency', currency: 'EUR' }, { column: 'payers', agg: 'count_distinct', format: 'percent' }] },
-    // a view folds with what a read's measure takes, but for the percentile: a median, a sketch merged
-    { kind: 'bar', x: 'users_country', y: ['revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }], agg: 'median' } },
-    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'users_sketch', agg: 'hll_merge' }] },
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'revenue', format: 'currency', currency: 'EUR' }, { column: 'payers', fn: 'count_distinct', format: 'percent' }] },
+    // a view folds with an aggregate function, but for the percentile and a sketch's making: a median, a sketch merged
+    { kind: 'bar', x: 'users_country', y: ['revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }], fn: 'median' } },
+    { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'users_sketch', fn: 'hll_merge' }] },
   ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
   for (const [bad, why] of [
     [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
@@ -295,9 +295,10 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'kpi', values: [1, 2, 3, 4, 5].map((i) => ({ column: `c${i}` })) }, 'more than four tiles'],
     [{ kind: 'pie', label_column: 'a', value_column: 'b', stacked: true }, 'a field of another kind'],
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
-    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'percentile' }] }, 'a percentile names no quantile here'],
-    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'hll_init' }] }, 'a view returns values, not a sketch'],
-    [{ kind: 'bar', x: 'a', y: ['v'], drill: { levels: [{ column: 'b' }], agg: 'percentile' } }, 'a drill folds no percentile either'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', fn: 'percentile' }] }, 'a percentile names no quantile here'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', fn: 'hll_init' }] }, 'a view returns values, not a sketch'],
+    [{ kind: 'bar', x: 'a', y: ['v'], drill: { levels: [{ column: 'b' }], fn: 'percentile' } }, 'a drill folds no percentile either'],
+    [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'max' }] }, 'the fold is fn: the earlier agg is refused'],
     [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', currency: 'EUR' }] }, 'a pivot value\'s currency without format currency'],
     [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', format: 'number', currency: 'EUR' }] }, 'a number takes no currency'],
   ]) assert.equal(check(bad).ok, false, why);
@@ -309,7 +310,7 @@ test('the card declaration (display) is structural: each kind is a closed branch
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
   assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_ids with a query');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], transform: {} }).ok, false, 'task_ids with a transform');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], stages: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with stages');
   assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
   assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

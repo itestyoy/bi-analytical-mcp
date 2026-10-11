@@ -185,21 +185,23 @@ export const semanticIndexMethods = {
       if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
       if (notes.length) out.join_note = notes.join(' ');
     }
-    // AMOUNTS the schema marks aggregatable on this source. They fix NO function: name one as
-    // a measure's `field` and choose the aggregation the question needs.
+    // AMOUNTS the schema marks aggregatable on this source. They fix NO function: a measure names one
+    // as a { column } of its aggregate, and the aggregate is the one the question needs.
     const amounts = c.aggregatableFields(k);
     if (amounts.length) {
       out.aggregatable = amounts.map((a) => ({
-        field: a.name,
+        column: a.name,
         ...(a.expr !== a.name ? { expr: a.expr } : {}),
         ...(a.type ? { type: a.type } : {}),
         ...(a.unit ? { unit: a.unit } : {}),
         ...(a.label ? { label: a.label } : {}),
         ...(a.description ? { description: a.description } : {}),
       }));
-      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ request: { semantic_models: [{ from: '${k}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', field: '${amounts[0].name}' }] }] } }) (percentile also takes { percentile: 0.9 }).`;
+      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ request: { semantic_models: [{ from: '${k}', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }] }] } }) (percentile also takes percentile: 0.9 beside its args).`;
     }
-    // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way.
+    // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way. Listed
+    // with the catalog's own keys — `agg` is dbt's aggregation as the declaration fixes it (sum_boolean
+    // included, no function of the expression grammar), named by the measure, never written in a call.
     out.measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
       name, agg: mm.agg, expr: mm.expr,
       ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
@@ -408,7 +410,7 @@ export const semanticIndexMethods = {
     if (complex) {
       // Complex values are ~unique arrays/structs — sample_values are EXAMPLES of the shape,
       // not a frequency ranking; distinct/top-N do not apply.
-      if (samples.length) recommendations.push(`${samples.length} example value(s) showing the array/struct SHAPE (not top-N by frequency; complex values are ~unique). Read the contents with an unnest stage ({ property }) or a compute event_property with \`field\`.`);
+      if (samples.length) recommendations.push(`${samples.length} example value(s) showing the array/struct SHAPE (not top-N by frequency; complex values are ~unique). Read the contents with an unnest stage ({ expr: { property } }) or a compute stage reading { property, field }.`);
       else recommendations.push(`Complex (${spec.type}) property — no examples indexed yet (the value index may not have run); its structure is in \`items\`/\`fields\` above.`);
     } else if (samples.length) {
       recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
@@ -455,7 +457,7 @@ export const semanticIndexMethods = {
     };
     if (spec.unit && spec.type === 'string') {
       out.cast_hint = 'numeric';
-      out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/average.`];
+      out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — read them as a number before sum/average: { fn: "cast", args: [{ property: '${p}' }], type: "numeric" }, in a semantic measure's or a pipeline's expression alike.`];
     }
     // Per-app split: which apps populate this property vs leave it empty (non_null=0).
     // Surfaced so the AI sees a property is app-specific before using it cross-app.
@@ -687,8 +689,9 @@ export const semanticIndexMethods = {
     // drill one with semantic_index({ request: { bundle } }) to see what carries data for that app.
     // Apps PER SOURCE — the same bundle id is a different row set in each source that carries it.
     ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
-    // a task's vocabulary, keyed as the declaration's fields are: a measure's agg, a metric's type, a grain
-    enums: { agg: [...TASK_MEASURE_AGGS], type: ['simple', 'ratio', 'cumulative', 'derived'], grain: c.timeGranularities() },
+    // a task's vocabulary, keyed as the declaration's fields are: a measure's aggregate (its expr's fn), a
+    // metric's type, a grain
+    enums: { fn: [...TASK_MEASURE_AGGS], type: ['simple', 'cumulative', 'derived'], grain: c.timeGranularities() },
     // Ready-made task templates, fetched in full via semantic_index({ request: { recipe: id } }).
     ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
     // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW

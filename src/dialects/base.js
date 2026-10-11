@@ -171,11 +171,6 @@ export class Dialect {
   secondsBetween(_fromExpr, _toExpr) { throw new Error('abstract secondsBetween'); }
   /** The body of the daily time spine MetricFlow needs: one `date_day` per day, start..end inclusive. */
   timeSpineSelect(_start, _end) { throw new Error('abstract timeSpineSelect'); }
-  /**
-   * A read of a representative random subset of `ref` (about `percent` of it), shaped by `project`
-   * (rel → select over it) — rather than its first rows by physical order.
-   */
-  sampleQuery(_ref, _percent, _project) { throw new Error('abstract sampleQuery'); }
   /** A stable bucket in [0, buckets) for a value — the same value always lands in the same bucket,
    *  on every run: a deterministic sample of users is `bucket < share * buckets`. */
   valueBucket(_expr, _buckets) { throw new Error('abstract valueBucket'); }

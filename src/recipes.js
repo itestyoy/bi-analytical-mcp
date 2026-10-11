@@ -17,6 +17,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { pythonReferenceRecipes } from './python-guide.js';
 import { currentSpelling } from './pipeline/earlier.js';
+import { currentOf, currentMetrics } from './earlier-spelling.js';
 
 /**
  * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
@@ -39,48 +40,35 @@ export function pipelineStartRequest(payload) {
   return stages.every((st, i) => st === request.stages[i]) ? request : { ...request, stages };
 }
 
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
 /** A semantic model item of an earlier recipe in today's spelling: a dimension's `as_type` dropped (the
  *  catalog's column type says whether it is a time dimension now), a sum_boolean measure as the count
- *  with its where it computed (sum_boolean summed the scope as a boolean, whatever field it named). */
+ *  with its where it computed (sum_boolean summed the scope as a boolean, whatever field it named), and
+ *  its measures, conditions and dimensions in the one expression grammar (src/earlier-spelling.js — a
+ *  `field` is read as the column of that name, which a property the source stores flat also is). */
 function currentSemanticModel(sm) {
-  if (!sm || typeof sm !== 'object') return sm;
-  const asType = (sm.dimensions || []).some((d) => d && typeof d === 'object' && d.as_type !== undefined);
-  const sumBoolean = (sm.measures || []).some((m) => m?.agg === 'sum_boolean');
-  if (!asType && !sumBoolean) return sm;
-  return {
-    ...sm,
-    ...(asType ? { dimensions: sm.dimensions.map((d) => (d && typeof d === 'object' && d.as_type !== undefined ? (({ as_type: _t, ...rest }) => rest)(d) : d)) } : {}),
-    ...(sumBoolean ? { measures: sm.measures.map((m) => (m?.agg === 'sum_boolean' ? (({ field: _f, cast: _c, percentile: _p, ...rest }) => ({ ...rest, agg: 'count' }))(m) : m)) } : {}),
-  };
-}
-
-/** A metric of an earlier recipe in today's spelling: a measure referenced as `{ name }` is its name,
- *  and a derived metric's inputs `[{ metric, name? }]` are the metric names, its expr rewritten from
- *  each input's alias to the metric it stood for. */
-function currentMetric(m) {
-  if (!m || typeof m !== 'object') return m;
-  const ref = (r) => (r && typeof r === 'object' && typeof r.name === 'string' ? r.name : r);
-  let out = m;
-  for (const k of ['measure', 'numerator', 'denominator']) if (out[k] && typeof out[k] === 'object') out = { ...out, [k]: ref(out[k]) };
-  if (Array.isArray(out.metrics) && out.metrics.some((x) => x && typeof x === 'object')) {
-    const alias = new Map(out.metrics.filter((x) => x && typeof x === 'object').map((x) => [x.name ?? x.metric, x.metric]));
-    const metrics = [...new Set(out.metrics.map((x) => (x && typeof x === 'object' ? x.metric : x)))];
-    // every identifier at once, so two aliases swapped with each other's metric are read as written
-    const expr = typeof out.expr === 'string' ? out.expr.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (tok) => alias.get(tok) ?? tok) : out.expr;
-    out = { ...out, metrics, expr };
+  if (!isObj(sm)) return sm;
+  let out = sm;
+  if ((sm.dimensions || []).some((d) => isObj(d) && d.as_type !== undefined)) {
+    out = { ...out, dimensions: sm.dimensions.map((d) => (isObj(d) && d.as_type !== undefined ? (({ as_type: _t, ...rest }) => rest)(d) : d)) };
   }
-  return out;
+  if ((sm.measures || []).some((m) => m?.agg === 'sum_boolean')) {
+    out = { ...out, measures: sm.measures.map((m) => (m?.agg === 'sum_boolean' ? (({ field: _f, cast: _c, percentile: _p, ...rest }) => ({ ...rest, agg: 'count' }))(m) : m)) };
+  }
+  return currentOf(out);
 }
 
 /**
  * A semantic recipe's payload, as the build_semantic_model request it is. A file written for an
  * earlier version may load a model for its attributes with `use_base_models`, reference a measure as
- * `{ name }`, list a derived metric's inputs as `[{ metric, name }]`, type a dimension with `as_type`
- * or fold a measure with `sum_boolean`; a deployment's file is not ours to rewrite, so each is read here
- * as what it said: a model loaded is a `{ from }` item of semantic_models.
+ * `{ name }`, write a derived metric as text over its inputs or a ratio of two sides, type a dimension
+ * with `as_type`, fold a measure with `sum_boolean`, or write its measures, conditions and dimensions
+ * in the earlier grammar; a deployment's file is not ours to rewrite, so each is read here as what it
+ * said: a model loaded is a `{ from }` item of semantic_models.
  */
 export function semanticRequest(payload) {
-  if (!payload || typeof payload !== 'object') return payload;
+  if (!isObj(payload)) return payload;
   const { use_base_models: base, ...rest } = payload;
   let out = base === undefined ? payload : rest;
   if (Array.isArray(out.semantic_models) && out.semantic_models.some((sm) => currentSemanticModel(sm) !== sm)) out = { ...out, semantic_models: out.semantic_models.map(currentSemanticModel) };
@@ -88,7 +76,10 @@ export function semanticRequest(payload) {
     const loaded = new Set((out.semantic_models || []).map((sm) => sm?.from));
     out = { ...out, semantic_models: [...(out.semantic_models || []), ...base.filter((k) => !loaded.has(k)).map((from) => ({ from }))] };
   }
-  if (Array.isArray(out.metrics) && out.metrics.some((m) => currentMetric(m) !== m)) out = { ...out, metrics: out.metrics.map(currentMetric) };
+  // its metrics as the converter table reads a declaration's (src/earlier-spelling.js): a ratio's side
+  // that names a measure through the simple metric over it, as the earlier build read it
+  const metrics = currentMetrics(out.metrics);
+  if (metrics !== out.metrics) out = { ...out, metrics };
   return out;
 }
 

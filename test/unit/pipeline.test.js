@@ -16,7 +16,7 @@ test('only duckdb and bigquery are supported', () => {
 
 test('pipeline rejects a reference to a column not present at that stage', () => {
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'aggregate', group_by: ['nope'], measures: [{ name: 'c', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['nope'], measures: [{ name: 'c', expr: { fn: 'count' } }] },
   ]), /unknown column 'nope'/);
 });
 
@@ -44,30 +44,33 @@ test('user/install attributes are on dim_users, NOT on the events fact', () => {
 test('user attribute is rejected on the fact directly, accepted via a users-join', () => {
   // direct reference on the fact → unknown column (it is not materialized there).
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]), /unknown column 'country'/);
   // joined from the users dimension → resolves and renders.
   const { sql } = renderPipeline(catalog, 'duckdb', 'events', [
     { stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.ok(sql.length > 0);
 });
 
 test('pivot: a value is a literal whatever it holds; the column it names must be an identifier', () => {
   const pivot = (value) => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'pivot', group_by: [], on: 'event_name', measure: { agg: 'sum', column: 'price' }, values: [value] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'pivot', group_by: [], on: 'event_name', measure: { fn: 'sum', args: [{ column: 'price' }] }, values: [value] },
   ]);
   assert.ok(pivot({ value: "iap'); drop", name: 'iap' }).columns.has('iap'));
   assert.throws(() => pivot({ value: 'iap', name: "iap'); drop" }), /unsafe SQL identifier/);
 });
 
-test('percentile requires q in (0,1); compute validates operands', () => {
-  assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'p', agg: 'percentile', column: 'price' }] },
-  ]), /percentile requires/);
+test('percentile needs its `percentile` in (0,1); compute validates operands', () => {
+  const p90 = (params) => renderPipeline(catalog, 'duckdb', 'events', [
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'p', expr: { fn: 'percentile', args: [{ column: 'price' }], ...params } }] },
+  ]);
+  assert.throws(() => p90({}), /percentile needs `percentile`/);
+  assert.throws(() => p90({ percentile: 1.5 }), /percentile needs `percentile` in \(0,1\)/);
+  assert.ok(p90({ percentile: 0.9 }).columns.has('p'));
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
     { stage: 'compute', name: 'x', expr: { fn: 'add', args: [{ column: 'nope' }, { value: 1 }] } },
   ]), /unknown column 'nope'/);
@@ -75,17 +78,17 @@ test('percentile requires q in (0,1); compute validates operands', () => {
 
 test('date_diff / stat functions render on both dialects', () => {
   const stages = [
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'age', expr: { fn: 'date_diff', args: [{ column: 'device_time' }, { now: true }], unit: 'day' } },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'm', agg: 'median', column: 'price' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'm', expr: { fn: 'median', args: [{ column: 'price' }] } }] },
   ];
   for (const d of ['duckdb', 'bigquery']) assert.ok(renderPipeline(catalog, d, 'events', stages).sql.length > 0);
 });
 
 test('both dialects render a non-empty string for the same pipeline', () => {
   const stages = [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'new_session' }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'new_session' }] }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ];
   for (const d of ['duckdb', 'bigquery']) {
     const { sql } = renderPipeline(catalog, d, 'events', stages);

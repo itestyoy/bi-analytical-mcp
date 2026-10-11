@@ -42,9 +42,9 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-        { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+        { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       column: 'revenue',
     },
@@ -59,8 +59,8 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'aggregate', measures: [{ name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
       ],
       column: 'payers',
     },
@@ -72,7 +72,7 @@ export const CASES = [
     expect: { any: ANSWERING, max_calls: 10 },
     answer: { kind: 'number', sql: 'SELECT COUNT(*) AS v FROM fct_analytics_events' },
     decoy: { sql: 'SELECT COUNT(*) AS v FROM fct_crashlytics_events' }, // the other events source
-    ref: { source: 'events', stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }], column: 'n' },
+    ref: { source: 'events', stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }], column: 'n' },
   },
   {
     id: 'fatal_crashes',
@@ -84,9 +84,9 @@ export const CASES = [
     ref: {
       source: 'crashlytics',
       stages: [
-        { stage: 'compute', name: 'fatal', expr: { fn: 'event_property', property: 'is_fatal_of_event_data', type: 'string' } },
-        { stage: 'where', conditions: [{ column: 'fatal', op: 'eq', value: 'true' }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+        { stage: 'compute', name: 'fatal', expr: { property: 'is_fatal_of_event_data', type: 'string' } },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'fatal' }, { value: 'true' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },
@@ -97,7 +97,7 @@ export const CASES = [
     prompt: 'What was our total user-acquisition spend (cost) over the whole period?',
     expect: { any: ANSWERING, max_calls: 10 },
     answer: { kind: 'number', sql: 'SELECT SUM(cost) AS v FROM fct_player_acquisition' },
-    ref: { source: 'acquisition', stages: [{ stage: 'aggregate', measures: [{ name: 'spend', agg: 'sum', column: 'cost' }] }], column: 'spend' },
+    ref: { source: 'acquisition', stages: [{ stage: 'aggregate', measures: [{ name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }], column: 'spend' },
   },
   {
     id: 'payers_by_variant',
@@ -115,10 +115,10 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
         { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }, { column: 'experiment_name' }] },
-        { stage: 'where', conditions: [{ column: 'experiment_name', op: 'eq', value: 'checkout_flow' }] },
-        { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'experiment_name' }, { value: 'checkout_flow' }] }] },
+        { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
       ],
       key: 'variant_group',
       value: 'payers',
@@ -135,10 +135,10 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-        { stage: 'compute', name: 'product', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
-        { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-        { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+        { stage: 'compute', name: 'product', expr: { property: 'product_id_of_event_data', type: 'string' } },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+        { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       key: 'product',
       value: 'revenue',
@@ -154,8 +154,8 @@ export const CASES = [
     ref: {
       source: 'events',
       stages: [
-        { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_failed' }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_failed' }] }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },
@@ -170,7 +170,7 @@ export const CASES = [
     decoy: { sql: 'SELECT media_source AS v FROM fct_player_acquisition GROUP BY 1 ORDER BY COUNT(DISTINCT player_id_of_internal) DESC, 1 LIMIT 1' },
     ref: {
       source: 'acquisition',
-      stages: [{ stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', agg: 'sum', column: 'cost' }] }],
+      stages: [{ stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
       key: 'media_source',
       value: 'spend',
     },
@@ -193,10 +193,10 @@ export const CASES = [
       stages: [
         { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [
           { name: 'launch', event_name: ['first_launch'] },
-          { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+          { name: 'tut1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_1' }] }] },
         ] },
-        { stage: 'where', conditions: [{ column: 'reached_tut1', op: 'eq', value: true }] },
-        { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+        { stage: 'where', conditions: [{ column: 'reached_tut1' }] },
+        { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
       column: 'n',
     },

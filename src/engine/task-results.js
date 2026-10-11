@@ -7,11 +7,12 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { RESULT_MODEL_PREFIX } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
-import { buildProjection, projectionProblems } from '../projection.js';
-import { getDialect } from '../dialects/index.js';
+import { renderRead } from '../pipeline.js';
+import { physicalColumnType } from '../catalog/column-types.js';
 import { sqlConfigHeader } from '../sql-header.js';
-import { DRILL_ROWS, PIVOT_LEVEL_ROWS, buildViewModel, drillView, pivotTransform } from '../apps/result-view-model.js';
-import { resultColumns, displayProblems, drillFirstRead } from '../display-check.js';
+import { DRILL_ROWS, PIVOT_LEVEL_ROWS, buildViewModel, drillView, pivotStages } from '../apps/result-view-model.js';
+import { resultColumns, displayProblems, drillFirstRead, displayColumns } from '../display-check.js';
+import { currentDisplay } from '../earlier-spelling.js';
 import { isPlainObject, samplingNote, pageBlock } from './helpers.js';
 import { READ_PAGE, KEPT_ROWS } from '../schema/fields.js';
 
@@ -47,29 +48,40 @@ export const taskResultMethods = {
     return this._readTable(dir, table, kept);
   },
 
-  /** Run a (optionally projected) read over a materialized result table: `limit` rows from row `offset`,
-   *  as the warehouse cuts them. `ordered` is what a read with no transform knows of its rows' order
-   *  (false: none). */
-  async _readTable(dir, table, limit, transform, { ordered } = {}, offset = 0, sample = false, samplePercent = 10) {
+  /**
+   * Read a stored result table: `limit` rows from row `offset`, as the warehouse cuts them — the table as
+   * it is, or a READ of it in the pipeline's own stages (`stages`, built over the table's `columns` by the
+   * one read compiler, renderRead). `ordered` is what a read with no stages knows of its rows' order
+   * (false: none); a read's own order is its stages'.
+   */
+  async _readTable(dir, table, limit, { stages = null, columns = [], ordered } = {}, offset = 0) {
     const ref = `{{ ref('${table}') }}`;
-    const d = getDialect(this.catalog.dialect);
-    const base = transform ? buildProjection(ref, transform, d) : `select * from ${ref}`;
-    if (sample) {
-      // A REPRESENTATIVE random subset rather than the first rows by physical order, the
-      // dialect's way (src/dialects). Paging doesn't apply.
-      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform, d) : `select * from ${rel}`));
-      const res = await this.runner.show(dir, sql, limit);
-      if (!res.ok) return { ok: false, status: 'error', table, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-      return { ok: true, status: 'ready', table, sampled: true, sampling: samplingNote(samplePercent / 100), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+    let base = `select * from ${ref}`;
+    let sampled = null;
+    if (stages?.length) {
+      // a table whose columns nothing here knows (an intermediate model of a chain) is asked for them —
+      // each in the type the warehouse has it, as a source's own columns are
+      if (!columns?.length && this.runner?.relationColumns) {
+        const phys = await this.runner.relationColumns(dir, table).catch(() => null);
+        if (phys?.ok) columns = phys.columns.map((c) => ({ name: c.name, type: physicalColumnType(String(c.dtype ?? c.data_type ?? '')), physical: true }));
+      }
+      let read;
+      // the stages were checked against the table's columns when the read was asked for; what refuses
+      // here is a table that changed under it (rebuilt with other columns), said as the read's failure
+      try { read = renderRead(this.catalog, ref, columns, stages); } catch (e) { return { ok: false, status: 'error', table, error: { stage: 'read', message: e.message } }; }
+      base = read.sql;
+      ordered = read.ordered;
+      // a read that samples the table answers with a share of its rows: every number in it is approximate
+      sampled = stages.find((st) => st?.stage === 'sample') || null;
     }
     // A PAGE IS CUT BY THE WAREHOUSE (LIMIT … OFFSET), one row past it fetched to know whether more
     // follow — never the rows before it, which a deep page of a large table would pull every time. The
-    // rows come in the order every read of them comes in: a transform's order_by, else the stored
-    // table's own (on DuckDB its insertion order, which LIMIT and OFFSET keep). A page past the first is
-    // read as a relation, since dbt show writes a `limit` of its own after the SQL it is given, and that
-    // may not follow an OFFSET.
+    // rows come in the order every read of them comes in: a read's order_by, else the stored table's own
+    // (on DuckDB its insertion order, which LIMIT and OFFSET keep). A page past the first is read as a
+    // relation, since dbt show writes a `limit` of its own after the SQL it is given, and that may not
+    // follow an OFFSET.
     const fetch = limit + 1;
-    const sql = offset > 0 ? `select * from (${buildProjection(ref, { ...(transform || {}), limit: fetch, offset }, d)}) _page` : base;
+    const sql = offset > 0 ? `select * from (select * from (${base}) _p limit ${Math.trunc(fetch)} offset ${Math.trunc(offset)}) _page` : base;
     const failed = (r) => ({ ok: false, status: 'error', table, error: { stage: 'fetch', message: formatDbtError(r.stdout, r.stderr) } });
     const res = await this.runner.show(dir, sql, fetch);
     if (!res.ok) return failed(res);
@@ -83,7 +95,34 @@ export const taskResultMethods = {
       if (!counted.ok) return failed(counted);
       total = Number(counted.rows[0]?.n ?? 0);
     }
-    return { ok: true, status: 'ready', table, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: pageBlock({ offset, limit, returned: pageRows.length, has_more: more, total, ordered: transform ? !!transform.order_by?.length : ordered }), ...(transform ? { projected: true } : {}) };
+    return {
+      ok: true, status: 'ready', table, columns: res.columns, rows: pageRows, row_count: pageRows.length,
+      page: pageBlock({ offset, limit, returned: pageRows.length, has_more: more, total, ordered }),
+      ...(sampled ? { sampled: true, sampling: samplingNote(sampled.share) } : {}),
+    };
+  },
+
+  /**
+   * The columns of a stored result table as this server knows them, without asking the warehouse — what
+   * a read of it in stages is built over: each with its type where a pipeline build said it (the
+   * checkpoint that table stands for, its physical flag kept; the build's answer while it is held, which
+   * types what a python stage returned), else by name alone (a query's answer, the context's pipeline
+   * model). `also` names columns known to be there besides (a drawn card's): they join the list untyped.
+   */
+  _storedColumns(contextId, table, taskId = null, also = []) {
+    const state = this.ctxs.has(contextId) ? this.ctxs.get(contextId).state : null;
+    const held = taskId ? this.tasks.held(taskId) : null;
+    const answered = held?.output_columns || (Array.isArray(held?.columns) && held.columns.every(isPlainObject) ? held.columns : null);
+    const typedBy = new Map((answered || []).filter((c) => c.type && c.type !== 'unknown').map((c) => [c.name, c.type]));
+    const cp = state ? [...(state.draft?.checkpoints || []), ...(state.pipeline_origin?.checkpoints || [])].find((c) => c.model === table && Array.isArray(c.columns)) : null;
+    const known = cp ? cp.columns
+      : answered ? answered.map((c) => ({ name: c.name }))
+        : state?.pipeline_model?.model === table ? (state.pipeline_model.columns || []).map((name) => ({ name }))
+          : [];
+    const columns = known.map((c) => ({ ...c, type: c.type && c.type !== 'unknown' ? c.type : typedBy.get(c.name) || 'unknown' }));
+    const have = new Set(columns.map((c) => c.name));
+    for (const name of also) if (!have.has(name)) { have.add(name); columns.push({ name, type: 'unknown' }); }
+    return columns;
   },
 
   /** The side a task belongs to (semantic | pipeline), from the tool that started it (persisted with the task). */
@@ -93,7 +132,7 @@ export const taskResultMethods = {
 
   /** How to have rows past what a task keeps — said in the terms of the tool that ran it. */
   _pageHint(job) {
-    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_pipeline_model({ request: { context_id, transform, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
+    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_pipeline_model({ request: { context_id, stages, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
     if (this._taskSide(job) === 'pipeline') return 'build it again — a pipeline build stores its table, which a read then pages to its last row';
     return 'run the query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to its last row';
   },
@@ -167,10 +206,11 @@ export const taskResultMethods = {
 
   /**
    * QUERY A BUILT PIPELINE MODEL — the pipeline side's twin of query_semantic_model. Two modes:
-   * with a query ({ context_id, transform?, limit? }) it STARTS a task that reads the context's built
-   * model, optionally filtered / grouped / aggregated (a read-only projection over the stored table,
-   * nothing upstream recomputed), keeps its first `limit` rows and returns its task_id at once; with
-   * { task_ids } it waits for pipeline tasks (a build, or such a query) and returns a page of each.
+   * with a query ({ context_id, stages?, limit? }) it STARTS a task that reads the context's built
+   * model, optionally through the pipeline's own stages (where, compute, aggregate … run read-only over
+   * the stored table, nothing upstream recomputed), keeps its first `limit` rows and returns its task_id
+   * at once; with { task_ids } it waits for pipeline tasks (a build, or such a query) and returns a page
+   * of each.
    */
   async query_pipeline_model(input) {
     this._validate('query_pipeline_model', input);
@@ -188,23 +228,26 @@ export const taskResultMethods = {
     const building = ctx.state.draft?.building?.task_id ? ctx.state.draft.building : null;
     // (an edit during the build may have retired its checkpoint: then the model standing is what is known)
     const buildingCp = building ? (ctx.state.draft.checkpoints || []).find((cp) => cp.task_id === building.task_id) : null;
-    const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.pipeline_model?.columns || [] : null;
-    const columns = buildingCp ? buildingCp.columns.map((c) => c.name) : building ? (standing || []) : standing;
+    const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? this._storedColumns(ctx.id, ctx.state.model, ctx.state.pipeline_model?.task_id) : null;
+    const columns = buildingCp ? buildingCp.columns : building ? (standing || []) : standing;
     if (!columns) {
       throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
     }
-    // the transform is checked HERE, against the model's columns: a mistake is refused in the call
-    if (input.transform) {
-      // (columns are unknown only while a first build whose plan was edited away runs: shape alone then)
-      const problems = projectionProblems(input.transform, columns.length ? columns : null);
-      if (problems.length) throw new ToolError(`transform: ${problems.join('; ')}. The model's columns: ${columns.join(', ')}`, { stage: 'validate', field: 'transform' });
+    // the stages are built HERE, over the model's columns, by the compiler the read runs through: a
+    // mistake is refused in the call (the columns are unknown only while a first build whose plan was
+    // edited away runs — the schema alone holds the stages then, and the read builds them when it runs)
+    if (input.stages?.length && columns.length) {
+      // (a refusal names the stage, and an unknown column the columns there are at that stage)
+      try { renderRead(this.catalog, `{{ ref('${building?.model || ctx.state.model}') }}`, columns, input.stages); } catch (e) {
+        throw new ToolError(e.message, { stage: 'validate', field: 'stages' });
+      }
     }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     return async () => {
       const table = ctx.state.model; // resolved when the query runs: after any build queued before it
       if (!table || !this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table || ''} is not there (its build failed, or it was deleted) — build it again` } };
-      const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? KEPT_ROWS, input.transform);
-      return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table } };
+      const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? KEPT_ROWS, { stages: input.stages, columns: this._storedColumns(ctx.id, table, ctx.state.pipeline_model?.task_id) });
+      return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table, ...(out.sampled ? { approximate: true } : {}) } };
     };
   },
 
@@ -254,7 +297,7 @@ export const taskResultMethods = {
       // held — with what the answer said of the rows' order, and what a page carries of it (pageAround).
       // A read that names no page (a card's, once the answer is gone) reads the rows the task kept.
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-      const read = await this._readTable(this.ctxs.dir(job.contextId), job.table, page?.limit ?? job.keptRows ?? KEPT_ROWS, undefined, { ordered: held?.page?.ordered }, page?.offset ?? 0);
+      const read = await this._readTable(this.ctxs.dir(job.contextId), job.table, page?.limit ?? job.keptRows ?? KEPT_ROWS, { ordered: held?.page?.ordered }, page?.offset ?? 0);
       if (read.ok === false) return { ...head, ...read, status: 'error' };
       return { ...head, ...pageAround(held, page?.offset ?? 0), ...read, status: 'done', ...this._showHint(id, read) };
     }
@@ -340,7 +383,7 @@ export const taskResultMethods = {
           if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
         }
         if (first) {
-          const view = await this._readTable(this.ctxs.dir(job.contextId), job.table, first.limit, first.transform);
+          const view = await this._readTable(this.ctxs.dir(job.contextId), job.table, first.limit, { stages: first.stages, columns: this._storedColumns(job.contextId, job.table, id, cols) });
           if (view.ok === false) return { task_id: id, ...view };
           out = { task_id: id, tool, context_id: job.contextId, ...view, status: 'done', display: d, drill_source: { task_id: id } };
         } else out = { ...result, ...(d ? { display: d } : {}) };
@@ -359,8 +402,8 @@ export const taskResultMethods = {
   /**
    * THE CARD'S READ OF ITS OWN RESULT (visible to the view only, never to the model): one view of a
    * drill-down — the task's stored table filtered to the path taken and grouped by the level chosen,
-   * built by the view model's one definition of a view (pivotTransform / drillView). Only a task
-   * that was drawn, and only its table.
+   * built by the view model's one definition of a view (pivotStages / drillView) and read in the
+   * pipeline's own stages. Only a task that was drawn, and only its table.
    */
   async drill_result(input) {
     this._validate('drill_result', input);
@@ -372,7 +415,12 @@ export const taskResultMethods = {
       return { ok: false, task_id: job.id, status: 'error', error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone)` } };
     }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-    const out = await this._readTable(this.ctxs.dir(job.contextId), job.table, input.limit ?? (job.display?.kind === 'pivot' ? PIVOT_LEVEL_ROWS : DRILL_ROWS), drillRead(job, input));
+    // the display the card was drawn with, as this version spells it (a card outlives a restart)
+    const display = currentDisplay(job.display);
+    const stages = drillRead(job, display, input);
+    // a view touches the columns the display names, which the draw checked against the result
+    const columns = this._storedColumns(job.contextId, job.table, job.id, displayColumns(display));
+    const out = await this._readTable(this.ctxs.dir(job.contextId), job.table, input.limit ?? (display.kind === 'pivot' ? PIVOT_LEVEL_ROWS : DRILL_ROWS), { stages, columns });
     return { task_id: job.id, ...out };
   },
 };
@@ -397,24 +445,23 @@ function pageAround(held, offset) {
 }
 
 /**
- * The read of one view of a drawn card: the path taken and the level opened, made into the view by the
- * view model's one definition of it (pivotTransform / drillView) over the display the card was DRAWN
- * with — so a card reads only the views of what it drew, along the levels it declared.
+ * The read of one view of a drawn card, as stages: the path taken and the level opened, made into the
+ * view by the view model's one definition of it (pivotStages / drillView) over the display `d` the card
+ * was DRAWN with — so a card reads only the views of what it drew, along the levels it declared.
  */
-function drillRead(job, input) {
-  const d = job.display;
+function drillRead(job, d, input) {
   const path = input.path || [];
   if (!d) throw new ToolError(`task ${job.id} was drawn before its card's display was kept — draw a new query to drill into it`, { stage: 'validate', field: 'task_id' });
   if (d.kind === 'pivot') {
     if (input.level !== undefined || input.mode !== undefined) throw new ToolError('a pivot opens the next level of the row taken: give its path alone', { stage: 'validate', field: 'level' });
     if (path.length >= d.levels.length) throw new ToolError(`the pivot has ${d.levels.length} level(s): a path of ${path.length} opens none`, { stage: 'validate', field: 'path' });
     path.forEach((p, i) => { if (p.column !== d.levels[i].column) throw new ToolError(`path[${i}]: the pivot's level ${i + 1} is '${d.levels[i].column}', not '${p.column}'`, { stage: 'validate', field: 'path' }); });
-    return pivotTransform(d, path.map((p) => p.value));
+    return pivotStages(d, path.map((p) => p.value));
   }
   const levels = (d.drill?.levels || []).map((l) => l.column);
   if (!levels.length) throw new ToolError(`task ${job.id}'s card was drawn without a drill-down`, { stage: 'validate', field: 'task_id' });
   const along = new Set([d.x, d.series_column, d.label_column, ...levels].filter(Boolean));
   for (const p of path) if (!along.has(p.column)) throw new ToolError(`path: '${p.column}' is not a column this card was drawn or drills along (${[...along].join(', ')})`, { stage: 'validate', field: 'path' });
   if (input.level !== undefined && !levels.includes(input.level)) throw new ToolError(`level: '${input.level}' is not one of the card's drill levels (${levels.join(', ')})`, { stage: 'validate', field: 'level' });
-  return drillView(d, path, input.level !== undefined ? { level: { column: input.level }, mode: input.mode || 'breakdown' } : null).transform;
+  return drillView(d, path, input.level !== undefined ? { level: { column: input.level }, mode: input.mode || 'breakdown' } : null).stages;
 }

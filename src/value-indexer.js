@@ -5,7 +5,7 @@
 
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
-import { comparison } from './conditions.js';
+import { conditionListSql } from './pipeline/compute.js';
 
 const DAY_MS = 86400000;
 
@@ -300,7 +300,7 @@ export class BackgroundIndexer {
   _partitionSince(source, ms) {
     if (!source) throw new Error('value index: a bounded scan needs the source it reads, for its partitions');
     const conditions = partitionConditions(this.catalog.getModel(source), { start: new Date(ms).toISOString().slice(0, 10) });
-    return conditions.map((c) => comparison(c.column, c.op, c.value)).join(' AND ');
+    return conditions.length ? conditionListSql(getDialect(this.catalog.dialect), null, conditions, 'partition').join(' AND ') : '';
   }
 
   /** Top-N values for ONE property via an exact GROUP BY (the per-property fallback path). */

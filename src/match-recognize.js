@@ -7,7 +7,9 @@
 // reached (reached_<step>) and when (at_<step>), and each `capture` — the value
 // a column held at a step. What is computed FROM them — a conversion, the time
 // between two steps — is the stages after it (compute date_diff, aggregate).
-// A step is an event + conditions in the one condition grammar every where takes.
+// A step is an event + conditions, each an expression of the one grammar every
+// where takes (src/pipeline/compute.js) — over the columns here and the source's
+// event properties ({ property }).
 //
 // BigQuery specifics honored: one-row-per-match (no ONE ROW PER MATCH / AFTER
 // MATCH SKIP keywords), nested PATTERN enforces step order, GAP = any non-step
@@ -16,18 +18,13 @@
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
-import { comparison, typedAs, conditionsSql, eachCondition } from './conditions.js';
-import { strEnum } from './schema-kit.js';
-import { condPred, CONDITIONS, partitionItem, partitionColumn } from './pipeline/sql.js';
+import { comparison } from './conditions.js';
+import { strEnum, conditionSlot } from './schema-kit.js';
+import { partitionItem, partitionColumn } from './pipeline/sql.js';
+import { conditionListSql, eachNode } from './pipeline/compute.js';
+import { currentConditions } from './earlier-spelling.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
-
-/** A step's or the prefilter's comparison, its constants written in the type of what they are
- *  compared with (src/conditions.js: a flag spelled "true" is TRUE, a number spelled "5" is 5). */
-const comparePred = (lhs, op, value, type = null, name = lhs) => comparison(lhs, op, value, { lit: typedAs(type, name) });
-
-/** The type of a model column, as the catalog declares it. */
-const columnType = (catalog, source, name) => catalog.modelColumns(source).find((x) => x.name === name)?.type || null;
 
 /** Step/prefilter event names, normalized to the SOURCE fact's physical values. A
  *  row-pattern match scans ONE table, so an event of another fact cannot participate. */
@@ -43,10 +40,19 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   const evCol = d.quoteIdent(m.event_name.column);
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
-  // the one condition grammar of every where: a column of the rows here, or an expression (an event
-  // property read with event_property) — compared in its own type
-  const props = conditionsSql(step.where, (c) => condPred(d, prepCols, c, { windows: false, catalog, source }));
+  // the one grammar of every where: conditions over the columns of the rows here and the source's event
+  // properties, each compared in its own type
+  const props = !step.where?.length ? [] : conditionListSql(d, prepCols, step.where, `step '${step.name || 'unnamed'}' where`, { catalog, source }).map((x) => `(${x})`);
   return [ev, ...props].join(' AND ');
+}
+
+/**
+ * A kept draft's prefilter conditions in this version's grammar: each named a `property` — an event
+ * property of the source when it has one, else one of its columns, as the earlier build read it.
+ */
+function prefilterConditions(catalog, source, where) {
+  const props = catalog.getModel(source).properties || {};
+  return currentConditions(where || [], { subject: (name) => (props[name] ? 'property' : 'column') });
 }
 
 /**
@@ -61,28 +67,22 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
  * and a payload property is rendered by `catalog.propertyExpr`, which has no qualifier of its own —
  * so a qualifier here would reach half the clauses and silently skip the rest.
  */
-export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = null } = {}) {
+export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = null, cols = null } = {}) {
   const f = spec.filter;
   if (!f) return '';
   const m = catalog.getModel(source);
-  const evNameCol = m.event_name.column;
-  const clauses = [];
+  const d = getDialect(dialect);
   // the window by the one rule every stage applies (a timezone's wall-clock bounds, the whole last day
-  // of a date-only end), and the partition column only where the scanned relation still carries it
+  // of a date-only end), and the partition column only where the scanned relation still carries it;
+  // the events and the conditions as a where writes them, over the columns the scanned relation has
   if (f.time_range?.timezone && !isValidTimezone(f.time_range.timezone)) throw new Error(`filter.time_range: unknown timezone '${f.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`);
-  for (const c of timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []) clauses.push(comparePred(c.column, c.op, c.value));
-  if (f.event_name?.length) clauses.push(comparison(evNameCol, 'in', factEventNames(catalog, source, f.event_name)));
-  const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
-  clauses.push(...conditionsSql(f.where, (c) => {
-    const p = (m.properties || {})[c.property];
-    if (!p) {
-      // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value, columnType(catalog, source, c.property));
-      throw new Error(`unknown event property or column in filter.where: ${c.property}`);
-    }
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value, p.type, c.property);
-  }));
-  return clauses.join(' AND ');
+  const names = f.event_name?.length ? factEventNames(catalog, source, f.event_name) : [];
+  const conditions = [
+    ...(timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []),
+    ...(names.length ? [{ fn: 'in', args: [{ column: m.event_name.column }, ...names.map((v) => ({ value: v }))] }] : []),
+    ...prefilterConditions(catalog, source, f.where),
+  ];
+  return conditions.length ? conditionListSql(d, cols, conditions, 'filter', { catalog, source }).map((x) => `(${x})`).join(' AND ') : '';
 }
 
 /**
@@ -99,11 +99,10 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
   want(m.event_name?.column, 'the event name');
   want(spec.order_by || m.time?.column, 'the sequence order');
-  // (a step's own conditions name columns of the rows here, checked as they are written; a kept
-  // draft's prefilter names properties, whose backing column must be here)
-  eachCondition(spec.filter?.where, (c) => {
-    if (availableCols.has(c.property)) return;
-    if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
+  // (a step's own conditions are checked as they are written; a kept draft's prefilter names
+  // properties, whose backing column must be here)
+  eachNode(prefilterConditions(catalog, source, spec.filter?.where), (n) => {
+    if (n.fn === undefined && n.property !== undefined) want(catalog.propertyBackingColumn(source, n.property), `property '${n.property}'`);
   });
   const missing = [...need].filter(([col]) => !availableCols.has(col));
   if (!missing.length) return;
@@ -179,7 +178,7 @@ function resolve(catalog, spec, dialect, availableCols, source) {
     if (names.has(c.name)) throw new Error(`capture '${c.name}': the funnel already outputs a column of that name — name it otherwise`);
     if (working.has(c.name)) throw new Error(`capture '${c.name}': the funnel uses that name for a working column of its own — name it otherwise`);
     names.add(c.name);
-    if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage (event_property)`);
+    if (!prepCols.has(c.column)) throw new Error(`capture '${c.name}': '${c.column}' is not a column at this stage (available: ${[...prepCols.keys()].join(', ')}) — an event property is read into a column first, with a compute stage ({ property })`);
     // a copy of a column is stored as that column is (its `physical` mark: a boolean is compared with a text flag as text)
     const from = prepCols.get(c.column);
     propCaptures.push({ id: c.name, idx: stepIdx(c.step, `capture '${c.name}'`), property: c.column, type: from?.type || 'unknown', physical: !!from?.physical, isColumn: true });
@@ -343,7 +342,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => q(c.id)),
   ];
-  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact, { partitionCol: r.partitionCol });
+  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact, { partitionCol: r.partitionCol, cols: r.prepCols });
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
@@ -392,7 +391,7 @@ function matchRecognizeSchema(catalog) {
     properties: {
       name: { type: 'string', pattern: NAME, description: 'Step name — its output columns are reached_<name> and at_<name> (default s1, s2, …).' },
       event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, of the pipeline\'s own source (a funnel scans one table).' },
-      where: CONDITIONS('Conditions the step\'s row meets as well — on columns here, or an event property ({ left: { fn: "event_property", property }, op, value }).'),
+      where: conditionSlot('#/$defs/expr', 'Conditions the step\'s row meets as well, all of them — on columns here or an event property: { fn: "eq", args: [{ property: "step_id" }, { value: "step_1" }] }.'),
     },
   };
   const capture = {
@@ -405,7 +404,7 @@ function matchRecognizeSchema(catalog) {
   };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (aggregate count_if-style measures with `where`, compute date_diff). Filter the events before it with a where stage.',
+    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (an aggregate counting where a step was reached — { fn: "count", where: [{ column: "reached_<step>" }] } — and compute date_diff). Filter the events before it with a where stage.',
     properties: {
       stage: { enum: ['match_recognize'] },
       partition_by: {
@@ -439,7 +438,7 @@ registerStage('match_recognize', {
         // which its dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
-          const pre = buildPrefilter(catalog, spec, dn, r.fact, { partitionCol: r.partitionCol });
+          const pre = buildPrefilter(catalog, spec, dn, r.fact, { partitionCol: r.partitionCol, cols: r.prepCols });
           return matchStepCte(r, pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev, catalog, dn);
         },
       },

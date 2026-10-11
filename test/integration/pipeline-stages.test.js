@@ -85,9 +85,9 @@ const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_
 test('pipeline unnest: explode words_selected (JSON-string array) and count per word', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-    { stage: 'unnest', property: 'words_selected_of_event_data', name: 'word' },
-    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
+    { stage: 'unnest', expr: { property: 'words_selected_of_event_data' }, name: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
     { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -104,10 +104,10 @@ test('pipeline unnest: explode words_selected (JSON-string array) and count per 
 test('pipeline json_parse_array + unnest: parse a flat JSON-string column then explode', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
     { stage: 'compute', name: 'words_arr', expr: { fn: 'json_parse_array', args: [{ column: 'words_selected_of_event_data' }] } },
-    { stage: 'unnest', column: 'words_arr', name: 'word' },
-    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'unnest', expr: { column: 'words_arr' }, name: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.word), num(x.n)]));
@@ -119,11 +119,11 @@ test('pipeline json_parse_array + unnest: parse a flat JSON-string column then e
 test('pipeline array_last / element_at: last & first word per completed level', opts, async (t) => {
   if (skip(t)) return;
   const stages = (pick) => [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
     { stage: 'compute', name: 'wa', expr: { fn: 'json_parse_array', args: [{ column: 'words_selected_of_event_data' }] } },
     pick,
-    { stage: 'where', conditions: [{ column: 'w', op: 'is_not_null' }] },
-    { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'w' }] }] },
+    { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ];
   const last = await show(stages({ stage: 'compute', name: 'w', expr: { fn: 'array_last', args: [{ column: 'wa' }] } }));
   assert.equal(last.ok, true, JSON.stringify(last));
@@ -138,9 +138,9 @@ test('pipeline array_last / element_at: last & first word per completed level', 
 test('pipeline raw: a verbatim SQL expression is evaluated', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
     { stage: 'compute', name: 'ev', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } },
-    { stage: 'aggregate', group_by: ['ev'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['ev'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.rows.length, 1);
@@ -153,28 +153,28 @@ test('pipeline where starts_with / contains: iap_purchase_* events', opts, async
   const agg = async (cond) => {
     const r = await show([
       { stage: 'where', conditions: [cond] },
-      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
     ]);
     assert.equal(r.ok, true, JSON.stringify(r));
     return Object.fromEntries(r.rows.map((x) => [String(x.event_name), num(x.n)]));
   };
-  const byPrefix = await agg({ column: 'event_name', op: 'starts_with', value: 'iap_purchase_' });
+  const byPrefix = await agg({ fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'iap_purchase_' }] });
   assert.deepEqual(byPrefix, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
-  const byContains = await agg({ column: 'event_name', op: 'contains', value: 'purchase' });
+  const byContains = await agg({ fn: 'contains', args: [{ column: 'event_name' }, { value: 'purchase' }] });
   assert.deepEqual(byContains, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
 });
 
 // pivot: each listed value of `on` a column of its own, holding the measure over that value's rows —
 // the aggregate stage's conditional measures, so a count counts rows (not cells) on every warehouse
 const IAP_BY_COUNTRY = [
-  { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-  { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+  { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+  { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
   { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
 ];
 const COUNTRIES = [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }];
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await show([...IAP_BY_COUNTRY, { stage: 'pivot', group_by: [], on: 'country', measure: { agg: 'sum', column: 'price' }, values: COUNTRIES }]);
+  const r = await show([...IAP_BY_COUNTRY, { stage: 'pivot', group_by: [], on: 'country', measure: { fn: 'sum', args: [{ column: 'price' }] }, values: COUNTRIES }]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(r.rows.length, 1);            // one pivoted row
   const row = r.rows[0];
@@ -183,17 +183,24 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   assert.equal(num(row.br), 25);
 });
 
-test('pipeline pivot: a count per cell is the rows of that value — the aggregate stage\'s count by country, 8 in all', opts, async (t) => {
+test('pipeline pivot: a count per cell is the rows of that value — the aggregate stage\'s count by country, 8 in all; a formula per cell is the grouped formula', opts, async (t) => {
   if (skip(t)) return;
-  const grouped = await show([...IAP_BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }, { name: 'payers', agg: 'count_distinct', column: 'player_id_of_internal' }] }]);
-  const pivoted = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { agg: 'count' }, values: COUNTRIES }]);
-  const payers = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { agg: 'count_distinct', column: 'player_id_of_internal' }, values: COUNTRIES }]);
-  assert.equal(grouped.ok && pivoted.ok && payers.ok, true, JSON.stringify([grouped, pivoted, payers].find((x) => !x.ok)));
+  const sum = { fn: 'sum', args: [{ column: 'price' }] };
+  const payersOf = { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] };
+  const grouped = await show([...IAP_BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'payers', expr: payersOf }, { name: 'revenue', expr: sum }] }]);
+  const pivoted = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { fn: 'count' }, values: COUNTRIES }]);
+  const payers = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: payersOf, values: COUNTRIES }]);
+  // a formula over aggregates in each cell — revenue per payer: the cell's value is added to the where
+  // of BOTH aggregates in it, so each country's cell is its own revenue over its own payers
+  const arppu = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { fn: 'div', args: [sum, payersOf] }, values: COUNTRIES }]);
+  assert.equal(grouped.ok && pivoted.ok && payers.ok && arppu.ok, true, JSON.stringify([grouped, pivoted, payers, arppu].find((x) => !x.ok)));
   const by = Object.fromEntries(grouped.rows.map((x) => [String(x.country), x]));
   for (const { value, name } of COUNTRIES) {
     assert.equal(num(pivoted.rows[0][name]), num(by[value].n), `${value}: rows`);
     assert.equal(num(payers.rows[0][name]), num(by[value].payers), `${value}: payers`);
+    assert.ok(Math.abs(num(arppu.rows[0][name]) - num(by[value].revenue) / num(by[value].payers)) < 1e-9, `${value}: revenue per payer ${arppu.rows[0][name]}`);
   }
+  assert.equal(num(by.US.revenue), 35, 'the US revenue the US cell divides');
   assert.equal(COUNTRIES.reduce((a, c) => a + num(pivoted.rows[0][c.name]), 0), 8); // the 8 purchases, one cell each
   assert.ok(COUNTRIES.some((c) => num(pivoted.rows[0][c.name]) > 1), 'a cell holds more than one row — a count of cells would read 1');
 });
@@ -201,9 +208,9 @@ test('pipeline pivot: a count per cell is the rows of that value — the aggrega
 test('pipeline pivot: a numeric column pivots by number, a missing value is a column too, per group', opts, async (t) => {
   if (skip(t)) return;
   // the session number of every event, per event name: sessions 1 and 2 as numbers, and the rows with none
-  const base = [{ stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['first_launch', 'new_session'] }] }];
-  const grouped = await show([...base, { stage: 'aggregate', group_by: ['event_name', 'session_number'], measures: [{ name: 'n', agg: 'count' }] }]);
-  const pivoted = await show([...base, { stage: 'pivot', group_by: ['event_name'], on: 'session_number', measure: { agg: 'count' }, values: [{ value: 1, name: 's1' }, { value: 2, name: 's2' }, { value: null, name: 'none' }] }]);
+  const base = [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'first_launch' }, { value: 'new_session' }] }] }];
+  const grouped = await show([...base, { stage: 'aggregate', group_by: ['event_name', 'session_number'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
+  const pivoted = await show([...base, { stage: 'pivot', group_by: ['event_name'], on: 'session_number', measure: { fn: 'count' }, values: [{ value: 1, name: 's1' }, { value: 2, name: 's2' }, { value: null, name: 'none' }] }]);
   assert.equal(grouped.ok && pivoted.ok, true, JSON.stringify([grouped, pivoted].find((x) => !x.ok)));
   const cell = (ev, s) => num(grouped.rows.find((x) => String(x.event_name) === ev && (s === null ? x.session_number == null : num(x.session_number) === s))?.n ?? 0);
   assert.equal(pivoted.rows.length, 2);
@@ -218,31 +225,48 @@ test('pipeline pivot: a numeric column pivots by number, a missing value is a co
 
 // ONE ungrouped aggregate over the 8 IAP prices [5,5,5,10,10,10,20,20] carries what were four
 // tests: the statistical aggregates, compute arithmetic, a constant column, and approx_count_distinct
-// (HLL++: BigQuery APPROX_COUNT_DISTINCT; DuckDB exact).
-test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7', opts, async (t) => {
+// (HLL++: BigQuery APPROX_COUNT_DISTINCT; DuckDB exact) — and, as measures of the same stage, a
+// formula over two aggregates (revenue per payer) and counts with a condition each: a comparison, a
+// membership of three members, and a range whose value and bound are both expressions.
+const IAP_PRICES = [5, 5, 5, 10, 10, 10, 20, 20];
+test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7, ARPPU 85/7 and conditional counts', opts, async (t) => {
   if (skip(t)) return;
+  const price = { column: 'price' };
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     // compute: scalar arithmetic over a derived column
     { stage: 'compute', name: 'double_price', expr: { fn: 'mul', args: [{ column: 'price' }, { value: 2 }] } },
     // compute const: a literal numeric column
     { stage: 'compute', name: 'one', expr: { value: 1 } },
     { stage: 'aggregate', group_by: [], measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'med', agg: 'median', column: 'price' },
-      { name: 'sd', agg: 'stddev', column: 'price' },
-      { name: 'p90', agg: 'percentile', column: 'price', percentile: 0.9 },
-      { name: 'p25', agg: 'percentile', column: 'price', percentile: 0.25 },
-      { name: 'd', agg: 'sum', column: 'double_price' },
-      { name: 's', agg: 'sum', column: 'price' },
-      { name: 'rows', agg: 'sum', column: 'one' },
-      { name: 'payers', agg: 'approx_count_distinct', column: 'player_id_of_internal' },
-      { name: 'exact', agg: 'count_distinct', column: 'player_id_of_internal' },
+      { name: 'n', expr: { fn: 'count' } },
+      { name: 'med', expr: { fn: 'median', args: [{ column: 'price' }] } },
+      { name: 'sd', expr: { fn: 'stddev', args: [{ column: 'price' }] } },
+      { name: 'p90', expr: { fn: 'percentile', args: [{ column: 'price' }], percentile: 0.9 } },
+      { name: 'p25', expr: { fn: 'percentile', args: [{ column: 'price' }], percentile: 0.25 } },
+      { name: 'd', expr: { fn: 'sum', args: [{ column: 'double_price' }] } },
+      { name: 's', expr: { fn: 'sum', args: [{ column: 'price' }] } },
+      { name: 'rows', expr: { fn: 'sum', args: [{ column: 'one' }] } },
+      { name: 'payers', expr: { fn: 'approx_count_distinct', args: [{ column: 'player_id_of_internal' }] } },
+      { name: 'exact', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } },
+      // revenue per payer: a formula over two aggregates, in one measure
+      { name: 'arppu', expr: { fn: 'div', args: [{ fn: 'sum', args: [price] }, { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] }] } },
+      // the rows a condition holds for, counted
+      { name: 'over_10', expr: { fn: 'count', where: [{ fn: 'gt', args: [price, { value: 10 }] }] } },
+      { name: 'listed', expr: { fn: 'count', where: [{ fn: 'in', args: [price, { value: 5 }, { value: 20 }, { value: 7 }] }] } },
+      // price*2 between 15 and price+15: the prices from 7.5 to 15
+      { name: 'mid', expr: { fn: 'count', where: [{ fn: 'between', args: [{ fn: 'mul', args: [price, { value: 2 }] }, { value: 15 }, { fn: 'add', args: [price, { value: 15 }] }] }] } },
     ] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const row = r.rows[0];
+  // the formula and the conditional counts, against the 8 prices
+  assert.ok(Math.abs(num(row.arppu) - 85 / 7) < 1e-9, `[formula measure] revenue per payer 85/7, got ${row.arppu}`);
+  assert.equal(num(row.over_10), IAP_PRICES.filter((p) => p > 10).length, '[conditional count] price > 10: the two 20s');
+  assert.equal(num(row.listed), IAP_PRICES.filter((p) => [5, 20, 7].includes(p)).length, '[in, three members] 5, 20 or 7: three 5s and two 20s');
+  assert.equal(num(row.mid), IAP_PRICES.filter((p) => 2 * p >= 15 && 2 * p <= p + 15).length, '[between over expressions] the three 10s');
+  assert.equal(num(row.mid), 3, '[between over expressions] the three 10s');
   // 'pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5'
   assert.equal(num(row.n), 8, '[statistical aggregates] n');
   assert.equal(num(row.med), 10, '[statistical aggregates] median');
@@ -287,10 +311,10 @@ test('pipeline elapsed_days: 24h buckets (25h=1, 47h59m=1, 48h=2, negative→0)'
 test('pipeline compute window: row_number per user → exactly 1 user has a 2nd purchase (u1)', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'compute', name: 'pseq', expr: { fn: 'row_number', over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time', direction: 'asc' }] } } },
-    { stage: 'where', conditions: [{ column: 'pseq', op: 'eq', value: 2 }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'repeat_buyers', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'pseq' }, { value: 2 }] }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'repeat_buyers', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].repeat_buyers), 1); // only u1 purchased twice
@@ -300,10 +324,10 @@ test('pipeline compute window: row_number per user → exactly 1 user has a 2nd 
 test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'compute', name: 'tier', expr: { fn: 'case', cases: [{ when: [{ column: 'price', op: 'lt', value: 10 }], then: { value: 'low' } }], else: { value: 'high' } } },
-    { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'tier', expr: { fn: 'case', cases: [{ when: [{ fn: 'lt', args: [{ column: 'price' }, { value: 10 }] }], then: { value: 'low' } }], else: { value: 'high' } } },
+    { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.tier), num(x.n)]));
@@ -315,17 +339,17 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
 test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset', opts, async (t) => {
   if (skip(t)) return;
   const full = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'sample', share: 1 },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(full.ok, true, JSON.stringify(full));
   assert.equal(num(full.rows[0].n), 8); // 100% keeps every row (random() < 1.0 always true)
 
   const part = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'sample', share: 0.1 },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(part.ok, true, JSON.stringify(part));
   const n = num(part.rows[0].n);
@@ -336,13 +360,13 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
 test('pipeline where operands: price>=10 (a constant) and device_time<now → 5 rows summing 70', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'where', conditions: [
-      { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' },
-      { column: 'price', op: 'gte', value: 10 }, // column vs constant
-      { column: 'device_time', op: 'lt', right: { now: true } }, // column vs now
+      { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] },
+      { fn: 'gte', args: [{ column: 'price' }, { value: 10 }] }, // column vs constant
+      { fn: 'lt', args: [{ column: 'device_time' }, { now: true }] }, // column vs now
     ] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }, { name: 's', agg: 'sum', column: 'price' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 's', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].n), 5); // prices >=10: 10,20,10,20,10
@@ -353,8 +377,8 @@ test('pipeline where operands: price>=10 (a constant) and device_time<now → 5 
 test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date order key)', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'player_id_of_internal' }, { value: 'u1' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'day', expr: { fn: 'unix_date', args: [{ column: 'device_time' }] } },
     { stage: 'compute', name: 'roll', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } } } },
     { stage: 'order_by', keys: [{ key: 'day', direction: 'asc' }] },
@@ -370,10 +394,10 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
 test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum = 8)', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
-    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', agg: 'hll_init', column: 'player_id_of_internal' }, { name: 'n', agg: 'count_distinct', column: 'player_id_of_internal' }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', agg: 'hll_merge', column: 'sk' }, { name: 'naive', agg: 'sum', column: 'n' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }, { name: 'n', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', expr: { fn: 'hll_merge', args: [{ column: 'sk' }] } }, { name: 'naive', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].merged), 7); // distinct buyers across products (u1 counted once)
@@ -384,10 +408,10 @@ test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum =
 test('pipeline HLL hll_merge_partial→hll_extract: staged merge then extract = 7', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
-    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', agg: 'hll_init', column: 'player_id_of_internal' }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', agg: 'hll_merge_partial', column: 'sk' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', expr: { fn: 'hll_merge_partial', args: [{ column: 'sk' }] } }] },
     { stage: 'compute', name: 'total', expr: { fn: 'hll_extract', args: [{ column: 'merged' }] } },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -400,11 +424,11 @@ test('pipeline unnest struct + json_field: reward item/qty extracted together', 
   // seed: level-1 completions grant [coin×10, gem×2]; other completions grant [coin×5].
   // Every level_completed row has a coin reward; gem only on level-1.
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-    { stage: 'unnest', property: 'rewards', name: 'rw' },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
+    { stage: 'unnest', expr: { property: 'rewards' }, name: 'rw' },
     { stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item', type: 'string' } },
     { stage: 'compute', name: 'qty', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'qty', type: 'int' } },
-    { stage: 'aggregate', group_by: ['item'], measures: [{ name: 'grants', agg: 'count' }, { name: 'total_qty', agg: 'sum', column: 'qty' }] },
+    { stage: 'aggregate', group_by: ['item'], measures: [{ name: 'grants', expr: { fn: 'count' } }, { name: 'total_qty', expr: { fn: 'sum', args: [{ column: 'qty' }] } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const grants = Object.fromEntries(r.rows.map((x) => [String(x.item), num(x.grants)]));
@@ -419,11 +443,11 @@ test('pipeline unnest struct + json_field: reward item/qty extracted together', 
 test('pipeline compute string/const: concat + upper labels group correctly (P1=3, P2=3, P3=2)', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'pid', expr: { fn: 'event_property', property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
     { stage: 'compute', name: 'label', expr: { fn: 'concat', args: [{ column: 'pid' }, { value: '_iap' }] } },
     { stage: 'compute', name: 'up', expr: { fn: 'upper', args: [{ column: 'label' }] } },
-    { stage: 'aggregate', group_by: ['up'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['up'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.up), num(x.n)]));
@@ -436,10 +460,10 @@ test('pipeline compute string/const: concat + upper labels group correctly (P1=3
 test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi)=1, count=2', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'player_id_of_internal' }, { value: 'u1' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'install_date' }] },
     { stage: 'compute', name: 'dsi', expr: { fn: 'date_diff', args: [{ column: 'install_date' }, { column: 'device_time' }], unit: 'day' } },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', agg: 'sum', column: 'dsi' }, { name: 'max_dsi', agg: 'max', column: 'dsi' }, { name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', expr: { fn: 'sum', args: [{ column: 'dsi' }] } }, { name: 'max_dsi', expr: { fn: 'max', args: [{ column: 'dsi' }] } }, { name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].n), 2);
@@ -451,9 +475,9 @@ test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi
 test('pipeline compute date_trunc: all 8 IAP purchases fall in one month bucket', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'compute', name: 'mon', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'month' } },
-    { stage: 'aggregate', group_by: ['mon'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['mon'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
     { stage: 'order_by', keys: [{ key: 'mon', direction: 'asc' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -469,14 +493,14 @@ test('pipeline date_trunc week / date_part dow, week: the ISO week (Monday 1 …
   const weeks = await show([
     { stage: 'compute', name: 'wk', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'week' } },
     { stage: 'compute', name: 'wk_start', expr: { fn: 'substring', args: [{ fn: 'cast', args: [{ column: 'wk' }], type: 'string' }], start: 1, len: 10 } },
-    { stage: 'aggregate', group_by: ['wk_start'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['wk_start'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(weeks.ok, true, JSON.stringify(weeks));
   assert.deepEqual(Object.fromEntries(weeks.rows.map((x) => [String(x.wk_start), num(x.n)])), { '2025-12-29': 141, '2026-01-05': 43 });
   const parts = await show([
     { stage: 'compute', name: 'dow', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'dow' } },
     { stage: 'compute', name: 'wk', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'week' } },
-    { stage: 'aggregate', group_by: ['dow', 'wk'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['dow', 'wk'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(parts.ok, true, JSON.stringify(parts));
   const by = Object.fromEntries(parts.rows.map((x) => [`${num(x.dow)}/${num(x.wk)}`, num(x.n)]));
@@ -490,7 +514,7 @@ test('pipeline date_diff: whole units elapsed, truncated toward zero, integers',
   if (skip(t)) return;
   const dd = (name, from, unit, to = { column: 'device_time' }) => ({ stage: 'compute', name, expr: { fn: 'date_diff', args: [{ value: from }, to], unit } });
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_id', op: 'eq', value: 'e1' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_id' }, { value: 'e1' }] }] },
     dd('h_half', '2026-01-01 07:30:00', 'hour'),       // 30 min → 0 hours (not 0.5)
     dd('h_neg', '2026-01-01 09:30:00', 'hour'),        // −1 h 30 min → −1 (toward zero, not −2)
     dd('m_secs', '2026-01-01 07:59:30', 'minute'),     // 30 s → 0 minutes
@@ -509,13 +533,13 @@ test('pipeline date_diff: whole units elapsed, truncated toward zero, integers',
 // is NULL on every event that is no level event.
 test('pipeline sort keys: NULLs last by default, first when asked — the order_by stage and a window', opts, async (t) => {
   if (skip(t)) return;
-  const scope = { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['first_launch', 'level_completed'] }] };
+  const scope = { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'first_launch' }, { value: 'level_completed' }] }] };
   const top = async (key) => {
     const r = await show([scope, { stage: 'order_by', keys: [key, { key: 'event_id' }] }, { stage: 'limit', limit: 1 }]);
     assert.equal(r.ok, true, JSON.stringify(r));
     return r.rows[0].level_id_of_event_data;
   };
-  const lowest = await show([scope, { stage: 'aggregate', group_by: [], measures: [{ name: 'lo', agg: 'min', column: 'level_id_of_event_data' }, { name: 'hi', agg: 'max', column: 'level_id_of_event_data' }] }]);
+  const lowest = await show([scope, { stage: 'aggregate', group_by: [], measures: [{ name: 'lo', expr: { fn: 'min', args: [{ column: 'level_id_of_event_data' }] } }, { name: 'hi', expr: { fn: 'max', args: [{ column: 'level_id_of_event_data' }] } }] }]);
   assert.equal(lowest.ok, true, JSON.stringify(lowest));
   assert.equal(num(await top({ key: 'level_id_of_event_data' })), num(lowest.rows[0].lo));
   assert.equal(num(await top({ key: 'level_id_of_event_data', direction: 'desc' })), num(lowest.rows[0].hi));
@@ -527,7 +551,7 @@ test('pipeline sort keys: NULLs last by default, first when asked — the order_
     { stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'rn_nulls', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data', nulls: 'first' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'seen', expr: { fn: 'count', args: [{ column: 'level_id_of_event_data' }], over: { order_by: [{ key: 'level_id_of_event_data' }, { key: 'event_id' }], frame: { mode: 'rows' } } } },
-    { stage: 'where', conditions: [{ column: 'rn', op: 'eq', value: 1 }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'rn' }, { value: 1 }] }] },
   ]);
   assert.equal(ranked.ok, true, JSON.stringify(ranked));
   assert.notEqual(ranked.rows[0].level_id_of_event_data, null);
@@ -535,7 +559,7 @@ test('pipeline sort keys: NULLs last by default, first when asked — the order_
   const nullsFirst = await show([
     scope,
     { stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { order_by: [{ key: 'level_id_of_event_data', nulls: 'first' }, { key: 'event_id' }] } } },
-    { stage: 'where', conditions: [{ column: 'rn', op: 'eq', value: 1 }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'rn' }, { value: 1 }] }] },
   ]);
   assert.equal(nullsFirst.ok, true, JSON.stringify(nullsFirst));
   assert.equal(nullsFirst.rows[0].level_id_of_event_data, null);
@@ -545,9 +569,9 @@ test('pipeline sort keys: NULLs last by default, first when asked — the order_
 test('pipeline window partition_by { entity }: the same rows as the key column', opts, async (t) => {
   if (skip(t)) return;
   const nth = (partition) => show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'compute', name: 'pseq', expr: { fn: 'row_number', over: { partition_by: [partition], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
-    { stage: 'aggregate', group_by: ['pseq'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['pseq'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   const byEntity = await nth({ entity: 'user' });
   const byColumn = await nth('player_id_of_internal');
@@ -564,10 +588,10 @@ test('pipeline window partition_by { entity }: the same rows as the key column',
 test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35; IAP revenue by country = US35 / GB25 / BR25', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_column: 'metric', value_column: 'value' },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -592,14 +616,14 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35; IAP reven
 test('pipeline unpivot: exactly keep + name/value columns, one row per value — NULL values kept', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['iap_purchase_completed', 'first_launch'] }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }, { value: 'first_launch' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
     { stage: 'compute', name: 'session', expr: { fn: 'cast', args: [{ column: 'session_number' }], type: 'numeric' } },
     { stage: 'unpivot', keep: ['event_id', 'event_name'], columns: ['price', 'session'], name_column: 'metric', value_column: 'amount' },
   ]);
   const events = await show([
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['iap_purchase_completed', 'first_launch'] }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }, { value: 'first_launch' }] }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(r.ok && events.ok, true, JSON.stringify([r, events].find((x) => !x.ok)));
   assert.deepEqual(r.columns.map((c) => c.name).sort(), ['amount', 'event_id', 'event_name', 'metric']);
@@ -621,19 +645,19 @@ test('pipeline unpivot: exactly keep + name/value columns, one row per value —
 test('a table-wide statistic is ONE row, and its numbers scale the rows as literals', opts, async (t) => {
   if (skip(t)) return;
   const perPlayer = [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
-    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
   ];
 
   // PASS 1 — one row: the count, the mean, the max. No group_by, no window.
   const stats = await show([...perPlayer, {
     stage: 'aggregate',
     measures: [
-      { name: 'players', agg: 'count' },
-      { name: 'revenue_avg', agg: 'average', column: 'revenue' },
-      { name: 'revenue_max', agg: 'max', column: 'revenue' },
-      { name: 'revenue_median', agg: 'median', column: 'revenue' },
+      { name: 'players', expr: { fn: 'count' } },
+      { name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }] } },
+      { name: 'revenue_max', expr: { fn: 'max', args: [{ column: 'revenue' }] } },
+      { name: 'revenue_median', expr: { fn: 'median', args: [{ column: 'revenue' }] } },
     ],
   }]);
   assert.equal(stats.ok, true, JSON.stringify(stats));
@@ -666,9 +690,11 @@ test('a table-wide statistic is ONE row, and its numbers scale the rows as liter
 });
 
 // ════════════ ONE CONDITION GRAMMAR (was condition-grammar.test.js) ════════════════════════════
-// ONE CONDITION GRAMMAR (src/schema-kit.js conditionList, src/conditions.js): every `where` is a list
-// of conditions that all hold, an item may be { or: [...] } (its items { and: [...] }), and every place
-// takes the same operators — the text ones included. Proven on DATA: each count below is the
+// ONE EXPRESSION GRAMMAR (src/pipeline/compute.js, src/conditions.js): every `where` is a list of
+// conditions that all hold, each a function — a comparison, in, between, a text test, or and / or / not
+// over them, nested to any depth — and every place takes the same functions, the text ones included. A
+// comparison with a missing value does not hold (neq is "present and different"); not(…) holds wherever
+// what it negates does not, a missing value included. Proven on DATA: each count below is the
 // warehouse's own count of the same rows, read with SQL written by hand in the test.
 
 /** A pipeline over the events source, materialized; its rows. */
@@ -680,64 +706,76 @@ async function condPipe(stages) {
   return { rows: built.rows, context_id: s.context_id };
 }
 
-test('a where keeps a row when any condition of an { or } holds, beside the conditions that all hold — and a text operator matches as LIKE does', opts, async (t) => {
+test('a where keeps a row when any argument of an or holds, beside the conditions that all hold — and a text operator matches as LIKE does', opts, async (t) => {
   if (skip(t)) return;
   const want = await truth("select count(*) as n from fct_analytics_events where (event_name = 'tutorial' or event_name like '%level%') and session_number <= 2");
   const { rows } = await condPipe([
-    { stage: 'where', conditions: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'contains', value: 'level' }] }, { column: 'session_number', op: 'lte', value: 2 }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'contains', args: [{ column: 'event_name' }, { value: 'level' }] }] }, { fn: 'lte', args: [{ column: 'session_number' }, { value: 2 }] }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.ok(want > 0, 'the fixture has such rows');
   assert.equal(num(rows[0].n), want);
-  // an { and } inside an { or }: tutorials of the first session, or any level event
+  // an and inside an or: tutorials of the first session, or any level event
   const both = await truth("select count(*) as n from fct_analytics_events where (event_name = 'tutorial' and session_number = 1) or event_name like 'level%'");
   const nested = await condPipe([
-    { stage: 'where', conditions: [{ or: [{ and: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'session_number', op: 'eq', value: 1 }] }, { column: 'event_name', op: 'starts_with', value: 'level' }] }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'and', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ column: 'session_number' }, { value: 1 }] }] }, { fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }] }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(num(nested.rows[0].n), both);
 });
 
 // ONE ungrouped aggregate over events carries what four tests each built a whole-table pipeline for,
 // every figure held to the warehouse's own count of the same rows (SQL written here by hand):
-//   - a CASE branch takes the same conditions: an { or } in `when` flags the rows either event names;
+//   - a CASE branch takes the same conditions: an or in `when` flags the rows either event names;
 //   - an aggregate measure takes a where of its own: a conditional count and sum beside the
 //     unconditional one, in one pass;
+//   - a missing value: neq holds only where the value is there and differs, not(eq) wherever eq does
+//     not hold — the rows with no level id too;
 //   - a text column of the warehouse compared with a boolean matches the ways text spells the flag,
 //     not run as STRING = BOOL;
 //   - a raw expression takes its columns positionally, in args: the server writes each quoted, a
 //     reserved word (`order`) too.
 // The in-call refusals of the last two (an order on a text flag; a column named in raw text, a
 // placeholder with no argument, an argument no placeholder uses) are checked on drafts after it.
-test('one ungrouped aggregate over events carrying every condition and expression form: the CASE { or } flag, conditional count/sum, text-vs-boolean yes/no, raw positional args', opts, async (t) => {
+test('one ungrouped aggregate over events carrying every condition and expression form: the CASE or flag, conditional count/sum, neq vs not(eq) on a missing value, text-vs-boolean yes/no, raw positional args', opts, async (t) => {
   if (skip(t)) return;
   const flagged = await truth("select count(*) as n from fct_analytics_events where event_name in ('tutorial', 'level_started')");
   const all = await truth('select count(*) as n from fct_analytics_events');
   const tutorials = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial' or event_name like 'level%'");
   const early = await truth('select sum(session_number) as n from fct_analytics_events where session_number <= 2');
+  const otherLevel = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data <> 1');
+  const notLevel1 = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data is distinct from 1');
+  const noLevel = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data is null');
   const filled = await truth('select count(*) as n from fct_analytics_events where bundle_id is not null');
   const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
   const doubled = await truth('select sum(session_number * 2) as n from fct_analytics_events');
+  const level1 = { fn: 'eq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] };
   const { rows } = await condPipe([
-    { stage: 'compute', name: 'flag', expr: { fn: 'case', cases: [{ when: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'eq', value: 'level_started' }] }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } },
+    { stage: 'compute', name: 'flag', expr: { fn: 'case', cases: [{ when: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } },
     { stage: 'compute', name: 'order', expr: { column: 'session_number' } },
     { stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'order' }], type: 'int' } },
     { stage: 'aggregate', measures: [
-      { name: 'flagged', agg: 'sum', column: 'flag' },
-      { name: 'n', agg: 'count' },
-      { name: 'n_tut', agg: 'count', where: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'event_name', op: 'starts_with', value: 'level' }] }] },
-      { name: 's_early', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'lte', value: 2 }] },
-      { name: 'yes', agg: 'count', where: [{ column: 'bundle_id', op: 'eq', value: true }] },
-      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
-      { name: 'twice_sum', agg: 'sum', column: 'twice' },
+      { name: 'flagged', expr: { fn: 'sum', args: [{ column: 'flag' }] } },
+      { name: 'n', expr: { fn: 'count' } },
+      { name: 'n_tut', expr: { fn: 'count', where: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }] }] } },
+      { name: 's_early', expr: { fn: 'sum', args: [{ column: 'session_number' }], where: [{ fn: 'lte', args: [{ column: 'session_number' }, { value: 2 }] }] } },
+      { name: 'neq_l1', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] }] } },
+      { name: 'not_l1', expr: { fn: 'count', where: [{ fn: 'not', args: [level1] }] } },
+      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
+      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
+      { name: 'twice_sum', expr: { fn: 'sum', args: [{ column: 'twice' }] } },
     ] },
   ]);
   const row = rows[0];
-  // 'a CASE branch takes the same conditions: an { or } in `when` flags the rows either event names'
-  assert.equal(num(row.flagged), flagged, '[CASE { or }] the flagged rows');
+  // 'a CASE branch takes the same conditions: an or in `when` flags the rows either event names'
+  assert.equal(num(row.flagged), flagged, '[CASE or] the flagged rows');
   // 'an aggregate measure takes a where of its own: a conditional count and sum beside the unconditional one, in one pass'
   assert.ok(tutorials > 0 && tutorials < all, '[measure where] the condition keeps some rows, not all');
   assert.deepEqual([num(row.n), num(row.n_tut), num(row.s_early)], [all, tutorials, early], '[measure where] count, conditional count, conditional sum');
+  // a missing level id: neq drops it, not(eq) keeps it — the two differ by exactly the rows with none
+  assert.ok(noLevel > 0 && otherLevel > 0, '[missing value] the fixture has rows with no level id, and other levels');
+  assert.deepEqual([num(row.neq_l1), num(row.not_l1)], [otherLevel, notLevel1], '[missing value] neq vs not(eq)');
+  assert.equal(num(row.not_l1) - num(row.neq_l1), noLevel, '[missing value] not(eq) keeps the rows with no level id');
   // 'a text column of the warehouse compared with a boolean matches the ways text spells the flag, not run as STRING = BOOL'
   assert.ok(filled > 0, '[text vs boolean] the fixture has the column filled');
   assert.deepEqual([num(row.yes), num(row.no)], [truthy, filled - truthy], '[text vs boolean] yes / no');
@@ -746,7 +784,7 @@ test('one ungrouped aggregate over events carrying every condition and expressio
 
   // [text vs boolean] an order compares no flag: refused as the step is added
   const flag = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: flag.context_id, stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'gt', value: false }] }] }), /text column in the warehouse/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: flag.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'bundle_id' }, { value: false }] }] }] }), /text column in the warehouse/);
   // [raw positional args] a column named in its text is refused
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
@@ -759,48 +797,54 @@ test('one ungrouped aggregate over events carrying every condition and expressio
   await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
-test('a read of a built model filters and keeps groups with the same grammar: where and having take { or }', opts, async (t) => {
+test('a read of a built model filters and keeps groups with the same grammar: a where before its aggregate and one after it take or', opts, async (t) => {
   if (skip(t)) return;
-  const { context_id } = await condPipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }]);
+  const { context_id } = await condPipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
   const want = await truth("select count(*) as n from fct_analytics_events where event_name like 'level%' or event_name = 'tutorial'");
-  const read = await engine.query_pipeline_model({ context_id, transform: { where: [{ or: [{ column: 'event_name', op: 'starts_with', value: 'level' }, { column: 'event_name', op: 'eq', value: 'tutorial' }] }], measures: [{ agg: 'sum', column: 'n', name: 'n' }] } });
+  const read = await engine.query_pipeline_model({ context_id, stages: [
+    { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
+  ] });
   assert.equal(num(read.rows[0].n), want);
-  // the names whose count is the smallest or the largest
+  // the names whose count is the smallest or the largest: a where on the measure the aggregate made
   const counts = (await wh.query('select event_name, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => num(r.n));
   const lo = Math.min(...counts); const hi = Math.max(...counts);
-  const kept = await engine.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'sum', column: 'n', name: 'n' }], having: [{ or: [{ column: 'n', op: 'eq', value: lo }, { column: 'n', op: 'eq', value: hi }] }] } });
+  const kept = await engine.query_pipeline_model({ context_id, stages: [
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
+    { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'n' }, { value: lo }] }, { fn: 'eq', args: [{ column: 'n' }, { value: hi }] }] }] },
+  ] });
   assert.equal(kept.rows.length, counts.filter((n) => n === lo || n === hi).length);
 });
 
 // One semantic build serves both sides of the governed grammar (each was a build of its own): a
 // measure's where and a metric query's where.
-test('a semantic measure\'s where and a metric query\'s where take { or } and the text operators', opts, async (t) => {
+test('a semantic measure\'s where and a metric query\'s where take or and the text operators', opts, async (t) => {
   if (skip(t)) return;
   const built = await engine.build_semantic_model({
     name: 'cond_sem',
-    semantic_models: [{ from: 'events', dimensions: [{ field: 'event_name' }], measures: [
-      { name: 'picked', agg: 'count', where: [{ or: [{ field: 'level_id_of_event_data', op: 'eq', value: 1 }, { field: 'level_id_of_event_data', op: 'gte', value: 3 }] }] },
-      { name: 'rows', agg: 'count' },
+    semantic_models: [{ from: 'events', dimensions: [{ column: 'event_name' }], measures: [
+      { name: 'picked', expr: { fn: 'count', where: [{ fn: 'or', args: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: 1 }] }, { fn: 'gte', args: [{ property: 'level_id_of_event_data' }, { value: 3 }] }] }] } },
+      { name: 'rows', expr: { fn: 'count' } },
     ] }],
     metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }, { name: 'rows', type: 'simple', measure: 'rows' }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
 
-  // 'a measure's where takes an { or }: the count is the rows either condition holds for'
+  // 'a measure's where takes an or: the count is the rows either condition holds for'
   const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   assert.ok(picked > 0, '[measure where] the fixture has such rows');
   const r = await engine.query_semantic_model({ context_id: built.context_id, metrics: ['cond_sem_picked'], time_range: { start: '2020-01-01', end: '2030-12-31' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].cond_sem_picked), picked, '[measure where] the rows either condition holds for');
 
-  // 'a metric query's where names its field as group_by does, and takes the text operators and { or } too'
+  // 'a metric query's where names what it compares as group_by does, and takes the text operators and or too'
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
   const w = await engine.query_semantic_model({
     context_id: built.context_id, metrics: ['cond_sem_rows'], time_range: { start: '2020-01-01', end: '2030-12-31' },
-    where: [{ or: [{ field: { model: 'events', attribute: 'event_name' }, op: 'contains', value: 'level' }, { field: { model: 'events', attribute: 'event_name' }, op: 'eq', value: 'tutorial' }] }],
+    where: [{ fn: 'or', args: [{ fn: 'contains', args: [{ model: 'events', attribute: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ model: 'events', attribute: 'event_name' }, { value: 'tutorial' }] }] }],
   });
   assert.equal(w.ok, true, JSON.stringify(w.error));
-  assert.equal(num(w.rows[0].cond_sem_rows), named, '[query where] the rows the { or } of text operators keeps');
+  assert.equal(num(w.rows[0].cond_sem_rows), named, '[query where] the rows the or of text operators keeps');
 });
 
 test('a time window whose bounds carry their own offset is those instants, whatever timezone is named beside them', opts, async (t) => {
@@ -811,7 +855,7 @@ test('a time window whose bounds carry their own offset is those instants, whate
   const local = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 09:00:00' and device_time <= '2026-01-04 08:59:59'");
   assert.ok(want > 0 && want < all && want !== local, 'the fixture tells the readings apart');
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.equal(num(built.rows[0].n), want);
@@ -822,22 +866,22 @@ test('a project stage drops the columns it names and keeps the rest; the next st
   const want = await truth('select count(distinct event_name) as n from fct_analytics_events');
   const { rows } = await condPipe([
     { stage: 'project', drop: ['session_number'] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(rows.length, want);
   // once session_number is dropped the next stage cannot name it — refused as the step is added
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', agg: 'sum', column: 'session_number' }] }] }), (e) => !(e instanceof assert.AssertionError));
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }] }] }), (e) => !(e instanceof assert.AssertionError));
 });
 
 test('a query over a built model computes a sample stddev, variance, median and percentile, as the warehouse does', opts, async (t) => {
   if (skip(t)) return;
   const sd = await truth('select stddev_samp(session_number) as n from fct_analytics_events');
   const vr = await truth('select var_samp(session_number) as n from fct_analytics_events');
-  const { context_id } = await condPipe([{ stage: 'where', conditions: [{ column: 'session_number', op: 'is_not_null' }] }]);
+  const { context_id } = await condPipe([{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'session_number' }] }] }]);
   const md = await truth('select quantile_cont(session_number, 0.5) as n from fct_analytics_events');
   const p9 = await truth('select quantile_cont(session_number, 0.9) as n from fct_analytics_events');
-  const read = await engine.query_pipeline_model({ context_id, transform: { measures: [{ agg: 'stddev', column: 'session_number', name: 'sd' }, { agg: 'variance', column: 'session_number', name: 'vr' }, { agg: 'median', column: 'session_number', name: 'md' }, { agg: 'percentile', percentile: 0.9, column: 'session_number', name: 'p9' }] } });
+  const read = await engine.query_pipeline_model({ context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'sd', expr: { fn: 'stddev', args: [{ column: 'session_number' }] } }, { name: 'vr', expr: { fn: 'variance', args: [{ column: 'session_number' }] } }, { name: 'md', expr: { fn: 'median', args: [{ column: 'session_number' }] } }, { name: 'p9', expr: { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 } }] }] });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
@@ -850,9 +894,13 @@ test('a query over a built model reads columns named with reserved words (order,
   const want = await truth("select count(*) as n from fct_analytics_events where event_name = 'tutorial'");
   const { context_id } = await condPipe([
     { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
-    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
   ]);
-  const read = await engine.query_pipeline_model({ context_id, transform: { where: [{ column: 'group', op: 'eq', value: 'tutorial' }], group_by: ['group'], measures: [{ agg: 'sum', column: 'order', name: 'select' }], order_by: [{ key: 'select', direction: 'desc' }] } });
+  const read = await engine.query_pipeline_model({ context_id, stages: [
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'group' }, { value: 'tutorial' }] }] },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'select', expr: { fn: 'sum', args: [{ column: 'order' }] } }] },
+    { stage: 'order_by', keys: [{ key: 'select', direction: 'desc' }] },
+  ] });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.deepEqual(read.rows.map((r) => [r.group, num(r.select)]), [['tutorial', want]]);
 });
@@ -863,12 +911,12 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
   const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
   const counts = [
     { stage: 'aggregate', measures: [
-      { name: 'yes', agg: 'count', where: [{ left: { value: true }, op: 'eq', right: { column: 'bundle_id' } }] },
-      { name: 'no', agg: 'count', where: [{ column: 'bundle_id', op: 'neq', value: true }] },
+      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ value: true }, { column: 'bundle_id' }] }] } },
+      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
     ] },
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', stages: [{ stage: 'where', conditions: [{ column: 'bundle_id', op: 'is_not_null' }] }] });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'bundle_id' }] }] }] });
   const prefix = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(prefix.build?.ok, true, JSON.stringify(prefix.error || prefix.build));
   const added = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: counts });
@@ -891,8 +939,8 @@ test('a joined text column, under the name the join gave it, is compared with a 
   const { rows } = await condPipe([
     { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'activity_test' }] },
     { stage: 'aggregate', measures: [
-      { name: 'yes', agg: 'count', where: [{ column: 'activity_test', op: 'eq', value: true }] },
-      { name: 'no', agg: 'count', where: [{ column: 'activity_test', op: 'neq', value: true }] },
+      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'activity_test' }, { value: true }] }] } },
+      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'activity_test' }, { value: true }] }] } },
     ] },
   ]);
   assert.ok(all > 0, 'the fixture joins users to events');
@@ -903,8 +951,8 @@ test('preview with validate runs the draft\'s SQL against the warehouse with no 
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] });
   const good = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
   assert.equal(good.ok, true, JSON.stringify(good.error));
@@ -923,12 +971,12 @@ test('a time column compared with an expression that yields a moment keeps the r
   const all = await truth('select count(*) as n from fct_analytics_events');
   assert.ok(want > 0 && want < all, 'the bound keeps some rows, not all');
   const { rows } = await condPipe([
-    { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', right: { fn: 'raw', sql: "DATE '2026-01-03'" } }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { fn: 'raw', sql: "DATE '2026-01-03'" }] }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(num(rows[0].n), want);
   const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'device_time', op: 'gte', right: { fn: 'length', args: [{ column: 'event_name' }] } }] }] }), /is a moment/);
+  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { fn: 'length', args: [{ column: 'event_name' }] }] }] }] }), /is a moment/);
 });
 
 // ════════════ FUNNELS: match_recognize (was match-recognize.test.js) ═══════════════════════════
@@ -958,9 +1006,9 @@ const activation = () => (activationBuild ||= mrPipe([matchActivation()]));
 // The canonical 4-step activation funnel as a single match_recognize stage.
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ column: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_1' }] }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_2' }] }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ column: 'element_of_event_data' }, { value: 'step_3' }] }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps, ...extra });
 
@@ -977,8 +1025,8 @@ test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', op
   if (skip(t)) return;
   const count = async (time_range) => {
     const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: mrCtx, pipeline: { source: 'events', time_range, stages: [
-      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
     ] } });
     assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
     mrCtx = out.context_id;
@@ -995,7 +1043,7 @@ test('time_range with a timezone keeps the events on the other UTC day of a part
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `tr_${seq++}`, context_id: mrCtx, pipeline: { source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' }, stages: [
     { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   mrCtx = out.context_id;
@@ -1012,11 +1060,11 @@ test('a where on the time axis, alone or before a funnel, reads the same rows wi
   const declared = model.partition_column;
   const rowsOf = async (stages) => (await mrPipe(stages)).rows.map((r) => JSON.stringify(r)).sort();
   const byDay = [
-    { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 10:00:00' }, { column: 'device_time', op: 'lt', value: '2026-01-02 10:00:00' }] },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01 10:00:00' }] }, { fn: 'lt', args: [{ column: 'device_time' }, { value: '2026-01-02 10:00:00' }] }] },
     { stage: 'compute', name: 'utc_day', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } },
-    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ];
-  const funnel = [{ stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 09:30:00' }, { column: 'device_time', op: 'lt', value: '2026-01-03' }] }, matchActivation({ steps: activationSteps.slice(0, 2) })];
+  const funnel = [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01 09:30:00' }] }, { fn: 'lt', args: [{ column: 'device_time' }, { value: '2026-01-03' }] }] }, matchActivation({ steps: activationSteps.slice(0, 2) })];
   const pruned = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
   let plain;
   try {
@@ -1081,7 +1129,7 @@ test('match_recognize between_steps: explicit "any" equals the default; "gap" is
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
 test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
   if (skip(t)) return;
-  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] }];
+  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }];
   const wide = await engine._buildPipeline({ dry_run: true, name: 'est_wide', pipeline: { source: 'events', stages } });
   const narrow = await engine._buildPipeline({ dry_run: true, name: 'est_narrow', pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
   assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
@@ -1100,7 +1148,7 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 // usable in a step's where, the grammar of every where.
 test('match_recognize takes a column in a step condition', opts, async (t) => {
   if (skip(t)) return;
-  const colCond = { column: 'session_number', op: 'gte', value: 2 };
+  const colCond = { fn: 'gte', args: [{ column: 'session_number' }, { value: 2 }] };
   const base = await activation();
   const stepFiltered = await mrPipe([matchActivation({ steps: [{ ...activationSteps[0], where: [colCond] }, ...activationSteps.slice(1)] })]);
   const truth = (await wh.query("select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'first_launch' and session_number >= 2")).rows[0];
@@ -1165,7 +1213,7 @@ test('funnel sliced + aggregated in-pipeline: aggregate count by furthest_step_n
   // semantic-model "users by furthest step".
   const out = await mrPipe([
     matchActivation(),
-    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['furthest_step_name'], measures: [{ name: 'users', expr: { fn: 'count' } }] },
     { stage: 'order_by', keys: [{ key: 'users', direction: 'desc' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.furthest_step_name), num(r.users)]));
@@ -1181,7 +1229,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await mrPipe([
     { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
-    { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }] },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps.slice(0, 2) },
   ]);
   assert.equal(reached(out.rows, 'launch'), 4); // exactly the 4 US users
@@ -1190,7 +1238,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
 
 test('a wide where before the funnel keeps all data: 12 / 8', opts, async (t) => {
   if (skip(t)) return;
-  const out = await mrPipe([{ stage: 'where', conditions: [{ column: 'device_time', op: 'between', value: ['2000-01-01', '2100-01-01'] }] }, matchActivation({ steps: activationSteps.slice(0, 2) })]);
+  const out = await mrPipe([{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'device_time' }, { value: '2000-01-01' }, { value: '2100-01-01' }] }] }, matchActivation({ steps: activationSteps.slice(0, 2) })]);
   assert.equal(reached(out.rows, 'launch'), 12);
   assert.equal(reached(out.rows, 'tut1'), 8);
 });
@@ -1203,9 +1251,9 @@ test('a funnel whose partition, order and capture columns are SQL keywords (grou
   const out = await mrPipe([
     { stage: 'compute', name: 'group', expr: { column: 'player_id_of_internal' } },
     { stage: 'compute', name: 'order', expr: { column: 'device_time' } },
-    { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', property: 'words_collected' } },
+    { stage: 'compute', name: 'n_words', expr: { fn: 'array_length', args: [{ property: 'words_collected' }] } },
     { stage: 'match_recognize', partition_by: ['group'], order_by: 'order',
-      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
+      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ fn: 'eq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] }] }],
       capture: [{ name: 'select', step: 'lvl1', column: 'n_words' }] },
   ]);
   assert.equal(out.rows.length, 12, 'one row per player');
@@ -1218,9 +1266,9 @@ test('a funnel whose partition, order and capture columns are SQL keywords (grou
 test('funnel + prepare compute (array_contains): step filtered by derived boolean reaches 12', opts, async (t) => {
   if (skip(t)) return;
   const out = await mrPipe([
-    { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } },
+    { stage: 'compute', name: 'has_cat', expr: { fn: 'array_contains', args: [{ property: 'words_collected' }, { value: 'cat' }] } },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'],
-      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ column: 'has_cat', op: 'eq', value: true }] }] },
+      steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ fn: 'eq', args: [{ column: 'has_cat' }, { value: true }] }] }] },
   ]);
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'
 });
@@ -1262,8 +1310,8 @@ test('semantic_index: overview lists models, then { source } drills into the usa
 test('pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine._buildPipeline({ name: `day_${seq++}`, context_id: mrCtx, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
-    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   mrCtx = out.context_id;
@@ -1282,10 +1330,10 @@ test('pipeline time_range: single date-only day is not collapsed to a midnight i
 // continuation. The prefix changes the grain (one row per player), so a checkpoint after it
 // carries no event columns — exactly the case worth proving.
 const CP_STEPS = [
-  { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
-  { stage: 'compute', name: 'score', expr: { fn: 'event_property', property: 'daily_level_score_of_event_data', type: 'numeric' } },
-  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', agg: 'count' }, { name: 'total_score', agg: 'sum', column: 'score' }] },
-  { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] },
+  { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
+  { stage: 'compute', name: 'score', expr: { property: 'daily_level_score_of_event_data', type: 'numeric' } },
+  { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', expr: { fn: 'count' } }, { name: 'total_score', expr: { fn: 'sum', args: [{ column: 'score' }] } }] },
+  { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 2 }] }] },
 ];
 
 const byPlayer = (rows) => Object.fromEntries(rows.map((r) => [String(r.player_id_of_internal), [num(r.levels), num(r.total_score)]]));
@@ -1321,7 +1369,7 @@ test('editing a step AFTER the prefix keeps it: the numbers still match a full r
   assert.equal(before.steps_recomputed, 1, '[continued = whole] only the step after the prefix was built');
   assert.ok(whole.result.row_count > 0, '[continued = whole] the pipeline returns rows at all');
   assert.deepEqual(byPlayer(before.rows), byPlayer(whole.result.rows), '[continued = whole] the same rows as one built in one go');
-  const edited = { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 3 }] };
+  const edited = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 3 }] }] };
   const ed = await engine.build_pipeline_model({ action: 'edit_step', context_id, index: 4, stage: edited });
   assert.equal(ed.from_checkpoint.at, 3, 'the prefix survived an edit below it');
   const after = await engine.build_pipeline_model({ action: 'materialize', context_id });
@@ -1346,7 +1394,7 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
   // [fork] a fork inherits the prefix: same numbers as an independent recompute
   const fork = await engine.build_pipeline_model({ action: 'fork', context_id, after: 3, name: 'cp_fork' });
   assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] inherits the checkpoint');
-  const tail = { stage: 'where', conditions: [{ column: 'total_score', op: 'gte', value: 1 }] };
+  const tail = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'total_score' }, { value: 1 }] }] };
   await engine.build_pipeline_model({ action: 'add_steps', context_id: fork.context_id, stages: [tail] });
   const forked = await engine.build_pipeline_model({ action: 'materialize', context_id: fork.context_id });
   assert.notEqual(forked.ok, false, JSON.stringify(forked.error));
@@ -1360,7 +1408,7 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
   await wh.query(`UPDATE main.${built.model} SET levels = 99, total_score = 4242 WHERE player_id_of_internal = '${victim}'`);
 
   // [prefix is read] the parent's continuation reads the changed row
-  const cont = await engine.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] }] });
+  const cont = await engine.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 2 }] }] }] });
   assert.equal(cont.from_checkpoint.at, 3, '[prefix is read] the continuation stands on the checkpoint');
   const out = await engine.build_pipeline_model({ action: 'materialize', context_id });
   assert.notEqual(out.ok, false, JSON.stringify(out.error));
@@ -1390,13 +1438,13 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
 // same pipeline computed in one go.
 test('a funnel and a payload read run on top of a materialized event slice, with the same numbers', opts, async (t) => {
   if (skip(t)) return;
-  const SLICE = { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['level_started', 'level_completed'] }] };
+  const SLICE = { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }, { value: 'level_completed' }] }] };
   const FUNNEL = {
     stage: 'match_recognize',
     partition_by: ['player_id_of_internal'],
     steps: [{ name: 'started', event_name: ['level_started'] }, { name: 'completed', event_name: ['level_completed'] }],
   };
-  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', agg: 'count' }] };
+  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', expr: { fn: 'count' } }] };
 
   const whole = await cpBuild('cp_fn_whole', [SLICE, FUNNEL, COUNT]);
   const split = await cpBuild('cp_fn_split', [SLICE, FUNNEL, COUNT], [1]); // the slice is the prefix
@@ -1406,9 +1454,9 @@ test('a funnel and a payload read run on top of a materialized event slice, with
   assert.ok(Object.keys(tally(whole.result)).length > 0, 'the funnel returns rows at all');
   assert.deepEqual(tally(split.result), tally(whole.result));
 
-  // The payload column survived the slice too, so an event_property read on top of the prefix reads it.
-  const wholeScore = await cpBuild('cp_pl_whole', [SLICE, CP_STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }]);
-  const splitScore = await cpBuild('cp_pl_split', [SLICE, CP_STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', agg: 'sum', column: 'score' }] }], [1]);
+  // The payload column survived the slice too, so a { property } read on top of the prefix reads it.
+  const wholeScore = await cpBuild('cp_pl_whole', [SLICE, CP_STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'score' }] } }] }]);
+  const splitScore = await cpBuild('cp_pl_split', [SLICE, CP_STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'score' }] } }] }], [1]);
   assert.equal(splitScore.result.from_checkpoint.at, 1);
   assert.equal(num(splitScore.result.rows[0].total), num(wholeScore.result.rows[0].total));
   assert.ok(num(wholeScore.result.rows[0].total) > 0, 'the payload actually carried values');
@@ -1454,8 +1502,8 @@ async function pipeRows(...stages) {
 test('1. unnest a JSON string array: 20 breadcrumbs, level_start 4 / net_retry 4 / gc_pause 3', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
-    { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
+    { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   const by = mapCol(rows, 'crumb', 'n');
   assert.deepEqual(by, { level_start: 4, ad_shown: 2, shop_open: 2, iap_start: 1, net_retry: 4, decode: 1, ui_freeze: 3, gc_pause: 3 });
@@ -1470,7 +1518,7 @@ test('1. unnest a JSON string array: 20 breadcrumbs, level_start 4 / net_retry 4
 test('2. array_length on the flattened array: 13 rows, 20 elements, longest 3', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'n_crumbs', expr: { fn: 'array_length', property: 'breadcrumbs_of_event_data' } },
+    { stage: 'compute', name: 'n_crumbs', expr: { fn: 'array_length', args: [{ property: 'breadcrumbs_of_event_data' }] } },
     { stage: 'project', keep: ['crash_id', 'n_crumbs'] },
   );
   assert.equal(rows.length, 13, 'array_length does not change the grain');
@@ -1487,7 +1535,7 @@ test('2. array_length on the flattened array: 13 rows, 20 elements, longest 3', 
 test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', property: 'breadcrumbs_of_event_data', item: 'net_retry' } },
+    { stage: 'compute', name: 'retried', expr: { fn: 'array_contains', args: [{ property: 'breadcrumbs_of_event_data' }, { value: 'net_retry' }] } },
     { stage: 'project', keep: ['crash_id', 'retried'] },
   );
   assert.equal(rows.length, 13, 'one row per report');
@@ -1505,8 +1553,8 @@ test('3. array_contains: 3 reports carry net_retry (though it occurs 4 times)', 
 test('4. unnest an array of structs by field: 16 frames over 6 files, Game.cs 5', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
-    { stage: 'aggregate', group_by: ['file'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
+    { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'file', field: 'file' },
+    { stage: 'aggregate', group_by: ['file'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   const by = mapCol(rows, 'file', 'n');
   assert.deepEqual(by, { 'Game.cs': 5, 'Engine.cs': 3, 'Shop.cs': 2, 'Ads.cs': 1, 'Net.cs': 4, 'Decode.cs': 1 });
@@ -1521,7 +1569,7 @@ test('4. unnest an array of structs by field: 16 frames over 6 files, Game.cs 5'
 test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 / 3', opts, async (t) => {
   if (skip(t)) return;
   const frames = await pipeRows(
-    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'frame' },
+    { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'frame' },
     { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
     { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } },
     { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } },
@@ -1549,7 +1597,7 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
 test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read NULL', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'depth', expr: { fn: 'array_length', property: 'stack_frames_of_event_data' } },
+    { stage: 'compute', name: 'depth', expr: { fn: 'array_length', args: [{ property: 'stack_frames_of_event_data' }] } },
     { stage: 'project', keep: ['crash_id', 'event_name', 'depth'] },
   );
   assert.equal(rows.length, 13, 'every report is still here');
@@ -1569,8 +1617,8 @@ test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read 
 test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', opts, async (t) => {
   if (skip(t)) return;
   const exploded = await pipeRows(
-    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
+    { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'file', field: 'file' },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   assert.equal(numOrNaN(exploded[0].n), 16);
   assert.equal(numOrNaN(exploded[0].crashes), 10, 'k11..k13 have no stack, so they are simply not there');
@@ -1579,11 +1627,11 @@ test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', 
 // ═══════════ C. a JSON object (not an array) ═══════════
 
 // 8. Custom keys are an OBJECT: one field read out of it becomes a groupable attribute.
-test('8. event_property with a field of a JSON object: wifi 8 / cellular 5', opts, async (t) => {
+test('8. a { property, field } read of a JSON object: wifi 8 / cellular 5', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'network', expr: { fn: 'event_property', property: 'custom_keys_of_event_data', field: 'network' } },
-    { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'compute', name: 'network', expr: { property: 'custom_keys_of_event_data', field: 'network' } },
+    { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   );
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 8, cellular: 5 });
 });
@@ -1595,11 +1643,11 @@ test('9. json_field with a cast over the object column: coins 5205, top level 31
     { stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } },
     { stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } },
     { stage: 'aggregate', measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'coins', agg: 'sum', column: 'coins' },
-      { name: 'levels', agg: 'sum', column: 'level' },
-      { name: 'top_level', agg: 'max', column: 'level' },
-      { name: 'median_level', agg: 'median', column: 'level' },
+      { name: 'n', expr: { fn: 'count' } },
+      { name: 'coins', expr: { fn: 'sum', args: [{ column: 'coins' }] } },
+      { name: 'levels', expr: { fn: 'sum', args: [{ column: 'level' }] } },
+      { name: 'top_level', expr: { fn: 'max', args: [{ column: 'level' }] } },
+      { name: 'median_level', expr: { fn: 'median', args: [{ column: 'level' }] } },
     ] },
   );
   assert.equal(numOrNaN(rows[0].n), 13);
@@ -1643,9 +1691,9 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
 test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 3 / BR 1', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
     { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   assert.deepEqual(mapCol(rows, 'country', 'n'), { GB: 10, US: 6, DE: 3, BR: 1 });
   assert.equal(sumCol(rows, 'n'), 20, 'the join added no duplicates: still 20 elements');
@@ -1658,13 +1706,13 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
 test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', property: 'stack_frames_of_event_data', name: 'file', field: 'file' },
+    { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'file', field: 'file' },
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
     { stage: 'aggregate', measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'crashes', agg: 'count_distinct', column: 'crash_id' },
-      { name: 'files', agg: 'count_distinct', column: 'file' },
-      { name: 'events', agg: 'count_distinct', column: 'event_id' },
+      { name: 'n', expr: { fn: 'count' } },
+      { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } },
+      { name: 'files', expr: { fn: 'count_distinct', args: [{ column: 'file' }] } },
+      { name: 'events', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } },
     ] },
   );
   assert.equal(numOrNaN(rows[0].n), 20);
@@ -1678,9 +1726,9 @@ test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', o
 test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellular 7', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'network', expr: { fn: 'event_property', property: 'custom_keys_of_event_data', field: 'network' } },
-    { stage: 'unnest', property: 'breadcrumbs_of_event_data', name: 'crumb', type: 'string' },
-    { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', agg: 'count' }, { name: 'crashes', agg: 'count_distinct', column: 'crash_id' }] },
+    { stage: 'compute', name: 'network', expr: { property: 'custom_keys_of_event_data', field: 'network' } },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
+    { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 13, cellular: 7 });
   assert.equal(sumCol(rows, 'n'), 20);
@@ -1741,8 +1789,8 @@ test('15. the complex properties are discoverable with their declared shape', op
 async function countWhere(name, condition, description) {
   const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
   assert.ok(s.context_id, JSON.stringify(s));
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', ...condition }] }] });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [condition] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return Number(c.rows[0].n);
@@ -1753,11 +1801,12 @@ async function countWhere(name, condition, description) {
 test('a filter value that is a Jinja expression is compared as the literal text, never evaluated', opts, async (t) => {
   if (skip(t)) return;
   const header = "{{ run_query('select 1/0') }} and an unbalanced {% if";
-  assert.equal(await countWhere('jinja_plain', { op: 'eq', value: 'first_launch' }, header), 12,
+  const event = { column: 'event_name' };
+  assert.equal(await countWhere('jinja_plain', { fn: 'eq', args: [event, { value: 'first_launch' }] }, header), 12,
     '[the control, declared with a Jinja header] 12 first_launch events: the header neither ran nor broke the build');
   // evaluated, the first value would have matched the same 12; read as Jinja, the second (an
   // unbalanced opener) would have failed compilation
-  assert.equal(await countWhere('jinja_expr', { op: 'in', value: ['{{ "first_launch" }}', 'a {% b {# c'] }), 0,
+  assert.equal(await countWhere('jinja_expr', { fn: 'in', args: [event, { value: '{{ "first_launch" }}' }, { value: 'a {% b {# c' }] }), 0,
     '[Jinja filter values] compared as the literal text: no event is named either');
 });
 
@@ -1768,7 +1817,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'jtut',
-    semantic_models: [{ from: 'events', measures: [{ name: 's1', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }, { field: 'element_of_event_data', op: 'eq', value: 'step_1' }], label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', agg: 'count_distinct', field: 'player_id_of_internal', where: [{ field: 'event_name', op: 'eq', value: 'tutorial' }, { field: 'element_of_event_data', op: 'eq', value: '{{ "step_1" }}' }] }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 's1', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: 'step_1' }] }] }, label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: '{{ "step_1" }}' }] }] } }] }],
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));

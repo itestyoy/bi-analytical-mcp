@@ -54,7 +54,7 @@ after(() => { try { engine?.close(); } catch { /* noop */ } if (work) rmSync(wor
 // NaN; ddof = 0): mean 33.333…, std 24.607… → p1 −0.1355, p2 −1.1514, p3 +1.2869; p4 stays NaN.
 const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p3: (65 - 100 / 3) / Math.sqrt(1816.6666667 / 3) };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 const PY = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
@@ -124,7 +124,10 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   // The result IS a table in the warehouse: re-read it, and re-slice it.
   const again = await readTable(engine, r.context_id, r.model);
   assert.equal(again.rows.length, 4);
-  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], measures: [{ agg: 'count', name: 'players' }], order_by: [{ key: 'tier' }] } });
+  const byTier = await readTable(engine, r.context_id, r.model, { stages: [
+    { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'players', expr: { fn: 'count' } }] },
+    { stage: 'order_by', keys: [{ key: 'tier' }] },
+  ] });
   assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
   // and so is the prep table, under its own name
   const prep = await readTable(engine, r.context_id, r.models[0].model);
@@ -190,7 +193,7 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
     first,                                                                             // s1: python over the SOURCE (purchases only → p4 disappears here)
     AGG,                                                                               // s2: SQL over the python model
     z,                                                                                 // s3: python (pandas by choice) over s2
-    { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] },    // result: SQL over the python model's declared columns
+    { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue_z' }, { value: 0 }] }] },    // result: SQL over the python model's declared columns
   ] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
   assert.deepEqual(r.models.map((m) => m.kind), ['python', 'sql', 'python', 'sql']);

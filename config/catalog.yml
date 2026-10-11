@@ -1730,13 +1730,13 @@ models:
   #       config: { meta: { mcp: { property: true } } }
   #
   #   HOW A PIPELINE READS THEM:
-  #     array, per element   unnest { source, name }                  -> one row per element
-  #     array, per report    compute { name, expr: { fn: array_length | array_contains, property } }
+  #     array, per element   unnest { expr: { property }, name }      -> one row per element
+  #     array, per report    compute { name, expr: { fn: array_length | array_contains, args: [{ property }, …] } }
   #                                                                   -> grain unchanged
-  #     array<struct>        unnest { source, name, field }           -> one field per row, or
-  #                          unnest { source, name } + compute json_field -> several fields, same row
+  #     array<struct>        unnest { expr: { property }, name, field } -> one field per row, or
+  #                          unnest { expr: { property }, name } + compute json_field -> several fields, same row
   #     array, positional    compute json_parse_array -> element_at / array_last
-  #     JSON object          compute { name, expr: { fn: event_property, property, field } } or json_field
+  #     JSON object          compute { name, expr: { property, field } } or json_field
   #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads NULL. Both
   #   readings are correct — pick the grain the question is about.
 

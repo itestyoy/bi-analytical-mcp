@@ -15,6 +15,12 @@
 const OPENER = /\{(?=[{%#])/g;
 const HAS_OPENER = /\{[{%#]/;
 
+/** Whether a text holds a Jinja opener — what a caller's SQL (a raw expression) may not carry, since
+ *  breaking it there would change the SQL. */
+export function hasJinjaOpener(s) {
+  return HAS_OPENER.test(String(s));
+}
+
 /** Prose with every Jinja opener broken by a space. */
 export function inertText(s) {
   return typeof s === 'string' ? s.replace(OPENER, '{ ') : s;

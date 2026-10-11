@@ -10,7 +10,7 @@
 import { deref, field, forms, pinned } from './schema-nav.js';
 
 /** The stage union of a tool schema, wherever the tool puts it (`stage`, or `pipeline.stages`): one
- *  entry per stage — a stage written as several forms (compute, one per op) is one entry, its union. */
+ *  entry per stage — a stage written as several forms (project: keep or drop) is one entry, its union. */
 export function stageUnion(toolSchema, prop = 'stage') {
   const node = prop === 'stage'
     ? field(toolSchema, toolSchema, 'stage')

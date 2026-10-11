@@ -7,17 +7,16 @@
 //
 // This file puts the tools together; their pieces live in src/schema/: fields.js (what every tool
 // shares — patterns, descriptions, the declaration and query items, the limits), display.js (the
-// card), projection.js (a read over a stored table), semantic-index.js, memory.js, experiment.js
+// card), semantic-index.js, memory.js, experiment.js
 // (each tool's own input), transport.js (how a schema is folded before it is sent).
 
 import { ERROR_SOURCES } from './error-log.js';
-import { stageDefs } from './pipeline.js';
+import { stageDefs, readStageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, predicateDefs, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, attributeRefForms, timeRef, dimensionFields } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, semanticDefs, metricSchema, projectRef, projectEntityRef, METRIC_TIME_RANGE, whereDefs, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, attributeRefForms, timeRef, removedDimensionForms } from './schema/fields.js';
 import { display } from './schema/display.js';
-import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
-import { form, pick, conditionList, timeRange, SCALAR } from './schema-kit.js';
+import { form, pick, conditionSlot, timeRange, SCALAR } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
 import { analyzeContract, checkSplitContract, planContract, experimentSchema } from './schema/experiment.js';
@@ -52,8 +51,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     context_id: { type: 'string', pattern: CTX, description: D.context_id },
     name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
     description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
-    semantic_models: { type: 'array', items: { anyOf: semanticKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One or more per source model: { from, where?, dimensions?, measures? }; each item\'s where scopes its own measures. An item with only `from` loads that model, so its attributes can be grouped and filtered as { model, attribute } (e.g. { from: "users" } for { model: "users", attribute: "country" }; a slowly-changing model is joined point-in-time). Every name in an item is a `field` of its model — a column, a scalar payload property, a declared amount. A measure is { name, agg, field?, percentile?, where?, cast?, label? }: count without field counts rows.' },
-    metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above).' },
+    semantic_models: { type: 'array', items: { anyOf: semanticKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One or more per source model: { from, where?, dimensions?, measures? }; each item\'s where scopes its own measures. An item with only `from` loads that model, so its attributes can be grouped and filtered as { model, attribute } (e.g. { from: "users" } for { model: "users", attribute: "country" }; a slowly-changing model is joined point-in-time). What an item computes is written in the expression grammar over its model: { column } (a column, an entity key, a declared amount), { property } (an event property, on an events source), { value }. A measure is { name, expr, label? }, expr ONE aggregate — { fn: "count" } counts the rows, { fn: "sum", args: [{ column: "price" }], where: [...] } folds the rows its where holds for; a dimension is { column }, { property }, or { name, expr } computed from the row.' },
+    metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above, or other metrics).' },
     dry_run: { type: 'boolean', description: 'If true, validate and return the definition without writing files or building anything.' },
     include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
   };
@@ -69,18 +68,20 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       type: 'object', additionalProperties: false,
       description: 'What to remove, by the names it was added under. Removals come first, so one update replaces a measure or a metric by removing it and declaring it again.',
       properties: {
-        dimensions: { type: 'array', minItems: 1, items: { anyOf: semanticKeys.filter((k) => dimensionFields(catalog, k).length).map((k) => form({ title: k, tag: ['from', k], required: ['field'], properties: { field: { enum: dimensionFields(catalog, k), description: `A dimension this context declared on ${k}, by its field.` } } })) }, description: 'Dimensions to remove: { from, field }, as they were declared.' },
+        dimensions: { type: 'array', minItems: 1, items: { anyOf: removedDimensionForms(catalog, semanticKeys) }, description: 'Dimensions to remove, named as they were declared: { from, column }, { from, property }, or { from, name } for a computed one.' },
         measures: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a metric reads one, unless cascade.' },
-        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a ratio or derived metric is built from one, unless cascade.' },
+        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a derived metric is built from one, unless cascade.' },
       },
     },
-    cascade: { type: 'boolean', description: 'Also remove what is built on a removed item: the metrics that read a removed measure, and the ratio and derived metrics built from a removed metric.' },
+    cascade: { type: 'boolean', description: 'Also remove what is built on a removed item: the metrics that read a removed measure, and the derived metrics built from a removed metric.' },
     dry_run: createFields.dry_run,
     include_yaml: createFields.include_yaml,
   };
   const create = {
     type: 'object',
     description: 'Two forms. The default declares a task — name, semantic_models, metrics — in a new context, or beside the task already in context_id. action:"update" changes the task in a context in the same words: semantic_models and metrics are added, `remove` takes them away by name, and the rest stays as declared.',
+    // a semantic model's expression (`expr`) and a derived metric's (`metric_expr`), each once
+    $defs: semanticDefs(catalog),
     anyOf: [
       form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, required: ['name', 'metrics'], properties: createFields }),
       form({ title: 'update the task in a context', tag: ['action', 'update'], required: ['context_id'], properties: updateFields }),
@@ -160,10 +161,13 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     ],
   };
 
-  const pdefs = predicateDefs(catalog, project);
+  const pdefs = whereDefs(catalog, project);
+  // A READ OF THE BUILT TABLE IS WRITTEN IN THE PIPELINE'S OWN STAGES — those that re-slice rows without
+  // making a new table (READ_STAGES), over the table's columns: `$defs.read_stage`, beside the read's
+  // `$defs.expr` (the expression with no event property: a stored table has no source).
   const pipelineQueryFields = {
-    transform: projection,
-    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the projection the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
+    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/read_stage' }, description: 'The stages run over the stored table, in order — the pipeline\'s own where, compute, aggregate, pivot, unpivot, order_by, limit, sample and project, over its columns; nothing upstream is recomputed and nothing is stored. A where after an aggregate keeps the groups it holds for (a having); a second aggregate folds the groups again (how many passed). Omitted: the table as it is. A join, an unnest, a funnel or a python step makes a new table: build it from the task (build_pipeline_model start with from_task).' },
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the read the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
   };
 
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
@@ -197,7 +201,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
           ],
         },
       },
-      where: conditionList({ $ref: '#/$defs/predicate' }, 'Row filter applied before aggregation: conditions on dimensions / metric_time that all hold — an item may be { or: [...] }, any of its conditions holds (each a condition or { and: [...] }).'),
+      where: conditionSlot('#/$defs/expr', 'Row filter applied before aggregation: conditions on dimensions / metric_time, named as group_by names them, that all hold — e.g. [{ fn: "eq", args: [{ model: "users", attribute: "country" }, { value: "US" }] }]; any one of several is { fn: "or", args: [...] }.'),
       order_by: { type: 'array', description: 'Sort order, by the names the rows come back with: a requested metric, or the result column of a group_by item ("users_country", "metric_time_day").', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
@@ -253,6 +257,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     query_pipeline_model: {
       type: 'object',
       description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
+      $defs: readStageDefs(catalog),
       anyOf: queryModes(
         { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the context_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
         batchOf({ type: 'object', additionalProperties: false, properties: pipelineQueryFields }, 'queries over the built model'),

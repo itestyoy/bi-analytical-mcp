@@ -92,23 +92,36 @@ export function timeRange(description) {
   };
 }
 
-/** A constant a condition or an expression takes: a scalar — or, for in / not_in / between, a list of them. */
+/** A constant an expression takes ({ value }): a scalar, never a list — in / not_in take each member as an argument of its own. */
 export const SCALAR = { anyOf: [{ type: 'string', title: 'a string' }, { type: 'number', title: 'a number' }, { type: 'boolean', title: 'a boolean' }, { type: 'null', title: 'null' }] };
-export const CONSTANT = { anyOf: [...SCALAR.anyOf, { type: 'array', items: SCALAR, title: 'a list of constants' }] };
 
 /**
- * ONE CONDITION GRAMMAR — what every `where` is written in, wherever it sits: a list of conditions
- * that ALL hold, each item a condition (`leaf`, the place's own: a column, an event property, a
- * dimension) or a group — { or: [...] }, at least one holds, whose items may be { and: [...] }, all
- * of them hold. A list of ors is every boolean condition there is (with the negated operators at the
- * leaves), and it nests no deeper, so no schema recursion is needed. The groups are told apart from a
- * condition by the field each requires (`or` / `and`, a condition its `op`).
+ * A CONDITION SLOT — what every `where` is, wherever it sits (a where stage's `conditions`, an
+ * aggregate's `where`, a CASE branch's `when`, a funnel step's, a semantic model's, a metric query's,
+ * the retentioneering filter's): a list of expressions of the place's own grammar (`ref`, its
+ * `$defs` entry) that ALL hold, each a boolean — a condition function, and / or / not, a boolean
+ * column. Any boolean there is is one item: an or of ands nests inside it as functions do.
  */
-export function conditionList(leaf, description, { minItems = 1 } = {}) {
-  const leaves = leaf.anyOf && !leaf.properties ? leaf.anyOf : [leaf];
-  const all = form({ title: 'all of', required: ['and'], properties: { and: { type: 'array', minItems: 2, items: { anyOf: leaves }, description: 'Conditions that all hold.' } } });
-  const any = form({ title: 'any of', required: ['or'], properties: { or: { type: 'array', minItems: 2, items: { anyOf: [...leaves, all] }, description: 'Conditions of which at least one holds — each a condition, or { and: [...] } for several that hold together.' } } });
-  return { type: 'array', minItems, description, items: { anyOf: [...leaves, any] } };
+export function conditionSlot(ref, description) {
+  return { type: 'array', minItems: 1, items: { $ref: ref }, ...(description ? { description } : {}) };
+}
+
+/**
+ * ONE MEASURE, wherever rows are aggregated — an aggregate stage, a semantic model: the name of the
+ * column (or of the measure) it produces and the expression that folds the rows, an aggregate of the
+ * place's grammar (`ref`) or a formula over aggregates. `pattern` is what a name may be there, `extra`
+ * the place's own optional fields (a semantic measure's `label`).
+ */
+export function measureForm({ ref, pattern, nameDescription = 'The name of the column it produces.', exprDescription, description, extra = {} }) {
+  return form({
+    ...(description ? { description } : {}),
+    required: ['name', 'expr'],
+    properties: {
+      name: { type: 'string', ...(pattern ? { pattern } : {}), description: nameDescription },
+      expr: { $ref: ref, ...(exprDescription ? { description: exprDescription } : {}) },
+      ...extra,
+    },
+  });
 }
 
 /**

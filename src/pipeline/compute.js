@@ -1,34 +1,48 @@
-// THE COMPUTE STAGE'S EXPRESSIONS — one table: each function's arguments, its parameters and its SQL.
-// An expression is a column ({ column }), a constant ({ value }), the current time ({ now: true }) or a
-// function over expressions ({ fn, args: [...], ...its parameters }), nested to any depth — so a
-// computed column is one stage however many steps its formula has, and the same expression is what a
-// condition compares (src/pipeline/sql.js CONDITION). The schema ($defs.expr: one form per function
-// shape) and the build (exprSql) both read FNS, so a function is added in one place — and a parameter
-// a function does not read is not in its form, so it is refused instead of silently ignored.
+// THE EXPRESSION GRAMMAR — ONE, for every place a value, a condition or a measure is written. An
+// expression is a LEAF — a column ({ column }), an event property read where it is stored
+// ({ property, field?, type? }), a constant ({ value }), the current time ({ now: true }), or a leaf a
+// level adds of its own (a metric, a dimension reference) — or a FUNCTION over expressions ({ fn, args:
+// [...], …its parameters }), nested to any depth. A condition is a function (eq, in, between, is_null …
+// combined by and / or / not), and so is an aggregate (sum, count, percentile …), so a where, a measure
+// and a computed column are one grammar placed in different stages.
+//
+// One table (FNS) says each function's arguments, parameters, kind and SQL; one builder (exprSchema)
+// turns it into a level's schema — a closed form per leaf and per function shape, `args` referring back
+// to the same definition; one writer (exprSql, and conditionListSql for a condition slot) turns an
+// expression into SQL and holds the rules of WHERE each kind may stand: an aggregate folds rows only
+// where a measure is written, a window keeps them only in a compute stage, a condition slot takes
+// booleans. A function is added in one place, and a parameter it does not read is not in its form, so
+// it is refused instead of silently ignored.
 
 import { GRAINS } from '../catalog.js';
-// (sql.js imports this module too: what is read from it here is read when a function runs, never as
-// the module loads)
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { fillPlaceholders, rawNamedColumns, unquotedSql, condPred, frameClause, requireCol, sqlAgg, EXPR, CONDITIONS, TYPE, SORT_KEY, propEnum, sourceProp, partitionItem, partitionColumn } from './sql.js';
-import { conditionsSql, eachCondition } from '../conditions.js';
-import { form, SCALAR } from '../schema-kit.js';
+// (sql.js is read when a function runs, never as this module loads)
+import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, propEnum, sourceProp, partitionItem, partitionColumn } from './sql.js';
+import { OPS, predicateSql } from '../conditions.js';
+import { form, SCALAR, conditionSlot } from '../schema-kit.js';
+import { rankFuzzy } from '../fuzzy.js';
+import { currentOf } from '../earlier-spelling.js';
 
-// (built when the schema is: sql.js imports this module, so what it exports is read lazily here)
+// ── The function names, by kind — what a level picks its vocabulary from ──────────────────────────
+/** The conditions: comparisons, membership, a range, the null tests, the text tests (src/conditions.js OPS). */
+export const CONDITION_FNS = [...OPS];
+/** The logic over conditions. */
+export const LOGIC_FNS = ['and', 'or', 'not'];
+/** The aggregates — each folds the rows of a group into one value, where a measure is written. */
+export const AGGREGATE_FNS = ['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'median', 'percentile', 'stddev', 'variance', 'hll_init', 'hll_merge', 'hll_merge_partial'];
+/** The aggregates that also compute over a WINDOW, given `over`. */
+export const WINDOW_AGGREGATE_FNS = ['sum', 'average', 'min', 'max', 'count'];
+/** The window functions proper: always over a window. */
+export const WINDOW_FNS = ['row_number', 'rank', 'dense_rank', 'lag', 'lead'];
+/** The aggregates that produce a SKETCH (a value merged later with hll_merge), not a number. */
+export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']);
+/** The statistical aggregates — each written the dialect's way (exact on one warehouse, a sketch on another). */
+export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
+
+// (built when the schema is: what the window parameters reference is read lazily)
 const ORDER = () => ({ type: 'array', items: SORT_KEY, description: 'Window ordering: each key a column, its direction and where its NULLs go (last unless said).' });
-const PARTITION = (catalog) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog), description: 'What the window restarts per: columns, or a declared relationship { entity } (its key column). Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.' });
+const PARTITION = (catalog, entities) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog, { entities }), description: 'What the window restarts per: columns, or a declared relationship { entity } (its key column). Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.' });
 
-/** An event property of the pipeline's source, as every place that names one takes it (compute's
- *  functions, the unnest stage): one enum of the catalog's event properties. */
-export const eventPropertySchema = (catalog, description = 'An event property of the pipeline\'s source — a scalar, an array or a JSON object, read where it is stored (its own column, or the event_data payload).') => propEnum(catalog?.eventPropEnum ? catalog.eventPropEnum() : [], description);
-
-/** An ARRAY event property, as the unnest stage names the one it explodes: the catalog's properties
- *  declared as arrays — every event property when it declares none of them so (the build still refuses
- *  one that is no array). */
-export const arrayEventPropertySchema = (catalog, description) => {
-  const arrays = catalog?.arrayEventPropEnum ? catalog.arrayEventPropEnum() : [];
-  return arrays.length ? propEnum(arrays, description) : eventPropertySchema(catalog, description);
-};
 // a frame bound: an offset, or the edge of the partition
 const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
 const FRAME = {
@@ -41,38 +55,40 @@ const FRAME = {
   },
 };
 
-// the parameters a function may take, by name — each function's form picks its own
-const params = (catalog) => ({
-  property: eventPropertySchema(catalog),
-  item: { ...SCALAR, description: 'The value to look for among the array\'s elements.' },
+// the parameters a function may take, by name — each function's form picks its own. `ref` is the
+// level's own definition (a CASE's branches and an aggregate's where are expressions of the same level),
+// `entities` whether a window may restart per a relationship of the source.
+const params = (catalog, { ref, entities }) => ({
   places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
   type: TYPE,
   start: { type: 'integer', minimum: 1, description: '1-based start position.' },
   len: { type: 'integer', minimum: 0, description: 'Length in characters (optional).' },
   search: { type: 'string', description: 'Substring to find.' },
   replacement: { type: 'string', description: 'What replaces it.' },
-  field: { type: 'string', description: 'The field of a JSON OBJECT to read: of the argument (json_field) or of the property (event_property).' },
+  field: { type: 'string', description: 'The field of the JSON object to read.' },
   index: { type: 'integer', minimum: 1, description: '1-based index.' },
   unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference: the whole units elapsed from the first argument to the second, truncated toward zero (1 h 59 min is 1 hour; a day is 24 hours, not a calendar boundary — date_trunc both to the day for calendar days), an integer, negative when the second is earlier.' },
   grain: { enum: GRAINS, description: 'The time bucket to truncate to (a week starts on Monday, the ISO week).' },
   part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
   sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
-  cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` is a list of conditions that all hold (an item may be an { or: [...] } group), `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: CONDITIONS('The conditions this branch takes: all of them hold.'), then: EXPR } } },
-  else: { ...EXPR, description: 'The value when no branch holds (default NULL).' },
+  cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
+  else: { $ref: ref, description: 'The value when no branch holds (default NULL).' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
   default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
-  over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION(catalog), order_by: ORDER() } },
-  over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION(catalog), order_by: ORDER(), frame: FRAME } },
+  percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' },
+  where: conditionSlot(ref, 'A conditional aggregate: fold only the rows these conditions hold for — count the failed loads, sum the revenue of payers.'),
+  over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER() } },
+  over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER(), frame: FRAME } },
 });
 
 // a window clause in raw SQL, outside its string literals, quoted names and comments
 const RAW_OVER = /\bover\s*\(/i;
 
-/** The type of a value picked from several (coalesce, least, greatest): the one its typed arguments
- *  share; numbers of any kind are numeric, moments of any kind a time; arguments of kinds that do not
- *  meet are 'unknown' (compared as written); with no typed argument, `fallback`. An untyped constant
- *  (null) says nothing. */
+/** The type of a value picked from several (coalesce, least, greatest, a CASE's branches): the one its
+ *  typed arguments share; numbers of any kind are numeric, moments of any kind a time; arguments of
+ *  kinds that do not meet are 'unknown' (compared as written); with no typed argument, `fallback`. An
+ *  untyped constant (null) says nothing. */
 function commonType(types, fallback) {
   const typed = [...new Set(types.filter((t) => t && t !== 'unknown'))];
   if (!typed.length) return fallback;
@@ -83,7 +99,7 @@ function commonType(types, fallback) {
 }
 
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
-const arith = (sym) => ({ args: 2, sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
+const arith = (sym) => ({ args: 2, title: '[left, right]', sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
 // An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
 // KNOWN non-array type fails — an array, or a column whose type is unknown (raw, native), passes.
 const ARRAY_TYPES = new Set(['array', 'unknown', undefined, null]);
@@ -94,14 +110,16 @@ const needsArray = (fn, t) => {
   throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
 };
 
-/** The window clause of a window function: OVER (PARTITION BY … ORDER BY … frame). `frame`: an
- *  aggregate of a frame (sum, count …) rather than a rank or a neighbour — the dialect orders the two
- *  differently where it places NULLs. `opts` carries the pipeline's catalog and source, for a partition
- *  named by a declared relationship. */
+/** The window clause of a window: OVER (PARTITION BY … ORDER BY … frame). `frame`: an aggregate of a
+ *  frame (sum, count …) rather than a rank or a neighbour — the dialect orders the two differently where
+ *  it places NULLs. `opts` carries the pipeline's catalog and source, for a partition named by a
+ *  declared relationship. */
 function overSql(d, cols, over = {}, { frame = false, opts = {} } = {}) {
   const partCols = (over.partition_by || []).map((p, i) => partitionColumn({ catalog: opts.catalog, source: opts.source, cols }, p, `over.partition_by[${i}]`));
-  partCols.forEach((c) => requireCol(cols, c));
-  (over.order_by || []).forEach((o) => requireCol(cols, o.key));
+  if (cols) {
+    partCols.forEach((c) => requireCol(cols, c));
+    (over.order_by || []).forEach((o) => requireCol(cols, o.key));
+  }
   const parts = partCols.map((c) => d.quoteIdent(c));
   const keys = (over.order_by || []).map((o) => ({ sql: d.quoteIdent(o.key), direction: o.direction, nulls: o.nulls }));
   const f = frame ? frameClause(over.frame) : '';
@@ -113,40 +131,82 @@ function overSql(d, cols, over = {}, { frame = false, opts = {} } = {}) {
 /**
  * An event property of the pipeline's source, read where it is stored: its flattened column (a native
  * ARRAY, or text holding JSON) or a key of the source's event_data blob. `kind` is what is read: its
- * value (one field of it with `field`), an array's length, or whether an array holds `item`. The
- * column it reads must still be in the row — after a stage that changed the grain it is gone.
+ * value (one field of it with `field`), an array's length, or whether an array holds `item`. The column
+ * it reads must still be in the row — after a stage that changed the grain it is gone.
  */
-function propertyRead(kind, { d, cols, p, opts }) {
-  const { catalog, source } = opts;
-  if (!catalog || !source) throw new Error(`${p.fn}: an event property is read in a pipeline over a source`);
+function propertyRead(kind, { d, cols, catalog, source, property, field, type, item, at }) {
+  if (!catalog || !source) throw new Error(`${at}: { property: '${property}' } reads an event property of a pipeline's source, and these rows read none (a stored table) — name one of their columns ({ column })`);
   const blob = catalog.eventDataColumn(source);
-  const found = sourceProp(catalog, source, p.property);
+  const found = sourceProp(catalog, source, property);
   const spec = found?.spec;
-  const key = found?.name || p.property; // the PHYSICAL payload key (qualifier stripped)
-  requireCol(cols, spec?.column || blob);
-  const flat = spec?.column || null;
+  const key = found?.name || property; // the PHYSICAL payload key (qualifier stripped)
+  if (cols) requireCol(cols, spec?.column || blob);
+  // what is read — the property's own column, or the payload column it is a key of — is written quoted,
+  // as every column the server writes is; the catalog's rule (propertyBackingColumn) says which it is
+  const flat = spec?.column ? d.quoteIdent(catalog.propertyBackingColumn(source, key)) : null;
+  const payload = d.quoteIdent(blob);
   const native = flat && (spec.encoding || 'native') === 'native';
   if (kind !== 'value' && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
-    throw new Error(`${p.fn}: '${p.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.fn} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). A field of a JSON object is { fn: "event_property", property, field }.`);
+    throw new Error(`${at}: '${property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — an array function needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). A field of a JSON object is { property, field }.`);
   }
-  if (kind === 'length') return { expr: flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key), type: 'int' };
-  if (kind === 'contains') return { expr: flat ? (native ? d.arrayContains(flat, p.item) : d.jsonColumnArrayContains(flat, p.item)) : d.jsonArrayContains(blob, key, p.item), type: 'boolean' };
-  if (p.field !== undefined) return { expr: flat ? d.jsonColumnStructField(flat, p.field, p.type) : d.jsonStructField(blob, key, p.field, p.type), type: p.type || 'string' };
-  // the catalog's one rule for reading a scalar property (flat column or JSON extract)
-  return { expr: spec ? catalog.propertyExpr(source, key, d.name, { type: p.type }) : d.jsonExtract(blob, key, p.type || 'string'), type: p.type || spec?.type || 'string' };
+  if (kind === 'length') return { sql: flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(payload, key), type: 'int' };
+  if (kind === 'contains') return { sql: flat ? (native ? d.arrayContains(flat, item) : d.jsonColumnArrayContains(flat, item)) : d.jsonArrayContains(payload, key, item), type: 'boolean' };
+  if (field !== undefined) return { sql: flat ? d.jsonColumnStructField(flat, field, type) : d.jsonStructField(payload, key, field, type), type: type || 'string' };
+  // a scalar in its own column holds what the catalog declares; read as another type, it is cast (SAFE,
+  // as the cast function casts), so the type the leaf reports is the type its SQL has. A payload key
+  // is extracted as that type (the declared one by default).
+  if (flat) return { sql: type && type !== String(spec.type || '').toLowerCase() ? d.castExpr(flat, type) : flat, type: type || spec.type || 'string' };
+  return { sql: d.jsonExtract(payload, key, type || spec?.type || 'string'), type: type || spec?.type || 'string' };
 }
 
+/** An aggregate's SQL over its written argument `arg` (null: a count of the rows). A CONDITIONAL
+ *  aggregate folds only the rows `cond` holds for: the value is NULL on every other row, which every
+ *  aggregate skips — count(case when …), sum(case when …) — the same on every warehouse. */
+function aggregateSql(d, fn, arg, q, cond) {
+  if (fn === 'count' && arg == null) return cond ? `count(CASE WHEN ${cond} THEN 1 END)` : 'count(*)';
+  const c = cond ? `CASE WHEN ${cond} THEN ${arg} END` : arg;
+  if (fn === 'count_distinct') return `count(distinct ${c})`;
+  if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
+  if (fn === 'hll_init') return d.hllInit(c);
+  if (fn === 'hll_merge') return d.hllMerge(c);
+  if (fn === 'hll_merge_partial') return d.hllMergePartial(c);
+  if (STAT_FNS.has(fn)) return d.statAggExpr(fn, c, q);
+  return `${sqlAgg(fn)}(${c})`; // sum / average / min / max / count
+}
+
+/** What an aggregate yields: a count is an integer, a sketch a sketch, the earliest / latest of a value
+ *  that value's type (a time stays a time), every other a number. */
+function aggregateType(fn, argType) {
+  if (SKETCH_FNS.has(fn)) return 'sketch';
+  if (['count', 'count_distinct', 'approx_count_distinct', 'hll_merge'].includes(fn)) return 'int';
+  if (fn === 'min' || fn === 'max') return argType || 'unknown';
+  return 'numeric';
+}
+
+const condition = (op, args, title) => ({
+  kind: 'condition', args, title,
+  sql: ({ d, r, opts }) => ({ expr: predicateSql(op, r, { timeOperand: (x) => d.timeOperand(x), castToConstant: !!opts.castToConstant, dialect: d.name }), type: 'boolean' }),
+});
+
+const aggregate = (fn, { args = 1, title, needs } = {}) => ({
+  kind: 'aggregate', args, title, ...(needs ? { needs } : {}), windowable: WINDOW_AGGREGATE_FNS.includes(fn),
+  sql: ({ d, cols, a, t, p, cond, window, opts }) => (window
+    ? { expr: `${sqlAgg(fn)}(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: aggregateType(fn, t[0]) }
+    : { expr: aggregateSql(d, fn, a.length ? a[0] : null, p.percentile, cond), type: aggregateType(fn, t[0]) }),
+});
+
 /**
- * Every function, by name: how many `args` it takes (a number, or { min } for a list), the
- * parameters it requires (`needs`) and may take (`may`), and its SQL over the rendered arguments `a`
- * (with their types `t`) → { expr, type } (type 'numeric' when it is not said). `title` says what
- * the arguments are when their order matters.
+ * Every function, by name: its `kind` (scalar | condition | logic | aggregate | window), how many `args`
+ * it takes (a number, or { min, max? }), the parameters it requires (`needs`) and may take (`may`), and
+ * its SQL over the written arguments — `a` their SQL, `t` their types, `r` all that is known of each —
+ * → { expr, type } (type 'numeric' when it is not said). `title` says what the arguments are when their
+ * order matters. An aggregate takes `where` (a conditional aggregate) and, when `windowable`, `over`.
  */
 export const FNS = {
-  add: { ...arith('+'), title: '[left, right]' },
-  sub: { ...arith('-'), title: '[left, right]' },
-  mul: { ...arith('*'), title: '[left, right]' },
-  div: { ...arith('/'), title: '[left, right]' },
+  add: arith('+'),
+  sub: arith('-'),
+  mul: arith('*'),
+  div: arith('/'),
   round: { args: 1, may: ['places'], sql: ({ d, a, p }) => ({ expr: d.roundExpr(a[0], p.places ?? 0) }) },
   floor: one('floor'),
   ceil: one('ceil'),
@@ -168,12 +228,10 @@ export const FNS = {
   // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
   // TEXT and has to be parsed first, or the json operators do not apply to it.
   json_field: { args: 1, needs: ['field'], may: ['type'], sql: ({ d, a, t, p }) => ({ expr: t[0] === 'json' ? d.jsonColumnField(a[0], p.field, p.type) : d.jsonColumnStructField(a[0], p.field, p.type), type: p.type || 'string' }) },
-  // an EVENT PROPERTY read where it is stored — its own (flattened) column, or a key of the event_data
-  // payload: a scalar (or one field of a JSON object), how many elements an array holds, whether it
-  // holds one value
-  event_property: { args: 0, needs: ['property'], may: ['field', 'type'], sql: (x) => propertyRead('value', x) },
-  array_length: { args: 0, needs: ['property'], sql: (x) => propertyRead('length', x) },
-  array_contains: { args: 0, needs: ['property', 'item'], sql: (x) => propertyRead('contains', x) },
+  // how many elements an array holds, whether it holds one value: of an array event property read where
+  // it is stored ({ property }), or of an expression that yields an array (written by the writer itself)
+  array_length: { args: 1, title: '[array]', array: 'length' },
+  array_contains: { args: 2, title: '[array, { value }]', array: 'contains' },
   element_at: { args: 1, needs: ['index'], may: ['type'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: p.type || 'string' }; } },
   array_last: { args: 1, may: ['type'], sql: ({ d, a, t, p }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: p.type || 'string' }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
@@ -191,132 +249,423 @@ export const FNS = {
   },
   case: {
     args: 0, needs: ['cases'], may: ['else', 'type'],
-    sql: ({ d, cols, p, sub, opts }) => {
-      const branches = p.cases.map((cs) => `WHEN ${conditionsSql(cs.when, (c) => condPred(d, cols, c, opts)).join(' AND ')} THEN ${sub(cs.then, 'then').sql}`);
-      return { expr: `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${sub(p.else, 'else').sql}` : ''} END`, type: p.type || 'string' };
+    sql: ({ p, sub, conds }) => {
+      const thens = [];
+      const branches = p.cases.map((cs, i) => {
+        const then = sub(cs.then, `cases[${i}].then`);
+        thens.push(then.type);
+        return `WHEN ${conds(cs.when, `cases[${i}].when`).map((x) => `(${x})`).join(' AND ')} THEN ${then.sql}`;
+      });
+      const other = p.else !== undefined ? sub(p.else, 'else') : null;
+      if (other) thens.push(other.type);
+      return { expr: `CASE ${branches.join(' ')}${other ? ` ELSE ${other.sql}` : ''} END`, type: p.type || commonType(thens, 'string') };
     },
   },
   // escape hatch: dialect SQL whose columns come STRUCTURED — each an item of args, `{n}` in the SQL
   // where the n-th goes, written quoted by the server; a column named in its text is refused
   raw: {
     args: { min: 0 }, needs: ['sql'], may: ['type'], title: '[the expressions {1}, {2}, … stand for in sql]',
-    sql: ({ d, cols, p, opts, a }) => {
+    sql: ({ d, cols, p, scope, a, at }) => {
       // a raw window is still a window: where SQL takes none, it is refused as the structured one is
-      if (opts.windows === false && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and a where cannot compare one — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column');
-      if (opts.inWindow && RAW_OVER.test(unquotedSql(p.sql))) throw new Error('a raw expression with OVER (…) is a window function, and it cannot be an argument of another window function — compute it into a column first (a compute stage), then use that column');
+      if (RAW_OVER.test(unquotedSql(p.sql))) {
+        if (scope.noWindows) throw new Error(`${at}: a raw expression with OVER (…) is a window function, and a condition cannot test one — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column`);
+        if (scope.inWindow) throw new Error(`${at}: a raw expression with OVER (…) is a window function, and it cannot be an argument of another window function — compute it into a column first (a compute stage), then use that column`);
+        if (scope.inAggregate || scope.aggregateLevel) throw new Error(`${at}: a raw expression with OVER (…) is a window function, and a measure folds rows — compute it into a column first (a compute stage), then fold that column`);
+      }
       // a column comes positionally, in args: one written by name in the text is refused
-      const named = rawNamedColumns(p.sql, cols, d.quoteIdent('x')[0]);
+      const named = cols ? rawNamedColumns(p.sql, cols, d.quoteIdent('x')[0]) : [];
       if (named.length) throw new Error(`pipeline: a raw expression names ${named.map((n) => `'${n}'`).join(', ')} in its SQL text — a column goes in \`args\`, with {1}, {2}, … in the SQL where each goes (e.g. sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "${named[0]}" }, …]); the server writes it quoted`);
       return { expr: `(${fillPlaceholders(p.sql, a)})`, type: p.type || 'string' };
     },
   },
-  // window functions: each over its `over` — the rank of a row, the value of a neighbour, an aggregate of a frame
-  row_number: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `row_number() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
-  rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
-  dense_rank: { args: 0, needs: ['over'], window: true, sql: ({ d, cols, p, opts }) => ({ expr: `dense_rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
-  lag: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lag(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
-  lead: { args: 1, needs: ['over'], may: ['offset', 'default'], window: true, sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lead(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
-  ...Object.fromEntries(['sum', 'average', 'min', 'max'].map((fn) => [fn, {
-    args: 1, needs: ['over_frame'], window: true,
-    sql: ({ d, cols, a, t, p, opts }) => ({ expr: `${sqlAgg(fn)}(${a[0]}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: ['min', 'max'].includes(fn) ? (t[0] || 'unknown') : 'numeric' }),
-  }])),
-  // a count of the rows (no argument) or of the non-NULL values of one
-  count: { args: { min: 0, max: 1 }, needs: ['over_frame'], window: true, sql: ({ d, cols, a, p, opts }) => ({ expr: `count(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: 'int' }) },
+  // conditions: a boolean of their arguments, written by the one comparison writer (src/conditions.js)
+  ...Object.fromEntries(['eq', 'neq', 'gt', 'gte', 'lt', 'lte'].map((op) => [op, condition(op, 2, '[a, b]')])),
+  ...Object.fromEntries(['in', 'not_in'].map((op) => [op, condition(op, { min: 2 }, '[a, member, member, …]')])),
+  between: condition('between', 3, '[a, low, high] (both included)'),
+  ...Object.fromEntries(['is_null', 'is_not_null'].map((op) => [op, condition(op, 1, '[a]')])),
+  ...Object.fromEntries(['like', 'not_like', 'contains', 'starts_with', 'ends_with'].map((op) => [op, condition(op, 2, '[text, pattern]')])),
+  // logic: and / or of two or more conditions, not of one — a missing value is false in all of them
+  // (`not` of a comparison with a missing operand holds: NOT COALESCE(c, FALSE))
+  and: { kind: 'logic', args: { min: 2 }, title: '[condition, condition, …]', sql: ({ a }) => ({ expr: `(${a.map((x) => `(${x})`).join(' AND ')})`, type: 'boolean' }) },
+  or: { kind: 'logic', args: { min: 2 }, title: '[condition, condition, …]', sql: ({ a }) => ({ expr: `(${a.map((x) => `(${x})`).join(' OR ')})`, type: 'boolean' }) },
+  not: { kind: 'logic', args: 1, title: '[condition]', sql: ({ a }) => ({ expr: `(NOT COALESCE(${a[0]}, FALSE))`, type: 'boolean' }) },
+  // aggregates: each folds a group's rows into one value where a measure is written (an aggregate stage,
+  // a pivot, a semantic model) — or, with `over`, sum / average / min / max / count compute over a window
+  ...Object.fromEntries(['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'median', 'stddev', 'variance', 'hll_init', 'hll_merge', 'hll_merge_partial'].map((fn) => [fn, aggregate(fn)])),
+  count: aggregate('count', { args: { min: 0, max: 1 }, title: '[] counts the rows, [x] the rows where x is present' }),
+  percentile: aggregate('percentile', { needs: ['percentile'] }),
+  // window functions: each over its `over` — the rank of a row, the value of a neighbour
+  row_number: { kind: 'window', args: 0, needs: ['over'], sql: ({ d, cols, p, opts }) => ({ expr: `row_number() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  rank: { kind: 'window', args: 0, needs: ['over'], sql: ({ d, cols, p, opts }) => ({ expr: `rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  dense_rank: { kind: 'window', args: 0, needs: ['over'], sql: ({ d, cols, p, opts }) => ({ expr: `dense_rank() ${overSql(d, cols, p.over, { opts })}`, type: 'int' }) },
+  lag: { kind: 'window', args: 1, needs: ['over'], may: ['offset', 'default'], sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lag(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
+  lead: { kind: 'window', args: 1, needs: ['over'], may: ['offset', 'default'], sql: ({ d, cols, a, t, p, opts }) => ({ expr: `lead(${a[0]}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''}) ${overSql(d, cols, p.over, { opts })}`, type: t[0] || 'unknown' }) },
 };
+
+const kindOf = (fn) => FNS[fn].kind || 'scalar';
+/** The scalar functions: neither a condition, logic, an aggregate nor a window. */
+export const SCALAR_FNS = Object.keys(FNS).filter((fn) => kindOf(fn) === 'scalar');
 
 /** The parameter a function's spec names, as the caller writes it (`over_frame` is written `over`). */
 const written = (name) => (name === 'over_frame' ? 'over' : name);
 
-/**
- * The expression's SQL and type over the columns at this step. `at` names it in a refusal. `opts`:
- * `windows: false` where SQL takes no window function (a where condition — it filters rows before
- * any window is computed), `inWindow` inside a window function's own arguments (SQL nests none).
- */
-export function exprSql(d, cols, e, at = 'expression', opts = {}) {
-  if (e === null || typeof e !== 'object' || Array.isArray(e)) throw new Error(`${at}: must be { column } | { value } | { now: true } | { fn, … }`);
-  // (physical: the type is the warehouse's own — a condition compares a boolean with a text flag as text)
-  if (e.column !== undefined) { requireCol(cols, e.column); return { sql: d.quoteIdent(e.column), type: cols.get(e.column)?.type || null, physical: !!cols.get(e.column)?.physical }; }
-  if (e.now) return { sql: d.nowExpr(), type: 'time' };
-  if (e.fn === undefined) {
-    if (!Object.hasOwn(e, 'value')) throw new Error(`${at}: needs column | value | now | fn`);
-    const v = e.value;
-    // a list is a condition's constant (in / not_in / between: its `value`), never a value of its own
-    if (Array.isArray(v) || (v !== null && typeof v === 'object')) throw new Error(`${at}: a constant is a string, a number, a boolean or null — a list belongs in a condition's \`value\` (in / not_in / between)`);
-    return { sql: d.sqlLiteral(v), type: typeof v === 'number' ? 'numeric' : typeof v === 'boolean' ? 'boolean' : v === null ? null : 'string' };
-  }
-  const spec = Object.hasOwn(FNS, e.fn) ? FNS[e.fn] : null;
-  if (!spec) throw new Error(`${at}: unknown function '${e.fn}' (known: ${Object.keys(FNS).join(', ')})`);
-  const args = e.args || [];
-  const { min, max } = typeof spec.args === 'number' ? { min: spec.args, max: spec.args } : { min: spec.args.min, max: spec.args.max ?? Infinity };
-  if (args.length < min || args.length > max) throw new Error(`${at}: ${e.fn} takes ${min === max ? min : max === Infinity ? `at least ${min}` : `${min} to ${max}`} argument${max === 1 ? '' : 's'}${spec.title ? ` ${spec.title}` : ''}, not ${args.length}`);
-  for (const n of spec.needs || []) if (e[written(n)] === undefined) throw new Error(`${at}: ${e.fn} needs \`${written(n)}\``);
-  if (spec.window && opts.windows === false) throw new Error(`${at}: a window function (${e.fn}) cannot be compared in a where — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column`);
-  if (spec.window && opts.inWindow) throw new Error(`${at}: a window function (${e.fn}) cannot be an argument of another window function — compute the inner one into a column first (a compute stage), then use that column`);
-  const inner = spec.window ? { ...opts, inWindow: true } : opts;
-  const rendered = args.map((x, i) => exprSql(d, cols, x, `${at} ${e.fn} args[${i}]`, inner));
-  const out = spec.sql({ d, cols, p: e, opts: inner, a: rendered.map((r) => r.sql), t: rendered.map((r) => r.type), sub: (x, what) => exprSql(d, cols, x, `${at} ${e.fn} ${what}`, inner) });
-  return { sql: out.expr, type: out.type || 'numeric' };
-}
+const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
-/** Every function an expression calls, nested ones included — in arguments, a CASE's branches and
- *  the conditions they test (to find a window, a raw SQL). */
-export function exprCalls(e, out = []) {
-  if (!e || typeof e !== 'object') return out;
-  if (e.fn !== undefined) {
-    out.push(e);
-    for (const x of e.args || []) exprCalls(x, out);
-    for (const cs of e.cases || []) {
-      conditionCalls(cs.when, out);
-      exprCalls(cs.then, out);
-    }
-    if (e.else) exprCalls(e.else, out);
-  }
-  return out;
-}
+/** Whether an expression calls a window: a window function, or an aggregate given `over`. */
+export const isWindowCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '') && (kindOf(e.fn) === 'window' || (kindOf(e.fn) === 'aggregate' && e.over !== undefined));
+/** Whether an expression calls an aggregate that folds rows (an aggregate with no `over`). */
+export const isAggregateCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '') && kindOf(e.fn) === 'aggregate' && e.over === undefined;
+/** Whether an expression is a condition or a logic function — a boolean by what it is. */
+export const isConditionCall = (e) => isObj(e) && (CONDITION_FNS.includes(e.fn) || LOGIC_FNS.includes(e.fn));
 
-/** Every function the expressions of a list of conditions call (their left and right sides). */
-export function conditionCalls(list, out = []) {
-  eachCondition(list, (c) => { exprCalls(c.left, out); exprCalls(c.right, out); });
-  return out;
+// ── The leaves, as a level's schema offers them ─────────────────────────────────────────────────────
+/** { column } — a column of the rows here (checked when built, with the columns there are). */
+export const columnLeaf = (description = 'A column of the rows here.', { pattern } = {}) => form({ title: 'a column — { column }', required: ['column'], properties: { column: { type: 'string', ...(pattern ? { pattern } : {}), description } } });
+/** { value } — a constant: a string, a number, a boolean or null; never a list. */
+export const valueLeaf = () => form({ title: 'a constant — { value }', required: ['value'], properties: { value: { ...SCALAR, description: 'A string, a number, a boolean or null — never a list (in / not_in take each member as an argument of its own). A constant is compared in the type of what it meets.' } } });
+/** { now: true } — the current time. */
+export const nowLeaf = () => form({ title: 'the current time — { now: true }', required: ['now'], properties: { now: { const: true } } });
+/** { property, field?, type? } — an event property among `values`, read where it is stored. */
+export const propertyLeaf = (values, description = 'An event property of the source (semantic_index lists them) — a scalar, an array or a JSON object, read where it is stored: its own column, or the event_data payload.') => form({
+  title: 'an event property — { property }', required: ['property'],
+  properties: {
+    property: propEnum(values || [], description),
+    field: { type: 'string', description: 'One field of a JSON object property.' },
+    type: { ...TYPE, description: 'What it is read as (default: as the catalog declares it; a field as a string).' },
+  },
+});
+/** The leaves of a level, by what it reads: a pipeline over a source reads its event properties too. */
+export const expressionLeaves = (catalog, { sourced = true } = {}) => [
+  columnLeaf(),
+  ...(sourced ? [propertyLeaf(catalog?.eventPropEnum ? catalog.eventPropEnum() : [])] : []),
+  valueLeaf(),
+  nowLeaf(),
+];
+
+/** The shapes a function is offered in: an aggregate in two when it is windowable — folding rows (with
+ *  an optional `where`) and over a window (with `over`, which the fold does not take) — so the forms
+ *  stay apart by the field one of them requires. */
+function shapesOf(fn) {
+  const s = FNS[fn];
+  const base = { args: s.args, title: s.title || null, needs: s.needs || [], may: s.may || [] };
+  if (kindOf(fn) === 'aggregate') {
+    return [
+      { ...base, may: [...base.may, 'where'], label: 'an aggregate' },
+      ...(s.windowable ? [{ ...base, needs: [...base.needs, 'over_frame'], label: 'over a window', window: true }] : []),
+    ];
+  }
+  return [{ ...base, window: kindOf(fn) === 'window', label: kindOf(fn) === 'condition' ? 'a condition' : kindOf(fn) === 'logic' ? 'logic' : null }];
 }
 
 /**
- * The expression's schema — $defs.expr, recursive through its arguments: the three leaves, and one
- * form per function SHAPE (the functions that take the same arguments and parameters share a form,
- * tagged by all of them), each with exactly its own fields.
+ * A LEVEL'S EXPRESSION SCHEMA — recursive through `ref` (the level's own `$defs` entry: every argument,
+ * a CASE's branches, an aggregate's where refer back to it). `leaves`: the level's leaf forms (default:
+ * a pipeline's — { column }, { property } of the catalog's events, { value }, { now }; `sourced: false`
+ * leaves the property out); `fns`: the functions it offers (default: all); `windows: false` leaves out
+ * every window form (a level whose rows are not a pipeline's). One form per function SHAPE — the
+ * functions that take the same arguments and parameters share one, tagged by all of them — each with
+ * exactly its own fields.
  */
-export function exprSchema(catalog) {
-  const PARAMS = params(catalog);
+export function exprSchema(catalog, { ref = '#/$defs/expr', leaves = null, fns = Object.keys(FNS), windows = true, sourced = true, description = null } = {}) {
+  const P = params(catalog, { ref, entities: sourced });
+  const offered = fns.filter((fn) => Object.hasOwn(FNS, fn));
   const byShape = new Map();
-  for (const [fn, s] of Object.entries(FNS)) {
-    const shape = { args: s.args, title: s.title || null, needs: s.needs || [], may: s.may || [] };
-    const key = JSON.stringify(shape);
-    if (!byShape.has(key)) byShape.set(key, { ...shape, fns: [] });
-    byShape.get(key).fns.push(fn);
+  for (const fn of offered) {
+    for (const shape of shapesOf(fn)) {
+      if (shape.window && !windows) continue;
+      const key = JSON.stringify(shape);
+      if (!byShape.has(key)) byShape.set(key, { ...shape, fns: [] });
+      byShape.get(key).fns.push(fn);
+    }
   }
+  // A form says how MANY arguments its functions take, and that a conditional aggregate's `where` is a
+  // list; WHAT each argument and each condition is — an expression — is said once, beside the forms (the
+  // union's own `properties`). Said inside every form, a validator reading all of a value's errors would
+  // check the arguments once per form whose `fn` is not the value's, at every level of nesting:
+  // exponential in the depth of the expression (seconds for an or of ands). Beside them, once per node.
   const argsOf = (n) => {
     const { min, max } = typeof n === 'number' ? { min: n, max: n } : { min: n.min, max: n.max };
-    return { type: 'array', minItems: min, ...(max !== undefined ? { maxItems: max } : {}), items: EXPR };
+    return { type: 'array', minItems: min, ...(max !== undefined ? { maxItems: max } : {}) };
   };
-  const forms = [...byShape.values()].map(({ args, title, needs, may, fns }) => {
+  const shallow = { ...P, where: { type: 'array', minItems: 1, description: P.where.description } };
+  const forms = [...byShape.values()].map(({ args, title, needs, may, fns: names, label }) => {
     const takesArgs = args !== 0;
     const required = typeof args === 'number' ? args > 0 : args.min > 0;
-    const fields = Object.fromEntries([...needs, ...may].map((n) => [written(n), PARAMS[n]]));
+    const fields = Object.fromEntries([...needs, ...may].map((n) => [written(n), shallow[n]]));
     return form({
-      title: `fn: ${fns.join(' | ')}${title ? ` — args ${title}` : ''}`,
-      tag: ['fn', fns],
+      title: `fn: ${names.join(' | ')}${title ? ` — args ${title}` : ''}${label ? ` (${label})` : ''}`,
+      tag: ['fn', names],
       required: [...(takesArgs && required ? ['args'] : []), ...needs.map(written)],
       properties: { ...(takesArgs ? { args: argsOf(args) } : {}), ...fields },
     });
   });
+  const leafForms = leaves || expressionLeaves(catalog, { sourced });
+  const has = (list) => list.some((fn) => offered.includes(fn));
+  const text = [
+    `An expression: a leaf — ${leafForms.map((l) => (l.title || '').replace(/^.* — /, '')).filter(Boolean).join(', ')} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`,
+    ...(has(['add', 'round']) ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
+    ...(has(CONDITION_FNS) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
+    ...(has(AGGREGATE_FNS) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written; its `where` folds only the rows those conditions hold for.'] : []),
+    ...(windows && has([...WINDOW_FNS, ...WINDOW_AGGREGATE_FNS]) ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
+    ...(has(['raw']) ? ['raw is the escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
+  ].join(' ');
+  const nested = {
+    args: { type: 'array', items: { $ref: ref }, description: 'A function\'s arguments, each an expression.' },
+    ...(has(AGGREGATE_FNS) ? { where: conditionSlot(ref, P.where.description) } : {}),
+  };
+  return { type: 'object', description: description || text, properties: nested, anyOf: [...leafForms, ...forms] };
+}
+
+// ── The writer ───────────────────────────────────────────────────────────────────────────────────────
+
+/** What a refusal calls a written argument. */
+const said = (r) => (r.constant ? `the constant ${JSON.stringify(r.value)}` : r.name ? `'${r.name}' (${r.type || 'of unknown type'})` : `an expression of type ${r.type || 'unknown'}`);
+/** Whether a written argument is a boolean — or may be one: nothing is known of its type. */
+const mayBeBoolean = (r) => (r.constant ? typeof r.value === 'boolean' : r.type === 'boolean' || r.type == null || r.type === 'unknown');
+
+/** The fields a leaf takes, by the field that says which leaf it is. */
+const LEAF_FIELDS = { column: ['column'], property: ['property', 'field', 'type'], value: ['value'], now: ['now'] };
+
+/** A refusal of a value written in an earlier spelling of the grammar, with the value it is now. */
+function earlier(e, at) {
+  const now = currentOf(e);
+  return now !== e && JSON.stringify(now) !== JSON.stringify(e) ? new Error(`${at}: ${JSON.stringify(e)} is an earlier spelling — write ${JSON.stringify(now)}`) : null;
+}
+
+function writer(d, cols, opts) {
+  const groupBy = new Set(opts.groupBy || []);
+  const aggregateLevel = opts.context === 'aggregate' || opts.context === 'measure';
+  const offeredAggregates = opts.aggregates ? new Set(opts.aggregates) : null;
+  let aggregates = 0;
+
+  // outside an aggregate, a measure reads only what is the same on every row of a group
+  const groupRule = (name, at, s) => {
+    if (!aggregateLevel || s.inAggregate || groupBy.has(name)) return;
+    throw new Error(`${at}: '${name}' stands outside an aggregate, so it has to be one of the group_by columns (${[...groupBy].join(', ') || 'none'}) — group by it, or fold it ({ fn: "max", args: [{ column: "${name}" }] })`);
+  };
+
+  function leaf(e, at, s) {
+    const hooked = opts.leaf ? opts.leaf(e, at, s) : undefined;
+    if (hooked) return hooked;
+    const which = Object.keys(LEAF_FIELDS).find((k) => Object.hasOwn(e, k));
+    const stray = which ? Object.keys(e).filter((k) => !LEAF_FIELDS[which].includes(k)) : [];
+    if (!which || stray.length) {
+      throw earlier(e, at) || new Error(which
+        ? `${at}: { ${which} } takes ${LEAF_FIELDS[which].join(', ')}, not ${stray.join(', ')}`
+        : `${at}: an expression is { column }, { property }, { value }, { now: true } or a function { fn, args, … }`);
+    }
+    if (which === 'column') {
+      groupRule(e.column, at, s);
+      if (cols) requireCol(cols, e.column);
+      const c = cols?.get(e.column);
+      return { sql: d.quoteIdent(e.column), type: c?.type ?? opts.columnType?.(e.column) ?? null, physical: !!c?.physical, name: e.column };
+    }
+    if (which === 'property') {
+      groupRule(e.property, at, s);
+      return { ...propertyRead('value', { d, cols, catalog: opts.catalog, source: opts.source, property: e.property, field: e.field, type: e.type, at }), name: e.property };
+    }
+    if (which === 'now') {
+      if (e.now !== true) throw new Error(`${at}: the current time is { now: true }`);
+      return { sql: d.nowExpr(), type: 'time', name: 'now' };
+    }
+    const v = e.value;
+    // a list is no constant: in / not_in take each member as an argument of its own
+    if (Array.isArray(v) || isObj(v)) throw new Error(`${at}: a constant is a string, a number, a boolean or null — a list is written as arguments of their own ({ fn: "in", args: [<the expression>, { value: "a" }, { value: "b" }] })`);
+    return { sql: d.sqlLiteral(v), type: typeof v === 'number' ? 'numeric' : typeof v === 'boolean' ? 'boolean' : v === null ? null : 'string', constant: true, value: v };
+  }
+
+  // an array function: of an array property read where it is stored, or of an expression yielding one
+  function arrayCall(e, at, s) {
+    const [arr, item] = e.args || [];
+    const kind = FNS[e.fn].array;
+    if (kind === 'contains' && !(isObj(item) && item.fn === undefined && Object.keys(item).length === 1 && Object.hasOwn(item, 'value') && !isObj(item.value) && !Array.isArray(item.value))) {
+      throw new Error(`${at}: array_contains takes [array, { value }] — the element looked for is a constant`);
+    }
+    const v = item?.value;
+    if (isObj(arr) && arr.fn === undefined && arr.property !== undefined) {
+      if (arr.field !== undefined || arr.type !== undefined) throw new Error(`${at}: ${e.fn} reads the array itself — { property: '${arr.property}' }, with no field or type`);
+      groupRule(arr.property, at, s);
+      return { ...propertyRead(kind, { d, cols, catalog: opts.catalog, source: opts.source, property: arr.property, item: v, at }), name: `${e.fn}(${arr.property})` };
+    }
+    const r = render(arr, `${at} ${e.fn} args[0]`, s);
+    if (r.constant) throw new Error(`${at}: ${e.fn} reads an array — an array { property } of the source, or an expression that yields one (json_parse_array)`);
+    // text holding a JSON array is read as one; anything else has to be an array
+    const json = r.type === 'json' || r.type === 'string';
+    if (!json) needsArray(e.fn, r.type);
+    if (kind === 'length') return { sql: json ? d.jsonColumnArrayLength(r.sql) : d.arrayLength(r.sql), type: 'int' };
+    return { sql: json ? d.jsonColumnArrayContains(r.sql, v) : d.arrayContains(r.sql, v), type: 'boolean' };
+  }
+
+  function render(e, at, s) {
+    if (!isObj(e)) throw new Error(`${at}: an expression is an object — { column }, { property }, { value }, { now: true } or a function { fn, args, … }`);
+    if (e.fn === undefined) return leaf(e, at, s);
+    const spec = Object.hasOwn(FNS, e.fn) ? FNS[e.fn] : null;
+    if (!spec) {
+      const wrong = earlier(e, at);
+      if (wrong) throw wrong;
+      const near = typeof e.fn === 'string' ? rankFuzzy(e.fn, Object.keys(FNS), { fields: (x) => [x], limit: 3 }).map((x) => x.item) : [];
+      throw new Error(`${at}: unknown function '${e.fn}'${near.length ? ` — did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : ''} (the functions: ${Object.keys(FNS).join(', ')})`);
+    }
+    const fn = e.fn;
+    const kind = kindOf(fn);
+    const window = kind === 'window' || (spec.windowable && e.over !== undefined);
+    const folds = kind === 'aggregate' && !window;
+    // the fields a call may carry: its function's parameters, an aggregate's where (folding) or over (a window)
+    const allowed = new Set(['fn', ...(spec.args !== 0 ? ['args'] : []), ...(spec.needs || []).map(written), ...(spec.may || []).map(written), ...(folds ? ['where'] : []), ...(window ? ['over'] : [])]);
+    const stray = Object.keys(e).filter((k) => !allowed.has(k));
+    if (stray.length) {
+      if (stray.includes('over') && kind !== 'window' && !spec.windowable) throw new Error(`${at}: ${fn} takes no \`over\` — a window is ${WINDOW_FNS.join(', ')}, or ${WINDOW_AGGREGATE_FNS.join(' / ')} over rows`);
+      if (stray.includes('where') && window) throw new Error(`${at}: ${fn} over a window takes no \`where\` — a conditional window folds a CASE: { fn: "${fn}", args: [{ fn: "case", cases: [{ when: [...], then: <the value> }] }], over }`);
+      throw earlier(e, at) || new Error(`${at}: ${fn} takes ${[...allowed].filter((k) => k !== 'fn').join(', ') || 'no field'}, not ${stray.join(', ')}`);
+    }
+    const args = e.args || [];
+    if (!Array.isArray(args)) throw new Error(`${at}: ${fn} takes \`args\` as a list of expressions`);
+    const { min, max } = typeof spec.args === 'number' ? { min: spec.args, max: spec.args } : { min: spec.args.min, max: spec.args.max ?? Infinity };
+    if (args.length < min || args.length > max) throw new Error(`${at}: ${fn} takes ${min === max ? min : max === Infinity ? `at least ${min}` : `${min} to ${max}`} argument${max === 1 ? '' : 's'}${spec.title ? ` ${spec.title}` : ''}, not ${args.length}`);
+    for (const n of spec.needs || []) if (e[written(n)] === undefined) throw new Error(`${at}: ${fn} needs \`${written(n)}\``);
+    if (kind === 'window' && e.over === undefined) throw new Error(`${at}: ${fn} needs \`over\``);
+    // WHERE each kind may stand
+    if (window) {
+      if (s.noWindows) throw new Error(`${at}: a window function (${fn} with over) cannot stand in a condition — a where keeps rows before any window is computed. Compute it into a column first (a compute stage), then filter on that column`);
+      if (s.inWindow) throw new Error(`${at}: a window function (${fn}) cannot be an argument of another window function — compute the inner one into a column first (a compute stage), then use that column`);
+      if (s.inAggregate) throw new Error(`${at}: a window function (${fn}) cannot be an aggregate's argument — compute it into a column first (a compute stage), then fold that column`);
+      if (aggregateLevel) throw new Error(`${at}: a measure folds a group's rows into one value, and a window (${fn} with over) keeps every row — compute the window in a compute stage before the aggregate, then fold its column`);
+    }
+    if (folds) {
+      if (s.inAggregate) throw new Error(`${at}: ${fn} cannot fold the result of another aggregate — an aggregate of aggregates is a second aggregate stage over the first one's columns`);
+      if (!aggregateLevel) throw new Error(`${at}: ${fn} with no \`over\` folds many rows into one value, which a row cannot hold — fold rows in an aggregate stage's measure (or a pivot's), or give it \`over\` to compute it over a window in a compute stage`);
+      if (offeredAggregates && !offeredAggregates.has(fn)) throw new Error(`${at}: ${fn} is not an aggregate this measure takes (${[...offeredAggregates].join(', ')})`);
+      if (fn === 'percentile' && !(typeof e.percentile === 'number' && e.percentile > 0 && e.percentile < 1)) throw new Error(`${at}: percentile needs \`percentile\` in (0,1), e.g. 0.95 for p95`);
+      aggregates += 1;
+    }
+    if (spec.array) return arrayCall(e, at, s);
+    // an aggregate's argument is refused a window as an aggregate's (inAggregate); its where is a
+    // condition slot, which refuses one as a condition's (conditions() sets noWindows)
+    const inner = folds ? { ...s, inAggregate: true } : window ? { ...s, inWindow: true } : s;
+    const r = args.map((x, i) => render(x, `${at} ${fn} args[${i}]`, inner));
+    if (kind === 'logic') {
+      r.forEach((x, i) => { if (!mayBeBoolean(x)) throw new Error(`${at} ${fn} args[${i}]: ${fn} takes conditions — a comparison ({ fn: "eq", args: [...] }), and / or / not, or a boolean column; this is ${said(x)}`); });
+    }
+    const cond = folds && e.where !== undefined ? conditions(e.where, `${at} ${fn} where`, inner).map((x) => `(${x})`).join(' AND ') : null;
+    const out = spec.sql({
+      d, cols, opts, at, scope: { ...s, aggregateLevel: aggregateLevel && !s.inAggregate }, window, cond,
+      a: r.map((x) => x.sql), t: r.map((x) => x.type), r, p: e,
+      sub: (x, what) => render(x, `${at} ${fn} ${what}`, inner),
+      conds: (list, what) => conditions(list, `${at} ${fn} ${what}`, inner),
+    });
+    return { sql: out.expr, type: out.type || 'numeric', name: `${fn}(…)` };
+  }
+
+  // a condition slot: a list of booleans that all hold; no window can stand in one
+  function conditions(list, at, s) {
+    if (!Array.isArray(list) || !list.length) throw new Error(`${at}: a list of conditions that all hold — at least one`);
+    return list.map((c, i) => {
+      const where = `${at}[${i}]`;
+      const r = render(c, where, { ...s, noWindows: true });
+      if (!mayBeBoolean(r)) throw new Error(`${where}: a where takes conditions — a comparison ({ fn: "eq", args: [...] }), and / or / not, or a boolean column; this is ${said(r)}`);
+      return r.sql;
+    });
+  }
+
+  return { render, conditions, aggregates: () => aggregates };
+}
+
+/**
+ * THE ONE WRITER: an expression's SQL and type over the columns at this step (`cols`, a Map name →
+ * { type, physical? }; null where columns are not tracked — a { column } is then taken as written, its
+ * type `opts.columnType(name)`). `at` names it in a refusal. `opts`:
+ *   catalog, source — what a { property } is read from and a window's { entity } resolved against;
+ *   leaf(e, at)     — a level's own leaves (a metric, a dimension reference): { sql, type, … } for one
+ *                     it resolves, undefined to fall back to { column } / { property } / { value } / { now };
+ *   context         — 'row' (default: a compute stage's expression; no aggregate without over, a window
+ *                     only with `windows` not false), 'aggregate' (a measure of an aggregate stage or a
+ *                     pivot: aggregates combined by scalar functions, at least one, and a column outside
+ *                     them one of `groupBy`; no window), 'measure' (a semantic measure: ONE aggregate at
+ *                     the top, of `aggregates` when given);
+ *   windows         — false where no window may stand (a where);
+ *   castToConstant  — a column compared with constants is read as their kind (the retentioneering filter).
+ * → { sql, type, physical? }
+ */
+export function exprSql(d, cols, e, at = 'expression', opts = {}) {
+  if (opts.context === 'measure' && !isAggregateCall(e)) {
+    throw (isObj(e) && earlier(e, at)) || new Error(`${at}: a measure is ONE aggregate — { fn: "sum" | "average" | "count" | …, args: [<a row expression>], where? } — a formula over several aggregates is several measures and a derived metric`);
+  }
+  const w = writer(d, cols, opts);
+  const r = w.render(e, at, { inAggregate: false, inWindow: false, noWindows: opts.windows === false });
+  if ((opts.context === 'aggregate' || opts.context === 'measure') && !w.aggregates()) {
+    throw new Error(`${at}: a measure folds rows, so it needs an aggregate — sum, count, average, … (e.g. { fn: "sum", args: [{ column: "price" }] }); a constant or a column alone is no measure`);
+  }
+  return { sql: r.sql, type: r.type, ...(r.physical ? { physical: true } : {}) };
+}
+
+/**
+ * A CONDITION SLOT's SQL — a list of boolean expressions that all hold (a where stage, a funnel step, a
+ * scope), one SQL per item, over the columns at this step. No window stands in one, and in a row a
+ * condition folds no rows. `opts` as exprSql's.
+ */
+export function conditionListSql(d, cols, list, at = 'where', opts = {}) {
+  return writer(d, cols, opts).conditions(list, at, { inAggregate: false, inWindow: false, noWindows: true });
+}
+
+// ── Reading expressions (to check, warn and convert) ────────────────────────────────────────────────
+
+/** Every node of an expression — leaves and calls — visited once, in its arguments, an aggregate's
+ *  where, a CASE's branches and their conditions. */
+export function eachNode(e, visit) {
+  if (Array.isArray(e)) { e.forEach((x) => eachNode(x, visit)); return; }
+  if (!isObj(e)) return;
+  visit(e);
+  if (e.fn === undefined) return;
+  eachNode(e.args, visit);
+  eachNode(e.where, visit);
+  for (const cs of Array.isArray(e.cases) ? e.cases : []) { eachNode(cs?.when, visit); eachNode(cs?.then, visit); }
+  eachNode(e.else, visit);
+}
+
+/** Every function an expression calls, nested ones included (to find a window, a raw SQL). */
+export function exprCalls(e, out = []) {
+  eachNode(e, (n) => { if (n.fn !== undefined) out.push(n); });
+  return out;
+}
+
+/** Every column an expression names ({ column } leaves), anywhere in it. */
+export function exprColumns(e) {
+  const out = new Set();
+  eachNode(e, (n) => { if (n.fn === undefined && typeof n.column === 'string') out.add(n.column); });
+  return [...out];
+}
+
+/** Every condition of a list, the logic functions opened (and / or / not): to read what each compares. */
+export function eachCondition(list, visit) {
+  for (const c of Array.isArray(list) ? list : []) {
+    if (isObj(c) && LOGIC_FNS.includes(c.fn)) eachCondition(c.args, visit);
+    else visit(c);
+  }
+}
+
+/**
+ * A condition that compares a column or an event property with constants — { subject: the leaf, op,
+ * values } — or null: the first argument a bare { column } / { property }, every other a { value }.
+ * What a scope reads (an event filter, a time bound, a value to verify).
+ */
+export function comparisonOf(e) {
+  if (!isObj(e) || !CONDITION_FNS.includes(e.fn) || !Array.isArray(e.args) || !e.args.length) return null;
+  const [subject, ...rest] = e.args;
+  if (!isObj(subject) || subject.fn !== undefined || (subject.column === undefined && subject.property === undefined)) return null;
+  if (!rest.every((x) => isObj(x) && x.fn === undefined && Object.hasOwn(x, 'value'))) return null;
+  return { subject, op: e.fn, values: rest.map((x) => x.value) };
+}
+
+/** The expression with every aggregate that folds rows replaced by `f(call)` — an aggregate's own
+ *  arguments are rows, and are left as they are (a pivot's cell adds its condition to each). */
+export function mapAggregates(e, f) {
+  if (Array.isArray(e)) return e.map((x) => mapAggregates(x, f));
+  if (!isObj(e) || e.fn === undefined) return e;
+  if (isAggregateCall(e)) return f(e);
   return {
-    type: 'object',
-    description: 'An expression: { column }, a constant { value }, the current time { now: true }, or a function { fn, args: [expressions], …its parameters } — arguments are expressions themselves, so a formula nests in one place (e.g. round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }). Window functions (row_number, rank, dense_rank, lag, lead, and sum / average / count / min / max of a frame) take `over`. raw is the escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).',
-    anyOf: [
-      form({ title: 'a column', required: ['column'], properties: { column: { type: 'string' } } }),
-      form({ title: 'a constant', required: ['value'], properties: { value: SCALAR } }),
-      form({ title: 'the current time', required: ['now'], properties: { now: { const: true } } }),
-      ...forms,
-    ],
+    ...e,
+    ...(Array.isArray(e.args) ? { args: e.args.map((x) => mapAggregates(x, f)) } : {}),
+    ...(Array.isArray(e.cases) ? { cases: e.cases.map((cs) => (isObj(cs) ? { ...cs, when: mapAggregates(cs.when, f), then: mapAggregates(cs.then, f) } : cs)) } : {}),
+    ...(e.else !== undefined ? { else: mapAggregates(e.else, f) } : {}),
   };
 }

@@ -200,24 +200,34 @@ test('steps asked for at once are all applied, and a materialize racing an edit 
   assert.ok(now.includes('tutorial') && !now.includes('level_completed'), 'T26: materialized again, the table holds the edited steps\' events');
 });
 
-// ── what a start takes: its events, its path, its window, its sample — decided in SQL ────────────────
+// ── what a start takes: its stages, its path, its window, its sample — decided in SQL ────────────────
 // A start below carries two of these specs where the checks of each read numbers the other leaves as they
-// are: a split of events with a path or with a window, a where with a top N. A sample by a hash is two
-// starts of one spec.
+// are: events renamed with a path or with a window, a where with a top N. A sample by a hash is two
+// starts of one spec. Events renamed, merged or split by a parameter are a compute stage — a case over the
+// event and its properties — whose column `columns.event` names.
 
 /** How many distinct values `f` gives over `list` — a missing part of a key makes no path. */
 const distinct = (list, f) => new Set(list.filter((x) => f(x) != null && !String(f(x)).includes('null')).map(f)).size;
 const counts = (list) => list.reduce((m, x) => m.set(x, (m.get(x) || 0) + 1), new Map());
 
-// A PATH that is not the user, by an event property (a key of one part takes the property's branch), and
-// events made from an event's parameters by a value: one start.
-test('a path by an event property, its events split by a value (with names of its own): one path per level, events without it left out, every event counted from the rows', opts, async (t) => {
+const eventIs = (name) => ({ fn: 'eq', args: [{ column: 'event_name' }, { value: name }] });
+const result = { property: 'result_of_event_data' };
+/** A level_completed with a result, renamed <event>_<result>: the branch of a case after the named ones. */
+const byResult = { when: [eventIs('level_completed'), { fn: 'is_not_null', args: [result] }], then: { fn: 'concat', args: [{ value: 'level_completed_' }, result] } };
+/** A compute stage making the event column `ev`: the case's branches, every other event as it was. */
+const renamed = (cases) => ({ stage: 'compute', name: 'ev', expr: { fn: 'case', cases, else: { column: 'event_name' }, type: 'string' } });
+
+// A PATH that is not the user, by an event property's column, and events made from an event's parameters
+// by a value: one start.
+test('a path by an event property, its events renamed by a value (with names of its own): one path per level, events without it left out, every event counted from the rows', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select event_name as e, result_of_event_data as r, level_id_of_event_data as l from fct_analytics_events')).rows;
-  // by value: win → level_won (its own name), any other value → level_completed_<value>
+  // by value: win → level_won (its own name), any other value → level_completed_<value> — a compute stage
+  // whose column is the event, and the property's own column as the path
   const b = await engine.build_retentioneering_model({
-    name: 'by_level', source: 'events', path: [{ property: 'level_id_of_event_data' }],
-    events: { split: [{ event: 'level_completed', by: { property: 'result_of_event_data' }, names: { win: 'level_won' } }] },
+    name: 'by_level', source: 'events', path: ['level_id_of_event_data'],
+    stages: [renamed([{ when: [eventIs('level_completed'), { fn: 'eq', args: [result, { value: 'win' }] }], then: { value: 'level_won' } }, byResult])],
+    columns: { event: 'ev' },
   });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
@@ -229,23 +239,28 @@ test('a path by an event property, its events split by a value (with names of it
   const results = new Set(withLevel.filter((x) => x.e === 'level_completed').map((x) => x.r));
   assert.ok(results.has('win') && [...results].some((v) => v != null && v !== 'win'), 'guard: the levels\' events hold a named value and another');
   const expected = counts(withLevel.map((x) => (x.e !== 'level_completed' || x.r == null ? x.e : x.r === 'win' ? 'level_won' : `level_completed_${x.r}`)));
-  assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'split by value: the named value under its name, any other as <event>_<value>, every other event as it was');
+  assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'renamed by value: the named value under its name, any other as <event>_<value>, every other event as it was');
   // an unknown parameter is refused before anything runs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', by: { property: 'no_such' } }] } }), /invalid input|no_such/, 'an unknown parameter');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])], columns: { event: 'ev' } }), /invalid input|no_such/, 'an unknown parameter');
 });
 
 // A window in a timezone, and events made from an event's parameters by conditions: one start.
-test('a time window scopes the eventstream on the partitioned source (in a timezone, across the UTC day), its events split by conditions; a source that requires a window refuses a build without it', opts, async (t) => {
+test('a time window scopes the eventstream on the partitioned source (in a timezone, across the UTC day), its events renamed by conditions; a source that requires a window refuses a build without it', opts, async (t) => {
   if (skip(t)) return;
   // 2026-01-02 in UTC+14 = [01-01 10:00, 01-02 10:00) UTC — partly on the previous UTC day
   const window = "device_time >= timestamp '2026-01-01 10:00:00' and device_time < timestamp '2026-01-02 10:00:00'";
   const inWindow = Number((await wh.query(`select count(*) as n from fct_analytics_events where ${window}`)).rows[0].n);
   const results = (await wh.query(`select result_of_event_data as r from fct_analytics_events where event_name = 'level_completed' and ${window}`)).rows.map((x) => x.r);
-  // by conditions: the first case that holds; the rest take `else` — the names the table holds, and so
-  // what an analysis of it reads
+  // by conditions: the first branch that holds; the event's other rows take the next — the names the
+  // table holds, and so what an analysis of it reads (a level with no result is not lost: a comparison
+  // with a missing value does not hold)
   const b = await engine.build_retentioneering_model({
     name: 'windowed', source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' },
-    events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }], else: 'level_passed' }] },
+    stages: [renamed([
+      { when: [eventIs('level_completed'), { fn: 'eq', args: [result, { value: 'lose' }] }], then: { value: 'level_lost' } },
+      { when: [eventIs('level_completed')], then: { value: 'level_passed' } },
+    ])],
+    columns: { event: 'ev' },
   });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
@@ -254,7 +269,7 @@ test('a time window scopes the eventstream on the partitioned source (in a timez
   const lost = results.filter((x) => x === 'lose').length;
   assert.ok(lost > 0 && lost < results.length, 'guard: the window holds a lost level and another');
   const vocab = new Map(r.vocabulary.map((v) => [v.event, v.events]));
-  assert.deepEqual([vocab.get('level_lost'), vocab.get('level_passed'), vocab.get('level_completed')], [lost, results.length - lost, undefined], 'split by conditions: the first case that holds names the row, the rest take else');
+  assert.deepEqual([vocab.get('level_lost'), vocab.get('level_passed'), vocab.get('level_completed')], [lost, results.length - lost, undefined], 'renamed by conditions: the first branch that holds names the row, the event\'s rest take the next');
   const saved = engine.catalog._requireTimeRangeAll;
   engine.catalog._requireTimeRangeAll = true;
   try {
@@ -262,31 +277,36 @@ test('a time window scopes the eventstream on the partitioned source (in a timez
   } finally { engine.catalog._requireTimeRangeAll = saved; }
 });
 
-// A PATH by a composite key of columns (a column as a key part takes the composite key's branch), and a
-// group merging events the split made with events of the source: one start. Its paths, forked twice, each
-// fork with one sample step the caller left unseeded.
-test('a path by a composite key of columns, its events split and merged into a group with events of the source; a sample of those paths the caller left unseeded is drawn with a fixed seed — the same paths on every materialize', opts, async (t) => {
+// A PATH by a composite key of columns, and events of the level's end merged under one name — completed
+// levels with a result of win or lose, and the shop opened — beside the rest renamed by their result: one
+// start. Its paths, forked twice, each fork with one sample step the caller left unseeded.
+test('a path by a composite key of columns, its events renamed and merged into one with events of the source; a sample of those paths the caller left unseeded is drawn with a fixed seed — the same paths on every materialize', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select player_id_of_internal as u, session_number as s, event_name as e, result_of_event_data as r from fct_analytics_events')).rows;
+  const levelEnd = {
+    when: [{ fn: 'or', args: [
+      { fn: 'and', args: [eventIs('level_completed'), { fn: 'in', args: [result, { value: 'win' }, { value: 'lose' }] }] },
+      eventIs('shop_opened'),
+    ] }],
+    then: { value: 'level_end' },
+  };
   const b = await engine.build_retentioneering_model({
-    name: 'by_player_session', source: 'events', path: [{ column: 'player_id_of_internal' }, { column: 'session_number' }],
-    events: {
-      split: [{ event: 'level_completed', by: { property: 'result_of_event_data' }, names: { win: 'level_won' } }],
-      groups: { level_end: ['level_won', 'level_completed_lose', 'shop_opened'] },
-    },
+    name: 'by_player_session', source: 'events', path: ['player_id_of_internal', 'session_number'],
+    stages: [renamed([levelEnd, byResult])],
+    columns: { event: 'ev' },
   });
   const composite = await readDone(b.task_id);
   assert.equal(composite.status, 'done', JSON.stringify(composite.error));
   assert.equal(composite.users, distinct(src, (x) => (x.u == null || x.s == null ? null : `${x.u}|${x.s}`)), 'a path per value of the composite key');
   assert.deepEqual(composite.path, ['player_id_of_internal', 'session_number'], 'the summary says what one path is: the key\'s parts');
-  // the group: a name the split gives, an <event>_<value> and an event of the source, under the group's name
+  // the merged event: completed levels of two results and an event of the source, under one name
   const vocab = new Map(composite.vocabulary.map((v) => [v.event, v.events]));
   const n = (f) => src.filter(f).length;
-  assert.equal(vocab.get('level_end'), n((x) => (x.e === 'level_completed' && ['win', 'lose'].includes(x.r)) || x.e === 'shop_opened'), 'a group merges a name the split gives, an <event>_<value> and an event of the source');
-  assert.deepEqual([vocab.get('level_won'), vocab.get('level_completed_lose'), vocab.get('shop_opened')], [undefined, undefined, undefined], 'the group\'s events are under its name only');
-  // a name neither the source nor the split has is still refused, and a path column the source does not have
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }], groups: { g: ['level_lostt'] } } }), (e) => e.field === 'events.groups.g', 'a group name neither the source nor the split has');
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', path: [{ column: 'no_such' }] }), (e) => e.field === 'path', 'a path column the source does not have');
+  assert.equal(vocab.get('level_end'), n((x) => (x.e === 'level_completed' && ['win', 'lose'].includes(x.r)) || x.e === 'shop_opened'), 'an or of an and and an event merges two results of an event and an event of the source');
+  assert.deepEqual([vocab.get('level_completed_win'), vocab.get('level_completed_lose'), vocab.get('shop_opened')], [undefined, undefined, undefined], 'the merged events are under its name only');
+  // an event column the stages did not make is refused, and a path column the source does not have
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [renamed([levelEnd])], columns: { event: 'evnt' } }), (e) => e.field === 'columns.event' && /evnt/.test(e.message), 'an event column the stages did not make');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', path: ['no_such'] }), (e) => e.field === 'path', 'a path column the source does not have');
 
   // a sample the caller left unseeded is drawn with a fixed seed: the same paths on every materialize
   const ctx = composite.context_id;
@@ -306,7 +326,7 @@ test('a path by a composite key of columns, its events split and merged into a g
 test('a where between two values (both ends included), and a top N: the most frequent events of those rows keep their names, the rest is "other" — no event dropped', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select session_number as s, event_name as e from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'sessions_1_2', source: 'events', where: [{ column: 'session_number', op: 'between', value: [1, 2] }], events: { top: 3 } });
+  const b = await engine.build_retentioneering_model({ name: 'sessions_1_2', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   const inSessions = src.filter((x) => x.s >= 1 && x.s <= 2);

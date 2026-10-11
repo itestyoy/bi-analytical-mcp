@@ -5,7 +5,7 @@ Project index router for this repository. It keeps orientation short; the rules 
 
 ## Snapshot
 
-- Last reviewed: 2026-10-02
+- Last reviewed: 2026-10-11
 - Repository path: `bi-analytical-mcp/`
 - Role: an MCP server for product analytics over a fixed data catalog — governed metrics (dbt semantic layer + MetricFlow) and one-off pipeline tables, queried as tasks, drawn as cards in MCP Apps hosts.
 
@@ -40,7 +40,8 @@ Project index router for this repository. It keeps orientation short; the rules 
 ## Hotspots
 
 - Schemas and refusals: `src/schema.js`, `src/schema/`, `src/schema-kit.js`, `src/validate.js` — every change is held by `test/unit/schema-portability.test.js` and the size budget.
-- Pipelines: `src/pipeline/` (stages, expressions, conditions) and `src/pipeline/earlier.js` (steps stored by an earlier version).
+- The expression grammar every tool shares: `src/pipeline/compute.js` (the function table, `exprSchema`, `exprSql`), `src/conditions.js` (`predicateSql`), `src/earlier-spelling.js` (the one converter table for earlier spellings).
+- Pipelines: `src/pipeline/` (stages, reads of stored tables — `renderRead`) and `src/pipeline/earlier.js` (steps stored by an earlier version).
 - The semantic side: `src/compile.js`, `src/engine/semantic-query.js`, `src/project-semantics.js`.
 - The dbt client: `src/dbt/` — the only place dbt and `mf` are spawned.
 

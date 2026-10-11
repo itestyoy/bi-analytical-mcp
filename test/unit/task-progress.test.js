@@ -48,11 +48,12 @@ test('a where that bounds a time column from above by a bare date is told so; a 
   const advisor = new PipelineAdvisor({ catalog: null, valueIndex: null });
   const cols = [{ name: 'event_at', type: 'time' }, { name: 'event_name', type: 'categorical' }];
   const warned = (conditions) => advisor.dateBoundWarnings({ stage: 'where', conditions }, cols).length;
-  assert.equal(warned([{ column: 'event_at', op: 'between', value: ['2026-01-01', '2026-01-31'] }]), 1);
-  assert.equal(warned([{ or: [{ column: 'event_at', op: 'lte', value: '2026-01-31' }] }]), 1);
-  assert.equal(warned([{ column: 'event_at', op: 'lte', value: '2026-01-31 23:59:59' }]), 0);
-  assert.equal(warned([{ column: 'event_at', op: 'gte', value: '2026-01-01' }, { column: 'event_at', op: 'lt', value: '2026-02-01' }]), 0);
-  assert.equal(warned([{ column: 'event_name', op: 'lte', value: '2026-01-31' }]), 0, 'not a time column');
+  const cond = (fn, column, ...values) => ({ fn, args: [{ column }, ...values.map((value) => ({ value }))] });
+  assert.equal(warned([cond('between', 'event_at', '2026-01-01', '2026-01-31')]), 1);
+  assert.equal(warned([{ fn: 'or', args: [cond('lte', 'event_at', '2026-01-31'), cond('eq', 'event_name', 'x')] }]), 1, 'inside an or too');
+  assert.equal(warned([cond('lte', 'event_at', '2026-01-31 23:59:59')]), 0);
+  assert.equal(warned([cond('gte', 'event_at', '2026-01-01'), cond('lt', 'event_at', '2026-02-01')]), 0);
+  assert.equal(warned([cond('lte', 'event_name', '2026-01-31')]), 0, 'not a time column');
 });
 
 test('a query only compiled waits for the build of its context, not for the queries queued before it', async () => {

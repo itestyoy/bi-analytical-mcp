@@ -1,9 +1,11 @@
 // A refusal is the only teacher the caller has at that moment, so it must name the spelling THIS
 // server uses instead of only listing what is allowed.
 //
-// Every path aggregates with ONE vocabulary — `agg`, the mean `average`, a quantile `percentile`, the
-// name a step produces `name` — so a caller who learned it once can use it everywhere. A caller who
-// brings SQL's words (`avg`, `q`, `fn`, `as`) is told what this server calls them, in either path.
+// Every path aggregates with ONE vocabulary — an aggregation is a function (`fn`), the mean `average`,
+// a quantile `percentile`, the name a step produces `name` — so a caller who learned it once can use it
+// everywhere. A caller who brings SQL's words (`avg`, `mean`, `quantile`, `q`, `as`) or the earlier
+// `agg` is told what this server calls them, in every path; a value written in an earlier spelling of
+// the grammar is shown as it is written now.
 //
 // Input-validation tests: bad input is refused, and the refusal says the right thing. Nothing here
 // asserts on generated SQL/YAML.
@@ -14,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
-import { renderPipeline } from '../../src/pipeline.js';
+import { renderPipeline, renderRead } from '../../src/pipeline.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -23,21 +25,24 @@ const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
 const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', stages: [st] });
+const measure = (name, expr) => stage({ stage: 'aggregate', measures: [{ name, expr }] });
 
-test("a pipeline stage refuses `avg` and says it is spelled `average` here", () => {
-  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'avg', column: 'price' }] }));
+test("a pipeline measure refuses `avg` (and `mean`, `quantile`) and says how it is spelled here", () => {
+  const res = check('build_pipeline_model', measure('x', { fn: 'avg', args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /'avg' is spelled 'average'/);
   // the allowed list is still there — the hint adds to it, it does not replace it
-  assert.match(text(res), /must be one of: sum, average/);
+  assert.match(text(res), /must be one of: add, sub/);
+  assert.match(text(check('build_pipeline_model', measure('x', { fn: 'mean', args: [{ column: 'price' }] }))), /'mean' is spelled 'average'/);
+  assert.match(text(check('build_pipeline_model', measure('x', { fn: 'quantile', args: [{ column: 'price' }], percentile: 0.5 }))), /'quantile' is spelled 'percentile'/);
   // …and the correct spelling is accepted
-  assert.equal(check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'average', column: 'price' }] })).ok, true);
+  assert.equal(check('build_pipeline_model', measure('x', { fn: 'average', args: [{ column: 'price' }] })).ok, true);
 });
 
 test("a governed measure refuses `avg` and says it is spelled `average` here", () => {
-  const payload = (agg) => ({
+  const payload = (fn) => ({
     name: 'spell_task',
-    semantic_models: [{ from: 'events', measures: [{ name: 'm', agg, field: 'price_in_usd_of_event_data' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'm', expr: { fn, args: [{ column: 'price_in_usd_of_event_data' }] } }] }],
     metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
   const res = check('build_semantic_model', payload('avg'));
@@ -46,30 +51,41 @@ test("a governed measure refuses `avg` and says it is spelled `average` here", (
   assert.equal(check('build_semantic_model', payload('average')).ok, true);
 });
 
-test('the quantile is `percentile` on both paths, and SQL\'s `q` / `fn` / `as` are named for what they are here', () => {
-  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', agg: 'percentile', q: 0.9, column: 'price' }] }));
+test("a card's fold refuses `avg` and the earlier `agg`, naming `average` and `fn`", () => {
+  const draw = (display) => check('display_model_result', { task_id: 'abcdef123456', display });
+  assert.match(text(draw({ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', fn: 'avg' }] })), /'avg' is spelled 'average'/);
+  assert.match(text(draw({ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'max' }] })), /unexpected property 'agg' — here that field is called 'fn'/);
+  assert.match(text(draw({ kind: 'bar', x: 'a', y: ['b'], drill: { levels: [{ column: 'c' }], agg: 'max' } })), /unexpected property 'agg' — here that field is called 'fn'/);
+  assert.equal(draw({ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', fn: 'average' }] }).ok, true);
+  // a card folds into a number: a sketch producer is no fold, nor is a percentile without its quantile
+  for (const fn of ['hll_init', 'percentile']) assert.equal(draw({ kind: 'bar', x: 'a', y: ['b'], drill: { levels: [{ column: 'c' }], fn } }).ok, false, fn);
+});
+
+test('the quantile is `percentile` on every path, and SQL\'s `q` / `as` and the earlier `agg` are named for what they are here', () => {
+  const res = check('build_pipeline_model', measure('p90', { fn: 'percentile', q: 0.9, args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /here that field is called 'percentile'/);
-  assert.equal(check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', agg: 'percentile', percentile: 0.9, column: 'price' }] })).ok, true);
+  assert.equal(check('build_pipeline_model', measure('p90', { fn: 'percentile', percentile: 0.9, args: [{ column: 'price' }] })).ok, true);
 
   const gov = check('build_semantic_model', {
     name: 'spell_pct',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'p90', agg: 'percentile', field: 'cost', q: 0.9 }] }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'p90', expr: { fn: 'percentile', args: [{ column: 'cost' }], q: 0.9 } }] }],
     metrics: [{ name: 'p90', type: 'simple', measure: 'p90' }],
   });
   assert.equal(gov.ok, false);
   assert.match(text(gov), /here that field is called 'percentile'/);
 
-  const fn = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }));
-  assert.equal(fn.ok, false);
-  assert.match(text(fn), /here that field is called 'agg'/);
-  const as = check('build_pipeline_model', stage({ stage: 'unnest', column: 'items', as: 'item' }));
+  // a measure written as the earlier { name, agg } is shown as the expression it is now
+  const agg = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }));
+  assert.equal(agg.ok, false);
+  assert.ok(text(agg).includes('is written in an earlier spelling — write {"name":"n","expr":{"fn":"count","args":[]}}'), text(agg));
+  const as = check('build_pipeline_model', stage({ stage: 'unnest', expr: { column: 'items' }, as: 'item' }));
   assert.equal(as.ok, false);
   assert.match(text(as), /here that field is called 'name'/);
 });
 
 test('a name with no counterpart in this path gets the plain list, with no invented advice', () => {
-  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', agg: 'geomean', column: 'price' }] }));
+  const res = check('build_pipeline_model', measure('x', { fn: 'geomean', args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /must be one of/);
   assert.ok(!/is spelled/.test(text(res)), 'nothing is suggested for a function this server does not have');
@@ -77,11 +93,11 @@ test('a name with no counterpart in this path gets the plain list, with no inven
 
 // `sum_boolean` has no word-for-word counterpart: a count of a column counts its non-NULL rows, not
 // its true ones, so naming `count` alone would hand back another number under the same reading. The
-// refusal lists the functions; the measure's where (and recipe boolean_condition_as_measure) teach
+// refusal lists the functions; an aggregate's where (and recipe boolean_condition_as_measure) teach
 // count + where.
 test('sum_boolean is refused with the list of functions, and no word-for-word advice, on both paths', () => {
-  const pipe = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'payers', agg: 'sum_boolean', column: 'is_payer' }] }));
-  const semantic = check('build_semantic_model', { name: 'spell_task', semantic_models: [{ from: 'events', measures: [{ name: 'm', agg: 'sum_boolean' }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const pipe = check('build_pipeline_model', measure('payers', { fn: 'sum_boolean', args: [{ column: 'is_payer' }] }));
+  const semantic = check('build_semantic_model', { name: 'spell_task', semantic_models: [{ from: 'events', measures: [{ name: 'm', expr: { fn: 'sum_boolean' } }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
   for (const res of [pipe, semantic]) {
     assert.equal(res.ok, false);
     assert.match(text(res), /must be one of/);
@@ -89,22 +105,14 @@ test('sum_boolean is refused with the list of functions, and no word-for-word ad
   }
 });
 
-test("a read's projection explains '*': count rows by leaving `column` out", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', column: '*', name: 'n' }] } });
-  assert.equal(res.ok, false);
-  assert.match(text(res), /'\*' is not a column — leave `column` out to count rows/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { measures: [{ agg: 'count', name: 'n' }] } }).ok, true);
-});
-
 // A list of measures is `measures` wherever rows are aggregated — a stage, a read, a semantic model —
 // and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
 // name in the refusal (a hint, not an alias).
 test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], aggregations: [{ agg: 'count', name: 'n' }] } });
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', stages: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.equal(res.ok, false);
   assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
-  const then = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'n' }], then: { aggregations: [{ agg: 'count', name: 'groups' }] } } });
-  assert.match(text(then), /'aggregations' — here that field is called 'measures'/);
+  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
 });
 
 test('a pipeline step names its context with context_id; `draft_id` is refused with that name', () => {
@@ -116,28 +124,31 @@ test('a pipeline step names its context with context_id; `draft_id` is refused w
   assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
-// `count(*)` is a SQL habit; in a stage the rows are counted by leaving `column` out. The refusal
-// for '*' now says that instead of listing every column available at that point.
-test("a stage explains '*': count rows by omitting `column`", () => {
+// `count(*)` is a SQL habit; here the rows are counted by a count with no argument. The refusal for
+// '*' says that instead of listing every column available at that point — in a stage and in a read.
+test("a stage and a read explain '*': count rows with no argument", () => {
   const cols = new Map([['player_id_of_internal', { type: 'string' }]]);
-  assert.throws(
-    () => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', column: '*' }] }], { physicalCols: new Set(cols.keys()) }),
-    (e) => {
+  const star = [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [{ column: '*' }] } }] }];
+  for (const build of [
+    () => renderPipeline(catalog, catalog.dialect, 'events', star, { physicalCols: new Set(cols.keys()) }),
+    () => renderRead(catalog, "{{ ref('t') }}", cols, star),
+  ]) {
+    assert.throws(build, (e) => {
       assert.match(e.message, /'\*' is not a column/);
-      assert.match(e.message, /leaving `column` out/);
+      assert.match(e.message, /a count with no argument counts the ROWS/);
       return true;
-    },
-  );
+    });
+  }
   // and the form that works
-  const ok = renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }], { physicalCols: new Set(cols.keys()) });
-  assert.ok(ok.columns.has('n'), 'count with no column is the row count');
+  const ok = renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }], { physicalCols: new Set(cols.keys()) });
+  assert.ok(ok.columns.has('n'), 'a count with no argument is the row count');
 });
 
 // A stage object that arrived without its `stage` field is a truncated call, not an unknown stage
 // type — the message used to point at the schema ("unknown pipeline stage: undefined").
 test('a stage with no `stage` field says the stage never arrived', () => {
   assert.throws(
-    () => renderPipeline(catalog, catalog.dialect, 'events', [{ measures: [{ name: 'n', agg: 'count' }] }], { physicalCols: new Set(['player_id_of_internal']) }),
+    () => renderPipeline(catalog, catalog.dialect, 'events', [{ measures: [{ name: 'n', expr: { fn: 'count' } }] }], { physicalCols: new Set(['player_id_of_internal']) }),
     (e) => {
       assert.match(e.message, /has no `stage` field/);
       assert.match(e.message, /truncated/);
@@ -162,7 +173,7 @@ test('an expression says what it is missing, in words', () => {
     () => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'flag', expr: {} }], { physicalCols: new Set(['player_id_of_internal']) }),
     (e) => {
       assert.match(e.message, /compute 'flag'/);
-      assert.match(e.message, /needs column \| value \| now \| fn/);
+      assert.match(e.message, /an expression is \{ column \}, \{ property \}, \{ value \}, \{ now: true \} or a function \{ fn, args, … \}/);
       return true;
     },
   );

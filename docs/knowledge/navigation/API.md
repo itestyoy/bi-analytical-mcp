@@ -34,7 +34,7 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 |------|------|
 | `semantic_index` | The catalog: overview, a source's events and properties, models, search, guides, recipes |
 | `build_semantic_model` / `query_semantic_model` / `preview_semantic_model` | The governed side: named metrics, their queries (tasks), inspection |
-| `build_pipeline_model` / `query_pipeline_model` | The pipeline side: one-off tables built stage by stage, read with projections |
+| `build_pipeline_model` / `query_pipeline_model` | The pipeline side: one-off tables built stage by stage, read back in the same stages (where, compute, aggregate, …) |
 | `display_model_result` / `drill_result` | Draw a model result as a card (once); a drawn card's drill-down read |
 | `experiment` | A/B statistics over numbers the caller brings |
 | `context` / `delete_context` | Read / remove the contexts builds produce |
@@ -46,6 +46,7 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 ## Notes
 
 - A call that starts warehouse work returns `{ task_id }` at once; the same side's query tool reads it with `{ task_ids }`.
+- Every tool writes conditions, measures and computed values in one expression grammar — `{ fn, args, …params }` over leaves (`src/pipeline/compute.js`); a value in an earlier spelling is refused with the converted value (`src/earlier-spelling.js`).
 - `structuredContent` rides on a drawn card and on the answers of tools with an `outputSchema`; everything else is text.
 
 ## Source Of Truth

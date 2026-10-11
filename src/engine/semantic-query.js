@@ -5,13 +5,14 @@
 // Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
+import { rankFuzzy } from '../fuzzy.js';
 import { measureRefs } from '../compile.js';
 import { PARTITION_DIM, renderContext } from '../yaml-render.js';
-import { renderWhereClauses, wherePredicates } from '../predicate.js';
+import { whereSql, referenceComparisons } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
-import { uniqueRefs, clone, pageBlock } from './helpers.js';
+import { uniqueRefs, pageBlock } from './helpers.js';
 import { KEPT_ROWS } from '../schema/fields.js';
 
 export const semanticQueryMethods = {
@@ -84,8 +85,10 @@ export const semanticQueryMethods = {
     // the model's own attributes: its dimensions and, on an events source, the event name (one set with
     // the schema's — modelDimensionColumns)
     if (!(target.dimensions || {})[attribute] && !c.modelDimensionColumns(model).includes(attribute)) {
-      const known = c.modelDimensionColumns(model);
-      throw new ToolError(`${where}: '${attribute}' is not an attribute of '${model}'. Its attributes: ${known.slice(0, 20).join(', ') || '(none — a payload property is declared as a task dimension first)'}`, { stage: 'validate', field: 'attribute' });
+      // what this context can name on the model: its attributes, and the dimensions its tasks declared there
+      const known = [...new Set([...c.modelDimensionColumns(model), ...(ctx.state.additions?.[model]?.dimensions || []).map((d) => d._attribute)])];
+      const near = rankFuzzy(String(attribute), known, { fields: (x) => [x], limit: 3 }).map((x) => x.item);
+      throw new ToolError(`${where}: '${attribute}' is not an attribute of '${model}'${near.length ? ` — did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : '.'} Its attributes: ${known.slice(0, 20).join(', ') || '(none)'}. A payload property, or a value computed from the row ({ name, expr }), is declared as a task dimension first.`, { stage: 'validate', field: 'attribute' });
     }
     // The sources whose MEASURES this task reads: a path starts from one of them. A model loaded
     // only to be joined to (an item with only `from`) — even another events source — is a join TARGET
@@ -142,7 +145,7 @@ export const semanticQueryMethods = {
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
       const built = ctx.state.pipeline_model?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', stages } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     const project = ctx.state.engine === 'project';
@@ -303,25 +306,20 @@ export const semanticQueryMethods = {
       groupBy.push(tok); rename.set(tok, column);
       if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item)] = column;
     }
-    let where = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
-    if (input.where) {
-      const translated = wherePredicates(clone(input.where));
-      walkPredicates(translated, (p) => {
-        if (p.field?.kind !== 'entity' && p.field?.kind !== 'dimension') return;
-        const item = pick(p.field, 'where');
-        whereNames.set(tokenOf(item), columnOf(item));
-        if (item.kind === 'entity') { p.field = { kind: 'entity', name: tokenOf(item) }; return; }
-        if (item.type === 'time') {
-          whereNames.set(item.dunder_name, `${item.semantic_model}_${item.name}`);
-          p.field = { kind: 'time_dimension', path: item.dunder_name, grain: item.grain || 'day' };
-          return;
-        }
-        p.field = { kind: 'dimension', path: item.dunder_name };
-      });
-      where = renderWhereClauses(translated);
-    }
+    // each reference of the where names one item MetricFlow listed, as group_by's do
+    const where = input.where ? this._whereClauses(input.where, (ref, at) => {
+      if (ref.time !== undefined) return { kind: 'metric_time', grain: ref.grain };
+      const item = pick(ref, at);
+      whereNames.set(tokenOf(item), columnOf(item));
+      if (item.kind === 'entity') return { kind: 'entity', name: tokenOf(item) };
+      if (item.type === 'time') {
+        whereNames.set(item.dunder_name, `${item.semantic_model}_${item.name}`);
+        return { kind: 'time_dimension', path: item.dunder_name, grain: ref.grain || item.grain || 'day' };
+      }
+      return { kind: 'dimension', path: item.dunder_name };
+    }) : [];
     // order_by: a requested metric or a result column of group_by
     const { orderBy } = this._metricOrderBy(input, { groupBy, rename });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
@@ -518,29 +516,23 @@ export const semanticQueryMethods = {
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     if (input.where) {
-      const translated = wherePredicates(clone(input.where));
-      const specs = [];
-      walkPredicates(translated, (p) => {
-        // a field named the way a project semantic model's context names it is refused with that
+      where = this._whereClauses(input.where, (ref) => {
+        if (ref.time !== undefined) return { kind: 'metric_time', grain: ref.grain };
+        // a reference named the way a project semantic model's context names it is refused with that
         // context's name, as group_by refuses it (the schema takes both shapes in every context)
-        if (p.field?.kind === 'entity' || (p.field?.kind === 'dimension' && ('dimension' in p.field || 'semantic_model' in p.field))) this._normalizeRef(ctx, p.field, 'where');
-        if (p.field?.kind === 'dimension') {
-          const label = `${p.field.model}.${p.field.attribute}`;
-          const refModel = p.field.model; const refAttr = p.field.attribute;
-          // The value-index key comes from the model the caller NAMED, while it is still here: a
-          // path carries no source, so recovering it afterwards loses the guard on any name two
-          // sources happen to share.
-          const at = this.advisor.valueKeyForColumn(p.field.model, p.field.attribute);
-          p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
-          whereNames.set(p.field.path, `${refModel}_${refAttr}`);
-          delete p.field.model; delete p.field.attribute; delete p.field.via;
-          // Verify the filter literal against the column's REAL values (source-scoped):
-          // reject a wrong-cased/non-existent value instead of filtering to nothing.
-          specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
-        }
+        if (ref.model === undefined) this._normalizeRef(ctx, ref, 'where');
+        const path = this._normalizeRef(ctx, { model: ref.model, attribute: ref.attribute, via: ref.via }, 'where');
+        whereNames.set(path, `${ref.model}_${ref.attribute}`);
+        return { kind: 'dimension', path };
       });
+      // Verify each constant compared with an attribute against the column's REAL values
+      // (source-scoped): reject a wrong-cased/non-existent value instead of filtering to nothing. The
+      // value-index key comes from the model the caller NAMED: a path carries no source, so recovering
+      // it from the path would lose the guard on any name two sources happen to share.
+      const specs = referenceComparisons(input.where).filter((c) => c.ref.model !== undefined).map((c) => ({
+        at: this.advisor.valueKeyForColumn(c.ref.model, c.ref.attribute), op: c.op, value: c.values, where: `where ${c.ref.model}.${c.ref.attribute}`,
+      }));
       filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
-      where = renderWhereClauses(translated);
     }
     // order_by: a requested metric or a result column of group_by
     const { orderBy, orderableKeys } = this._metricOrderBy(input, { groupBy, rename });
@@ -628,11 +620,19 @@ export const semanticQueryMethods = {
     // holds it.
     return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });
   },
-};
 
-function walkPredicates(group, fn) {
-  for (const c of group.conditions || []) {
-    if (c.conditions) walkPredicates(c, fn);
-    else fn(c);
-  }
-}
+  /**
+   * A metric query's where → MetricFlow's `--where` clauses (src/predicate.js), each reference resolved
+   * by `resolve(ref, at)` — a context's own rule for what a name reaches. Refused here, before anything
+   * runs: a reference that reaches nothing (resolve's refusal), and a where the one writer refuses — a
+   * constant of the wrong kind, a null compared, a condition that is not a boolean.
+   */
+  _whereClauses(list, resolve) {
+    try {
+      return whereSql(this.catalog.dialect, list, resolve);
+    } catch (e) {
+      if (e instanceof ToolError) throw e;
+      throw new ToolError(e.message, { stage: 'validate', field: 'where' });
+    }
+  },
+};

@@ -54,7 +54,7 @@ test('event drill-down rows carry the unit per property', async () => {
 
 // Compile errors carry the INPUT FIELD that caused them (ToolError.field via e.field).
 test('compile errors name the offending field', () => {
-  const declWith = (metrics) => ({ name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }], metrics });
+  const declWith = (metrics) => ({ name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics });
   try {
     compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: 'nope' }]));
     assert.fail('expected unknown-measure error');
@@ -72,12 +72,15 @@ test('compile errors name the offending field', () => {
     assert.equal(e.field, 'semantic_models.from');
   }
   try {
-    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', agg: 'sum', field: 'complete_time_of_event_data' }] }] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ property: 'complete_time_of_event_data' }] } }] }] });
     assert.fail('expected cast-required error');
   } catch (e) {
-    assert.match(e.message, /cast/);
-    assert.equal(e.field, 'measures.cast');
+    // a text property summed is read as a number first: the refusal writes the cast as the argument it is
+    assert.match(e.message, /is string, and sum folds numbers — read it as one: \{ fn: "sum", args: \[\{ fn: "cast"/);
+    assert.equal(e.field, 'measures.expr');
   }
+  // …and with that cast it compiles
+  assert.ok(compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }] }] }));
 });
 
 test('overview carries join_note + value_index_status; payload-less event is not a dead end', async () => {

@@ -8,8 +8,24 @@
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { stageDef, listSome } from '../pipeline.js';
-import { FNS, exprCalls } from '../pipeline/compute.js';
-import { eachCondition } from '../conditions.js';
+import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition } from '../pipeline/compute.js';
+
+/** The values a where's own conditions scope `column` to — each a comparison of the column with
+ *  constants by eq / in at the top of the list (one inside an or, or a negation, keeps other rows too). */
+function scopedValues(stages, column) {
+  const values = [];
+  let scoped = false;
+  for (const st of stages) {
+    if (st?.stage !== 'where') continue;
+    for (const c of st.conditions || []) {
+      const cmp = comparisonOf(c);
+      if (!cmp || cmp.subject.column !== column || !(cmp.op === 'eq' || cmp.op === 'in')) continue;
+      scoped = true;
+      values.push(...cmp.values);
+    }
+  }
+  return scoped ? values : null;
+}
 
 export class PipelineAdvisor {
   constructor({ catalog, valueIndex }) {
@@ -23,7 +39,7 @@ export class PipelineAdvisor {
     if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
     // said until a where on `completed` follows the funnel — the one judgement, for a step as it is
     // added (nothing follows it yet) and for a whole pipeline alike
-    if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed'))) return [];
+    if (after.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => exprColumns(c).includes('completed')))) return [];
     return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
   }
 
@@ -87,7 +103,7 @@ export class PipelineAdvisor {
     // test included (a where takes no window function at all: it is refused when the step is added)
     if (stage?.stage !== 'compute') return [];
     const calls = exprCalls(stage.expr);
-    const windowed = calls.find((c) => FNS[c.fn]?.window && !(c.over?.partition_by || []).length);
+    const windowed = calls.find((c) => isWindowCall(c) && !(c.over?.partition_by || []).length);
     // Raw SQL is where this actually came from: a window function is only reachable through its
     // `over`, but `fn: 'raw'` carries whatever the caller wrote.
     const rawGlobal = calls.some((c) => c.fn === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(c.sql || '')));
@@ -212,9 +228,10 @@ export class PipelineAdvisor {
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
     // the events a where keeps: only a condition that NAMES them (eq / in) at the top of a where scopes
-    // the rows to them — a neq / not_in, or one inside an { or }, keeps others too
-    const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol && (cond.op === 'eq' || cond.op === 'in')) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
+    // the rows to them — a neq / not_in, or one inside an or, keeps others too
+    const named = scopedValues(draft.stages, evCol);
+    const hasScope = !!named;
+    const scoped = new Set(named || []);
     // the risk is ROWS WITHOUT THE FIELD: no scope at all (every other event reads NULL), or a scope that
     // keeps an event the field is not populated on. A scope within the field's events is the right one.
     const missing = (evs) => (hasScope ? [...scoped].filter((e) => !evs.includes(e)) : null);
@@ -244,13 +261,8 @@ export class PipelineAdvisor {
     const used = props.filter((p) => s.includes(`"${p}"`)); // event-properties referenced by THIS step
     if (!used.length) return [];
     // Concrete scope from all where-stages so far (eq / in only).
-    const scopedEvents = new Set(); const scopedBundles = new Set();
-    for (const st of draft.stages) if (st.stage === 'where') for (const cd of st.conditions || []) {
-      if (!cd || cd.column == null || !(cd.op === 'eq' || cd.op === 'in')) continue;
-      const vals = Array.isArray(cd.value) ? cd.value : [cd.value];
-      if (cd.column === evCol) vals.forEach((v) => scopedEvents.add(String(v)));
-      else if (bundleCol && cd.column === bundleCol) vals.forEach((v) => scopedBundles.add(String(v)));
-    }
+    const scopedEvents = new Set((scopedValues(draft.stages, evCol) || []).map(String));
+    const scopedBundles = new Set((bundleCol ? scopedValues(draft.stages, bundleCol) || [] : []).map(String));
     if (!scopedBundles.size && !scopedEvents.size) return []; // nothing concrete scoped → _eventScopeWarnings covers it
     const fmt = (arr) => arr.slice(0, 4).join(', ') + (arr.length > 4 ? ', …' : '');
     const warns = [];
@@ -291,13 +303,13 @@ export class PipelineAdvisor {
     const dateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const hits = [];
     eachCondition(stage.conditions, (c) => {
-      const col = c.column;
+      const cmp = comparisonOf(c);
+      const col = cmp?.subject.column;
       if (!timeCols.has(col)) return;
-      const value = c.value;
-      const upper = c.op === 'lte' ? value : c.op === 'between' && Array.isArray(value) ? value[1] : undefined;
+      const upper = cmp.op === 'lte' ? cmp.values[0] : cmp.op === 'between' ? cmp.values[1] : undefined;
       if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
     });
-    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { column: "${col}", op: "lt", value: "<the next day>" } (with gte for the start); on a DATE column the bound is right as it is.`);
+    return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { fn: "lt", args: [{ column: "${col}" }, { value: "<the next day>" }] } (with gte for the start); on a DATE column the bound is right as it is.`);
   }
 
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.

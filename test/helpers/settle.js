@@ -68,12 +68,13 @@ export function settle(engine) {
 
 /**
  * Read a table a pipeline or a materialized query built — an intermediate model of a chain
- * included — for a test's check of the data. The same read a card's drill-down makes (with an
- * optional transform); no tool offers a table by name.
+ * included — for a test's check of the data. The same read a card's drill-down makes (with
+ * optional read stages, over the table's columns as the server knows them); no tool offers a
+ * table by name.
  */
-export function readTable(engine, contextId, table, { transform, limit = 1000 } = {}) {
+export function readTable(engine, contextId, table, { stages, columns, limit = 1000 } = {}) {
   const raw = engine.raw || engine;
-  return raw._readTable(raw.ctxs.dir(contextId), table, limit, transform);
+  return raw._readTable(raw.ctxs.dir(contextId), table, limit, { stages, columns: columns ?? raw._storedColumns(contextId, table) });
 }
 
 /**

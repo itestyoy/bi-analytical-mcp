@@ -118,17 +118,21 @@ export function partitionDays({ start = null, endExclusive = null, end = null } 
   return { from, until };
 }
 
+/** A column compared with a constant, as the one expression grammar writes a condition
+ *  (src/pipeline/compute.js): what a where stage takes, and what a scan writes through the same writer. */
+const bound = (column, op, value) => ({ fn: op, args: [{ column }, { value }] });
+
 /**
  * The conditions on a model's partition column for a window on its time axis — [] when the model
  * has none, or when it partitions by the time axis itself (the window already bounds it). An event
  * lies in the partition of its own day, or up to `partition_late_days` days later.
- * @returns {{ column, op: 'gte'|'lt', value }[]}
+ * @returns the conditions, each { fn: 'gte' | 'lt', args: [{ column }, { value }] }
  */
 export function partitionConditions(model, bounds) {
   const part = model?.partition_column;
   if (!part || part === model.time?.column) return [];
   const { from, until } = partitionDays(bounds, model.partition_late_days || 0);
-  return [...(from ? [{ column: part, op: 'gte', value: from }] : []), ...(until ? [{ column: part, op: 'lt', value: until }] : [])];
+  return [...(from ? [bound(part, 'gte', from)] : []), ...(until ? [bound(part, 'lt', until)] : [])];
 }
 
 /**
@@ -171,8 +175,10 @@ export function resolveTimeRange(tr) {
 /**
  * The conditions a {start, end, timezone} window puts on a model's time axis — and on its partition
  * column when it partitions by another (`partition: false` leaves that out, for a relation that no
- * longer carries it): the ONE rule every stage, build and funnel filter applies. The timezone is
- * checked by the caller (isValidTimezone), which knows how to refuse. → { column, op, value }[] | null
+ * longer carries it): the ONE rule every stage, build and funnel filter applies, written in the one
+ * expression grammar ({ fn: 'gte' | 'lt' | 'lte', args: [{ column }, { value }] }) — a where stage's
+ * conditions as they are. The timezone is checked by the caller (isValidTimezone), which knows how to
+ * refuse. → the conditions | null
  */
 export function timeRangeConditions(model, tr, { partition = true } = {}) {
   if (!tr || !(tr.start || tr.end)) return null;
@@ -180,9 +186,9 @@ export function timeRangeConditions(model, tr, { partition = true } = {}) {
   if (!timeCol) return null;
   const r = resolveTimeRange(tr);
   const conditions = [];
-  if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
-  if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
-  else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
+  if (r.start) conditions.push(bound(timeCol, 'gte', r.start));
+  if (r.endExclusive) conditions.push(bound(timeCol, 'lt', r.endExclusive));
+  else if (r.end) conditions.push(bound(timeCol, 'lte', r.end));
   // a source partitioned by ANOTHER column (the day of the event time, next to it) is pruned only by a
   // condition on that column; the time axis above stays the exact bound
   if (partition) conditions.push(...partitionConditions(model, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));

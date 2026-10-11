@@ -4,7 +4,8 @@
 // project, the catalog and the value index (whose scan generation retires its caches), holding the
 // caches and the in-flight reads as its own state.
 
-import { comparison } from '../conditions.js';
+import { getDialect } from '../dialects/index.js';
+import { conditionListSql } from '../pipeline/compute.js';
 import { detached } from '../request-context.js';
 
 /** How far back freshness looks first on a partitioned source (days): late enough data still lands in it. */
@@ -144,6 +145,11 @@ export class WarehouseProbe {
     });
   }
 
+  /** A window's conditions (the one expression grammar) as the WHERE of a read of a source's own table. */
+  whereOf(conditions) {
+    return ` WHERE ${conditionListSql(getDialect(this.catalog.dialect), null, conditions, 'time_range').join(' AND ')}`;
+  }
+
   /**
    * Data FRESHNESS of a source: the LATEST value of its time column, live —
    *   SELECT MAX(<time column>) FROM <the source's model>
@@ -174,7 +180,7 @@ export class WarehouseProbe {
       };
       try {
         const recent = m.partition_column ? this.timeRangeConditions(sourceKey, { start: new Date(this.now() - FRESHNESS_LOOKBACK_DAYS * 86400000).toISOString().slice(0, 10) }) : null;
-        if (recent) latest = await maxOver(` WHERE ${recent.map((c) => comparison(c.column, c.op, c.value)).join(' AND ')}`);
+        if (recent) latest = await maxOver(this.whereOf(recent));
         if (latest == null) latest = await maxOver('');
       } catch { /* freshness is best-effort */ }
       this.freshnessCache.set(sourceKey, { value: latest, gen });
@@ -195,9 +201,7 @@ export class WarehouseProbe {
     let where = '';
     // the same window the pipeline applies — the time axis, and the partition column that prunes
     const conditions = tr && (tr.start || tr.end) ? this.timeRangeConditions(sourceKey, tr) : null;
-    if (conditions) {
-      where = ` WHERE ${conditions.map((c) => comparison(c.column, c.op, c.value)).join(' AND ')}`;
-    }
+    if (conditions) where = this.whereOf(conditions);
     return this.bestEffort(`rows:${sourceKey}:${where}`, async () => {
       try {
         const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);

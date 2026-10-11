@@ -4,10 +4,10 @@
 // every path metric with exactly the arguments it takes; the condition grammar; the edge weights,
 // aggregations, clustering methods and scalers — all rendered from config/retentioneering-facts.json,
 // the sheet scripts/retentioneering-facts.py extracts from the installed library. Nothing here restates
-// one from the library's prose. What the CATALOG decides (the events sources, their events, the models
-// a segment can come from and their attributes, the relationships that reach them) comes from the
-// catalog. Names that exist only once an eventstream is built (the events after grouping, the segment
-// columns) are checked at call time against that eventstream.
+// one from the library's prose. What the CATALOG decides (the events sources, the models a join stage
+// can bring in, the event properties an expression reads) comes from the catalog, through the
+// pipeline's own stage schemas. Names that exist only once an eventstream is built (the columns its
+// stages make, the event names it holds) are checked at call time against what the stages produced.
 //
 // What a call cannot carry is not offered, each for its stated reason (NOT_OFFERED): a Python callable,
 // a DuckDB statement run on the analysis runtime (code, which this server never takes from a call —
@@ -20,8 +20,9 @@ import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
-import { anyOfOr, form, pick, stringOtherThan, conditionList, CONSTANT, timeRange } from '../schema-kit.js';
-import { OPS, TEXT_OPS, conditionsSql, comparison } from '../conditions.js';
+import { form, pick, stringOtherThan, timeRange, conditionSlot } from '../schema-kit.js';
+import { STAGES } from '../pipeline/stages.js';
+import { exprSchema, conditionListSql, columnLeaf, valueLeaf, CONDITION_FNS, LOGIC_FNS, SCALAR_FNS } from '../pipeline/compute.js';
 import { CTX, NAME as CORE_NAME, TASK_READ } from '../schema/fields.js';
 import { cardTitle } from '../schema/display.js';
 import { ES_COLUMNS } from './names.js';
@@ -45,7 +46,7 @@ export const NOT_OFFERED = {
   },
   params: {
     func: 'a Python callable, which a call cannot carry',
-    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model instead (events, groups, segments, where), and keep rows by a condition after the steps with filter_events\' where (this tool writes the SQL)',
+    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model\'s start instead (its stages: which events, what they are named, the attributes and properties carried), and keep rows by a condition after the steps with filter_events\' where (this tool writes the SQL)',
   },
 };
 
@@ -67,6 +68,11 @@ const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
 /** The library's per-path column, which this wrapper names `path` (see pathField). */
 const PATH_PARAM = 'path_col';
 export const CONDITION_DEF = 'retentioneering_condition';
+/** filter_events' expression over the eventstream's columns — a level of the one expression grammar
+ *  with its own `$defs` entry, beside the pipeline's `expr` that a start's stages read. */
+export const EVENTSTREAM_EXPR_DEF = 'eventstream_expr';
+/** The stages a start takes, as one union its `stages` list refers to. */
+const START_STAGE_DEF = 'eventstream_stage';
 
 const eventstreamWindow = timeRange('The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.');
 
@@ -82,113 +88,43 @@ export function userKeyColumn(catalog, source) {
   return parts && parts.length === 1 ? parts[0].column : null;
 }
 
-/** A source's own columns a path can be segmented or filtered by: every real column of it — what the
- *  catalog declares, and, when the warehouse was read, what the table holds (the same columns a
- *  pipeline can filter on) — without the event name, which the eventstream already is. */
-export function sourceColumns(catalog, source, physical = null) {
-  const eventCol = catalog.eventNameColumn(source);
-  const declared = [...catalog.modelDimensionColumns(source), ...catalog.modelColumns(source).map((c) => c.name)];
-  return [...new Set([...declared, ...(physical ? [...physical] : [])])].filter((c) => c && c !== eventCol).sort();
+/**
+ * The pipeline's stages a start takes — those whose rows stay the source's events, one row per event
+ * (`keepsSourceRows`): a where, a compute, a join — where the warehouse offers them. A sample stage keeps
+ * rows too, but draws them at random (TABLESAMPLE, random()), and an eventstream is the same rows on
+ * every build: its own `sample` keeps a share of users by a hash of their key instead.
+ */
+export function startStages(catalog) {
+  return Object.entries(STAGES).filter(([k, s]) => s.keepsSourceRows && k !== 'sample' && (typeof s.available !== 'function' || s.available(catalog))).map(([k]) => k);
 }
 
-/** The relationships the path sources declare toward `model` — of the sources other than `model`
- *  itself: a source's own columns are carried with { column }, never by a join onto itself. */
-function relationshipsTo(catalog, sources, model) {
-  return [...new Set(sources.filter((s) => s !== model).flatMap((s) => Object.keys(catalog.entitiesOf(s)).filter((name) => catalog.joinTargetFor(name) === model)))].sort();
-}
-
-/** One event name of the path sources: an enum of their vocabularies (each checked against the source
- *  named at call time), or a free string when a source declares none (the warehouse decides). */
-function eventName(catalog, sources) {
-  const lists = sources.map((s) => catalog.eventNames(s));
-  if (lists.some((l) => !l.length)) return { type: 'string' };
-  return { type: 'string', enum: [...new Set(lists.flat())].sort() };
-}
-
-/** When events need logic the build's own rules cannot say — the one sentence every description that
- *  offers from_task carries. */
-export const COMPLEX_EVENT_LOGIC = 'For event logic the build cannot say itself — events defined by a window (a lag, a gap, the n-th occurrence), by a match_recognize sequence, from several sources joined, over a cohort chosen by what users did — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
+/** When events need logic a start's stages cannot say — the one sentence every description that offers
+ *  from_task carries. */
+export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s stages cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
 
 export function buildSchema(catalog) {
   const sources = pathSources(catalog);
-  // an event of the source (the catalog's names, as an enum); a build from a task's table reads the
-  // names that table holds instead — the same fields, with that one constraint lifted (see the end)
-  const event = eventName(catalog, sources);
-  const events = (description) => ({ type: 'array', minItems: 1, uniqueItems: true, items: event, description });
-  // a model a path source reaches by a declared relationship — `via` only where several lead to it (the
-  // one there is is taken otherwise), and no branch for a model no other source reaches
-  const segmentBranches = catalog.modelKeys().map((model) => {
-    const via = relationshipsTo(catalog, sources, model);
-    if (!via.length) return null;
-    return {
-      type: 'object', additionalProperties: false, required: ['model', 'attribute'], title: model,
-      properties: {
-        model: { const: model },
-        attribute: { type: 'string', enum: catalog.modelDimensionColumns(model), description: `A column of ${model}.` },
-        ...(via.length > 1 ? { via: { type: 'string', enum: via, description: `The relationship to reach ${model} by — several lead to it.` } } : {}),
-        name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the attribute).' },
-      },
-    };
-  }).filter((b) => b && b.properties.attribute.enum.length);
-  // the source's OWN columns (its declared dimensions — an environment, an app, a platform) and its
-  // scalar event properties: carried or filtered on without any join
-  const ownColumns = [...new Set(sources.flatMap((src) => sourceColumns(catalog, src)))].sort();
-  // a real column of the source — checked against the warehouse's table at call time, so a column the
-  // catalog does not declare (an environment flag) is reachable exactly as a pipeline reaches it
-  const column = (what) => ({ type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: `${what}${ownColumns.length ? ` (declared: ${ownColumns.slice(0, 12).join(', ')}${ownColumns.length > 12 ? ', …' : ''})` : ''}; any other column of the table is checked against the warehouse.` });
-  const ownProps = [...new Set(sources.flatMap((src) => catalog.scalarEventProps(src)))].sort();
-  const own = (list, what) => ({ type: 'string', enum: list, description: `${what} of the source (each is checked against the source you name).` });
-  segmentBranches.push({
-    type: 'object', additionalProperties: false, required: ['column'], title: 'source column',
-    properties: { column: column('A column of the source itself'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the column).' } },
-  });
-  if (ownProps.length) segmentBranches.push({
-    type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
-    properties: { property: own(ownProps, 'A scalar event_data property'), name: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
-  });
-  const OP = { enum: OPS };
-  const VALUE = { ...CONSTANT, description: 'The constant (an array for in/not_in; [low, high] for between, both included; a string for the text operators; none for is_null/is_not_null).' };
-  // one condition on the source's own column or on a scalar event property — the filter's and a split case's
-  const condition = {
-    anyOf: [
-      { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OP, value: VALUE } },
-      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property'), op: OP, value: VALUE } }] : []),
-    ],
-  };
-  const parameter = {
-    anyOf: [
-      { type: 'object', additionalProperties: false, required: ['column'], title: 'column', properties: { column: column('A column of the source') } },
-      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property') } }] : []),
-    ],
-  };
-  const split = {
-    type: 'array', minItems: 1,
-    description: 'Make events out of an event\'s parameters, in SQL, before the paths are built: each rule renames the rows of one event. `by` splits it by the value of a property or column (ad_finished by is_error → ad_finished_true / ad_finished_false; `names` gives values their own names: { "true": "ad_finished_failed", "false": "ad_finished_success" }); `cases` names it by conditions — each case { name, when }, the first whose `when` holds (and `else` the rest). Rows of the event without the parameter keep its name. The new names are what every analysis reads; groups and top apply after.',
-    items: {
-      anyOf: [
-        {
-          type: 'object', additionalProperties: false, required: ['event', 'by'], title: 'by value',
-          properties: {
-            event,
-            by: parameter,
-            names: { type: 'object', additionalProperties: { type: 'string', pattern: NAME }, description: 'Your name for a value ({ "<value>": "<event name>" }); any other value becomes <event>_<value>.' },
-          },
-        },
-        {
-          type: 'object', additionalProperties: false, required: ['event', 'cases'], title: 'by conditions',
-          properties: {
-            event,
-            cases: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'when'], properties: { name: { type: 'string', pattern: NAME, description: 'The new event\'s name.' }, when: conditionList(condition, 'When this case names the row: conditions that all hold (an item may be { or: [...] }) — as a compute case\'s `when`.') } }, description: 'The first case whose `when` holds names the row.' },
-            else: { type: 'string', pattern: NAME, description: 'The name for the event\'s other rows (omit: they keep the event\'s name).' },
-          },
-        },
-      ],
-    },
-  };
   const f = retentioneeringFacts();
+  const kinds = startStages(catalog);
+  const column = (description) => ({ type: 'string', pattern: NAME_OR_COLUMN, description });
+  // a source's own event and time columns, said where a start may name others
+  const own = sources.map((src) => `${src}: ${catalog.eventNameColumn(src)}, ${catalog.getModel(src).time.column}`).join('; ');
+  // which column is the event and which its time — a source's own unless named, a task's table's always
+  // named (its columns carry no catalog meaning)
+  const columns = (required) => ({
+    type: 'object', additionalProperties: false, ...(required ? { required: ['event', 'time'] } : { minProperties: 1 }),
+    description: required
+      ? 'Which columns of the rows (after the stages) are the event name and its time.'
+      : `Which columns of the rows (after the stages) are the event name and its time, when not the source's own (${own}): the column a compute stage made — events renamed, merged or split by a parameter — or another time.`,
+    properties: {
+      event: column('The column of the event name.'),
+      time: column('The column of the event time (a timestamp or a date) — the paths\' order.'),
+    },
+  });
   const index = { type: 'integer', minimum: 1, description: 'edit_step / insert_step / delete_step: which step (1-based; insert_step puts the new one before it, or at the end with steps + 1).' };
-  return buildForms(event, {
-    description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task, with its path and columns).',
+  return buildForms({
+    description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start: the rows of an events source, or of a task\'s stored table, prepared by the pipeline\'s own stages), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized.',
+    sourceColumns: columns(false),
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
       eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
@@ -197,54 +133,28 @@ export function buildSchema(catalog) {
       index,
       after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
       name: { type: 'string', pattern: NEW_EVENTSTREAM, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
-      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it.' },
+      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it — what its stages read event properties and relationships of.' },
       from_task: {
         type: 'string', pattern: TASK_ID_PATTERN,
-        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path columns in path and its event and time columns in columns. There, where / segments / events.split name the table's columns (payload properties and joined attributes are brought in by the pipeline), and the time window is the pipeline's.`,
+        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its stages run over that table's columns, and the time window is the pipeline's.`,
       },
-      columns: {
-        type: 'object', additionalProperties: false, required: ['event', 'time'],
-        description: 'With from_task: which columns of that table say which event, and when.',
-        properties: {
-          event: { type: 'string', pattern: NAME_OR_COLUMN, description: 'The column of the event name.' },
-          time: { type: 'string', pattern: NAME_OR_COLUMN, description: 'The column of the event time (a timestamp or a date) — the paths\' order.' },
-        },
-      },
+      columns: columns(true),
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },
       description: { type: 'string', description: 'What this eventstream is for, in your words — kept with this eventstream.' },
       time_range: eventstreamWindow,
+      stages: {
+        type: 'array', minItems: 1, items: { $ref: `#/$defs/${START_STAGE_DEF}` },
+        description: `The rows the paths are built from, prepared in SQL by the pipeline's own stages (${kinds.join(', ')}) — those of build_pipeline_model that keep the rows events, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns.`,
+      },
       path: {
-        type: 'array', minItems: 1, maxItems: 4, items: parameter,
-        description: `What one path is, when it is not the user (${[...new Set(sources.map((src) => userKeyColumn(catalog, src)))].join(', ')}): a column or scalar event property of the source — one path per value (a bidfloor id: one path per search cycle; a tracking id; a level) — or several, a composite key (the user column and a bidfloor id: one path per player per cycle). Events without every part are left out. Omit for one path per user.`,
-      },
-      // a task's table carries no catalog meaning: its path is named by its own columns, always
-      task_path: {
-        type: 'array', minItems: 1, maxItems: 4, uniqueItems: true,
-        items: { type: 'object', additionalProperties: false, required: ['column'], title: 'column', properties: { column: { type: 'string', pattern: NAME_OR_COLUMN, description: 'A column of the task\'s table.' } } },
-        description: 'What one path is: a column of the task\'s table (a user, a bidfloor_id, a tracking_id) — one path per value — or several, a composite key (a user and a bidfloor_id: one path per player per cycle). Events without every part are left out.',
-      },
-      events: {
-        type: 'object', additionalProperties: false,
-        description: 'Which events make up the paths, and under what names.',
-        properties: {
-          include: events('Keep only these events of the source (omit: every event).'),
-          exclude: events('Drop these events (technical noise the paths should not show).'),
-          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: { type: 'array', minItems: 1, uniqueItems: true, items: { anyOf: [event, { type: 'string', pattern: NAME, description: 'An event events.split makes: a name in its names, cases or else, or <event>_<value> of a split by value.' }] }, description: 'The events merged under this name — events of the source, or events events.split makes.' }, description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
-          split,
-          top: { type: 'integer', minimum: 1, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
-        },
+        type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: column('A column of the rows (after the stages).'),
+        description: `What one path is: a column of the rows — one path per value (a bidfloor id: one path per search cycle; a tracking id; a level) — or several, a composite key (the user and a bidfloor id: one path per player per cycle). An event property is read into a column by a compute stage. Rows without every part are left out. From an events source it may be omitted: one path per user (${[...new Set(sources.map((src) => userKeyColumn(catalog, src)))].join(', ')}); from a task's table it is required.`,
       },
       segments: {
-        type: 'array', minItems: 1,
-        description: 'Columns to carry on every event as segments — what segment_overview, metric_distribution, diff and in_segment read: an attribute of a model the source reaches by a declared relationship ({ model, attribute }), a column of the source itself ({ column }), or a scalar event property ({ property }).',
-        items: anyOfOr(segmentBranches),
+        type: 'array', minItems: 1, uniqueItems: true, items: column('A column of the rows (after the stages).'),
+        description: 'Columns carried on every event as segments, as text, each under its column\'s name — what segment_overview, metric_distribution, diff and in_segment read: a column of the source itself, an attribute a join stage brought (its attrs name it), an event property a compute stage read ({ stage: "compute", name, expr: { property } }).',
       },
-      where: conditionList({
-        anyOf: [
-          { ...condition.anyOf[0], properties: { ...condition.anyOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `name` or attribute name)') } },
-          ...condition.anyOf.slice(1),
-        ],
-      }, 'Keep only the events matching every condition — on a column of the source itself or a segment declared above ({ column }), or on a scalar event property ({ property }); an item may be { or: [...] }, any of its conditions holds. Applied in SQL before the paths are built.'),
+      top: { type: 'integer', minimum: 1, description: 'Keep only the N most frequent event names and merge the rest into "other" (omit: every event keeps its own name).' },
       sessions: {
         type: 'object', additionalProperties: false, required: ['gap_minutes'],
         description: `Also split each user's path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "${ES_COLUMNS.session}"). (A split_sessions step splits them by other rules: a timeout, a separator event, bounds.)`,
@@ -255,9 +165,8 @@ export function buildSchema(catalog) {
           share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The share of users kept (0 < share ≤ 1).' },
           events: {
             type: 'object', minProperties: 1,
-            propertyNames: { anyOf: [event, { type: 'string', pattern: NAME }] },
             additionalProperties: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
-            description: 'The share of rows kept per event: { "<event>": share }. An event of the source or one events.split makes; groups apply after.',
+            description: 'The share of rows kept per event: { "<event>": share } — the event as the rows name it (after a compute that renames events, the new name).',
           },
         };
         // by users, by events, or both — three closed forms, told apart by what each requires
@@ -269,7 +178,14 @@ export function buildSchema(catalog) {
         };
       })(),
     },
-    $defs: { [CONDITION_DEF]: f.condition_schema },
+    $defs: {
+      // the start's stages are the pipeline's own, each referring to the pipeline's `expr` (a compute
+      // stage's definitions bring it) — gathered under one union the `stages` list refers to
+      ...Object.assign({}, ...kinds.map((k) => (typeof STAGES[k].defs === 'function' ? STAGES[k].defs(catalog) : {}))),
+      [START_STAGE_DEF]: { anyOf: kinds.map((k) => STAGES[k].schema(catalog)) },
+      [EVENTSTREAM_EXPR_DEF]: eventstreamExprSchema(),
+      [CONDITION_DEF]: f.condition_schema,
+    },
   });
 }
 
@@ -294,18 +210,15 @@ const ACTION_SAYS = () => ({
  * table) — each with exactly its own fields, so a stray one is refused rather than ignored. `schema`
  * carries every field (`properties`), the build's description and its `$defs`.
  *
- * The event fields hold the source's own names (an enum) when the rows come from an events source,
- * and the names a task's table holds when they come from one — a pipeline can compute event names the
- * catalog does not know. So a start from a task takes the same fields with that one constraint lifted,
- * and a start from a source keeps the catalog's enum: a typo there is still refused by the schema.
+ * Both starts take the same fields — the rows' stages, their path, segments and event names — and
+ * differ where the rows come from: an events source names its own event and time columns (`columns`
+ * only when a stage made others: `sourceColumns`) and takes a window, a task's table names its path and
+ * its columns always (its columns carry no catalog meaning) and was bounded by the pipeline that made it.
  */
-function buildForms(event, schema) {
-  const { properties: F, description, $defs } = schema;
-  const free = { type: 'string', minLength: 1, description: 'An event name: of the source, or one the from_task table holds.' };
-  const relax = (node) => (node === event ? free : Array.isArray(node) ? node.map(relax) : node && typeof node === 'object' ? Object.fromEntries(Object.entries(node).map(([k, v]) => [k, relax(v)])) : node);
-  const lifted = event.enum ? relax(F) : F;
+function buildForms(schema) {
+  const { properties: F, description, sourceColumns, $defs } = schema;
   const action = (value) => ({ tag: ['action', value], tagDescription: [].concat(value).map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') });
-  const declaration = ['context_id', 'name', 'description', 'events', 'segments', 'where', 'sessions', 'sample'];
+  const declaration = ['context_id', 'name', 'description', 'stages', 'path', 'segments', 'top', 'sessions', 'sample'];
   // a step names the context its eventstream is in — a start may omit it (a new context), a step may not
   const stepContext = { ...F.context_id, description: 'The context the eventstream is in — the context_id start returned.' };
   const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: { ...pick(F, ['context_id', 'eventstream', ...required, ...optional]), context_id: stepContext } });
@@ -313,10 +226,8 @@ function buildForms(event, schema) {
     type: 'object',
     description,
     anyOf: [
-      form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: pick(F, ['source', 'time_range', 'path', ...declaration]) }),
-      // a task's table: its path named by its own columns (always), and no window — the pipeline that
-      // made it bounded it already
-      form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'path', 'columns'], properties: { ...pick(lifted, ['from_task', 'source']), path: F.task_path, ...pick(lifted, ['columns', ...declaration]) } }),
+      form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: { ...pick(F, ['source', 'time_range', ...declaration]), columns: sourceColumns } }),
+      form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'path', 'columns'], properties: pick(F, ['from_task', 'source', 'columns', ...declaration]) }),
       step('add_steps', 'add steps', ['steps']),
       step(['edit_step', 'insert_step'], 'edit or insert a step', ['index', 'step']),
       step('delete_step', 'delete a step', ['index']),
@@ -443,77 +354,44 @@ function rulesToLibrary({ cases, else: otherwise }, field) {
   ];
 }
 
-/** A row condition on the eventstream's columns, in the ONE condition grammar every `where` is written
- *  in (src/schema-kit.js conditionList, the operators of src/conditions.js OPS): a list of conditions
- *  that all hold, an item { or: [...] } (its items may be { and: [...] }), each condition a column of
- *  the eventstream compared with a constant. */
-function rowConditionSchema() {
-  const column = { type: 'string', pattern: NAME_OR_COLUMN, description: 'A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.' };
-  const leaf = form({
-    title: 'a column and a constant — { column, op, value }', required: ['column', 'op'],
-    properties: { column, op: { enum: OPS }, value: { ...CONSTANT, description: 'The constant: one for a comparison, a list of one kind for in / not_in, [low, high] for between (both included), a string for the text operators, none for is_null / is_not_null.' } },
+/**
+ * filter_events' expression — a level of the ONE expression grammar (src/pipeline/compute.js): a column
+ * of the eventstream or a constant, combined by the conditions, and / or / not and the scalar functions.
+ * No window (the library keeps rows, it computes none), no event property and no current time (the
+ * eventstream carries columns, and its run should not depend on the hour), and no raw SQL: the library
+ * runs what this tool writes, and SQL a call brings is code (NOT_OFFERED.params.sql).
+ */
+function eventstreamExprSchema() {
+  return exprSchema(null, {
+    ref: `#/$defs/${EVENTSTREAM_EXPR_DEF}`,
+    leaves: [
+      columnLeaf('A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.', { pattern: NAME_OR_COLUMN }),
+      valueLeaf(),
+    ],
+    fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw')],
+    windows: false,
+    sourced: false,
   });
-  return conditionList(leaf, `Keep only the rows whose columns satisfy every condition — a threshold, a range, a list, a text pattern, a missing value — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). A number or a flag is compared as one, whatever the column is stored as (a segment is text). A missing value matches no condition, so a negation (${Object.keys(NEGATED).join(', ')}) keeps it, as drop does; is_null picks it out. This tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.`);
 }
 
-/** A column name as a DuckDB identifier, quoted. */
-const ident = (name, field) => {
-  try { return DUCKDB.quoteIdent(name); } catch { throw new ToolError(`'${name}' is not a column name`, { stage: 'validate', field }); }
-};
-
-/** The operators that negate another — each tested as NOT of the one it negates, so a row whose value
- *  is missing (which matches nothing) is kept by it. */
-const NEGATED = { neq: 'eq', not_in: 'in', not_like: 'like' };
-
-/** A refusal of condition `c`'s constant: what its operator takes instead. */
-const refuseConstant = (c, field, what) => { throw new ToolError(`condition on '${c.column ?? c.property}': ${c.op} ${what}`, { stage: 'validate', field }); };
-
-/** A condition's constant held to what its operator takes — the one rule for every `where` of the
- *  feature (a start's, a split case's `when`, filter_events'): none for is_null / is_not_null, a list
- *  for in / not_in, [low, high] for between (both included), one constant for any other, a string for
- *  a text operator, and never null (a missing value is picked out with is_null). Refused here, at
- *  `field`, rather than when the SQL runs. */
-export function checkConstant(c, field) {
-  const say = (what) => refuseConstant(c, field, what);
-  if (c.op === 'is_null' || c.op === 'is_not_null') {
-    if (c.value !== undefined) say('takes no value');
-    return;
-  }
-  if (c.value === undefined) say('needs a value');
-  const many = c.op === 'in' || c.op === 'not_in' || c.op === 'between';
-  if (many !== Array.isArray(c.value)) say(many ? (c.op === 'between' ? 'takes [low, high]' : 'takes a list of constants') : 'takes one constant, not a list');
-  const list = [].concat(c.value);
-  if (!list.length) say('takes at least one constant');
-  if (c.op === 'between' && list.length !== 2) say('takes [low, high] (both included)');
-  if (list.some((v) => v === null)) say('takes no null — a missing value is picked out with is_null');
-  if (list.some((v) => typeof v === 'number' && !Number.isFinite(v))) say(`takes a number a comparison can take, not ${list.find((v) => typeof v === 'number' && !Number.isFinite(v))}`);
-  if (TEXT_OPS.has(c.op) && typeof c.value !== 'string') say('takes a string');
+/** filter_events' where: a condition slot of that expression — a list that all hold, as every where. */
+function rowConditionSchema() {
+  return conditionSlot(`#/$defs/${EVENTSTREAM_EXPR_DEF}`, 'Keep only the rows where every condition holds — a comparison, a range, a membership, a text test, a missing value (is_null), and / or / not over them — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). A column compared with constants is read as their kind, whatever it is stored as (a segment is text: a threshold on it is a number\'s). A comparison with a missing value does not hold — neq, not_in and not_like too (present and different); not(…) holds wherever its condition does not, a missing value included, as drop does. This tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.');
 }
 
-/** The kind filter_events compares a condition's column as — 'string', 'number' or 'boolean', its
- *  constant's (null for a null check): the constant held to checkConstant, and a list to one kind. */
-function constantKind(c, field) {
-  checkConstant(c, field);
-  if (c.value === undefined) return null;
-  const kinds = new Set([].concat(c.value).map((v) => typeof v));
-  if (kinds.size > 1) refuseConstant(c, field, 'takes constants of one kind — a list is compared as that kind');
-  return [...kinds][0];
-}
-
-/** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, every
- *  column quoted as an identifier and every constant as a literal — the caller's input stays data. A
- *  column is compared as the kind of its constant (a segment is stored as text: a threshold on it is a
- *  number's), and every test is two-valued — a missing value matches nothing, so a negation keeps it. */
+/** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, written
+ *  by the one writer for DuckDB — every column quoted, every constant a literal, so the caller's input
+ *  stays data. A column compared with constants is read as their kind (castToConstant: a segment is
+ *  stored as text, and a threshold on it is a number's), and a comparison with a missing value holds for
+ *  no row, as it holds nowhere else; not(…) is what keeps one. */
 function whereToSql(where, field) {
-  const leaf = (c) => {
-    const name = ident(c.column, field);
-    const kind = constantKind(c, field);
-    if (kind === null) return comparison(name, c.op);
-    const col = TEXT_OPS.has(c.op) ? `CAST(${name} AS VARCHAR)` : kind === 'number' ? `TRY_CAST(${name} AS DOUBLE)` : kind === 'boolean' ? `TRY_CAST(${name} AS BOOLEAN)` : name;
-    const test = `COALESCE(${comparison(col, NEGATED[c.op] || c.op, c.value, { lit: literal })}, FALSE)`;
-    return NEGATED[c.op] ? `NOT ${test}` : test;
-  };
-  return `SELECT * FROM eventstream WHERE ${conditionsSql(where, leaf).map((s) => `(${s})`).join(' AND ')}`;
+  let preds;
+  try {
+    preds = conditionListSql(DUCKDB, null, where, field, { castToConstant: true });
+  } catch (e) {
+    throw new ToolError(e?.message || String(e), { stage: 'validate', field });
+  }
+  return `SELECT * FROM eventstream WHERE ${preds.map((s) => `(${s})`).join(' AND ')}`;
 }
 
 /** Parameters this tool ADDS to a library op, each translated into one the library takes — a

@@ -7,25 +7,24 @@ import { dbtFailure } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { retentioneeringFacts } from './schema.js';
-import { pathColumns, pathParts, OTHER_EVENT } from './eventstream.js';
+import { pathParts, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize, truncatedTables } from './results.js';
 import { hasCard, diffForm, CHARTED_DIFF_KINDS } from './view-model.js';
 import { SIDE, BUILD, QUERY, DISPLAY, ES_COLUMNS } from './names.js';
 import { pathContext } from './contexts.js';
-import { suggest } from './build-input.js';
+import { suggest, namedColumns } from './build-input.js';
 import { ORDER_COL, ROLES_COL } from './steps.js';
 import { drawnAlready } from './display.js';
 
 /** Which column of the rows each eventstream column is — the eventstream names them as the library
- *  does (user_id, event, event_time, session_id), whatever the source calls them. */
+ *  does (user_id, event, event_time, session_id), whatever the rows call them. */
 export function columnsFrom(catalog, spec) {
-  const cols = pathColumns(catalog, spec);
-  const split = (spec.events?.split || []).length;
+  const cols = namedColumns(catalog, spec);
   return {
     [ES_COLUMNS.user]: pathKey(spec) ? pathKey(spec).join(' + ') : cols.user,
-    [ES_COLUMNS.event]: split ? `${cols.event} (events.split applied)` : cols.event,
+    [ES_COLUMNS.event]: cols.event,
     [ES_COLUMNS.time]: cols.time,
     ...(spec.sessions ? { [ES_COLUMNS.session]: `${ES_COLUMNS.user} + a gap of ${spec.sessions.gap_minutes} min` } : {}),
   };
@@ -34,18 +33,16 @@ export function columnsFrom(catalog, spec) {
 /** Segments on a path of a whole user: its transitions cross segment values (an interstitial load
  *  followed by a banner show) — said once, with the path that keeps them apart. */
 export function pathHint(catalog, spec) {
-  if (pathKey(spec) || !(spec.segments || []).length) return null;
-  const user = pathColumns(catalog, spec).user;
-  const seg = spec.segments[0];
-  const ref = seg.column !== undefined ? `{ column: '${seg.column}' }` : seg.property !== undefined ? `{ property: '${seg.property}' }` : null;
-  if (!ref) return null;
-  return `Each path is one user's whole history, so its transitions run across ${spec.segments.map((sg) => sg.name).join(', ')} values (one format's event followed by another's). To follow one ${seg.name} at a time, make it part of the path: path: [{ column: '${user}' }, ${ref}].`;
+  const segments = spec.segments || [];
+  if (pathKey(spec) || !segments.length) return null;
+  const user = namedColumns(catalog, spec).user;
+  if (!user) return null;
+  return `Each path is one user's whole history, so its transitions run across ${segments.join(', ')} values (one format's event followed by another's). To follow one ${segments[0]} at a time, make it part of the path: path: ['${user}', '${segments[0]}'].`;
 }
 
-/** The names of a path key the caller set (null: one path per user). */
+/** The columns of a path key the caller set (null: one path per user). */
 export function pathKey(spec) {
-  const parts = pathParts(spec);
-  return parts ? parts.map((ref) => ref.column ?? ref.property) : null;
+  return pathParts(spec);
 }
 
 /** The events kept at a share of their rows (a share of 1 keeps them whole, so it is not a sample). */
@@ -109,7 +106,7 @@ export function validateAnalyses(es, shape, analyses) {
   const segments = shape ? Object.keys(shape.segments) : es.segments;
   const paths = shape?.paths || [ES_COLUMNS.user, ...(es.sessions ? [ES_COLUMNS.session] : [])];
   const event = (n, field) => {
-    if (vocab && !vocab.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, vocab)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}${es.steps?.length ? ' and its steps' : ''}`, { stage: 'validate', field });
+    if (vocab && !vocab.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, vocab)} — its names are the ones its start made${es.spec?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}${es.steps?.length ? ' and its steps' : ''}`, { stage: 'validate', field });
   };
   const names = new Set();
   return analyses.map((a) => {

@@ -28,12 +28,30 @@ Design docs:
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
+| `query_pipeline_model` | read a built pipeline's rows, or query its stored table in the pipeline's own stages (where, compute, aggregate, pivot, …) |
 | `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
 
 Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
 The shapes above are that field's content. A tool's schema is a closed root with this one field,
 and its modes are an `anyOf` of closed forms under it. That shape is accepted as-is by the Anthropic
 and OpenAI APIs, so a client is shown the whole schema the server checks.
+
+Conditions, measures and computed values are written in ONE expression grammar in every tool —
+`{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property }`, `{ value }`, …):
+
+```js
+{ stage: "where", conditions: [
+  { fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] },
+  { fn: "or", args: [
+    { fn: "in", args: [{ column: "country" }, { value: "US" }, { value: "DE" }] },
+    { fn: "gt", args: [{ column: "revenue" }, { value: 10 }] } ] } ] }
+{ stage: "aggregate", group_by: ["country"], measures: [
+  { name: "revenue", expr: { fn: "sum", args: [{ column: "price" }] } },
+  { name: "p90_load", expr: { fn: "percentile", args: [{ column: "load_ms" }], percentile: 0.9 } },
+  { name: "failed_loads", expr: { fn: "count", where: [{ fn: "eq", args: [{ column: "status" }, { value: "error" }] }] } } ] }
+```
+
+A `where` is a list of conditions that all hold; `and` / `or` / `not` nest inside it.
 
 ## Architecture
 
@@ -48,8 +66,10 @@ AI ──► query_semantic_model (enum-constrained)
   event name is a JSON-Schema enum projected from the catalog; ajv rejects unknown
   names at the boundary (`src/validate.js`).
 - **Compile** (`src/compile.js`): declaration → dbt measures/dimensions/metrics.
-  Event scope is baked into each measure `expr` (`CASE WHEN …`); `ratio` operands
-  are auto-wrapped in `simple` metrics (dbt requires metric refs). Namespacing
+  A measure is `{ name, expr }`, its expression ONE aggregate in the expression grammar every
+  tool shares (`{ fn: "sum", args: [{ column }], where: [...] }`); the model's and the measure's
+  `where` are baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
+  `{ metric }` leaves — a ratio is `div` of two metrics. Namespacing
   uses a single underscore (dbt 1.11 forbids `__` in names).
 - **Render** (`src/yaml-render.js`): exactly one semantic model per dbt model per
   context (base template + task additions).
@@ -82,7 +102,7 @@ returns one in full — ready-to-run, warehouse-proven payloads.
 
 The recipes shipped with the server are per TECHNIQUE, not per business task: a
 business shape differs per product, the technique does not. Five technical
-families — `metric_types` (ratio, derived, cumulative, conversion window,
+families — `metric_types` (a ratio and other derived formulas, cumulative, conversion window,
 boolean measure, the aggregation chosen per question, a governed measure),
 `joins` (an attribute of another model, a cohort grid on two time axes, two
 independent sources, a pipeline join by relationship name, a point-in-time

@@ -65,7 +65,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_rev',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -92,18 +92,18 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_drop',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users', measures: [{ name: 'player_count', agg: 'count_distinct', field: 'internal_player_id' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users', measures: [{ name: 'player_count', expr: { fn: 'count_distinct', args: [{ column: 'internal_player_id' }] } }] }],
     metrics: [
       { name: 'revenue', type: 'simple', measure: 'revenue' },
       { name: 'players', type: 'simple', measure: 'player_count' },
-      // built on the dropped measure through another metric
-      { name: 'revenue_per_player', type: 'ratio', numerator: 'revenue', denominator: 'player_count' },
+      // built on the dropped measure through the metric over it
+      { name: 'revenue_per_player', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'players' }] } },
     ],
   });
   assert.equal(created.parse.ok, true, `parse must still succeed after dropping the SCD measure: ${JSON.stringify(created.parse)}`);
   assert.ok((created.warnings || []).some((w) => /join-only/i.test(w) && /player_count/.test(w)), `expected a drop warning naming player_count, got ${JSON.stringify(created.warnings)}`);
   assert.ok(!created.metrics.includes('scd_drop_players'), 'the metric depending on the dropped measure is gone');
-  assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a ratio over it goes with it');
+  assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a derived metric over it goes with it');
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
   // a dropped metric is refused when it is asked for, before any task starts — not by MetricFlow later
   await assert.rejects(engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_players'] }), /not in its semantic layer/);
@@ -119,10 +119,10 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id, stages: [
-      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+      { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
-      { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
+      { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     ],
   });
   assert.equal(r.action, 'add_steps');
@@ -143,10 +143,10 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
   await engine.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id, stages: [
-      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-      { stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } },
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+      { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] },
-      { stage: 'aggregate', measures: [{ name: 'revenue', agg: 'sum', column: 'price' }, { name: 'n', agg: 'count' }] },
+      { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     ],
   });
   const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });

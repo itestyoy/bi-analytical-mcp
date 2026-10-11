@@ -1,6 +1,6 @@
 ---
 title: One expression grammar — conditions, aggregates and reads as expressions and stages
-status: in-progress
+status: done
 last_reviewed: 2026-10-11
 last_used: 2026-10-11
 tags: [schema, grammar, pipeline, semantic, retentioneering, read]
@@ -11,7 +11,7 @@ source_of_truth: [src/pipeline/compute.js, src/conditions.js, src/pipeline/stage
 
 ## Status
 
-in-progress
+done
 
 ## Last Reviewed
 
@@ -189,8 +189,9 @@ the same aggregate names.
 
 Both starts take the same fields: `{ action: "start", name, (source + time_range?) | from_task, stages?, columns?: { event, time }, path?: [column names], segments?: [column names], sessions?, sample?, top?, description?, context_id? }`.
 
-- `stages`: the pipeline's own stages that keep the rows events (`keepsSourceRows`: where, compute,
-  join, sample) over the source (or the task's table), rendered through the pipeline as today's start is.
+- `stages`: the pipeline's own stages that keep the rows events (where, compute, join — not sample:
+  that stage draws at random, and the eventstream is deterministic, sampling users by a hash with its
+  own `sample`) over the source (or the task's table), rendered through the pipeline as today's start is.
 - `columns`: which columns are the event and the time — for a source they default to its own; a
   compute stage that renames events (what `events.split` / `events.groups` did: a `case`, a `concat`)
   makes a column and `columns.event` names it. Required with from_task.
@@ -238,3 +239,8 @@ evals/cases.js, test/**, AGENTS.md, docs/knowledge, docs/*.md where they describ
 
 All edits first; then ONE run: `npm run lint:names`, `npm test`, `npm run test:integration`,
 `npm run eval:check`; fix; commit; push. Tests assert on data.
+
+Result (2026-10-11, dbt-v2): lint:names clean; unit 762/762; integration 310/311 — the one failure
+was a refusal naming every source's properties for `semantic_index({ source: 'users', property })`
+(the unknown-value shortcut in src/validate.js ignored the other pinned fields given); fixed, and
+value-index re-run 27/27; eval:check — all 14 cases hold.

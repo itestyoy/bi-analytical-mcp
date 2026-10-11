@@ -108,7 +108,7 @@ before(async () => {
   // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
   const acq = await engine.build_semantic_model({
     name: 'jacq',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   assert.equal(acq.parse.ok, true, JSON.stringify(acq.parse));
@@ -116,7 +116,7 @@ before(async () => {
 
   const ev = await engine.build_semantic_model({
     name: 'jev',
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(ev.parse.ok, true, JSON.stringify(ev.parse));
@@ -157,7 +157,7 @@ before(async () => {
   phantomEngine = settle(new Engine({ catalog: phantom, contextManager: ctxs, runner: backend }));
   const pc = await phantomEngine.build_semantic_model({
     name: 'jph',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   assert.equal(pc.parse.ok, true, `the grounded phantom catalog must still parse: ${JSON.stringify(pc.parse)}`);
@@ -176,7 +176,7 @@ before(async () => {
   ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
   const oc = await ownerEngine.build_semantic_model({
     name: 'jown',
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'crashlytics' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(oc.parse.ok, true, JSON.stringify(oc.parse));
@@ -207,7 +207,7 @@ before(async () => {
   const evtsOn = async (engine, name) => {
     const r = await engine.build_semantic_model({
       name,
-      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+      semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'crashlytics' }, { from: 'users' }],
       metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
     });
     assert.equal(r.parse.ok, true, JSON.stringify(r.parse));
@@ -245,7 +245,7 @@ async function pipeRows(source, ...stages) {
 async function joinStats(source, joinStage, idColumn) {
   const rows = await pipeRows(source, joinStage, {
     stage: 'aggregate',
-    measures: [{ name: 'n', agg: 'count' }, { name: 'distinct_base', agg: 'count_distinct', column: idColumn }],
+    measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'distinct_base', expr: { fn: 'count_distinct', args: [{ column: idColumn }] } }],
   });
   return { n: num(rows[0].n), distinct: num(rows[0].distinct_base) };
 }
@@ -285,14 +285,14 @@ test('9. summing cost over the event pairing inflates it to 267.75, not 17.50', 
   if (skip(t)) return;
   const rows = await pipeRows('events',
     { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: [{ column: 'cost' }] },
-    { stage: 'aggregate', measures: [{ name: 'total', agg: 'sum', column: 'cost' }] });
+    { stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] });
   assert.ok(near(num(rows[0].total), 267.75), `total=${rows[0].total}`);
 });
 
 // 10. The SCD join also works in a FILTER, not just a group-by: GB spend is 5.00.
 test('10. filtering a metric by a point-in-time attribute: GB spend = 5.00', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(acqCtx, { metrics: ['jacq_cost'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'GB' }] });
+  const r = await q(acqCtx, { metrics: ['jacq_cost'], where: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'GB' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].jacq_cost), 5.0), `GB=${r.rows[0].jacq_cost}`);
 });
@@ -326,7 +326,7 @@ test('13. events by country are attributed point-in-time: US 67 / GB 57 / DE 31 
   if (skip(t)) return;
   const rows = await pipeRows('events',
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', agg: 'count' }] });
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }] });
   const by = mapCol(rows, 'country', 'n');
   assert.equal(by.US, 67);
   assert.equal(by.GB, 57);
@@ -360,7 +360,7 @@ test('15. crash reports join installs point-in-time: 13 rows, no duplicates', op
 test('18. the player is part of the key: a shared funnel id does not leak across players', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows('crashlytics',
-    { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k4' }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'crash_id' }, { value: 'k4' }] }] },
     { stage: 'join', with: 'events', via: 'ad_funnel_banner', kind: 'inner', attrs: [{ column: 'event_id' }] },
     { stage: 'project', keep: ['event_id'] });
   assert.deepEqual(new Set(rows.map((r) => String(r.event_id))), new Set(['e133', 'e134']),
@@ -406,7 +406,7 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   // u1's 36 events reach BOTH of its install rows, so the grouped total is 220, not 184.
   const sm = await phantomEngine.build_semantic_model({
     name: 'jphev',
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
@@ -463,7 +463,7 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
   for (const stage of [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
-    { stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'distinct_base', agg: 'count_distinct', column: 'event_id' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'distinct_base', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } }] },
   ]) {
     const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', context_id: st.context_id, stages: [stage] });
     assert.ok(!r.error, JSON.stringify(r.error));
@@ -668,7 +668,7 @@ test('32. what preview shows is what materialize builds', opts, async (t) => {
   if (skip(t)) return;
   const stages = [
     { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: [{ column: 'country' }] },
-    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', agg: 'sum', column: 'cost' }] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] },
   ];
   const direct = mapCol(await runSql(await generatedSql('acquisition', ...stages)), 'country', 'total');
   const builtRows = await pipeRows('acquisition', ...stages);
@@ -824,16 +824,17 @@ test('38. the generated four-way join matches a hand-written one', opts, async (
 
 // 40. The GOVERNED path over two facts at once: a spend measure and an event measure in one
 //     task, both reaching the SAME slowly-changing install record by the declared player key,
-//     plus a ratio that spans them. MetricFlow applies each source's point-in-time join itself.
+//     plus a derived metric dividing one by the other across them. MetricFlow applies each
+//     source's point-in-time join itself.
 test('40. governed: spend and events from two sources, sliced by the same install attribute', opts, async (t) => {
   if (skip(t)) return;
   const task = await engine.build_semantic_model({
     name: 'jmix',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'users' }],
     metrics: [
       { name: 'cost', type: 'simple', measure: 'cost' },
       { name: 'evts', type: 'simple', measure: 'evts' },
-      { name: 'cost_per_event', type: 'ratio', numerator: 'cost', denominator: 'evts' },
+      { name: 'cost_per_event', type: 'derived', expr: { fn: 'div', args: [{ metric: 'cost' }, { metric: 'evts' }] } },
     ],
   });
   assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
@@ -869,7 +870,7 @@ test('41. a join path without its owning model is refused, and works once loaded
   if (skip(t)) return;
   const bare = await engine.build_semantic_model({
     name: 'jbare',
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
@@ -958,23 +959,23 @@ test('44. any column of a joined model can be listed: 7 crashes / 8 events / 25.
     { stage: 'compute', name: 'days_after_spend', expr: { fn: 'date_diff', args: [{ column: 'spend_date' }, { column: 'event_time' }], unit: 'day' } }, {
     stage: 'aggregate',
     measures: [
-      { name: 'n', agg: 'count' },
+      { name: 'n', expr: { fn: 'count' } },
       // crashlytics (the base): its id and an EVENT-SCOPED payload column
-      { name: 'crashes', agg: 'count_distinct', column: 'crash_id' },
-      { name: 'issues', agg: 'count_distinct', column: 'issue_title_of_event_data' },
+      { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } },
+      { name: 'issues', expr: { fn: 'count_distinct', args: [{ column: 'issue_title_of_event_data' }] } },
       // events (joined): its id, its funnel key and its own event-scoped payload
-      { name: 'events', agg: 'count_distinct', column: 'event_id' },
-      { name: 'funnels', agg: 'count_distinct', column: 'tracking_id' },
-      { name: 'ad_types', agg: 'count_distinct', column: 'ad_type_of_event_data' },
+      { name: 'events', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } },
+      { name: 'funnels', expr: { fn: 'count_distinct', args: [{ column: 'tracking_id' }] } },
+      { name: 'ad_types', expr: { fn: 'count_distinct', args: [{ column: 'ad_type_of_event_data' }] } },
       // acquisition (joined): the AMOUNTS — the fields a dimensions-only join could not reach
-      { name: 'spend', agg: 'sum', column: 'cost' },
-      { name: 'impressions', agg: 'sum', column: 'impressions' },
-      { name: 'clicks', agg: 'sum', column: 'clicks' },
-      { name: 'spend_rows', agg: 'count_distinct', column: 'acquisition_id' },
+      { name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } },
+      { name: 'impressions', expr: { fn: 'sum', args: [{ column: 'impressions' }] } },
+      { name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } },
+      { name: 'spend_rows', expr: { fn: 'count_distinct', args: [{ column: 'acquisition_id' }] } },
       // the days from the spend row to the crash (46)
-      { name: 'lo', agg: 'min', column: 'days_after_spend' },
-      { name: 'hi', agg: 'max', column: 'days_after_spend' },
-      { name: 'total', agg: 'sum', column: 'days_after_spend' },
+      { name: 'lo', expr: { fn: 'min', args: [{ column: 'days_after_spend' }] } },
+      { name: 'hi', expr: { fn: 'max', args: [{ column: 'days_after_spend' }] } },
+      { name: 'total', expr: { fn: 'sum', args: [{ column: 'days_after_spend' }] } },
     ],
   });
   const r = rows[0];
@@ -1004,12 +1005,12 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   const narrow = { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] };
   // the listed one is usable…
   const rows = await pipeRows('crashlytics', narrow,
-    { stage: 'aggregate', measures: [{ name: 'events', agg: 'count_distinct', column: 'event_id' }] });
+    { stage: 'aggregate', measures: [{ name: 'events', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } }] });
   assert.equal(num(rows[0].events), 8);
   // …and its neighbours in the joined model are simply not in the pipeline.
   for (const unlisted of ['tracking_id', 'ad_type_of_event_data', 'session_number', 'device_time']) {
     await assert.rejects(
-      () => pipeRows('crashlytics', narrow, { stage: 'aggregate', measures: [{ name: 'x', agg: 'count_distinct', column: unlisted }] }),
+      () => pipeRows('crashlytics', narrow, { stage: 'aggregate', measures: [{ name: 'x', expr: { fn: 'count_distinct', args: [{ column: unlisted }] } }] }),
       new RegExp(`unknown column '${unlisted}'`),
       `${unlisted} must not appear unasked`,
     );
@@ -1017,7 +1018,7 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   // …and asking for it is all it takes.
   const wider = await pipeRows('crashlytics',
     { ...narrow, attrs: [{ column: 'event_id' }, { column: 'tracking_id' }] },
-    { stage: 'aggregate', measures: [{ name: 'funnels', agg: 'count_distinct', column: 'tracking_id' }] });
+    { stage: 'aggregate', measures: [{ name: 'funnels', expr: { fn: 'count_distinct', args: [{ column: 'tracking_id' }] } }] });
   assert.equal(num(wider[0].funnels), 4);
 });
 
@@ -1045,10 +1046,10 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
   const rows = await pipeRows('crashlytics',
     { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'app_version', name: 'users_app_version' }, { column: 'country' }] },
     { stage: 'aggregate', measures: [
-      { name: 'n', agg: 'count' },
-      { name: 'crash_versions', agg: 'count_distinct', column: 'app_version' },
-      { name: 'install_versions', agg: 'count_distinct', column: 'users_app_version' },
-      { name: 'countries', agg: 'count_distinct', column: 'country' },
+      { name: 'n', expr: { fn: 'count' } },
+      { name: 'crash_versions', expr: { fn: 'count_distinct', args: [{ column: 'app_version' }] } },
+      { name: 'install_versions', expr: { fn: 'count_distinct', args: [{ column: 'users_app_version' }] } },
+      { name: 'countries', expr: { fn: 'count_distinct', args: [{ column: 'country' }] } },
     ] });
   assert.equal(num(rows[0].n), 13, 'point-in-time: one install version per crash');
   assert.ok(num(rows[0].crash_versions) >= 1, 'the crash side stayed the base column');
@@ -1203,7 +1204,7 @@ async function perDayMatches(catalog) {
     context_id: s.context_id,
     stages: [{ stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: [{ column: 'cost' }] }] });
   assert.ok(!j.error, `add_steps join: ${JSON.stringify(j.error)}`);
-  await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }, { name: 'spend', agg: 'sum', column: 'cost' }] }] });
+  await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'spend', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }] });
   const c = await eng.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return { n: num(c.rows[0].n), spend: num(c.rows[0].spend) };

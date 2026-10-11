@@ -533,13 +533,13 @@ export class Catalog {
     return t === 'array' || t === 'struct' || t === 'array<struct>';
   }
 
-  /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
+  /** SCALAR event properties (the { property } leaf) — usable directly as categorical dims / scalar filters. */
   scalarEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
   }
 
-  /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
+  /** COMPLEX (array/struct) event properties (the { property } leaf) — only usable via prepare stages. */
   complexEventProps(fact) {
     fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
@@ -644,8 +644,8 @@ export class Catalog {
 
   /**
    * Fields of `key` the schema marks as AGGREGATABLE amounts. Each is { name, expr, column?,
-   * type?, unit?, label?, description? } and carries NO aggregation — a task measure names one
-   * as its `field` and chooses the function itself.
+   * type?, unit?, label?, description? } and carries NO aggregation — a task measure reads one
+   * as a { column } argument of the aggregate it chooses.
    */
   aggregatableFields(key) {
     return Object.values(this.getModel(key).aggregatable || {});

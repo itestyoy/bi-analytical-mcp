@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { retentioneeringViewModel } from '../../src/retentioneering/view-model.js';
 import { toCallToolResult } from '../../src/mcp-surface.js';
 import { one } from '../helpers/settle.js';
-import { ENV, opts, skip, FUNNEL, table, sizes, openWorld } from './retentioneering-harness.js';
+import { ENV, opts, skip, FUNNEL, table, sizes, openWorld, usersJoin } from './retentioneering-harness.js';
 
 let w; let engine; let wh; let rows; let built; let analyses;
 /** Users per platform ({ platform: users }), each user's platform, the platforms with paths in order. */
@@ -423,14 +423,15 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
 // (A sample drawn by a hash — two starts of one sampled spec — is retentioneering-steps.test.js's, with
 // the other specs a start takes.)
 
-// E — filter_events.where on an eventstream of its own (a level segment from an event property), each
-// where on a fork of it, materialized: the events its table holds are the rows the condition keeps,
-// counted here from the warehouse. Three forks carry the five checks: two of them join the wheres of two
-// checks by an or, with guards that each part's own exclusion still shows in the counts.
-test('filter_events.where: every operator, a number compared as a number, a negation keeps a missing value, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
+// E — filter_events.where on an eventstream of its own (a level segment from an event property, read
+// into a column by a compute stage), each where on a fork of it, materialized: the events its table holds
+// are the rows the condition keeps, counted here from the warehouse. Three forks carry the six checks: two
+// of them join the wheres of several checks by an or, with guards that each part's own exclusion still
+// shows in the counts.
+test('filter_events.where: every operator, a number compared as a number, not(…) keeps a missing value where neq drops it, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l, device_time as t from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', segments: [{ property: 'level_id_of_event_data', name: 'level' }] });
+  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', stages: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
   const levels = await readDone(b.task_id);
   assert.equal(levels.status, 'done', `T16 levels: ${JSON.stringify(levels.error)}`);
   const ctx = levels.context_id;
@@ -453,10 +454,12 @@ test('filter_events.where: every operator, a number compared as a number, a nega
   };
 
   // T14 + T16 — what keep / drop cannot say: a day boundary in the middle of the data, the most frequent
-  // event left out, and two negations on the level (not_in, neq) — each keeping the rows with no level —
-  // or (T16 above_5) a level above 5, compared as a number: the day boundary holds for all of it, the
-  // negations together or the level. (The level 10 started on a later day is kept by the number alone: the
-  // most frequent event is a start, and as text '10' is below '5'.)
+  // event left out, and two negations on the level written as not(…) — not(in), not(eq) — each keeping
+  // the rows with no level, or (T16 above_5) a level above 5, compared as a number: the day boundary holds
+  // for all of it, the negations together or the level. (The level 10 started on a later day is kept by
+  // the number alone: the most frequent event is a start, and as text '10' is below '5'.)
+  const level = { column: 'level' };
+  const event = { column: 'event' };
   const day = (x) => new Date(x.t).toISOString().slice(0, 10);
   const days = [...new Set(own.map(day))].sort();
   const from = days[Math.floor(days.length / 2)];
@@ -465,8 +468,8 @@ test('filter_events.where: every operator, a number compared as a number, a nega
   const holds = [
     ['event_time gte', (x) => day(x) >= from],
     ['event not_in', (x) => x.e !== top],
-    ['level not_in', (x) => num(x) == null || num(x) !== 1],
-    ['level neq', (x) => num(x) == null || num(x) !== 2],
+    ['level not(in)', (x) => num(x) == null || num(x) !== 1],
+    ['level not(eq)', (x) => num(x) == null || num(x) !== 2],
   ];
   const aboveAsNumber = (x) => num(x) != null && num(x) > 5;
   const aboveAsText = (x) => num(x) != null && String(num(x)) > '5';
@@ -487,38 +490,54 @@ test('filter_events.where: every operator, a number compared as a number, a nega
   assert.notDeepEqual(tally(keptBy({ above: aboveAsText })), want, 'guard: the level above 5 read as text keeps other rows');
   assert.ok(keptBy().some((x) => x.l == null), 'guard: rows with no level pass every condition');
   assert.deepEqual(await kept('negations', [
-    { column: 'event_time', op: 'gte', value: from },
-    { or: [
-      { and: [{ column: 'event', op: 'not_in', value: [top] }, { column: 'level', op: 'not_in', value: [1] }, { column: 'level', op: 'neq', value: 2 }] },
-      { column: 'level', op: 'gt', value: 5 },
+    { fn: 'gte', args: [{ column: 'event_time' }, { value: from }] },
+    { fn: 'or', args: [
+      { fn: 'and', args: [
+        { fn: 'not_in', args: [event, { value: top }] },
+        { fn: 'not', args: [{ fn: 'in', args: [level, { value: 1 }] }] },
+        { fn: 'not', args: [{ fn: 'eq', args: [level, { value: 2 }] }] },
+      ] },
+      { fn: 'gt', args: [level, { value: 5 }] },
     ] },
-  ]), want, 'T14 + T16 negations, and T16 above_5: the rows the warehouse keeps — a negation keeps the rows with no level, a level is compared as a number');
+  ]), want, 'T14 + T16 negations, and T16 above_5: the rows the warehouse keeps — not(…) keeps the rows with no level, a level is compared as a number');
 
   // T16 — every operator a where takes: a range (both ends), a text pattern, and conditions of which one
   // holds (mid_levels: a level between 2 and 9 that is a level's event or at least 9 — written as the two
   // ways it holds) — or (T16 as_written) a substring matched as written: a % or _ in it is that character,
   // not a wildcard (read as a LIKE pattern, 'ad%' would keep ad_started and ad_finished, and 'e_s'
-  // new_session and end_session)
+  // new_session and end_session) — or a first launch whose level is not 1: neq is "present and
+  // different", and a first launch has no level, so that part keeps none (were a missing value
+  // different from 1, it would keep every first launch)
   const midLevels = (x) => num(x) != null && num(x) >= 2 && num(x) <= 9 && (x.e.startsWith('level') || num(x) >= 9);
   const asWritten = (x) => x.e === 'tutorial' || x.e.startsWith('ad%') || x.e.includes('e_s') || x.e.endsWith('_started');
   const asWildcards = (x) => x.e === 'tutorial' || /^ad/.test(x.e) || /e.s/.test(x.e) || /._started$/.test(x.e);
-  const either = (a, b) => (x) => a(x) || b(x);
-  const want2 = tally(own.filter(either(midLevels, asWritten)));
+  const launchNeq = (x) => x.e === 'first_launch' && num(x) != null && num(x) !== 1;
+  const launchMissingKept = (x) => x.e === 'first_launch' && (num(x) == null || num(x) !== 1);
+  const either = (...fs) => (x) => fs.some((f) => f(x));
+  const want2 = tally(own.filter(either(midLevels, asWritten, launchNeq)));
   // guards: the wildcard reading keeps other rows; the range keeps rows the substrings do not, and each of
-  // its ends leaves out rows they do not keep (a level 1, a level 10 that is not a start)
+  // its ends leaves out rows they do not keep (a level 1, a level 10 that is not a start); a first launch
+  // has no level, and reading neq as keeping a missing value would keep them all
   const widened = (lo, hi) => (x) => num(x) != null && num(x) >= lo && num(x) <= hi && (x.e.startsWith('level') || num(x) >= 9);
   assert.notDeepEqual(tally(own.filter(asWildcards)), tally(own.filter(asWritten)), 'guard: the wildcard reading keeps other rows');
-  assert.notDeepEqual(tally(own.filter(either(midLevels, asWildcards))), want2, 'guard: the wildcard reading keeps other rows beside the range');
+  assert.notDeepEqual(tally(own.filter(either(midLevels, asWildcards, launchNeq))), want2, 'guard: the wildcard reading keeps other rows beside the range');
   assert.notDeepEqual(tally(own.filter(asWritten)), want2, 'guard: the range keeps rows the substrings do not');
-  for (const [end, range] of [['lower', widened(1, 9)], ['upper', widened(2, 10)]]) assert.notDeepEqual(tally(own.filter(either(range, asWritten))), want2, `guard: the range's ${end} end leaves out rows the rest of the where keeps`);
+  for (const [end, range] of [['lower', widened(1, 9)], ['upper', widened(2, 10)]]) assert.notDeepEqual(tally(own.filter(either(range, asWritten, launchNeq))), want2, `guard: the range's ${end} end leaves out rows the rest of the where keeps`);
+  assert.ok(own.some((x) => x.e === 'first_launch') && own.filter((x) => x.e === 'first_launch').every((x) => num(x) == null), 'guard: the first launches carry no level');
+  assert.notDeepEqual(tally(own.filter(either(midLevels, asWritten, launchMissingKept))), want2, 'guard: neq read as keeping a missing value keeps the first launches');
+  const between29 = { fn: 'between', args: [level, { value: 2 }, { value: 9 }] };
   assert.deepEqual(
-    await kept('mid_levels', [{ or: [
-      { and: [{ column: 'level', op: 'between', value: [2, 9] }, { column: 'event', op: 'starts_with', value: 'level' }] },
-      { and: [{ column: 'level', op: 'between', value: [2, 9] }, { column: 'level', op: 'gte', value: 9 }] },
-      { column: 'event', op: 'eq', value: 'tutorial' }, { column: 'event', op: 'starts_with', value: 'ad%' }, { column: 'event', op: 'contains', value: 'e_s' }, { column: 'event', op: 'ends_with', value: '_started' },
+    await kept('mid_levels', [{ fn: 'or', args: [
+      { fn: 'and', args: [between29, { fn: 'starts_with', args: [event, { value: 'level' }] }] },
+      { fn: 'and', args: [between29, { fn: 'gte', args: [level, { value: 9 }] }] },
+      { fn: 'eq', args: [event, { value: 'tutorial' }] },
+      { fn: 'starts_with', args: [event, { value: 'ad%' }] },
+      { fn: 'contains', args: [event, { value: 'e_s' }] },
+      { fn: 'ends_with', args: [event, { value: '_started' }] },
+      { fn: 'and', args: [{ fn: 'eq', args: [event, { value: 'first_launch' }] }, { fn: 'neq', args: [level, { value: 1 }] }] },
     ] }]),
     want2,
-    'T16 mid_levels: a range, a text pattern, an or — and T16 as_written: a substring\'s % and _ are those characters',
+    'T16 mid_levels: a range, a text pattern, an or — T16 as_written: a substring\'s % and _ are those characters — and neq keeps no missing value',
   );
 
   // T16 — a step an earlier version kept in its own tree — { op, conditions }, { not } — is re-checked
@@ -532,7 +551,7 @@ test('filter_events.where: every operator, a number compared as a number, a nega
 
   // T14 — a name that is not a column of the eventstream is the library's refusal, as the step is added
   await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'levels', name: 'bad_where', after: 0 });
-  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ column: 'no_such_col', op: 'eq', value: 'x' }] }] }), (e) => e.field === 'steps[0]' && /no_such_col/.test(e.message), 'T14: a column the eventstream does not have');
+  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ column: 'no_such_col' }, { value: 'x' }] }] }] }), (e) => e.field === 'steps[0]' && /no_such_col/.test(e.message), 'T14: a column the eventstream does not have');
 });
 
 // G — one context's eventstreams over time (a context of its own, deleted at the end): a start, its
@@ -540,8 +559,9 @@ test('filter_events.where: every operator, a number compared as a number, a nega
 // answers; and a task of the context once it is gone.
 test('a context\'s eventstreams over time: a later start makes a table of its own, a fork keeps its rows and description, a keyword segment is carried, a preview is not held behind a build — and once the context is gone its task is refused', opts, async (t) => {
   if (skip(t)) return;
-  // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it
-  const first = await readDone((await engine.build_retentioneering_model({ name: 'origin', source: 'events', description: 'every event', segments: [{ model: 'users', attribute: 'platform', name: 'group' }] })).task_id);
+  // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it — the
+  // platform a join stage brings under that name
+  const first = await readDone((await engine.build_retentioneering_model({ name: 'origin', source: 'events', description: 'every event', stages: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
   assert.equal(first.status, 'done', `T23 origin: ${JSON.stringify(first.error)}`);
   const ctx = first.context_id;
   assert.deepEqual(Object.fromEntries(first.segment_levels.group.levels.map((l) => [l.level, l.users])), perPlatform, 'T23: a segment named for a keyword is carried, level by level');
@@ -560,7 +580,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
 
   // T28 + T21 — a later start of the same name, and a step on it that waits for that build — while a
   // preview of another eventstream of the context answers at once
-  const restart = await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', events: { include: ['tutorial'] } });
+  const restart = await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
   const order = [];
   const stepping = engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'origin', steps: [{ type: 'collapse_events', loops: true }] }).then(() => order.push('step'));
   await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'origin_copy' }).then(() => order.push('preview'));
@@ -596,13 +616,19 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
 });
 
-test('the source\'s own columns and event properties filter the paths and carry as segments — no join needed', opts, async (t) => {
+test('the source\'s own columns and event properties filter the paths and carry as segments, by the start\'s stages — no join needed', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select player_id_of_internal as u, event_name as e, bundle_id as b, level_id_of_event_data as l from fct_analytics_events')).rows;
+  // a where on a column of the source, a compute copying a column under another name, a compute reading
+  // an event property into a column — and the two columns carried as segments
   const b = await engine.build_retentioneering_model({
     name: 'one_app', source: 'events',
-    where: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.colorfit' }],
-    segments: [{ column: 'bundle_id', name: 'app' }, { property: 'level_id_of_event_data', name: 'level' }],
+    stages: [
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'com.omg.colorfit' }] }] },
+      { stage: 'compute', name: 'app', expr: { column: 'bundle_id' } },
+      { stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } },
+    ],
+    segments: ['app', 'level'],
   });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
@@ -613,8 +639,8 @@ test('the source\'s own columns and event properties filter the paths and carry 
   assert.deepEqual([...new Set(es.map((x) => x.app))], ['com.omg.colorfit'], 'the column carried as a segment');
   const byLevel = (list, key) => list.reduce((m, x) => m.set(String(x[key] ?? ''), (m.get(String(x[key] ?? '')) || 0) + Number(x.n ?? 1)), new Map());
   assert.deepEqual(byLevel(es, 'level'), byLevel(kept.map((x) => ({ level: x.l })), 'level'), 'the property carried as a segment, value by value');
-  // a column the table does not have is refused before anything runs, with the ones it has
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', where: [{ column: 'no_such', op: 'eq', value: 1 }] }), (e) => e.field === 'where.column' && /bundle_id/.test(e.message));
+  // a column the table does not have is refused before anything runs, by the stage that names it, with the ones it has
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such' }, { value: 1 }] }] }] }), (e) => e.field === 'stages[0]' && /no_such/.test(e.message) && /bundle_id/.test(e.message));
 });
 
 // K — FROM A PIPELINE'S TASKS. An event only a window can define — a level started again right after a
@@ -641,13 +667,14 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const p = await engine.build_pipeline_model({ action: 'start', name: 'restarts', source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
-    { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ column: 'event_name', op: 'eq', value: 'level_started' }, { column: 'prev', op: 'eq', value: 'level_started' }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
+    { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }, { fn: 'eq', args: [{ column: 'prev' }, { value: 'level_started' }] }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
     { stage: 'project', keep: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
   ] });
   const m = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const firstBuild = await one(engine.query_pipeline_model({ task_ids: [m.task_id] }));
   assert.equal(firstBuild.status, 'done', `T41 the draft's first build: ${JSON.stringify(firstBuild.error)}`);
-  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: [{ column: 'player_id_of_internal' }], columns: { event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', name: 'app' }] });
+  // the start's stages run over the task's table as over a source: here a compute copying a column under the segment's name
+  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, stages: [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }], segments: ['app'] });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', `T41 from_pipe: ${JSON.stringify(r.error)}`);
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'T41: the events a window defined, counted from the rows');
@@ -659,21 +686,21 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   assert.equal(g.status, 'done', JSON.stringify(g.error));
   assert.equal(new Map(g.analyses.transition_graph.nodes.map((n) => [n.event, n.count])).get('level_restarted'), expected.get('level_restarted'), 'T41: the analysis reads the window-defined event');
   // what the table cannot say is refused before anything runs, with where it belongs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: [{ column: 'player_id_of_internal' }], columns: { event: 'ev', time: 'device_time' }, where: [{ property: 'result_of_event_data', op: 'eq', value: 'win' }] }), (e) => e.field === 'where.property' && /pipeline/.test(e.message), 'T41: a property of the source is not the table\'s');
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: [{ column: 'no_such' }], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /ev/.test(e.message), 'T41: a path column the table does not have');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] }] }), (e) => e.field === 'stages[0]' && /result_of_event_data/.test(e.message), 'T41: a property of the source is not the table\'s');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['no_such'], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /ev/.test(e.message), 'T41: a path column the table does not have');
 
   // T43 — the draft's second build (every event but the first launch; the case renames only level_started)
   const n = Number((await wh.query("select count(*) as n from fct_analytics_events where event_name <> 'first_launch'")).rows[0].n);
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'where', conditions: [{ column: 'ev', op: 'neq', value: 'first_launch' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
   const second = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const rebuilt = await one(engine.query_pipeline_model({ task_ids: [second.task_id] }));
   assert.equal(rebuilt.status, 'done', `T43 the draft's rebuild: ${JSON.stringify(rebuilt.error)}`);
-  const rb = await engine.build_retentioneering_model({ name: 'from_rebuild', from_task: second.task_id, path: [{ column: 'player_id_of_internal' }], columns: { event: 'ev', time: 'device_time' } });
+  const rb = await engine.build_retentioneering_model({ name: 'from_rebuild', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } });
   const rr = await readDone(rb.task_id);
   assert.equal(rr.status, 'done', `T43 from_rebuild: ${JSON.stringify(rr.error)}`);
   assert.equal(rr.events, n, 'T43: the eventstream over the rebuild finds the table it builds on');
   const pq = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const pm = await engine.build_pipeline_model({ action: 'materialize', context_id: pq.context_id });
   const counted = await one(engine.query_pipeline_model({ task_ids: [pm.task_id] }));
   assert.equal(counted.status, 'done', `T43 on_rebuild: ${JSON.stringify(counted.error)}`);

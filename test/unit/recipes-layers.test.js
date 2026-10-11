@@ -107,7 +107,7 @@ test('every shipped pipeline_payload is a build_pipeline_model start request the
 // one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes. It is
 // served as the start request it stands for.
 test('a deployment recipe in the earlier { name, pipeline } shape is served as the start request', () => {
-  const stages = [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }];
+  const stages = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }];
   const mine = deploymentFile([{ id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages } } }]);
   assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
 });
@@ -135,15 +135,24 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   const mine = deploymentFile([{ id: 'old_stages', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: pipeline }, { id: 'old_sem', task_type: 't', title: 'old', when_to_use: '', hack: '', semantic_payload: semantic }]);
   const recipes = loadRecipes(SYSTEM, mine);
   const p = recipes.get('old_stages').pipeline_payload;
-  assert.deepEqual(p.stages, [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
+  const firstLaunch = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] };
+  assert.deepEqual(p.stages, [{ stage: 'where', conditions: [firstLaunch] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
   const pr = validateInput(validators.build_pipeline_model, p);
   assert.equal(pr.ok, true, (pr.errors || []).join(' | '));
   const s = recipes.get('old_sem').semantic_payload;
   assert.deepEqual(s.semantic_models.map((m) => m.from), ['events', 'users'], 'a model loaded for its attributes is a { from } item');
-  assert.deepEqual(s.semantic_models[0].measures[0], { name: 'launches', agg: 'count', where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] });
-  assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: 'rows - launches', metrics: ['rows', 'launches'] });
+  // a dimension named by field is the column; a sum_boolean measure the count of its scope; a measure an expression
+  assert.deepEqual(s.semantic_models[0].dimensions, [{ column: 'event_name' }]);
+  assert.deepEqual(s.semantic_models[0].measures, [{ name: 'launches', expr: { fn: 'count', args: [], where: [firstLaunch] } }, { name: 'rows', expr: { fn: 'count', args: [] } }]);
+  // a ratio is the derived metric dividing its sides; a derived metric's text over aliases the expression over the metrics
+  assert.deepEqual(s.metrics.find((m) => m.name === 'share'), { name: 'share', type: 'derived', expr: { fn: 'div', args: [{ metric: 'launches' }, { metric: 'rows' }] } });
+  assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: { fn: 'sub', args: [{ metric: 'rows' }, { metric: 'launches' }] } });
   const sr = validateInput(validators.build_semantic_model, s);
   assert.equal(sr.ok, true, (sr.errors || []).join(' | '));
+  // a recipe written today is served as it is
+  const today = { name: 'today', semantic_models: s.semantic_models, metrics: s.metrics };
+  const again = loadRecipes(SYSTEM, deploymentFile([{ id: 'today', task_type: 't', title: 'today', when_to_use: '', hack: '', semantic_payload: today }])).get('today').semantic_payload;
+  assert.deepEqual(again, today);
 });
 
 // The same for an experiment block written for an earlier version: its columns are named by flat

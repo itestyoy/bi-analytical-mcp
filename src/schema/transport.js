@@ -50,8 +50,8 @@ export const SCHEMA_KEYS = ['items', 'additionalProperties', 'not', 'if', 'then'
 
 /**
  * Fold a repeated VOCABULARY — the same `enum` list offered at several sites under different
- * descriptions (a source's payload properties are the measure's `field`, the dimension's `expr`
- * and the filter's `property`). The values move to one `$defs` entry and each site keeps its own
+ * descriptions (a source's payload properties are the { property } leaf of a pipeline's and a
+ * semantic model's expressions, and a dimension's `property`). The values move to one `$defs` entry and each site keeps its own
  * sentence: `{ $ref, description }`. On the production catalog one such list is ~5 KB and appears
  * three times per tool, in two tools.
  *

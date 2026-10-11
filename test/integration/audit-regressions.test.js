@@ -85,7 +85,7 @@ function variant(mutate, extra = {}) {
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
 const evtsTask = (eng, name, load = []) => eng.build_semantic_model({
-  name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count' }] }, ...load.map((from) => ({ from }))],
+  name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, ...load.map((from) => ({ from }))],
   metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
 });
 /** Run a pipeline of stages and return its rows. */
@@ -126,14 +126,14 @@ before(async () => {
   // events x users, ad_type declared as a task dimension: S1 reads every split of one query
   const eu = await engine.build_semantic_model({
     name: 'aeu',
-    semantic_models: [{ from: 'events', dimensions: [{ field: 'ad_type_of_event_data' }], measures: [{ name: 'evts', agg: 'count' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', dimensions: [{ property: 'ad_type_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(eu.parse.ok, true, `40: a task declaring ad_type as a dimension parses: ${JSON.stringify(eu.parse)}`);
   evUsersCtx = eu.context_id;
   const both = await engine.build_semantic_model({
     name: 'aboth',
-    semantic_models: [{ from: 'events', measures: [{ name: 'launches', agg: 'count' }], where: [{ field: 'event_name', op: 'eq', value: 'first_launch' }] }, { from: 'crashlytics', measures: [{ name: 'reports', agg: 'count' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'launches', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }, { from: 'crashlytics', measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'launches', type: 'simple', measure: 'launches' }, { name: 'reports', type: 'simple', measure: 'reports' }],
   });
   evCrashCtx = both.context_id;
@@ -151,7 +151,7 @@ before(async () => {
   }));
   const bt = await bothEngine.build_semantic_model({
     name: 'aclk',
-    semantic_models: [{ from: 'acquisition', dimensions: [{ field: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ column: 'clicks' }], measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'click_total', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }, { from: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'click_total', type: 'simple', measure: 'click_total' }],
   });
   assert.equal(bt.parse.ok, true, JSON.stringify(bt.parse));
@@ -205,7 +205,8 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   if (skip(t)) return;
   const country = { model: 'users', attribute: 'country' };
   const bundle = { model: 'events', attribute: 'bundle_id' };
-  const filtered = (field, op, value) => ({ metrics: ['aeu_evts'], where: [{ field, op, value }] });
+  // a comparison of the reference with its constants, each its own argument (an in lists several)
+  const filtered = (ref, op, values) => ({ metrics: ['aeu_evts'], where: [{ fn: op, args: [ref, ...[].concat(values).map((value) => ({ value }))] }] });
   // the guard reads the keys the REAL indexer wrote: (users, country) and (events, bundle_id)
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'gb')), /different casing.*'GB'/s, '11: a wrong-cased country on users.country is rejected with the real casing');
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'in', ['GB', 'us'])), /different casing/, '13: an IN list is checked value by value');
@@ -254,7 +255,7 @@ test('19. a relationship nobody owns is pipeline only — and the pipeline join 
   assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'pipeline only');
   const rows = await pipeRows('crashlytics', [
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev_name' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.deepEqual(mapCol(rows, 'event_name', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
 });
@@ -283,12 +284,12 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   assert.ok(pruned.experiments.includes('(time axis)'), `27: the time axis over a missing column is pruned: ${JSON.stringify(pruned)}`);
   assert.equal(cat.getModel('experiments').time, undefined, '27: the model has no time axis left');
   // 25. a measure over the pruned amount is refused at validation, not in the warehouse
-  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
+  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
     /bonus_spend|invalid input/, '25: a measure over the pruned amount is refused at validation');
   // what survives builds and answers: the real amount, the surviving governed measure, the renamed source's count
   const c = await eng.build_semantic_model({
     name: 'agr',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }, { from: 'analytics', measures: [{ name: 'n', agg: 'count' }] }],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'analytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],
   });
   assert.equal(c.parse.ok, true, `26/33: the surviving measures and the renamed source parse: ${JSON.stringify(c.parse)}`);
@@ -300,7 +301,7 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   // 27. …and the model without its time axis still joins
   const rows = await pipeRows('analytics', [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
-    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', agg: 'count_distinct', column: 'player_id_of_internal' }] },
+    { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
   ], eng);
   assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 }, '27: the model without its time axis still joins: control 6 / variant_b 6');
 });
@@ -326,7 +327,7 @@ test('S6 (F/N). clicks is both an amount and an attribute; a spend task joined t
   // 30. the model view lists clicks both as an attribute and as an amount
   const v = await bothEngine.semantic_index({ source: 'acquisition' });
   assert.ok(v.dimensions.some((d) => d.name === 'clicks'), '30: clicks is listed as an attribute');
-  assert.ok(v.aggregatable.some((a) => a.field === 'clicks'), '30: clicks is listed as an amount');
+  assert.ok(v.aggregatable.some((a) => a.column === 'clicks'), '30: clicks is listed as an amount');
   assert.equal(v.dimensions.find((d) => d.name === 'clicks').distinct_count, null, '30: not profiled by THIS engine\'s index (separate store) — the attribute exists regardless');
 });
 
@@ -373,9 +374,9 @@ test('S10 (I/K). one events pipeline: session_number, an extracted ad_type and a
   if (skip(t)) return;
   const truth = (await wh.query('select cast(3000624785682605657 as bigint)::varchar as id')).rows[0].id;
   const rows = await pipeRows('events', [
-    { stage: 'compute', name: 'ad_type', expr: { fn: 'event_property', property: 'ad_type_of_event_data' } },
+    { stage: 'compute', name: 'ad_type', expr: { property: 'ad_type_of_event_data' } },
     { stage: 'compute', name: 'big_id', expr: { fn: 'raw', sql: 'CAST(3000624785682605657 AS BIGINT)', type: 'numeric' } },
-    { stage: 'aggregate', group_by: ['session_number', 'ad_type', 'big_id'], measures: [{ name: 'n', agg: 'count' }] },
+    { stage: 'aggregate', group_by: ['session_number', 'ad_type', 'big_id'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   // 37. a pipeline reads the session key like any column
   assert.deepEqual(marginal(rows, 'session_number', 'n'), { 1: 150, 2: 26, 3: 4, 4: 4 }, '37: sessions 1..4 hold 150 / 26 / 4 / 4 events');

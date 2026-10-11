@@ -34,8 +34,8 @@ The declarative tool input is a direct transcription of that pipe chain:
   "source": "events",
   "stages": [
     { "stage": "where",  "conditions": [ ... ] },
-    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
-    { "stage": "unnest", "property": "words_collected", "name": "word" },
+    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "args": [ { "property": "words_collected" } ] } },
+    { "stage": "unnest", "expr": { "property": "words_collected" }, "name": "word" },
     { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ],
       "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "country" ], "steps": [ ... ] },
@@ -47,7 +47,17 @@ The declarative tool input is a direct transcription of that pipe chain:
 ```
 
 There is **no raw SQL** anywhere in the input — only stage objects with
-catalog-constrained, enum/typed parameters. The engine generates the SQL.
+catalog-constrained, enum/typed parameters. The engine generates the SQL. (`fn: "raw"` is the one
+escape hatch, its columns structured as arguments and quoted by the server.)
+
+What a stage holds — a condition, a measure, a computed value — is ONE expression grammar:
+`{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property, field?, type? }`,
+`{ value }`, `{ now: true }`), nested to any depth. A condition is an expression with a boolean value
+(`eq`, `in`, `between`, `is_null`, a text test, `and` / `or` / `not`); a `where` is a list of them that
+all hold; a measure is `{ name, expr }` whose expression folds rows (`sum`, `count`, `percentile` with
+its `percentile`, a formula over several, an aggregate's own `where` for a conditional count). One
+builder makes each level's schema (`exprSchema`) and one writer its SQL (`exprSql`), both in
+`src/pipeline/compute.js`.
 
 ## 2. The stage registry (the "Lego")
 
@@ -68,11 +78,11 @@ Stage = {
 |---|---|---|---|
 | `scan` (implicit source) | `FROM` | the events fact or users dim (catalog model) | rows of the source |
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
-| `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (`event_property`, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
+| `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (the `{ property }` leaf, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), a condition (stored as a boolean), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
 | `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
-| `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one measure (the aggregate stage's) per value, as conditional measures | **collapses** to group keys |
+| `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one aggregate expression (`measure`) per value, each cell's condition added to the `where` of its aggregates | **collapses** to group keys |
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name_column, value_column) rows; the result is `keep` + those two | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
 | `project` | `\|> SELECT` | keep a column set (`keep`) or drop some (`drop`) | unchanged |
@@ -80,8 +90,8 @@ Stage = {
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 
-**Implemented**: the registry is `src/pipeline/stages.js` (the compute stage's ops are one
-table in `src/pipeline/compute.js`, the pieces every stage is written with in
+**Implemented**: the registry is `src/pipeline/stages.js` (the functions of the one expression
+grammar are one table in `src/pipeline/compute.js`, the pieces every stage is written with in
 `src/pipeline/sql.js`), rendering is `src/pipeline.js`, and each warehouse lowers the op list
 in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `compute`, `unnest`, `join`,
 `aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
@@ -123,9 +133,9 @@ an aggregate) before generating SQL.
   distinguished: the catalog says which a property is, and a function that needs an
   array checks it when the stage is added — `array_length` / `array_contains` refuse a
   property not declared as an array, `element_at` / `array_last` an argument of a known
-  non-array type. A complex prop is read with `compute`'s event-property functions —
-  `array_length`, `array_contains`, `event_property` (a struct's field with `field`;
-  without it the whole value) — or expanded with `unnest`. `element_at` / `array_last`
+  non-array type. A complex prop is read in an expression — `array_length`,
+  `array_contains`, the `{ property }` leaf (a struct's field with `field`; without it the
+  whole value) — or expanded with `unnest`. `element_at` / `array_last`
   take an array of scalars (a native one, or what `json_parse_array` makes); an array of
   structs is read a field at a time, by `unnest` then `json_field`. A comparison or a
   grouping is not checked against the type: a condition comparing a whole array with a
@@ -156,7 +166,7 @@ with `getDialect(name)` (`src/dialects/index.js`). The same op IR lowers two way
 - **DuckDB → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
   `SELECT … FROM p{i-1}`. `unnest` → `CROSS JOIN LATERAL jsonb_array_elements*`;
   `aggregate` → `GROUP BY`; `unpivot` → a `UNION ALL` of one branch per folded column.
-  `pivot` is the aggregate stage's conditional measures on both (`sum(CASE WHEN on = v THEN val END)`).
+  `pivot` is the aggregate stage's conditional aggregates on both (`sum(CASE WHEN on = v THEN val END)`).
   Semantics match the BigQuery pipe lowering step-for-step — one meaning on both warehouses: a week
   is the ISO week (Monday start), `date_part` dow is ISO (Monday 1 … Sunday 7), `date_diff` counts
   whole units elapsed, and NULLs sort last unless a sort key says first.
@@ -185,8 +195,10 @@ creator**: it accepts a `pipeline` (`source` + ordered stages — where/compute/
 aggregate/pivot/unpivot/sample/order_by/limit/project and the `match_recognize` funnel stage;
 window functions are compute expressions). A `pipeline` is materialized as a dbt model whose rows ARE the
 result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
-`query_pipeline_model({ context_id, transform })` filters and regroups the built model, and a
-pipeline started from it with `from_task` re-slices them).
+`query_pipeline_model({ context_id, stages })` filters and regroups the built model in the
+pipeline's own stages — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project,
+rendered by `renderRead` into one statement over the stored table — and a pipeline started from it
+with `from_task` re-slices them with every stage).
 
 ### 6.1 Continuing a pipeline on top of what it already built (checkpoints)
 
@@ -253,14 +265,14 @@ Declarative pipeline:
   "stages": [
     { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ],
       "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
-    { "stage": "where",  "conditions": [ { "column": "country", "op": "eq", "value": "US" } ] },
-    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "property": "words_collected" } },
+    { "stage": "where",  "conditions": [ { "fn": "eq", "args": [ { "column": "country" }, { "value": "US" } ] } ] },
+    { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "args": [ { "property": "words_collected" } ] } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ],
       "steps": [ { "name": "launch", "event_name": ["first_launch"] },
-                 { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "left": { "fn": "event_property", "property": "level_id_of_event_data" }, "op": "eq", "value": 1 } ] } ],
+                 { "name": "lvl1",   "event_name": ["level_completed"], "where": [ { "fn": "eq", "args": [ { "property": "level_id_of_event_data" }, { "value": 1 } ] } ] } ],
       "capture": [ { "name": "words_at_lvl1", "step": "lvl1", "column": "n_words" } ] },
     { "stage": "aggregate", "group_by": ["furthest_step_name", "platform"],
-      "measures": [ { "name": "users", "agg": "count" }, { "name": "avg_words", "agg": "average", "column": "words_at_lvl1" } ] }
+      "measures": [ { "name": "users", "expr": { "fn": "count" } }, { "name": "avg_words", "expr": { "fn": "average", "args": [ { "column": "words_at_lvl1" } ] } } ] }
   ]
 }
 ```
@@ -285,5 +297,5 @@ consistency; **safety** comes from catalog-enum params + literal binding + no ra
 SQL + per-stage reference checks; and the same plan **lowers to BigQuery pipe
 syntax natively or to nested CTEs elsewhere**, emitted as a dbt model with a YAML
 config header and consumed by MetricFlow. This unifies `prepare`, the native
-sequence model, and the result-transform under one extensible, safe, consistent
-model.
+sequence model, and the reads of a stored result (the same stages, run read-only) under one
+extensible, safe, consistent model, written in one expression grammar.

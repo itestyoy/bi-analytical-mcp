@@ -121,8 +121,6 @@ export class DuckDBDialect extends Dialect {
   secondsBetween(from, to) { return `EXTRACT(EPOCH FROM (${to} - ${from}))`; }
   // range() is a table of timestamps, one per day
   timeSpineSelect(start, end) { return `select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)`; }
-  // ORDER BY random() over the whole (small) result table: block sampling can return nothing there
-  sampleQuery(ref, _percent, project) { return `select * from (${project(ref)}) _s order by random()`; }
 
   // The whole units elapsed, truncated toward zero — as BigQuery's TIMESTAMP_DIFF counts them: the
   // span in seconds divided by the unit, trunc'd (CAST alone would round), an integer.

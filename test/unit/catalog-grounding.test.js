@@ -309,7 +309,7 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.match(view.reason, /is_event_name/);
   // a task on it is refused at validation with the reason (schema enum excludes it; the engine names why)
   const { compileDeclaration } = await import('../../src/compile.js');
-  assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'crashlytics', measures: [{ name: 'n', agg: 'count' }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
+  assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'crashlytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
   // the tool schema no longer offers it as a source, but the { source } view still accepts it to explain
   const { buildSchemas } = await import('../../src/schema.js');
   const schemas = buildSchemas(catalog);

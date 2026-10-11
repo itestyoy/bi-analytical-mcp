@@ -29,7 +29,7 @@ const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 const skipNoPy = (t) => { if (!HAS_PY) { t.skip('no python interpreter for the static gate'); return true; } return false; };
 
-const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }] } }] };
 const PY_STAGE = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
@@ -37,7 +37,7 @@ const PY_STAGE = {
   steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }],
   output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] },
 };
-const TAIL = { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gte', value: 0 }] };
+const TAIL = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue_z' }, { value: 0 }] }] };
 
 /** A runner whose builds finish WHEN THE TEST SAYS SO — that is the long-running model. */
 function heldRunner() {
@@ -199,7 +199,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   const runner = heldRunner();
   const e = engine(runner);
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
-  await add(e, context_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] });
+  await add(e, context_id, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] });
   const r = await finishTask(e, await materialize(e, context_id), runner);
   assert.equal(r.materialized, 'view');
   assert.ok(r.warnings.some((w) => /VIEW/.test(w)), 'a view is not a computed prefix — said once, here');

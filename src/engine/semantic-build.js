@@ -58,7 +58,6 @@ export const semanticBuildMethods = {
    */
   async _buildPipeline(input) {
     this._validate('build_pipeline_model.pipeline', input);
-    this._refuseOperandSpelling({ pipeline: { stages: input.pipeline?.stages } });
     // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_ids } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
@@ -212,15 +211,17 @@ export const semanticBuildMethods = {
       for (const add of Object.values(state.additions)) add.measures = add.measures.filter((m) => !names.includes(m.name));
     }
     for (const d of rm.dimensions || []) {
-      // A dimension is named by its FIELD — the name `groupable` offers and a declaration takes. What
-      // is STORED is the task-namespaced copy ('ret_country'), a name the caller is never shown; a
-      // name that matches nothing is refused rather than reported removed.
+      // A dimension is named the way it was declared — its column, its property, or a computed one's
+      // name: the attribute `groupable` offers. What is STORED is the task-namespaced copy
+      // ('ret_country'), a name the caller is never shown; a name that matches nothing is refused
+      // rather than reported removed.
+      const named = d.column ?? d.property ?? d.name;
       const dims = state.additions[d.from]?.dimensions || [];
-      if (!dims.some((x) => x._attribute === d.field || x.name === d.field)) {
+      if (!dims.some((x) => x._attribute === named || x.name === named)) {
         const have = [...new Set(dims.map((x) => x._attribute))];
-        throw new ToolError(`cannot remove dimension '${d.field}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
+        throw new ToolError(`cannot remove dimension '${named}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
       }
-      state.additions[d.from].dimensions = dims.filter((x) => x._attribute !== d.field && x.name !== d.field);
+      state.additions[d.from].dimensions = dims.filter((x) => x._attribute !== named && x.name !== named);
     }
 
     // the additions are a declaration fragment, compiled as a declaration is, against the measures the

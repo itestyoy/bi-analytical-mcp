@@ -20,12 +20,12 @@
 // Modeled on BigQuery pipe syntax (FROM t |> WHERE … |> EXTEND … |> AGGREGATE …).
 // See: https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331
 //
-//   where      |> WHERE      filter rows by column conditions.
+//   where      |> WHERE      filter rows by conditions (expressions that are true or false).
 //                            Solves: scope to an event / segment / time window.
 //   compute    |> EXTEND     add ONE column FROM existing columns, event properties + literals:
-//                            event_property (a scalar, or one field of a JSON object) /
+//                            { property } (a scalar, or one field of a JSON object) /
 //                            array_length / array_contains — a payload field as a column;
-//                            const (literal number/string/bool), arithmetic (+ - * /),
+//                            a condition (a flag), arithmetic (+ - * /),
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
 //                            date_diff / date_trunc / date_part, elapsed_days (whole 24h days
@@ -41,13 +41,14 @@
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
 //                            Solves: bring user attributes (country/platform/install_date).
-//   aggregate  |> AGGREGATE  group + measures: sum/average/min/max/count/count_distinct,
-//                            approx_count_distinct (HLL++), stddev/variance/median/
-//                            percentile(q). Solves: totals, rates, distributions,
-//                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.
-//   pivot      |> AGGREGATE  turn listed values of a column into columns: one conditional
-//                            measure per value. Solves: dashboard-ready matrices (revenue per
-//                            country column).
+//   aggregate  |> AGGREGATE  group + measures { name, expr }: aggregates (sum/average/min/max/count/
+//                            count_distinct, approx_count_distinct (HLL++), stddev/variance/median/
+//                            percentile, each with an optional where) and formulas over them.
+//                            Solves: totals, rates, distributions, DAU/MAU (count_distinct), fast
+//                            approximate uniques, revenue, ARPU / ARPPU.
+//   pivot      |> AGGREGATE  turn listed values of a column into columns: the measure with each
+//                            value's condition in its aggregates' where. Solves: dashboard-ready
+//                            matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
 //   sample     |> TABLESAMPLE  keep a share of the rows for a FAST approximate first estimate
@@ -61,8 +62,9 @@ import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
 import { physicalColumnType } from './catalog/column-types.js';
 import { currentSpelling } from './pipeline/earlier.js';
-import { STAGES, registerStage, stageDef, listSome, stageDefs, pipelineStageSchema } from './pipeline/stages.js';
-export { registerStage, stageDef, listSome, stageDefs, pipelineStageSchema };
+import { comparisonOf } from './pipeline/compute.js';
+import { STAGES, READ_STAGES, registerStage, stageDef, listSome, stageDefs, readStageDefs, pipelineStageSchema } from './pipeline/stages.js';
+export { registerStage, stageDef, listSome, stageDefs, readStageDefs, pipelineStageSchema, READ_STAGES };
 
 /**
  * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is
@@ -132,8 +134,9 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null, spel
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
+    // (a stage lowers to one op, or to several — an unnest of a computed array)
     const res = def.build({ d, catalog, cols, source, physical }, st);
-    ops.push(res.op);
+    ops.push(...(res.ops || [res.op]));
     cols = res.cols;
   }
   return { ops, cols };
@@ -169,20 +172,25 @@ function boundPartitions(m, stages, cols) {
   const out = [];
   let leading = true;
   for (const st of stages) {
-    if (leading && !stageDef(currentSpelling(st)?.stage)?.keepsSourceRows) leading = false;
-    if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
+    // (read in this version's spelling: a kept where bounds the window as a new one does)
+    const cur = currentSpelling(st);
+    if (leading && !stageDef(cur?.stage)?.keepsSourceRows) leading = false;
+    // a where of its own on the partition column prunes already; one naming it inside an or / a not does not
+    if (!leading || cur?.stage !== 'where' || (cur.conditions || []).some((c) => comparisonOf(c)?.subject.column === part)) { out.push(st); continue; }
     const extra = [];
-    for (const c of st.conditions || []) {
-      if (c.column !== time || c.value === undefined || c.value === null) continue;
-      const v = c.value;
-      const b = c.op === 'gte' || c.op === 'gt' ? { start: v }
-        : c.op === 'lt' ? { endExclusive: v }
-          : c.op === 'lte' ? { end: v }
-            : c.op === 'eq' ? { start: v, end: v }
-              : c.op === 'between' && Array.isArray(v) ? { start: v[0], end: v[1] } : null;
+    // a condition of the where's own list (an and of them all) comparing the time axis with constants
+    for (const c of cur.conditions || []) {
+      const cmp = comparisonOf(c);
+      if (cmp?.subject.column !== time || cmp.values.some((v) => v === null)) continue;
+      const [v, w] = cmp.values;
+      const b = cmp.op === 'gte' || cmp.op === 'gt' ? { start: v }
+        : cmp.op === 'lt' ? { endExclusive: v }
+          : cmp.op === 'lte' ? { end: v }
+            : cmp.op === 'eq' ? { start: v, end: v }
+              : cmp.op === 'between' ? { start: v, end: w } : null;
       if (b) extra.push(...partitionConditions(m, b));
     }
-    out.push(extra.length ? { ...st, conditions: [...st.conditions, ...extra] } : st);
+    out.push(extra.length ? { ...cur, conditions: [...cur.conditions, ...extra] } : st);
   }
   return out;
 }
@@ -245,4 +253,42 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   // (the bound is the render's, not the step's), respelled on its own: a where reads no columns to resolve
   const current = new Map(given.map((st, i) => [st, stages[i] === st ? (spelled.get(st) ?? st) : currentSpelling(st, { catalog, source })]));
   return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null, current };
+}
+
+/** Whether a stage holds a raw expression anywhere — in an expression, a measure, a CASE inside them. */
+const holdsRaw = (v) => (Array.isArray(v) ? v.some(holdsRaw) : v !== null && typeof v === 'object' && (v.fn === 'raw' || Object.values(v).some(holdsRaw)));
+
+/**
+ * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_pipeline_model and a card's
+ * drill run: the stages of READ_STAGES (where, compute, aggregate, pivot, unpivot, order_by, limit,
+ * sample, project), built by the stage builders over the table's columns and rendered by the dialect
+ * into one statement over `relation`; nothing is materialized, its rows are the answer. The table has no
+ * source: a { property } or an { entity } partition is refused; raw SQL is a build's (READ_FNS); and a
+ * stage that makes a new table (a join, an unnest, a funnel, a python model) is a build from the task instead.
+ *   catalog   — whose dialect writes the SQL (`dialect` names another);
+ *   relation  — the stored table as SQL (`{{ ref('…') }}`);
+ *   columns   — its columns: [{ name, type?, physical? }] or a tracked Map;
+ *   stages    — the read's stages (an empty list reads the table as it is).
+ * → { sql, columns (Map name → { type }), ordered (its last stage that is not a limit is an order_by) }.
+ * A refusal is an Error whose message names the stage (`stages[i]: …`).
+ */
+export function renderRead(catalog, relation, columns, stages = [], { dialect = catalog.dialect } = {}) {
+  const d = getDialect(dialect);
+  let cols = columnMap(columns);
+  const ops = [];
+  stages.forEach((st, i) => {
+    const kind = st?.stage;
+    if (!READ_STAGES.includes(kind)) {
+      throw new Error(`stages[${i}]: a read takes ${READ_STAGES.join(', ')} — ${kind === undefined ? 'this stage names no `stage`' : `a ${kind} stage makes a new table`}: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
+    }
+    // what reaches a read without its schema (a card's drill, a kept value) is held to it here too
+    if (holdsRaw(st)) throw new Error(`stages[${i}]: raw SQL is a build's escape hatch, not a read's — build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
+    let res;
+    try { res = STAGES[kind].build({ d, catalog, cols, source: null, physical: null }, st); }
+    catch (e) { throw new Error(`stages[${i}]: ${e.message}`); }
+    ops.push(...(res.ops || [res.op]));
+    cols = res.cols;
+  });
+  const last = [...stages].reverse().find((st) => st?.stage !== 'limit');
+  return { sql: d.renderPipeline(relation, ops), columns: cols, ordered: last?.stage === 'order_by' };
 }

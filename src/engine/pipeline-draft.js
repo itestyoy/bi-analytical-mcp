@@ -5,8 +5,12 @@
 
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
-import { operandsMisspelled } from '../pipeline/sql.js';
+import { comparisonOf, eachCondition } from '../pipeline/compute.js';
+import { currentSpelling } from '../pipeline/earlier.js';
 import { physicalColumnType } from '../catalog/column-types.js';
+
+/** The comparisons of a column with constants that bound a scan of it (require_time_range). */
+const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
 
 export const pipelineDraftMethods = {
   /**
@@ -18,7 +22,6 @@ export const pipelineDraftMethods = {
    */
   async build_pipeline_model(input) {
     this._validate('build_pipeline_model', input);
-    this._refuseOperandSpelling({ stages: input.stages, stage: input.stage });
     // start is the default action: a request without one is a start (its forms are the only ones that may omit it)
     if (input.action === undefined || input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
@@ -63,19 +66,6 @@ export const pipelineDraftMethods = {
         next: `The steps are added; the build did not start (materialize.error says why). Materialize with build_pipeline_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
       };
     }
-  },
-
-  /**
-   * A new step's condition written with its column as left: { column }, or its constant as right:
-   * { value }, is refused with the spelling this grammar has ({ column }, `value`) — the schema takes
-   * either as an expression, and the carry-over of a step a draft kept from an earlier version would
-   * otherwise accept it as that step.
-   */
-  _refuseOperandSpelling(value) {
-    const [found] = operandsMisspelled(value);
-    if (!found) return;
-    const [path, told] = found;
-    throw new ToolError(`invalid input: \`${path}\` ${told}`, { stage: 'validate', field: path });
   },
 
   /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom
@@ -283,12 +273,20 @@ export const pipelineDraftMethods = {
     };
   },
 
-  /** True when some pipeline stage already bounds the source's time/partition column. */
+  /**
+   * True when some pipeline stage already bounds the source's time/partition column: a where whose own
+   * list (all of it holds) compares that column with constants. A condition naming the column inside
+   * an or / a not bounds nothing — the other branch reads every row. A kept step is read in this
+   * version's spelling, as it is built.
+   */
   _stagesBoundInTime(source, stages = []) {
     const m = this.catalog.getModel(source);
     const bounds = new Set([m.time?.column, m.partition_column].filter(Boolean));
     if (!bounds.size) return true; // no time axis — nothing to bound
-    return stages.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => bounds.has(c.column)));
+    return stages.map((s) => currentSpelling(s)).some((s) => s?.stage === 'where' && (s.conditions || []).some((c) => {
+      const cmp = comparisonOf(c);
+      return !!cmp && bounds.has(cmp.subject.column) && BOUNDING_OPS.includes(cmp.op) && !cmp.values.includes(null);
+    }));
   },
 
   /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with materialize). */
@@ -571,9 +569,16 @@ export const pipelineDraftMethods = {
     // A python stage's bodies pass the static gate BEFORE the draft persists them.
     if (changedStage && changedStage.stage === 'python') await this._gatePythonStage(changedStage);
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
-      filterWarnings = this.advisor.guardFilterValues(changedStage.conditions
-        .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
-        .map((cd) => ({ at: this.advisor.valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
+      // each comparison of a column or an event property (its own value, not a field of it) with
+      // constants, at any depth of and / or / not
+      const specs = [];
+      eachCondition(changedStage.conditions, (cd) => {
+        const cmp = comparisonOf(cd);
+        if (!cmp || cmp.subject.field !== undefined) return;
+        const name = cmp.subject.column ?? cmp.subject.property;
+        specs.push({ at: this.advisor.valueKeyForColumn(draft.source, name), op: cmp.op, value: cmp.values, where: `where ${name}` });
+      });
+      filterWarnings = this.advisor.guardFilterValues(specs);
     }
     // a step an earlier version stored is kept from now on in the spelling it was built in — the
     // render's, resolved against the columns before it (src/pipeline/earlier.js); a step the render

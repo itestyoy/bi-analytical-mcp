@@ -1,11 +1,12 @@
 // WHAT AN EXPRESSION OR A CONDITION CANNOT BE IS REFUSED WHEN THE STAGE IS ADDED — not minutes later
-// by the warehouse, and not silently: a window function in a where (SQL filters rows before any window
-// is computed — raw SQL with OVER included), a window function inside another's arguments (no warehouse
-// nests them), a list where a value goes, a window bound that does not read as a moment. A step stored by
-// an earlier version is carried over to this version's spelling.
+// by the warehouse, and not silently: a window function in a condition (SQL filters rows before any
+// window is computed — raw SQL with OVER included, and a CASE's `when` is a condition too), a window
+// function inside another's arguments (no warehouse nests them), a list where a constant goes, a window
+// bound that does not read as a moment. A step stored by an earlier version is carried over to this
+// version's spelling — the one expression grammar (src/earlier-spelling.js).
 // What a value picked from several is typed as follows its arguments, so the next stage compares it
-// in its own type; and a whole-table window in a CASE's condition gets the same nudge as one in its
-// branch. Input-validation guards only: nothing here reads generated SQL.
+// in its own type; and a whole-table window in a CASE gets the same nudge as one at the top of a
+// compute. Input-validation guards only: nothing here reads generated SQL.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,89 +25,135 @@ const catalog = loadCatalog(CATALOG, {});
 const COLS = new Set(['player_id_of_internal', 'device_time', 'event_date', 'event_name', 'session_number']);
 const render = (stages) => renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: COLS });
 const OVER = { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] };
+const col = (column) => ({ column });
+const val = (value) => ({ value });
 
-test('a window function is refused in a where, with the way: compute it into a column, then filter', () => {
+test('a window function is refused in a condition, with the way: compute it into a column, then filter', () => {
   assert.throws(
-    () => render([{ stage: 'where', conditions: [{ left: { fn: 'row_number', over: OVER }, op: 'eq', value: 1 }] }]),
-    /window function \(row_number\) cannot be compared in a where.*compute stage/s,
+    () => render([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'row_number', over: OVER }, val(1)] }] }]),
+    /window function \(row_number with over\) cannot stand in a condition.*compute stage/s,
   );
-  // …inside an { or } too
+  // …inside an or too
   assert.throws(
-    () => render([{ stage: 'where', conditions: [{ or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { left: { fn: 'lag', args: [{ column: 'session_number' }], over: OVER }, op: 'gt', value: 1 }] }] }]),
-    /window function \(lag\) cannot be compared in a where/,
+    () => render([{ stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }, { fn: 'gt', args: [{ fn: 'lag', args: [col('session_number')], over: OVER }, val(1)] }] }] }]),
+    /window function \(lag with over\) cannot stand in a condition/,
+  );
+  // a CASE's `when` is a condition slot like a where's: a window is computed into a column first there too
+  assert.throws(
+    () => render([{ stage: 'compute', name: 'first', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ fn: 'row_number', over: OVER }, val(1)] }], then: val(1) }], else: val(0), type: 'int' } }]),
+    /window function \(row_number with over\) cannot stand in a condition/,
   );
   // the way it says: the window in a column, the where on that column
   const ok = render([
     { stage: 'compute', name: 'nth', expr: { fn: 'row_number', over: OVER } },
-    { stage: 'where', conditions: [{ column: 'nth', op: 'eq', value: 1 }] },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [col('nth'), val(1)] }] },
   ]);
   assert.ok(ok.columns.has('nth'));
-  // a CASE in a computed column may test one: that is a select list, where windows are computed
-  assert.ok(render([{ stage: 'compute', name: 'first', expr: { fn: 'case', cases: [{ when: [{ left: { fn: 'row_number', over: OVER }, op: 'eq', value: 1 }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } }]).columns.has('first'));
+  // a CASE's branch may be one: that is a select list, where windows are computed
+  assert.ok(render([{ stage: 'compute', name: 'first', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: { fn: 'row_number', over: OVER } }], else: val(0), type: 'int' } }]).columns.has('first'));
 });
 
 test('a window function is refused as the argument of another', () => {
   assert.throws(
-    () => render([{ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ fn: 'lag', args: [{ column: 'session_number' }], over: OVER }], over: OVER } }]),
+    () => render([{ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ fn: 'lag', args: [col('session_number')], over: OVER }], over: OVER } }]),
     /window function \(lag\) cannot be an argument of another window function/,
   );
   // arithmetic over windows is not nesting: sum(x) over (…) - lag(x) over (…)
-  assert.ok(render([{ stage: 'compute', name: 'x', expr: { fn: 'sub', args: [{ fn: 'sum', args: [{ column: 'session_number' }], over: OVER }, { fn: 'lag', args: [{ column: 'session_number' }], over: OVER }] } }]).columns.has('x'));
+  assert.ok(render([{ stage: 'compute', name: 'x', expr: { fn: 'sub', args: [{ fn: 'sum', args: [col('session_number')], over: OVER }, { fn: 'lag', args: [col('session_number')], over: OVER }] } }]).columns.has('x'));
 });
 
-test('a list is a condition\'s constant, never an expression\'s value', () => {
+test('a constant is never a list: a membership takes each member as an argument of its own', () => {
   assert.throws(
-    () => render([{ stage: 'compute', name: 'x', expr: { fn: 'coalesce', args: [{ column: 'session_number' }, { value: [1, 2] }] } }]),
-    /a constant is a string, a number, a boolean or null — a list belongs in a condition's `value`/,
+    () => render([{ stage: 'compute', name: 'x', expr: { fn: 'coalesce', args: [col('session_number'), val([1, 2])] } }]),
+    /a constant is a string, a number, a boolean or null — a list is written as arguments of their own/,
   );
-  // where it belongs
-  assert.ok(render([{ stage: 'where', conditions: [{ column: 'session_number', op: 'in', value: [1, 2] }] }]));
+  assert.throws(
+    () => render([{ stage: 'where', conditions: [{ fn: 'eq', args: [col('session_number'), val([1, 2])] }] }]),
+    /a list is written as arguments of their own/,
+  );
+  // how a membership is written
+  assert.ok(render([{ stage: 'where', conditions: [{ fn: 'in', args: [col('session_number'), val(1), val(2)] }] }]));
 });
 
-test('a step stored by an earlier version is built in this version\'s spelling — the same columns as the step written today', () => {
-  const columns = (stages) => [...render(stages).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
+test('a step stored by an earlier version is built in this version\'s spelling — the step written today, and the same columns', () => {
+  const physical = new Set([...COLS, 'event_data', 'price_in_usd_of_event_data']);
+  const built = (stages) => renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: physical });
+  const columns = (stages) => [...built(stages).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
+  // each pair: what an earlier version stored, and the step written today — the kept one is read as
+  // today's (what the render reports, and what a draft shows), and builds the same columns
+  const price = { fn: 'gte', args: [{ property: 'price_in_usd_of_event_data', type: 'numeric' }, val(1)] };
+  const funnel = (extra, where) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where }], ...extra });
+  const priceThen = { left: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' }, op: 'gte', value: 1 };
   for (const [earlier, today] of [
-    [{ stage: 'compute', name: 'd', op: 'elapsed_days', from: { column: 'device_time' }, to: { now: true } }, { stage: 'compute', name: 'd', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }, { now: true }] } }],
-    [{ stage: 'compute', name: 'w', op: 'window', fn: 'avg', column: 'session_number', partition_by: ['player_id_of_internal'] }, { stage: 'compute', name: 'w', expr: { fn: 'average', args: [{ column: 'session_number' }], over: { partition_by: ['player_id_of_internal'] } } }],
-    [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'avg', column: 'session_number' }, { name: 'p', fn: 'percentile', q: 0.9, column: 'session_number' }] }, { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'average', column: 'session_number' }, { name: 'p', agg: 'percentile', percentile: 0.9, column: 'session_number' }] }],
-    [{ stage: 'pivot', on: 'event_name', fn: 'avg', value_column: 'session_number', values: ['tutorial'] }, { stage: 'pivot', on: 'event_name', measure: { agg: 'average', column: 'session_number' }, values: [{ value: 'tutorial', name: 'tutorial' }] }],
-    [{ stage: 'pivot', on: 'event_name', agg: 'sum', value_column: 'session_number', values: ['Tutorial', '7'] }, { stage: 'pivot', on: 'event_name', measure: { agg: 'sum', column: 'session_number' }, values: [{ value: 'Tutorial', name: 'Tutorial' }, { value: '7', name: '_7' }] }],
+    // stage words
+    [{ stage: 'compute', name: 'd', op: 'elapsed_days', from: col('device_time'), to: { now: true } }, { stage: 'compute', name: 'd', expr: { fn: 'elapsed_days', args: [col('device_time'), { now: true }] } }],
+    [{ stage: 'compute', name: 'w', op: 'window', fn: 'avg', column: 'session_number', partition_by: ['player_id_of_internal'] }, { stage: 'compute', name: 'w', expr: { fn: 'average', args: [col('session_number')], over: { partition_by: ['player_id_of_internal'] } } }],
     [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', as: 'c' }] }, { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'c' }] }],
     [{ stage: 'join', with: 'users', via: 'user', between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] }, { stage: 'join', with: 'users', via: 'user', between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] }],
     [{ stage: 'unpivot', keep: ['event_name'], columns: ['session_number'], name_as: 'metric', value_as: 'amount' }, { stage: 'unpivot', keep: ['event_name'], columns: ['session_number'], name_column: 'metric', value_column: 'amount' }],
     [{ stage: 'project', columns: ['event_name', 'device_time'] }, { stage: 'project', keep: ['event_name', 'device_time'] }],
     [{ stage: 'limit', n: 5 }, { stage: 'limit', limit: 5 }],
     [{ stage: 'sample', percent: 10 }, { stage: 'sample', share: 0.1 }],
-    [{ stage: 'where', conditions: [{ left: { column: 'session_number' }, op: 'gt', value: 1, right: { column: 'session_number' } }, { or: [{ left: { column: 'event_name' }, op: 'eq', value: 'tutorial' }, { column: 'session_number', op: 'is_null' }] }] }, { stage: 'where', conditions: [{ column: 'session_number', op: 'gt', right: { column: 'session_number' } }, { or: [{ column: 'event_name', op: 'eq', value: 'tutorial' }, { column: 'session_number', op: 'is_null' }] }] }],
-    [{ stage: 'where', conditions: [{ column: 'session_number', op: 'gt', right: { value: 1 } }, { left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', value: 9, right: { value: 3 } }] }, { stage: 'where', conditions: [{ column: 'session_number', op: 'gt', value: 1 }, { left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', value: 3 }] }],
-    [{ stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ left: { column: 'session_number' }, op: 'gt', value: 1 }], then: { value: 'more' } }], else: { value: 'one' } } }, { stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ column: 'session_number', op: 'gt', value: 1 }], then: { value: 'more' } }], else: { value: 'one' } } }],
-    [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ left: { column: 'event_name' }, op: 'eq', value: 'tutorial' }] }] }, { stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] }] }],
     [{ stage: 'match_recognize', mode: 'ordered', between_steps: 'gap', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }, { stage: 'match_recognize', between_steps: 'gap', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }],
     [{ stage: 'match_recognize', mode: 'ordered', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }, { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }],
-  ]) assert.deepEqual(columns([earlier]), columns([today]), JSON.stringify(earlier));
+    // a measure: `fn` before `agg`, `q` before `percentile`, then `agg` + `column` — an expression now
+    [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'avg', column: 'session_number' }, { name: 'p', fn: 'percentile', q: 0.9, column: 'session_number' }] }, { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'average', args: [col('session_number')] } }, { name: 'p', expr: { fn: 'percentile', args: [col('session_number')], percentile: 0.9 } }] }],
+    [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ left: col('event_name'), op: 'eq', value: 'tutorial' }] }, { name: 's', agg: 'sum', column: 'session_number' }] }, { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [], where: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }] } }, { name: 's', expr: { fn: 'sum', args: [col('session_number')] } }] }],
+    // a pivot: agg + value_column + values as names, then a measure { agg, column } — the aggregate expression now
+    [{ stage: 'pivot', on: 'event_name', fn: 'avg', value_column: 'session_number', values: ['tutorial'] }, { stage: 'pivot', on: 'event_name', measure: { fn: 'average', args: [col('session_number')] }, values: [{ value: 'tutorial', name: 'tutorial' }] }],
+    [{ stage: 'pivot', on: 'event_name', agg: 'sum', value_column: 'session_number', values: ['Tutorial', '7'] }, { stage: 'pivot', on: 'event_name', measure: { fn: 'sum', args: [col('session_number')] }, values: [{ value: 'Tutorial', name: 'Tutorial' }, { value: '7', name: '_7' }] }],
+    [{ stage: 'pivot', on: 'event_name', measure: { agg: 'count' }, values: [{ value: 'tutorial', name: 't' }] }, { stage: 'pivot', on: 'event_name', measure: { fn: 'count', args: [] }, values: [{ value: 'tutorial', name: 't' }] }],
+    // a condition: { column | left, op, value | right } and its { or } / { and } groups — a function now;
+    // a `value` beside `right` was not read, and an in's list is its members
+    [{ stage: 'where', conditions: [{ left: col('session_number'), op: 'gt', value: 1, right: col('session_number') }, { or: [{ left: col('event_name'), op: 'eq', value: 'tutorial' }, { column: 'session_number', op: 'is_null' }] }] }, { stage: 'where', conditions: [{ fn: 'gt', args: [col('session_number'), col('session_number')] }, { fn: 'or', args: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }, { fn: 'is_null', args: [col('session_number')] }] }] }],
+    [{ stage: 'where', conditions: [{ column: 'session_number', op: 'gt', right: { value: 1 } }, { left: { fn: 'length', args: [col('event_name')] }, op: 'gt', value: 9, right: { value: 3 } }, { column: 'session_number', op: 'in', value: [1, 2] }, { and: [{ column: 'event_name', op: 'neq', value: 'x' }] }] }, { stage: 'where', conditions: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, val(3)] }, { fn: 'in', args: [col('session_number'), val(1), val(2)] }, { fn: 'neq', args: [col('event_name'), val('x')] }] }],
+    [{ stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ left: col('session_number'), op: 'gt', value: 1 }], then: val('more') }], else: val('one') } }, { stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: val('more') }], else: val('one') } }],
+    // an event property read by a function of its own, and the array functions naming `property` — a leaf and args now
+    [{ stage: 'compute', name: 'p', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }],
+    [{ stage: 'compute', name: 'n', expr: { fn: 'array_length', property: 'words_collected' } }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', args: [{ property: 'words_collected' }] } }],
+    [{ stage: 'compute', name: 'c', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', args: [{ property: 'words_collected' }, val('cat')] } }],
+    // a derive stage is the compute stage reading the same event property — a column of its own, or a key of the payload
+    [{ stage: 'derive', name: 'p', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }],
+    [{ stage: 'derive', name: 'n', op: 'array_length', source: 'words_collected' }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', args: [{ property: 'words_collected' }] } }],
+    [{ stage: 'derive', name: 'c', op: 'contains', source: 'words_collected', value: 'cat' }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', args: [{ property: 'words_collected' }, val('cat')] } }],
+    // an unnest naming its array as a field of its own — its expr now
+    [{ stage: 'unnest', property: 'words_collected', name: 'w' }, { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' }],
+    [{ stage: 'unnest', source: 'words_collected', name: 'w' }, { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' }],
+    // a kept funnel's step conditions — the property read as a left side, a mode, an or — in this version's forms
+    [funnel({ mode: 'ordered' }, [priceThen, { left: col('session_number'), op: 'gt', value: 1 }]), funnel({}, [price, { fn: 'gt', args: [col('session_number'), val(1)] }])],
+    [funnel({ mode: 'ordered', between_steps: 'gap' }, [{ or: [priceThen, { property: 'session_number', op: 'gte', value: 1 }, { left: col('session_number'), op: 'gt', value: 1, right: col('session_number') }] }]), funnel({ between_steps: 'gap' }, [{ fn: 'or', args: [price, { fn: 'gte', args: [col('session_number'), val(1)] }, { fn: 'gt', args: [col('session_number'), col('session_number')] }] }])],
+    [funnel({ mode: 'ordered' }, [priceThen, { column: 'session_number', op: 'gt', right: { value: 1 } }]), funnel({}, [price, { fn: 'gt', args: [col('session_number'), val(1)] }])],
+  ]) {
+    assert.deepEqual(built([earlier]).current.get(earlier), today, JSON.stringify(earlier));
+    assert.deepEqual(columns([earlier]), columns([today]), JSON.stringify(earlier));
+  }
+  // a step in today's spelling is kept as it is — by identity
+  const todays = { stage: 'where', conditions: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }] };
+  assert.equal(built([todays]).current.get(todays), todays);
   // a kept strict funnel is the funnel whose steps are adjacent events: what a warehouse without a
-  // row-pattern match cannot say, refused as that choice
+  // row-pattern match cannot say, refused as that choice — whatever its step conditions are spelled in
   assert.throws(() => render([{ stage: 'match_recognize', mode: 'strict', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }]), /between_steps 'none'/);
+  assert.throws(() => built([funnel({ mode: 'strict' }, [priceThen])]), /between_steps 'none'/);
+  assert.throws(() => built([funnel({ mode: 'strict' }, [{ or: [priceThen, { column: 'session_number', op: 'gt', value: 1 }] }])]), /between_steps 'none'/);
   // a kept unnest's `source` is the property it named, or the array column a step before it made — as its build resolved it
-  const unnested = (stages) => [...renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: new Set([...COLS, 'event_data']) }).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
-  assert.deepEqual(unnested([{ stage: 'unnest', source: 'words_collected', name: 'w' }]), unnested([{ stage: 'unnest', property: 'words_collected', name: 'w' }]));
-  const parsed = { stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'event_name' }] } };
-  assert.deepEqual(unnested([parsed, { stage: 'unnest', source: 'arr', name: 'w' }]), unnested([parsed, { stage: 'unnest', column: 'arr', name: 'w' }]));
+  const parsed = { stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [col('event_name')] } };
+  assert.deepEqual(columns([parsed, { stage: 'unnest', source: 'arr', name: 'w' }]), columns([parsed, { stage: 'unnest', expr: col('arr'), name: 'w' }]));
   // the render reports each kept step in today's spelling — what a draft keeps from its next accepted
   // edit — and a draft's steps are shown in it, so one copied into edit_step is one the tool takes
   const keptSteps = [parsed, { stage: 'unnest', source: 'arr', name: 'w' }, { stage: 'limit', n: 5 }];
-  const built = renderPipeline(catalog, catalog.dialect, 'events', keptSteps, { physicalCols: new Set([...COLS, 'event_data']) });
-  assert.deepEqual(keptSteps.map((s) => built.current.get(s)), [parsed, { stage: 'unnest', column: 'arr', name: 'w' }, { stage: 'limit', limit: 5 }]);
-  assert.equal(built.current.get(parsed), parsed, 'a step in today\'s spelling is kept as it is');
+  const kept = built(keptSteps);
+  assert.deepEqual(keptSteps.map((s) => kept.current.get(s)), [parsed, { stage: 'unnest', expr: col('arr'), name: 'w' }, { stage: 'limit', limit: 5 }]);
+  assert.equal(kept.current.get(parsed), parsed, 'a step in today\'s spelling is kept as it is');
   // the view is the render's own spelling, not a guess beside it: each step as its build renders it
   const view = Object.assign(Object.create(Engine.prototype), { catalog });
   const physSet = new Set([...COLS, 'event_data']);
-  const draftSteps = [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, parsed, { stage: 'unnest', source: 'arr', name: 'v' }];
+  const draftSteps = [{ stage: 'limit', n: 5 }, { stage: 'unnest', source: 'words_collected', name: 'w' }, parsed, { stage: 'unnest', source: 'arr', name: 'v' }, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'x' }] }];
   assert.deepEqual(view._draftSteps({ source: 'events', stages: draftSteps }, physSet), [
     { index: 1, stage: 'limit', limit: 5 },
-    { index: 2, stage: 'unnest', property: 'words_collected', name: 'w' },
+    { index: 2, stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' },
     { index: 3, ...parsed },
-    { index: 4, stage: 'unnest', column: 'arr', name: 'v' },
+    { index: 4, stage: 'unnest', expr: col('arr'), name: 'v' },
+    { index: 5, stage: 'where', conditions: [{ fn: 'eq', args: [col('event_name'), val('x')] }] },
   ]);
   // a kept funnel's step condition on a name that is both an event property and a column of the rows
   // is the column, as its build resolves it — so the step copied into edit_step reads that column
@@ -115,67 +162,48 @@ test('a step stored by an earlier version is built in this version\'s spelling �
   const [shown] = view._draftSteps({ source: 'events', stages: [onLevel] }, levelCols);
   const { index: _i, ...shownStep } = shown;
   assert.deepEqual(shownStep, renderPipeline(catalog, catalog.dialect, 'events', [onLevel], { physicalCols: levelCols }).current.get(onLevel));
-  assert.deepEqual(shownStep.steps[1].where, [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }]);
+  assert.deepEqual(shownStep.steps[1].where, [{ fn: 'eq', args: [col('level_id_of_event_data'), val(1)] }]);
   // a step that no longer builds is shown as stored, the steps before it as built
   const broken = view._draftSteps({ source: 'events', stages: [{ stage: 'limit', n: 5 }, { stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }] }, physSet);
   assert.deepEqual(broken.map(({ index: _n, ...s }) => s), [{ stage: 'limit', limit: 5 }, { stage: 'where', conditions: [{ column: 'no_such_column', op: 'eq', value: 1 }] }]);
-  // a kept one that named a scalar property — which the schema no longer offers — is refused by its build, saying what the property is
+  // a kept one that named a scalar property — which no array function takes — is refused by its build, saying what the property is
   assert.throws(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'unnest', source: 'price_in_usd_of_event_data', name: 'w' }], { physicalCols: new Set([...COLS, 'price_in_usd_of_event_data']) }), /'price_in_usd_of_event_data' is declared as numeric, not an array/);
-  // a derive stage is the compute stage reading the same event property — a column of its own, or a key of the payload
-  const withPayload = (stages) => [...renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: new Set([...COLS, 'event_data', 'price_in_usd_of_event_data']) }).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
-  for (const [earlier, today] of [
-    [{ stage: 'derive', name: 'p', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' }, { stage: 'compute', name: 'p', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }],
-    [{ stage: 'derive', name: 'n', op: 'array_length', source: 'words_collected' }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', property: 'words_collected' } }],
-    [{ stage: 'derive', name: 'c', op: 'contains', source: 'words_collected', value: 'cat' }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }],
-  ]) assert.deepEqual(withPayload([earlier]), withPayload([today]), earlier.op);
   // a funnel kept with a step condition on `property`, a `filter` and `metrics` builds the columns it built
-  const kept = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where: [{ property: 'session_number', op: 'gte', value: 1 }] }], filter: { event_name: ['first_launch', 'tutorial'] }, metrics: [{ name: 'gap', type: 'avg_seconds_between', from: 'a', to: 'b' }, { name: 'n', type: 'agg_at_step', step: 'b', property: 'session_number' }] };
-  const out = withPayload([kept]);
+  const keptFunnel = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where: [{ property: 'session_number', op: 'gte', value: 1 }] }], filter: { event_name: ['first_launch', 'tutorial'] }, metrics: [{ name: 'gap', type: 'avg_seconds_between', from: 'a', to: 'b' }, { name: 'n', type: 'agg_at_step', step: 'b', property: 'session_number' }] };
+  const out = columns([keptFunnel]);
   for (const c of ['reached_b:boolean', 'at_b:time', 'secs_gap:numeric', 'pv_n:numeric']) assert.ok(out.includes(c), `${c} in ${out.join(', ')}`);
-  // a kept funnel whose step reads an event property as its left side — the form a `property`
-  // condition became — still has its `mode` and its other kept conditions carried over: a strict one
-  // is the adjacent-events funnel, refused here as that choice…
-  const price = { left: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' }, op: 'gte', value: 1 };
-  const funnel = (extra, where) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where }], ...extra });
-  assert.throws(() => withPayload([funnel({ mode: 'strict' }, [price])]), /between_steps 'none'/);
-  assert.throws(() => withPayload([funnel({ mode: 'strict' }, [{ or: [price, { column: 'session_number', op: 'gt', value: 1 }] }])]), /between_steps 'none'/);
-  // …and an ordered one builds what its current spelling builds, its left: { column } and its
-  // top-level `property` (inside an { or } too) in this version's forms
-  for (const [earlier, today] of [
-    [funnel({ mode: 'ordered' }, [price, { left: { column: 'session_number' }, op: 'gt', value: 1 }]), funnel({}, [price, { column: 'session_number', op: 'gt', value: 1 }])],
-    [funnel({ mode: 'ordered', between_steps: 'gap' }, [{ or: [price, { property: 'session_number', op: 'gte', value: 1 }, { left: { column: 'session_number' }, op: 'gt', value: 1, right: { column: 'session_number' } }] }]), funnel({ between_steps: 'gap' }, [{ or: [price, { column: 'session_number', op: 'gte', value: 1 }, { column: 'session_number', op: 'gt', right: { column: 'session_number' } }] }])],
-    [funnel({ mode: 'ordered' }, [price, { column: 'session_number', op: 'gt', right: { value: 1 } }]), funnel({}, [price, { column: 'session_number', op: 'gt', value: 1 }])],
-  ]) assert.deepEqual(withPayload([earlier]), withPayload([today]), JSON.stringify(earlier));
 });
 
 test('a value picked from several is typed as its arguments are, and compared in that type', () => {
   // the earlier of two times is a time: a date constant compares with it
   assert.ok(render([
-    { stage: 'compute', name: 'first_seen', expr: { fn: 'least', args: [{ column: 'device_time' }, { now: true }] } },
-    { stage: 'where', conditions: [{ column: 'first_seen', op: 'gte', value: '2026-01-01' }] },
+    { stage: 'compute', name: 'first_seen', expr: { fn: 'least', args: [col('device_time'), { now: true }] } },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [col('first_seen'), val('2026-01-01')] }] },
   ]).columns.get('first_seen').type !== 'numeric');
   // a date and a time are both moments: never typed a number
   assert.ok(render([
-    { stage: 'compute', name: 'first', expr: { fn: 'least', args: [{ column: 'event_date' }, { column: 'device_time' }] } },
-    { stage: 'where', conditions: [{ column: 'first', op: 'gte', value: '2026-01-01' }] },
+    { stage: 'compute', name: 'first', expr: { fn: 'least', args: [col('event_date'), col('device_time')] } },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [col('first'), val('2026-01-01')] }] },
   ]).columns.get('first').type !== 'numeric');
   // a number falling back to a number is a number: a word does not compare with it
   assert.throws(() => render([
-    { stage: 'compute', name: 'n', expr: { fn: 'coalesce', args: [{ column: 'session_number' }, { value: 0 }] } },
-    { stage: 'where', conditions: [{ column: 'n', op: 'eq', value: 'many' }] },
-  ]), /'n' is a numeric column/);
+    { stage: 'compute', name: 'n', expr: { fn: 'coalesce', args: [col('session_number'), val(0)] } },
+    { stage: 'where', conditions: [{ fn: 'eq', args: [col('n'), val('many')] }] },
+  ]), /'n' is a number: compare it with a number/);
+  // a CASE is typed as its branches are, not as text
+  assert.equal(render([{ stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: col('session_number') }], else: val(0) } }]).columns.get('k').type, 'numeric');
 });
 
-test('a whole-table window in a CASE\'s condition gets the global-window nudge; a raw OVER () in a where is refused like a structured window', async () => {
+test('a whole-table window in a CASE gets the global-window nudge; a raw OVER () in a where is refused like a structured window', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
-  const caseWindow = { stage: 'compute', name: 'above', expr: { fn: 'case', cases: [{ when: [{ left: { fn: 'average', args: [{ column: 'session_number' }], over: {} }, op: 'gt', value: 1 }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } };
+  const caseWindow = { stage: 'compute', name: 'above', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: { fn: 'average', args: [col('session_number')], over: {} } }], else: val(0), type: 'numeric' } };
   assert.match(e.advisor.globalWindowWarnings(caseWindow).join(' '), /Global analytic window: the window function 'average' has no partition_by/);
-  // in a where a window is not a cost but an error, partitioned or not
+  // in a condition a window is not a cost but an error, partitioned or not
   for (const sql of ['count(*) over ()', 'count(*) OVER (PARTITION BY player_id_of_internal)']) {
-    assert.throws(() => render([{ stage: 'where', conditions: [{ left: { fn: 'raw', sql }, op: 'gt', value: 1 }] }]), /raw expression with OVER \(…\) is a window function, and a where cannot compare one/);
+    assert.throws(() => render([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'raw', sql }, val(1)] }] }]), /raw expression with OVER \(…\) is a window function, and a condition cannot test one/);
   }
   // the word in a string is no window
-  assert.ok(render([{ stage: 'where', conditions: [{ left: { fn: 'raw', sql: "'game over (again)'" }, op: 'eq', value: 'x' }] }]));
+  assert.ok(render([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'raw', sql: "'game over (again)'" }, val('x')] }] }]));
 });
 
 test('a window bound with its own offset is that instant, with or without a timezone; fractions stay as written; no impossible moment is rolled over', () => {
@@ -193,45 +221,52 @@ test('a window bound with its own offset is that instant, with or without a time
   }
 });
 
-test('the earliest or latest of a column is of that column\'s type — a time stays a time, and compares with a date', () => {
+test('a measure is typed by its aggregate: the earliest or latest of a column is of that column\'s type, a count an integer', () => {
   const out = render([
-    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'first_at', agg: 'min', column: 'device_time' }, { name: 'most', agg: 'max', column: 'session_number' }, { name: 'n', agg: 'count' }] },
-    { stage: 'where', conditions: [{ column: 'first_at', op: 'gte', value: '2026-01-01' }] },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'first_at', expr: { fn: 'min', args: [col('device_time')] } }, { name: 'most', expr: { fn: 'max', args: [col('session_number')] } }, { name: 'n', expr: { fn: 'count' } }, { name: 'per', expr: { fn: 'div', args: [{ fn: 'sum', args: [col('session_number')] }, { fn: 'count_distinct', args: [col('event_name')] }] } }] },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [col('first_at'), val('2026-01-01')] }] },
   ]);
-  assert.deepEqual(['first_at', 'most', 'n'].map((c) => out.columns.get(c).type), [render([]).columns.get('device_time').type, 'numeric', 'numeric']);
+  assert.deepEqual(['first_at', 'most', 'n', 'per'].map((c) => out.columns.get(c).type), [render([]).columns.get('device_time').type, 'numeric', 'int', 'numeric']);
 });
 
-test('a condition is a column or an expression against a constant or an expression — never `value` and `right` together, never left: { column } or right: { value }', async () => {
+test('a condition is a function: an earlier spelling is refused with the value written today; a field a function does not read is refused', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'cond', source: 'events' });
   const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [c] }] });
-  // both right sides: no form takes the two, so the schema refuses rather than one being ignored
-  await assert.rejects(() => add({ column: 'session_number', op: 'gt', value: 1, right: { column: 'session_number' } }), /unexpected property/);
-  await assert.rejects(() => add({ left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', value: 1, right: { value: 2 } }), /unexpected property/);
-  // a column is `column`: left: { column } is told so
-  await assert.rejects(() => add({ left: { column: 'session_number' }, op: 'gt', value: 1 }), /write \{ column \} instead of left: \{ column \}/);
-  // a constant compared with is `value`: right: { value } is told so — on either left side
-  await assert.rejects(() => add({ column: 'session_number', op: 'gt', right: { value: 1 } }), /write value: 1 instead of right: \{ value \}/);
-  await assert.rejects(() => add({ left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', right: { value: 3 } }), /write value: 3 instead of right: \{ value \}/);
-  // each of the four forms is taken
+  const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
+  for (const [earlier, today] of [
+    [{ column: 'session_number', op: 'gt', value: 1 }, { fn: 'gt', args: [col('session_number'), val(1)] }],
+    [{ column: 'session_number', op: 'is_null' }, { fn: 'is_null', args: [col('session_number')] }],
+    [{ left: { fn: 'length', args: [col('event_name')] }, op: 'gt', right: col('session_number') }, { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, col('session_number')] }],
+    [{ or: [{ column: 'session_number', op: 'gt', value: 1 }, { column: 'event_name', op: 'eq', value: 'x' }] }, { fn: 'or', args: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'eq', args: [col('event_name'), val('x')] }] }],
+    [{ fn: 'in', args: [col('event_name'), { value: ['a', 'b'] }] }, { fn: 'in', args: [col('event_name'), val('a'), val('b')] }],
+  ]) await assert.rejects(() => add(earlier), shown(today), JSON.stringify(earlier));
+  // a field the function does not read, an argument too few: refused, not ignored
+  await assert.rejects(() => add({ fn: 'gt', args: [col('session_number'), val(1)], value: 2 }), /unexpected property 'value'/);
+  await assert.rejects(() => add({ fn: 'gt', args: [col('session_number')] }), /must have at least 2 items/);
+  // each shape is taken: a column against a constant or an expression, an expression on the left, a test of a missing value, logic
   for (const c of [
-    { column: 'session_number', op: 'gt', value: 1 },
-    { column: 'session_number', op: 'is_null' },
-    { column: 'session_number', op: 'gte', right: { column: 'session_number' } },
-    { left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', value: 3 },
-    { left: { fn: 'length', args: [{ column: 'event_name' }] }, op: 'gt', right: { column: 'session_number' } },
+    { fn: 'gt', args: [col('session_number'), val(1)] },
+    { fn: 'is_null', args: [col('session_number')] },
+    { fn: 'gte', args: [col('session_number'), col('session_number')] },
+    { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, val(3)] },
+    { fn: 'not', args: [{ fn: 'and', args: [{ fn: 'in', args: [col('event_name'), val('a'), val('b')] }, { fn: 'between', args: [col('session_number'), val(1), val(3)] }] }] },
   ]) assert.ok(await add(c), JSON.stringify(c));
 });
 
-test('a pivot names a column per value, never twice or as a group key; unpivot keeps or folds a column, not both', () => {
-  const pivot = (extra) => render([{ stage: 'pivot', on: 'event_name', measure: { agg: 'count' }, ...extra }]);
+test('a pivot names a column per value, never twice or as a group key; its measure is an aggregate expression; unpivot keeps or folds a column, not both', () => {
+  const pivot = (extra) => render([{ stage: 'pivot', on: 'event_name', measure: { fn: 'count' }, ...extra }]);
   assert.throws(() => pivot({ values: [{ value: 'tutorial', name: 'n' }, { value: 'first_launch', name: 'n' }] }), /pivot: 'n' names two values/);
   assert.throws(() => pivot({ group_by: ['session_number'], values: [{ value: 'tutorial', name: 'session_number' }] }), /pivot: 'session_number' names a group_by column/);
   assert.throws(() => pivot({ values: [{ value: 'tutorial', name: 'a' }, { value: 'tutorial', name: 'b' }] }), /the value "tutorial" is listed twice/);
-  assert.throws(() => render([{ stage: 'pivot', on: 'event_name', measure: { agg: 'sum', column: 'nope' }, values: [{ value: 'tutorial', name: 't' }] }]), /unknown column 'nope'/);
+  assert.throws(() => render([{ stage: 'pivot', on: 'event_name', measure: { fn: 'sum', args: [col('nope')] }, values: [{ value: 'tutorial', name: 't' }] }]), /unknown column 'nope'/);
+  // a cell is the measure over the rows of its value: a column outside an aggregate is none
+  assert.throws(() => render([{ stage: 'pivot', on: 'event_name', measure: col('session_number'), values: [{ value: 'tutorial', name: 't' }] }]), /'session_number' stands outside an aggregate/);
+  // …and a formula over aggregates is one
+  assert.equal(render([{ stage: 'pivot', on: 'event_name', measure: { fn: 'div', args: [{ fn: 'sum', args: [col('session_number')] }, { fn: 'count' }] }, values: [{ value: 'tutorial', name: 't' }] }]).columns.get('t').type, 'numeric');
   // a number compared with a numeric column, a word refused there — the value is typed as `on` is
-  assert.ok(render([{ stage: 'pivot', on: 'session_number', measure: { agg: 'count' }, values: [{ value: 1, name: 's1' }, { value: null, name: 'none' }] }]));
-  assert.throws(() => render([{ stage: 'pivot', on: 'session_number', measure: { agg: 'count' }, values: [{ value: 'many', name: 's' }] }]), /'session_number' is a numeric column/);
+  assert.ok(render([{ stage: 'pivot', on: 'session_number', measure: { fn: 'count' }, values: [{ value: 1, name: 's1' }, { value: null, name: 'none' }] }]));
+  assert.throws(() => render([{ stage: 'pivot', on: 'session_number', measure: { fn: 'count' }, values: [{ value: 'many', name: 's' }] }]), /'session_number' is a number: compare it with a number/);
   const unpivot = (extra) => render([{ stage: 'unpivot', columns: ['session_number'], name_column: 'metric', value_column: 'amount', ...extra }]);
   assert.deepEqual([...unpivot({ keep: ['event_name'] }).columns.keys()], ['event_name', 'metric', 'amount']);
   assert.throws(() => unpivot({ keep: ['session_number'] }), /'session_number' is both kept and folded/);
@@ -248,7 +283,7 @@ test('a window partitions by a column or a declared relationship\'s one key colu
 
 test('a running window over a nullable key on BigQuery: NULLs where BigQuery puts them build, elsewhere the refusal names that way out', () => {
   const running = (key) => renderPipeline(catalog, 'bigquery', 'events', [
-    { stage: 'compute', name: 'roll', expr: { fn: 'sum', args: [{ column: 'session_number' }], over: { partition_by: ['player_id_of_internal'], order_by: [key], frame: { mode: 'range', preceding: 'unbounded', following: 1 } } } },
+    { stage: 'compute', name: 'roll', expr: { fn: 'sum', args: [col('session_number')], over: { partition_by: ['player_id_of_internal'], order_by: [key], frame: { mode: 'range', preceding: 'unbounded', following: 1 } } } },
   ], { physicalCols: COLS });
   assert.throws(() => running({ key: 'session_number' }), /say nulls: 'first' on that key \(desc: 'last'\)/);
   assert.throws(() => running({ key: 'session_number', direction: 'desc', nulls: 'first' }), /say nulls: 'first' on that key \(desc: 'last'\)/);

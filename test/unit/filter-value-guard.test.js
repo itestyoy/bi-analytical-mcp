@@ -14,7 +14,7 @@ function engine() {
   const catalog = loadCatalog(CATALOG, {});
   return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'fvg-')) }) }));
 }
-const whereStep = (e, draftId, column, op, value) => e.build_pipeline_model({ action: 'add_steps', context_id: draftId, stages: [{ stage: 'where', conditions: [{ column, op, value }] }] });
+const whereStep = (e, draftId, column, op, value) => e.build_pipeline_model({ action: 'add_steps', context_id: draftId, stages: [{ stage: 'where', conditions: [{ fn: op, args: [{ column }, { value }] }] }] });
 
 // A wrong-CASED filter value on a categorical event property is REJECTED with the real value,
 // not silently filtered to nothing (the 'organic' vs 'Organic' problem).
@@ -31,6 +31,20 @@ test('a wrong-cased filter value is rejected with the correct casing suggested',
   );
   // the exact, real value is accepted.
   const ok = await whereStep(e, s.context_id, 'result_of_event_data', 'eq', 'win');
+  assert.equal(ok.action, 'add_steps');
+});
+
+// A comparison is checked wherever it stands in a condition — a member of an in, under or / not —
+// and whether it names the column or the event property stored in it.
+test('a wrong-cased value is rejected at any depth of and / or / not, on a column or an event property', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'deep', source: 'events' });
+  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [c] }] });
+  const miscased = (err) => /different casing/.test(err.message) && /'win'/.test(err.message);
+  await assert.rejects(() => add({ fn: 'not', args: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'in', args: [{ column: 'result_of_event_data' }, { value: 'lose' }, { value: 'Win' }] }] }] }), miscased);
+  await assert.rejects(() => add({ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'Win' }] }), miscased);
+  const ok = await add({ fn: 'and', args: [{ fn: 'in', args: [{ column: 'result_of_event_data' }, { value: 'lose' }, { value: 'win' }] }, { fn: 'neq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] });
   assert.equal(ok.action, 'add_steps');
 });
 
@@ -119,11 +133,17 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   e.valueIndex.upsertProperty('users', 'country', { distinctCount: 2, totalCount: 20, values: [{ value: 'DE', freq: 12 }, { value: 'US', freq: 8 }] });
   const out = await e.build_semantic_model({
     name: 'vguard',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
+  const country = { model: 'users', attribute: 'country' };
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'de' }] }),
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ fn: 'eq', args: [country, { value: 'de' }] }] }),
+    /different casing.*'DE'/s,
+  );
+  // …and inside or / not, a member of an in
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ fn: 'or', args: [{ fn: 'eq', args: [country, { value: 'US' }] }, { fn: 'not', args: [{ fn: 'in', args: [country, { value: 'de' }, { value: 'US' }] }] }] }] }),
     /different casing.*'DE'/s,
   );
 });

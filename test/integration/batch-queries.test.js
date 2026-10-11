@@ -28,7 +28,7 @@ let monCtx;
 const monContext = async () => monCtx ?? (monCtx = (await engine.build_semantic_model(TASK)).context_id);
 const TASK = {
   name: 'mon',
-  semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+  semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
   metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
 };
 const byCountry = [{ model: 'users', attribute: 'country' }];
@@ -68,7 +68,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
       { metrics: ['mon_revenue'] },
       { metrics: ['mon_revenue'], group_by: byCountry },
       { metrics: ['mon_revenue'], group_by: byCountry, materialize: true },
-      { metrics: ['mon_revenue'], where: [{ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US' }] },
+      { metrics: ['mon_revenue'], where: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
@@ -91,28 +91,34 @@ test('a batch started right after the declaration waits for its parse, runs ever
   assert.deepEqual(card.rows.map((r) => num(r.mon_revenue)).sort((a, b) => a - b), [0, 25, 25, 35]);
 });
 
-test('a batch of projections over a built pipeline model: count, non-NULL count and sums read back together', opts, async (t) => {
+test('a batch of reads over a built pipeline model, each in the pipeline\'s own stages: count, non-NULL count, sums, and a where on a measure, read back together', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'priced', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
   const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
+  const priced = { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'price' }] }] };
+  const amountByEvent = { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'amount', expr: { fn: 'sum', args: [{ column: 'price' }] } }] };
   const started = await engine.raw.query_pipeline_model({
     context_id: s.context_id,
     queries: [
-      { transform: { measures: [{ agg: 'count', name: 'rows' }] } },
-      { transform: { measures: [{ agg: 'count', column: 'price', name: 'priced' }] } },
-      { transform: { where: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }], measures: [{ agg: 'sum', column: 'price', name: 'revenue' }] } },
-      { transform: { where: [{ column: 'price', op: 'is_not_null' }], group_by: ['event_name'], measures: [{ agg: 'sum', column: 'price', name: 'amount' }], order_by: [{ key: 'event_name' }] } },
+      { stages: [{ stage: 'aggregate', measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
+      { stages: [{ stage: 'aggregate', measures: [{ name: 'priced', expr: { fn: 'count', args: [{ column: 'price' }] } }] }] },
+      { stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] }] },
+      { stages: [priced, amountByEvent, { stage: 'order_by', keys: [{ key: 'event_name' }] }] },
+      // where → aggregate → a where on the measure it made → order_by: the groups whose amount passes 50
+      { stages: [priced, amountByEvent, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'amount' }, { value: 50 }] }] }, { stage: 'order_by', keys: [{ key: 'amount', direction: 'desc' }] }] },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');
-  const [rows, priced, revenue, byEvent] = await readAll('query_pipeline_model', started.task_ids);
-  for (const r of [rows, priced, revenue, byEvent]) assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const [rows, nonNull, revenue, byEvent, over50] = await readAll('query_pipeline_model', started.task_ids);
+  for (const r of [rows, nonNull, revenue, byEvent, over50]) assert.equal(r.status, 'done', JSON.stringify(r.error));
   assert.equal(num(rows.rows[0].rows), 184);
-  assert.equal(num(priced.rows[0].priced), 11);
+  assert.equal(num(nonNull.rows[0].priced), 11);
   assert.equal(num(revenue.rows[0].revenue), 85);
   assert.deepEqual(byEvent.rows.map((r) => [r.event_name, num(r.amount)]), [['iap_purchase_completed', 85], ['iap_purchase_failed', 35]]);
+  // the completed purchases' 85 passes 50, the failed ones' 35 does not
+  assert.deepEqual(over50.rows.map((r) => [r.event_name, num(r.amount)]), [['iap_purchase_completed', 85]]);
 });
 
 // A CANCEL, THEN A BATCH AND A QUERY AFTER IT, on the same context: the cancelled tasks end as

@@ -21,19 +21,33 @@
             "measures": [
               {
                 "name": "active_users",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "new_session"
-                  }
-                ]
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "new_session"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "event_volume",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           }
@@ -108,7 +122,7 @@
       ],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "semantic_payload": {
         "name": "rev_segment",
@@ -118,20 +132,38 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "price_in_usd_of_event_data"
+                    }
+                  ]
+                }
               },
               {
                 "name": "payers",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -152,9 +184,18 @@
           },
           {
             "name": "arppu",
-            "type": "ratio",
-            "numerator": "revenue",
-            "denominator": "payers"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "revenue"
+                },
+                {
+                  "metric": "payers"
+                }
+              ]
+            }
           }
         ]
       },
@@ -232,7 +273,7 @@
       "required_user_attrs": [],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "semantic_payload": {
         "name": "tut_funnel",
@@ -242,54 +283,108 @@
             "measures": [
               {
                 "name": "s1",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "tutorial"
-                  },
-                  {
-                    "field": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_1"
-                  }
-                ]
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "tutorial"
+                        }
+                      ]
+                    },
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "property": "element_of_event_data"
+                        },
+                        {
+                          "value": "step_1"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "s2",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "tutorial"
-                  },
-                  {
-                    "field": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_2"
-                  }
-                ]
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "tutorial"
+                        }
+                      ]
+                    },
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "property": "element_of_event_data"
+                        },
+                        {
+                          "value": "step_2"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "s3",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "tutorial"
-                  },
-                  {
-                    "field": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_3"
-                  }
-                ]
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "tutorial"
+                        }
+                      ]
+                    },
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "property": "element_of_event_data"
+                        },
+                        {
+                          "value": "step_3"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -312,15 +407,33 @@
           },
           {
             "name": "conv_1_2",
-            "type": "ratio",
-            "numerator": "s2",
-            "denominator": "s1"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "step2"
+                },
+                {
+                  "metric": "step1"
+                }
+              ]
+            }
           },
           {
             "name": "conv_2_3",
-            "type": "ratio",
-            "numerator": "s3",
-            "denominator": "s2"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "step3"
+                },
+                {
+                  "metric": "step2"
+                }
+              ]
+            }
           }
         ]
       },
@@ -343,8 +456,8 @@
           ]
         }
       ],
-      "notes": "Every step measure must count the SAME entity, or the ratios are not shares of one population. A step that can be reached twice still counts its user once — that is what count_distinct is for.",
-      "hack": "A step = event_name + an event_data value, counted as count_distinct(entity); a ratio metric between consecutive steps is the share that reached the next step. Two steps or six is the same payload. This counts WHO reached each step, not the order they did it in or how soon — for the order and a time limit, use a match_recognize pipeline (pipeline_ordered_sequence, conversion_metric_window)."
+      "notes": "Every step measure must count the SAME entity, or the ratios are not shares of one population. A step that can be reached twice still counts its user once — that is what count_distinct is for. A derived metric divides METRICS, so each step is a simple metric first and the conversion { fn: \"div\", args: [{ metric: \"step2\" }, { metric: \"step1\" }] } reads those.",
+      "hack": "A step = event_name + an event_data value, counted as { fn: \"count_distinct\", args: [<entity>], where: [<the step's conditions>] }; a derived metric dividing consecutive steps is the share that reached the next step. Two steps or six is the same payload. This counts WHO reached each step, not the order they did it in or how soon — for the order and a time limit, use a match_recognize pipeline (pipeline_ordered_sequence, conversion_metric_window)."
     },
     {
       "id": "conversion_metric_window",
@@ -384,9 +497,15 @@
                 ],
                 "where": [
                   {
-                    "column": "session_number",
-                    "op": "gte",
-                    "value": 2
+                    "fn": "gte",
+                    "args": [
+                      {
+                        "column": "session_number"
+                      },
+                      {
+                        "value": 2
+                      }
+                    ]
                   }
                 ]
               }
@@ -413,29 +532,47 @@
             "measures": [
               {
                 "name": "cohort",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "back_2d",
-                "agg": "count",
-                "where": [
-                  {
-                    "column": "secs_to_back",
-                    "op": "lte",
-                    "value": 172800
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "lte",
+                      "args": [
+                        {
+                          "column": "secs_to_back"
+                        },
+                        {
+                          "value": 172800
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "back_7d",
-                "agg": "count",
-                "where": [
-                  {
-                    "column": "secs_to_back",
-                    "op": "lte",
-                    "value": 604800
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "lte",
+                      "args": [
+                        {
+                          "column": "secs_to_back"
+                        },
+                        {
+                          "value": 604800
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -499,20 +636,38 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "price_in_usd_of_event_data"
+                    }
+                  ]
+                }
               },
               {
                 "name": "buyers",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -586,25 +741,41 @@
             "measures": [
               {
                 "name": "purchases",
-                "agg": "count",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "iap_purchase_completed"
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "sessions",
-                "agg": "count",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "new_session"
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "new_session"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -641,12 +812,12 @@
         }
       ],
       "notes": "A count with a where counts ROWS, not entities: for \"how many users did X\" use count_distinct of the user key with the same where, or build the flag per entity in a pipeline first. The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
-      "hack": "agg: \"count\" with a where counts the rows where the conditions hold, so a flag becomes a measure you can ratio, segment and put on a time axis. Any \"did X\" population is such a measure plus a ratio against the total."
+      "hack": "A measure whose expr is { fn: \"count\", where: [<conditions>] } counts the rows where the conditions hold, so a flag becomes a measure you can divide (a derived metric with div), segment and put on a time axis. Any \"did X\" population is such a measure plus a div against the total."
     },
     {
       "id": "agg_chosen_per_question",
       "task_type": "metric_types",
-      "title": "One field, a different aggregation per question",
+      "title": "One amount, a different aggregate function per question",
       "when_to_use": "When the same amount is a total in one question, an average in the next and a p90 in the third: session length, level time, order value, latency, attempts per step.",
       "required_events": [
         "level_started",
@@ -660,7 +831,7 @@
       "required_user_attrs": [],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "semantic_payload": {
         "name": "progression",
@@ -669,43 +840,71 @@
             "from": "events",
             "dimensions": [
               {
-                "field": "level_id_of_event_data"
+                "property": "level_id_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "starts",
-                "agg": "count",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "level_started"
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "level_started"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "completes",
-                "agg": "count",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "level_completed"
-                  }
-                ]
+                "expr": {
+                  "fn": "count",
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "level_completed"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "avg_time",
-                "agg": "average",
-                "field": "daily_level_score_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "level_completed"
-                  }
-                ]
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "property": "daily_level_score_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "level_completed"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -723,9 +922,18 @@
           },
           {
             "name": "completion_rate",
-            "type": "ratio",
-            "numerator": "completes",
-            "denominator": "starts"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "completes"
+                },
+                {
+                  "metric": "starts"
+                }
+              ]
+            }
           },
           {
             "name": "avg_time",
@@ -760,12 +968,12 @@
         }
       ],
       "notes": "An average of an average is wrong: an average measure is computed over the fact rows, so slicing it is safe but combining two of its values is not. A percentile needs the whole distribution — it cannot be derived from other measures.",
-      "hack": "The schema MARKS a field aggregatable and fixes no function: each measure picks its own — sum | average | min | max | count | count_distinct | median | percentile (with `percentile`). Declare several measures over ONE field and the model answers \"total\", \"typical\" and \"tail\" at once; group by an ordinal property for a per-step profile."
+      "hack": "The schema MARKS an amount aggregatable and fixes no function: each measure's expr picks its own — sum | average | min | max | count | count_distinct | median | percentile (with its `percentile` parameter). Declare several measures over ONE amount and the model answers \"total\", \"typical\" and \"tail\" at once; group by an ordinal property for a per-step profile."
     },
     {
       "id": "ratio_metric",
       "task_type": "metric_types",
-      "title": "A ratio metric: one measure divided by another",
+      "title": "A ratio: one metric divided by another (a derived metric)",
       "when_to_use": "Any per-entity or per-row average: ARPU / ARPPU, average order value, revenue per session, events per user, cost per click, a rate per population.",
       "required_events": [
         "iap_purchase_completed"
@@ -779,7 +987,7 @@
       ],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "semantic_payload": {
         "name": "monetization",
@@ -788,30 +996,50 @@
             "from": "events",
             "dimensions": [
               {
-                "field": "product_id_of_event_data"
+                "property": "product_id_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "price_in_usd_of_event_data"
+                    }
+                  ]
+                }
               },
               {
                 "name": "payers",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               },
               {
                 "name": "purchases",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -831,16 +1059,39 @@
             "measure": "payers"
           },
           {
+            "name": "purchases",
+            "type": "simple",
+            "measure": "purchases"
+          },
+          {
             "name": "arppu",
-            "type": "ratio",
-            "numerator": "revenue",
-            "denominator": "payers"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "revenue"
+                },
+                {
+                  "metric": "payers"
+                }
+              ]
+            }
           },
           {
             "name": "aov",
-            "type": "ratio",
-            "numerator": "revenue",
-            "denominator": "purchases"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "revenue"
+                },
+                {
+                  "metric": "purchases"
+                }
+              ]
+            }
           }
         ]
       },
@@ -885,7 +1136,7 @@
         }
       ],
       "notes": "A ratio is not additive — summing it across slices is meaningless; re-query it at the grain you want. Check the denominator before reading an extreme value: a slice with a tiny population produces a volatile rate, and an empty one has no rate at all.",
-      "hack": "type: \"ratio\" with numerator/denominator METRICS recomputes both sides under every grouping, so the ratio stays correct in every slice: sum ÷ count_distinct = per actor, sum ÷ count = per row. Never divide two numbers you fetched separately."
+      "hack": "A derived metric whose expr is { fn: \"div\", args: [{ metric: <numerator> }, { metric: <denominator> }] } recomputes both METRICS under every grouping, so the ratio stays correct in every slice: sum ÷ count_distinct = per actor, sum ÷ count = per row. Each side is a simple metric first. Never divide two numbers you fetched separately."
     },
     {
       "id": "payload_property_measure_and_dimension",
@@ -904,7 +1155,7 @@
       "required_user_attrs": [],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "semantic_payload": {
         "name": "ads",
@@ -913,31 +1164,45 @@
             "from": "events",
             "dimensions": [
               {
-                "field": "network_of_additional_info_of_event_data"
+                "property": "network_of_additional_info_of_event_data"
               },
               {
-                "field": "placement_of_event_data"
+                "property": "placement_of_event_data"
               },
               {
-                "field": "ad_type_of_event_data"
+                "property": "ad_type_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "ad_revenue",
-                "agg": "sum",
-                "field": "revenue_of_event_data"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "revenue_of_event_data"
+                    }
+                  ]
+                }
               },
               {
                 "name": "impressions",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "ad_finished"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "ad_finished"
+                  }
+                ]
               }
             ]
           }
@@ -955,9 +1220,18 @@
           },
           {
             "name": "rev_per_imp",
-            "type": "ratio",
-            "numerator": "ad_revenue",
-            "denominator": "impressions"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "ad_revenue"
+                },
+                {
+                  "metric": "impressions"
+                }
+              ]
+            }
           }
         ]
       },
@@ -1024,33 +1298,57 @@
             "from": "events",
             "dimensions": [
               {
-                "field": "source_type_of_event_data"
+                "property": "source_type_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "coins_in",
-                "agg": "sum",
-                "field": "amount_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "currency_income"
-                  }
-                ]
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "amount_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "currency_income"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "coins_out",
-                "agg": "sum",
-                "field": "amount_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "currency_outcome"
-                  }
-                ]
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "amount_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "currency_outcome"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -1069,11 +1367,17 @@
           {
             "name": "net_coins",
             "type": "derived",
-            "expr": "coins_in - coins_out",
-            "metrics": [
-              "coins_in",
-              "coins_out"
-            ]
+            "expr": {
+              "fn": "sub",
+              "args": [
+                {
+                  "metric": "coins_in"
+                },
+                {
+                  "metric": "coins_out"
+                }
+              ]
+            }
           }
         ]
       },
@@ -1131,15 +1435,27 @@
             "measures": [
               {
                 "name": "active_users",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "new_session"
-                  }
-                ]
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "new_session"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -1223,18 +1539,26 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "device_time",
-                "op": "gte",
-                "right": {
-                  "column": "assigned_at"
-                }
+                "fn": "gte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "assigned_at"
+                  }
+                ]
               },
               {
-                "column": "device_time",
-                "op": "lte",
-                "right": {
-                  "column": "ended_at"
-                }
+                "fn": "lte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "ended_at"
+                  }
+                ]
               }
             ]
           },
@@ -1247,9 +1571,15 @@
                 {
                   "when": [
                     {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -1273,8 +1603,14 @@
             "measures": [
               {
                 "name": "converted",
-                "agg": "max",
-                "column": "is_conv"
+                "expr": {
+                  "fn": "max",
+                  "args": [
+                    {
+                      "column": "is_conv"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1287,12 +1623,20 @@
             "measures": [
               {
                 "name": "n",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "conversions",
-                "agg": "sum",
-                "column": "converted"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "converted"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1342,15 +1686,27 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "iap_purchase_completed"
-                  }
-                ]
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "price_in_usd_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -1422,27 +1778,51 @@
             "measures": [
               {
                 "name": "iap_revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "iap_purchase_completed"
-                  }
-                ]
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "price_in_usd_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
+                    }
+                  ]
+                }
               },
               {
                 "name": "ad_revenue_cents",
-                "agg": "sum",
-                "field": "revenue_of_event_data",
-                "where": [
-                  {
-                    "field": "event_name",
-                    "op": "eq",
-                    "value": "ad_finished"
-                  }
-                ]
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "property": "revenue_of_event_data"
+                    }
+                  ],
+                  "where": [
+                    {
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "ad_finished"
+                        }
+                      ]
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -1461,11 +1841,25 @@
           {
             "name": "total_revenue",
             "type": "derived",
-            "expr": "iap_revenue + ad_revenue_cents / 100",
-            "metrics": [
-              "iap_revenue",
-              "ad_revenue_cents"
-            ]
+            "expr": {
+              "fn": "add",
+              "args": [
+                {
+                  "metric": "iap_revenue"
+                },
+                {
+                  "fn": "div",
+                  "args": [
+                    {
+                      "metric": "ad_revenue_cents"
+                    },
+                    {
+                      "value": 100
+                    }
+                  ]
+                }
+              ]
+            }
           }
         ]
       },
@@ -1537,18 +1931,26 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "device_time",
-                "op": "gte",
-                "right": {
-                  "column": "assigned_at"
-                }
+                "fn": "gte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "assigned_at"
+                  }
+                ]
               },
               {
-                "column": "device_time",
-                "op": "lte",
-                "right": {
-                  "column": "ended_at"
-                }
+                "fn": "lte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "ended_at"
+                  }
+                ]
               }
             ]
           },
@@ -1556,7 +1958,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -1570,9 +1971,15 @@
                 {
                   "when": [
                     {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -1596,8 +2003,14 @@
             "measures": [
               {
                 "name": "user_rev",
-                "agg": "sum",
-                "column": "price0"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price0"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1610,17 +2023,31 @@
             "measures": [
               {
                 "name": "n",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "rev_mean",
-                "agg": "average",
-                "column": "user_rev"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "user_rev"
+                    }
+                  ]
+                }
               },
               {
                 "name": "rev_sd",
-                "agg": "stddev",
-                "column": "user_rev"
+                "expr": {
+                  "fn": "stddev",
+                  "args": [
+                    {
+                      "column": "user_rev"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1694,7 +2121,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -1708,9 +2134,15 @@
                 {
                   "when": [
                     {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "iap_purchase_completed"
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "iap_purchase_completed"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -1733,18 +2165,26 @@
                 {
                   "when": [
                     {
-                      "column": "device_time",
-                      "op": "gte",
-                      "right": {
-                        "column": "assigned_at"
-                      }
+                      "fn": "gte",
+                      "args": [
+                        {
+                          "column": "device_time"
+                        },
+                        {
+                          "column": "assigned_at"
+                        }
+                      ]
                     },
                     {
-                      "column": "device_time",
-                      "op": "lte",
-                      "right": {
-                        "column": "ended_at"
-                      }
+                      "fn": "lte",
+                      "args": [
+                        {
+                          "column": "device_time"
+                        },
+                        {
+                          "column": "ended_at"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -1767,11 +2207,15 @@
                 {
                   "when": [
                     {
-                      "column": "device_time",
-                      "op": "lt",
-                      "right": {
-                        "column": "assigned_at"
-                      }
+                      "fn": "lt",
+                      "args": [
+                        {
+                          "column": "device_time"
+                        },
+                        {
+                          "column": "assigned_at"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -1795,13 +2239,25 @@
             "measures": [
               {
                 "name": "uy",
-                "agg": "sum",
-                "column": "y_val"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "y_val"
+                    }
+                  ]
+                }
               },
               {
                 "name": "ux",
-                "agg": "sum",
-                "column": "x_val"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "x_val"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1859,32 +2315,64 @@
             "measures": [
               {
                 "name": "n",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "sum_y",
-                "agg": "sum",
-                "column": "uy"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "uy"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_y2",
-                "agg": "sum",
-                "column": "uy2"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "uy2"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_x",
-                "agg": "sum",
-                "column": "ux"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "ux"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_x2",
-                "agg": "sum",
-                "column": "ux2"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "ux2"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_xy",
-                "agg": "sum",
-                "column": "uxy"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "uxy"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -1932,7 +2420,7 @@
         "experiments"
       ],
       "metric_types": [
-        "ratio"
+        "derived"
       ],
       "experiment": {
         "action": "analyze",
@@ -1981,18 +2469,26 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "device_time",
-                "op": "gte",
-                "right": {
-                  "column": "assigned_at"
-                }
+                "fn": "gte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "assigned_at"
+                  }
+                ]
               },
               {
-                "column": "device_time",
-                "op": "lte",
-                "right": {
-                  "column": "ended_at"
-                }
+                "fn": "lte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "ended_at"
+                  }
+                ]
               }
             ]
           },
@@ -2005,9 +2501,15 @@
                 {
                   "when": [
                     {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_completed"
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "level_completed"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -2030,9 +2532,15 @@
                 {
                   "when": [
                     {
-                      "column": "event_name",
-                      "op": "eq",
-                      "value": "level_started"
+                      "fn": "eq",
+                      "args": [
+                        {
+                          "column": "event_name"
+                        },
+                        {
+                          "value": "level_started"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -2056,13 +2564,25 @@
             "measures": [
               {
                 "name": "num",
-                "agg": "sum",
-                "column": "is_completed"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "is_completed"
+                    }
+                  ]
+                }
               },
               {
                 "name": "den",
-                "agg": "sum",
-                "column": "is_started"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "is_started"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2120,32 +2640,64 @@
             "measures": [
               {
                 "name": "n",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "sum_num",
-                "agg": "sum",
-                "column": "num"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "num"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_den",
-                "agg": "sum",
-                "column": "den"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "den"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_num2",
-                "agg": "sum",
-                "column": "num2"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "num2"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_den2",
-                "agg": "sum",
-                "column": "den2"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "den2"
+                    }
+                  ]
+                }
               },
               {
                 "name": "sum_numden",
-                "agg": "sum",
-                "column": "numden"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "numden"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2214,18 +2766,26 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "device_time",
-                "op": "gte",
-                "right": {
-                  "column": "assigned_at"
-                }
+                "fn": "gte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "assigned_at"
+                  }
+                ]
               },
               {
-                "column": "device_time",
-                "op": "lte",
-                "right": {
-                  "column": "ended_at"
-                }
+                "fn": "lte",
+                "args": [
+                  {
+                    "column": "device_time"
+                  },
+                  {
+                    "column": "ended_at"
+                  }
+                ]
               }
             ]
           },
@@ -2239,7 +2799,9 @@
             "measures": [
               {
                 "name": "events_seen",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           },
@@ -2252,7 +2814,9 @@
             "measures": [
               {
                 "name": "n",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           },
@@ -2338,9 +2902,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -2348,7 +2918,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -2361,8 +2930,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2371,23 +2946,43 @@
             "measures": [
               {
                 "name": "players",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue_p99",
-                "agg": "percentile",
-                "percentile": 0.99,
-                "column": "revenue"
+                "expr": {
+                  "fn": "percentile",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ],
+                  "percentile": 0.99
+                }
               },
               {
                 "name": "revenue_avg",
-                "agg": "average",
-                "column": "revenue"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ]
+                }
               },
               {
                 "name": "revenue_sd",
-                "agg": "stddev",
-                "column": "revenue"
+                "expr": {
+                  "fn": "stddev",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -2420,9 +3015,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -2430,7 +3031,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -2443,8 +3043,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2518,9 +3124,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "new_session"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "new_session"
+                  }
+                ]
               }
             ]
           },
@@ -2558,8 +3170,14 @@
             "measures": [
               {
                 "name": "returners",
-                "agg": "count_distinct",
-                "column": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2639,8 +3257,12 @@
                 {
                   "when": [
                     {
-                      "column": "gap_s",
-                      "op": "is_null"
+                      "fn": "is_null",
+                      "args": [
+                        {
+                          "column": "gap_s"
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -2650,9 +3272,15 @@
                 {
                   "when": [
                     {
-                      "column": "gap_s",
-                      "op": "gt",
-                      "value": 1800
+                      "fn": "gt",
+                      "args": [
+                        {
+                          "column": "gap_s"
+                        },
+                        {
+                          "value": 1800
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -2698,17 +3326,31 @@
             "measures": [
               {
                 "name": "events_in_session",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "session_start",
-                "agg": "min",
-                "column": "device_time"
+                "expr": {
+                  "fn": "min",
+                  "args": [
+                    {
+                      "column": "device_time"
+                    }
+                  ]
+                }
               },
               {
                 "name": "session_end",
-                "agg": "max",
-                "column": "device_time"
+                "expr": {
+                  "fn": "max",
+                  "args": [
+                    {
+                      "column": "device_time"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2768,9 +3410,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -2778,7 +3426,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -2804,8 +3451,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2895,12 +3548,20 @@
             "measures": [
               {
                 "name": "rows",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "users",
-                "agg": "count_distinct",
-                "column": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -2931,7 +3592,7 @@
         "mean",
         "proportion"
       ],
-      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (average) + stddev, then experiment({ request: { action: 'analyze', metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then experiment({ request: { action: 'analyze', metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a compute column (a case, an event_property), two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final experiment step on example per-group aggregates.",
+      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (average) + stddev, then experiment({ request: { action: 'analyze', metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then experiment({ request: { action: 'analyze', metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a compute column (a case, an event property read as { property }), two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final experiment step on example per-group aggregates.",
       "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE experiment({ request: { action: \"analyze\" } }) call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
       "tool_calls": [
         {
@@ -2995,7 +3656,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3008,12 +3668,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3084,7 +3752,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3111,8 +3778,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3177,9 +3850,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "level_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "level_completed"
+                  }
+                ]
               }
             ]
           },
@@ -3187,7 +3866,6 @@
             "stage": "compute",
             "name": "level_id",
             "expr": {
-              "fn": "event_property",
               "property": "level_id_of_event_data",
               "type": "int"
             }
@@ -3247,7 +3925,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3260,12 +3937,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3324,9 +4009,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "new_session"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "new_session"
+                  }
+                ]
               }
             ]
           },
@@ -3351,8 +4042,14 @@
             "measures": [
               {
                 "name": "dau",
-                "agg": "count_distinct",
-                "column": "player_id_of_internal"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "player_id_of_internal"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3418,7 +4115,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3431,12 +4127,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3499,9 +4203,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "level_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "level_completed"
+                  }
+                ]
               }
             ]
           },
@@ -3509,7 +4219,6 @@
             "stage": "compute",
             "name": "level_id",
             "expr": {
-              "fn": "event_property",
               "property": "level_id_of_event_data",
               "type": "int"
             }
@@ -3522,7 +4231,9 @@
             "measures": [
               {
                 "name": "attempts",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           },
@@ -3564,7 +4275,7 @@
           }
         ]
       },
-      "notes": "Ask for ONE q at a time. Several quantiles at once belong in a SQL stage (aggregate with agg: percentile), which returns them as columns instead of an indexed series. Keeping the threshold as a column makes the cut visible in the result instead of hidden in a filter.",
+      "notes": "Ask for ONE q at a time. Several quantiles at once belong in a SQL stage (an aggregate whose measures are { fn: \"percentile\", args: [<column>], percentile: 0.9 }), which returns them as columns instead of an indexed series. Keeping the threshold as a column makes the cut visible in the result instead of hidden in a filter.",
       "hack": "A cut-off computed FROM the data (median, p90, IQR) written back as a column, then compared row by row."
     },
     {
@@ -3586,7 +4297,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3599,12 +4309,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3665,7 +4383,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3678,12 +4395,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3745,12 +4470,20 @@
             "measures": [
               {
                 "name": "players",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "avg_revenue",
-                "agg": "average",
-                "column": "revenue"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -3778,7 +4511,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3791,12 +4523,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -3865,12 +4605,20 @@
             "measures": [
               {
                 "name": "players",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "avg_revenue",
-                "agg": "average",
-                "column": "revenue"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -3898,9 +4646,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -3908,7 +4662,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -3934,8 +4687,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4007,7 +4766,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4020,12 +4778,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4038,9 +4804,15 @@
                 {
                   "when": [
                     {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+                      "fn": "gt",
+                      "args": [
+                        {
+                          "column": "revenue"
+                        },
+                        {
+                          "value": 0
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -4106,12 +4878,20 @@
             "measures": [
               {
                 "name": "players",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "avg_revenue",
-                "agg": "average",
-                "column": "revenue"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "revenue"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -4139,7 +4919,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4152,12 +4931,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4170,9 +4957,15 @@
                 {
                   "when": [
                     {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+                      "fn": "gt",
+                      "args": [
+                        {
+                          "column": "revenue"
+                        },
+                        {
+                          "value": 0
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -4264,7 +5057,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4277,17 +5069,31 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               },
               {
                 "name": "max_price",
-                "agg": "max",
-                "column": "price"
+                "expr": {
+                  "fn": "max",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4338,17 +5144,31 @@
             "measures": [
               {
                 "name": "rows",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "pc1_sd",
-                "agg": "stddev",
-                "column": "principal_component_1"
+                "expr": {
+                  "fn": "stddev",
+                  "args": [
+                    {
+                      "column": "principal_component_1"
+                    }
+                  ]
+                }
               },
               {
                 "name": "pc2_sd",
-                "agg": "stddev",
-                "column": "principal_component_2"
+                "expr": {
+                  "fn": "stddev",
+                  "args": [
+                    {
+                      "column": "principal_component_2"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -4376,7 +5196,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4400,12 +5219,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4418,9 +5245,15 @@
                 {
                   "when": [
                     {
-                      "column": "revenue",
-                      "op": "gt",
-                      "value": 0
+                      "fn": "gt",
+                      "args": [
+                        {
+                          "column": "revenue"
+                        },
+                        {
+                          "value": 0
+                        }
+                      ]
                     }
                   ],
                   "then": {
@@ -4514,7 +5347,9 @@
             "measures": [
               {
                 "name": "players",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           }
@@ -4542,7 +5377,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4569,8 +5403,14 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4629,7 +5469,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4642,12 +5481,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4715,7 +5562,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -4728,12 +5574,20 @@
             "measures": [
               {
                 "name": "events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -4787,7 +5641,7 @@
       ],
       "metric_types": [
         "simple",
-        "ratio"
+        "derived"
       ],
       "id": "measures_source_agg_choice",
       "task_type": "metric_types",
@@ -4804,29 +5658,59 @@
             "measures": [
               {
                 "name": "cost",
-                "agg": "sum",
-                "field": "cost"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "cost"
+                    }
+                  ]
+                }
               },
               {
                 "name": "clicks",
-                "agg": "sum",
-                "field": "clicks"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "clicks"
+                    }
+                  ]
+                }
               },
               {
                 "name": "max_daily_cost",
-                "agg": "max",
-                "field": "cost"
+                "expr": {
+                  "fn": "max",
+                  "args": [
+                    {
+                      "column": "cost"
+                    }
+                  ]
+                }
               },
               {
                 "name": "avg_daily_cost",
-                "agg": "average",
-                "field": "cost"
+                "expr": {
+                  "fn": "average",
+                  "args": [
+                    {
+                      "column": "cost"
+                    }
+                  ]
+                }
               },
               {
                 "name": "p90_daily_cost",
-                "agg": "percentile",
-                "field": "cost",
-                "percentile": 0.9
+                "expr": {
+                  "fn": "percentile",
+                  "args": [
+                    {
+                      "column": "cost"
+                    }
+                  ],
+                  "percentile": 0.9
+                }
               }
             ]
           },
@@ -4862,9 +5746,18 @@
           },
           {
             "name": "cost_per_click",
-            "type": "ratio",
-            "numerator": "cost",
-            "denominator": "clicks"
+            "type": "derived",
+            "expr": {
+              "fn": "div",
+              "args": [
+                {
+                  "metric": "cost"
+                },
+                {
+                  "metric": "clicks"
+                }
+              ]
+            }
           }
         ]
       },
@@ -4917,7 +5810,7 @@
         }
       ],
       "notes": "The measures above read the SAME column at sum, max, average and p90 — nothing in the schema decided that. Such a source has its own time axis, so metric_time means its dates, not an events fact's; joining it to per-event data is many-to-many by design (carry its attributes onto events, never sum its money over them).",
-      "hack": "The schema marks a column aggregatable and fixes NO function: every measure names the field and picks its own agg, so one model answers \"total\", \"peak\", \"typical\" and \"tail\" at once. Extrapolate: any amount, any of sum | average | min | max | median | percentile | count | count_distinct, chosen per question."
+      "hack": "The schema marks a column aggregatable and fixes NO function: every measure's expr names the column and picks its own function, so one model answers \"total\", \"peak\", \"typical\" and \"tail\" at once. Extrapolate: any amount, any of sum | average | min | max | median | percentile | count | count_distinct, chosen per question."
     },
     {
       "required_events": [],
@@ -4942,7 +5835,7 @@
             "from": "acquisition",
             "dimensions": [
               {
-                "field": "media_source"
+                "column": "media_source"
               }
             ]
           },
@@ -4998,8 +5891,8 @@
           ]
         }
       ],
-      "notes": "The task declares no `measures` block at all: it names the governed measure and adds only the attributes it wants to slice by. The free choice over the raw field stays available in a separate model (measures_source_agg_choice) — the governed twin exists so two tasks cannot disagree about \"the total\".",
-      "hack": "A schema entry that carries `agg` publishes a measure whose function is fixed for everyone; a task consumes it by NAME. Use it when comparability matters, and the per-question agg when the function is part of the question. The semantic_index model view lists which measures are governed."
+      "notes": "The task declares no `measures` block at all: it names the governed measure and adds only the attributes it wants to slice by. The free choice over the raw column stays available in a separate model (measures_source_agg_choice) — the governed twin exists so two tasks cannot disagree about \"the total\".",
+      "hack": "A catalog entry that carries `agg` (meta.mcp.measures) publishes a measure whose function is fixed for everyone; a task consumes it by NAME. Use it when comparability matters, and a measure of your own ({ name, expr }) when the function is part of the question. The semantic_index model view lists which measures are governed, each with the catalog's own `agg` (dbt's aggregation, fixed there — a call never writes it)."
     },
     {
       "required_events": [],
@@ -5023,14 +5916,22 @@
             "measures": [
               {
                 "name": "launches",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "first_launch"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "first_launch"
+                  }
+                ]
               }
             ]
           },
@@ -5039,14 +5940,22 @@
             "measures": [
               {
                 "name": "fatal",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ],
             "where": [
               {
-                "field": "event_name",
-                "op": "eq",
-                "value": "fatal_crash"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "fatal_crash"
+                  }
+                ]
               }
             ]
           }
@@ -5134,12 +6043,20 @@
             "measures": [
               {
                 "name": "matched_events",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "reports",
-                "agg": "count_distinct",
-                "column": "crash_id"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "crash_id"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -5197,12 +6114,20 @@
             "measures": [
               {
                 "name": "spend",
-                "agg": "sum",
-                "column": "cost"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "cost"
+                    }
+                  ]
+                }
               },
               {
                 "name": "rows",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           },
@@ -5258,9 +6183,15 @@
                 ],
                 "where": [
                   {
-                    "column": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_1"
+                    "fn": "eq",
+                    "args": [
+                      {
+                        "column": "element_of_event_data"
+                      },
+                      {
+                        "value": "step_1"
+                      }
+                    ]
                   }
                 ]
               },
@@ -5271,9 +6202,15 @@
                 ],
                 "where": [
                   {
-                    "column": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_2"
+                    "fn": "eq",
+                    "args": [
+                      {
+                        "column": "element_of_event_data"
+                      },
+                      {
+                        "value": "step_2"
+                      }
+                    ]
                   }
                 ]
               },
@@ -5284,9 +6221,15 @@
                 ],
                 "where": [
                   {
-                    "column": "element_of_event_data",
-                    "op": "eq",
-                    "value": "step_3"
+                    "fn": "eq",
+                    "args": [
+                      {
+                        "column": "element_of_event_data"
+                      },
+                      {
+                        "value": "step_3"
+                      }
+                    ]
                   }
                 ]
               }
@@ -5316,7 +6259,9 @@
         "stages": [
           {
             "stage": "unnest",
-            "property": "breadcrumbs_of_event_data",
+            "expr": {
+              "property": "breadcrumbs_of_event_data"
+            },
             "name": "crumb",
             "type": "string"
           },
@@ -5328,12 +6273,20 @@
             "measures": [
               {
                 "name": "occurrences",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               },
               {
                 "name": "reports",
-                "agg": "count_distinct",
-                "column": "crash_id"
+                "expr": {
+                  "fn": "count_distinct",
+                  "args": [
+                    {
+                      "column": "crash_id"
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -5375,9 +6328,15 @@
             "stage": "where",
             "conditions": [
               {
-                "column": "event_name",
-                "op": "eq",
-                "value": "iap_purchase_completed"
+                "fn": "eq",
+                "args": [
+                  {
+                    "column": "event_name"
+                  },
+                  {
+                    "value": "iap_purchase_completed"
+                  }
+                ]
               }
             ]
           },
@@ -5385,7 +6344,6 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "fn": "event_property",
               "property": "price_in_usd_of_event_data",
               "type": "numeric"
             }
@@ -5413,12 +6371,20 @@
             "measures": [
               {
                 "name": "revenue",
-                "agg": "sum",
-                "column": "price"
+                "expr": {
+                  "fn": "sum",
+                  "args": [
+                    {
+                      "column": "price"
+                    }
+                  ]
+                }
               },
               {
                 "name": "purchases",
-                "agg": "count"
+                "expr": {
+                  "fn": "count"
+                }
               }
             ]
           },

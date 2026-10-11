@@ -174,8 +174,8 @@ models:
     stage: 'match_recognize',
     partition_by: [{ entity: 'user' }],
     steps: [
-      { name: 's1', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_1' }] },
-      { name: 's2', event_name: ['tutorial'], where: [{ left: { fn: 'event_property', property: 'step_id' }, op: 'eq', value: 'step_2' }] },
+      { name: 's1', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ property: 'step_id' }, { value: 'step_1' }] }] },
+      { name: 's2', event_name: ['tutorial'], where: [{ fn: 'eq', args: [{ property: 'step_id' }, { value: 'step_2' }] }] },
     ],
   };
   const out = await e._buildPipeline({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
@@ -230,7 +230,7 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'users', dimensions: [{ field: 'country' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
@@ -238,10 +238,15 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
 
   await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'platform' }] } }),
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', column: 'platform' }] } }),
     /cannot remove dimension 'platform'.*It has: country/s,
   );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } });
+  // a dimension is named the way it was declared: the earlier { from, field } is refused with that way
+  await assert.rejects(
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } }),
+    (err) => err.message.includes('is written in an earlier spelling — write {"from":"users","column":"country"}'),
+  );
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', column: 'country' }] } });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it
@@ -258,7 +263,7 @@ test('groupable and the example only name models this context loaded', async () 
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const loaded = new Set(out.joined_models);
@@ -462,7 +467,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   // relationship to it (two facts do not point at each other).
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count' }] }, { from: 'crashlytics' }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'crashlytics' }, { from: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
@@ -516,13 +521,13 @@ test('unnest is refused when the payload column it explodes is gone', async () =
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] });
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', property: 'words_collected', name: 'word' }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, stages: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

@@ -209,12 +209,12 @@
 
 | что нужно | стадия |
 |---|---|
-| массив, по элементам | `unnest { property, name }` — одна строка на элемент (массив-колонка этапа — `unnest { column, name }`) |
-| массив, по отчёту | `compute { name, expr: { fn: array_length, property } }` / `{ fn: array_contains, property, item }` — зерно не меняется |
-| массив структур, одно поле | `unnest { property, name, field }` |
-| массив структур, несколько полей | `unnest { property, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
+| массив, по элементам | `unnest { expr: { property }, name }` — одна строка на элемент (массив-колонка этапа — `unnest { expr: { column }, name }`) |
+| массив, по отчёту | `compute { name, expr: { fn: array_length, args: [{ property }] } }` / `{ fn: array_contains, args: [{ property }, { value }] }` — зерно не меняется |
+| массив структур, одно поле | `unnest { expr: { property }, name, field }` |
+| массив структур, несколько полей | `unnest { expr: { property }, name }`, затем `compute { name, expr: { fn: json_field, args: [{ column }], field } }` на каждое поле |
 | массив, по позиции | `compute` с `{ fn: json_parse_array, args: [{ column }] }` → `element_at` / `array_last` |
-| JSON-объект | `compute` с `{ fn: event_property, property, field }` или `{ fn: json_field, args: [{ column }], field }` |
+| JSON-объект | `compute` с листом `{ property, field }` или `{ fn: json_field, args: [{ column }], field }` |
 
 `unnest` **выбрасывает** отчёты, у которых массив NULL (у ANR нет стека исключения);
 `array_length` их сохраняет и читает NULL. Оба чтения верны — выбирается то зерно, о котором
@@ -563,7 +563,7 @@ MetricFlow умеет соединять только по уникальном�
     "between": { "column": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
     "kind": "inner", "attrs": [{ "column": "country" }] },
   { "stage": "aggregate", "group_by": ["country"],
-    "measures": [{ "name": "total", "agg": "sum", "column": "cost" }] }
+    "measures": [{ "name": "total", "expr": { "fn": "sum", "args": [{ "column": "cost" }] } }] }
 ] }
 ```
 
@@ -580,12 +580,12 @@ MetricFlow умеет соединять только по уникальном�
 именем (`name`) — иначе две колонки делили бы одно имя, и шаг отказал бы (таблица выше).
 
 Медиана стоимости клика — функция выбрана на месте, в схеме её нет. `cost_per_click` — выражение
-модели (`meta.mcp.measures`), и читает его мера семантической модели — по `field`:
+модели (`meta.mcp.measures`), и читает его мера семантической модели — листом `{ column }`:
 
 ```json
 { "name": "ua_cpc",
   "semantic_models": [{ "from": "acquisition",
-    "measures": [{ "name": "cpc_p50", "agg": "median", "field": "cost_per_click" }] }],
+    "measures": [{ "name": "cpc_p50", "expr": { "fn": "median", "args": [{ "column": "cost_per_click" }] } }] }],
   "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": "cpc_p50" }] }
 ```
 
@@ -598,7 +598,7 @@ MetricFlow умеет соединять только по уникальном�
   { "stage": "compute", "name": "cost_per_click",
     "expr": { "fn": "div", "args": [{ "column": "cost" }, { "column": "clicks" }] } },
   { "stage": "aggregate", "group_by": ["media_source"],
-    "measures": [{ "name": "cpc_p50", "agg": "median", "column": "cost_per_click" }] }
+    "measures": [{ "name": "cpc_p50", "expr": { "fn": "median", "args": [{ "column": "cost_per_click" }] } }] }
 ] }
 ```
 

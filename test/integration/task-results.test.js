@@ -13,7 +13,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
-import { settle, isStartedTask, one } from '../helpers/settle.js';
+import { settle, isStartedTask, one, readTable } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -29,7 +29,7 @@ before(async () => {
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
     name: 'mon',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }], where: [{ field: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] }, { from: 'users' }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -41,7 +41,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], ...input });
 const byCountry = [{ model: 'users', attribute: 'country' }];
-const paying = [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }];
+const paying = [{ fn: 'in', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }, { value: 'GB' }, { value: 'BR' }] }];
 
 // ONE UNGROUPED TASK carries what a single-row result is asked: started at once and read back; the
 // declarations a single row cannot take refused (refused is not drawn); then drawn, once, as a KPI.
@@ -110,7 +110,7 @@ test('one revenue-by-country task: its grouping, a refused KPI over many rows, t
 test('a query that FAILS in the warehouse is a task that ended in error', opts, async (t) => {
   if (skip(t)) return;
   // a filter on a value the warehouse cannot compare fails in the warehouse
-  const done = await q({ where: [{ field: { time: 'metric_time' }, op: 'eq', value: 'not-a-date' }] }).catch((e) => ({ refused: e }));
+  const done = await q({ where: [{ fn: 'eq', args: [{ time: 'metric_time' }, { value: 'not-a-date' }] }] }).catch((e) => ({ refused: e }));
   if (done.refused) return; // refused before running is fine too
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');
@@ -172,7 +172,7 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
 // task's stored table, filtered to that row — the same read the card makes, run here against the warehouse.
 test('a pivot shows the top level from the warehouse, and a row opens into its children, which add up to it', opts, async (t) => {
   if (skip(t)) return;
-  const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', agg: 'sum', label: 'Revenue' }] };
+  const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', fn: 'sum', label: 'Revenue' }] };
   const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
   // a drill-down reads a stored result: a result held in memory is refused
   const inMemory = await q({ group_by: groupBy });
@@ -206,7 +206,7 @@ test('a pivot value folds its level with a median: each country is the median of
   const median = (xs) => { const v = xs.filter((x) => x !== null && x !== undefined).map(Number).sort((a, b) => a - b); const h = Math.floor(v.length / 2); return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
   const truth = {};
   for (const r of rows) (truth[String(r.users_country)] ||= []).push(r.mon_revenue);
-  const display = { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue', agg: 'median', format: 'currency', currency: 'EUR' }] };
+  const display = { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue', fn: 'median', format: 'currency', currency: 'EUR' }] };
   const top = await engine.display_model_result({ task_id: stored.task_id, display });
   assert.equal(top.drawn, true, JSON.stringify(top.error || top.warnings));
   const m = buildViewModel('display_model_result', top);
@@ -237,6 +237,13 @@ test('a drillable bar is drawn folded over its drill level, and a bar drills int
   const view = drillView(display, path, { level: { column: 'users_platform' }, mode: 'breakdown' });
   const got = await engine.drill_result({ ...m.chart.drill.source, path, level: 'users_platform', mode: 'breakdown', limit: DRILL_ROWS });
   assert.equal(got.ok, true, JSON.stringify(got.error));
+  // the view is a read in the pipeline's own stages (where the path holds → aggregate by the level →
+  // order_by): run as such over the stored table, it gives the rows the server's drill gave
+  const byStages = await readTable(engine, ctxId, stored.table, { stages: view.stages });
+  assert.equal(byStages.ok, true, JSON.stringify(byStages.error));
+  const rowsOf = (r) => r.rows.map((x) => [String(x.users_platform), Number(x.mon_revenue)]).sort();
+  assert.deepEqual(rowsOf(byStages), rowsOf(got), '[a drill view is stages] the same rows');
+  assert.equal(rowsOf(byStages).reduce((a, [, v]) => a + v, 0), 35, '[a drill view is stages] US by platform adds up to US');
   const next = buildViewModel('display_model_result', { ...got, display: view.display, drill_source: m.chart.drill.source, drill_path: path });
   assert.equal(next.chart.x, 'users_platform');
   assert.equal(next.chart.bars.reduce((a, b) => a + b.value, 0), 35, 'US by platform adds up to US');

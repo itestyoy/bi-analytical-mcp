@@ -2,9 +2,10 @@
 // for before drawing it: every column it names is one of the result's, and the rows have the shape
 // the kind needs (one row for KPI tiles without x, a sankey that flows one way, a pie of positive
 // shares, a funnel whose parents come before their steps). Pure functions of the declaration and the
-// result; the view model (src/apps/result-view-model.js) says what one drill-down read is.
+// result; the view model (src/apps/result-view-model.js) says what one drill-down read is. A display a
+// drawn task keeps is read in this version's spelling first (currentDisplay, src/earlier-spelling.js).
 
-import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS } from './apps/result-view-model.js';
+import { pivotStages, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS } from './apps/result-view-model.js';
 
 /** The column names of a result with rows, or null when it has none (running, failed). */
 export function resultColumns(out) {
@@ -63,6 +64,8 @@ export function displayProblems(display, columns, rows = null) {
   }
   if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
   if (display.kind === 'pivot' && new Set((display.levels || []).map((l) => l.column)).size !== (display.levels || []).length) problems.push('a level is listed twice');
+  // a level is what a view groups by and a value what it folds under the value's own name: one column cannot be both
+  if (display.kind === 'pivot') for (const v of display.values || []) if ((display.levels || []).some((l) => l.column === v.column)) problems.push(`'${v.column}' is both a level and a value — a value is folded per level, so it is another column`);
   // a drill level is a dimension the chart does not already draw
   const drawn = new Set([display.x, display.label_column, display.series_column].filter(Boolean));
   if (new Set(drillLevels).size !== drillLevels.length) problems.push('a drill level is listed twice');
@@ -82,11 +85,24 @@ export function displayProblems(display, columns, rows = null) {
   return problems;
 }
 
-/** The first read of a drill-down display (a pivot's top level, a drillable chart as declared), or null. */
+/** The first read of a drill-down display (a pivot's top level, a drillable chart as declared) — its
+ *  stages over the stored result and how many rows it reads — or null. */
 export function drillFirstRead(display) {
-  if (display?.kind === 'pivot') return { transform: pivotTransform(display, []), limit: PIVOT_LEVEL_ROWS };
-  if (display?.drill) return { transform: drillView(display).transform, limit: DRILL_ROWS };
+  if (display?.kind === 'pivot') return { stages: pivotStages(display, []), limit: PIVOT_LEVEL_ROWS };
+  if (display?.drill) return { stages: drillView(display).stages, limit: DRILL_ROWS };
   return null;
+}
+
+/**
+ * The result columns a display names — what a read of one of its views touches in the stored table:
+ * the levels and values of a pivot, the axis, the values, the split and the drill levels of a chart.
+ */
+export function displayColumns(display) {
+  if (!display) return [];
+  const named = display.kind === 'pivot'
+    ? [...(display.levels || []).map((l) => l.column), ...(display.values || []).map((v) => v.column)]
+    : [display.x, display.label_column, display.value_column, display.series_column, ...[].concat(display.y ?? []), ...(display.drill?.levels || []).map((l) => l.column)];
+  return [...new Set(named.filter((c) => typeof c === 'string' && c))];
 }
 
 /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */

@@ -32,7 +32,7 @@ import { TaskRunner } from './task-runner.js';
 import { PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
 import { ContextManager } from './context-manager.js';
-import { renderPredicate } from './predicate.js';
+import { whereSql } from './predicate.js';
 import { PROJECT_STORE } from './project-semantics.js';
 import { dbtFailure } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
@@ -279,8 +279,12 @@ export class Engine {
     // — must reach back as far, or the window is cut at the start of the range
     const back = lookbackDays(metrics, ctx.state.metrics || []);
     const start = back === Infinity ? null : bounds.start && back ? shiftDay(bounds.start, -back) : bounds.start;
-    return partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
-      .map((cnd) => renderPredicate({ field: { kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }, op: cnd.op, value: cnd.value }));
+    // the bounds compare the partition column; in a metric query's where it is the dimension that carries it
+    const onDimension = partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
+      .map((c) => ({ ...c, args: c.args.map((a) => (a.column !== undefined ? { model: sources[0], attribute: PARTITION_DIM } : a)) }));
+    // a source pruned by its time axis alone has no partition condition, and a where is never an empty list
+    if (!onDimension.length) return [];
+    return whereSql(this.catalog.dialect, onDimension, () => ({ kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }), 'partition');
   }
 
   /**
@@ -313,10 +317,10 @@ export class Engine {
     if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
     if (job.status !== 'ready' || !job.table) {
       // a query over a pipeline model reads that model's table and stores nothing: the table it read
-      // is the one to start from, its transform said again as steps
+      // is the one to start from, the query's stages given again as its steps
       const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
       const why = job.status === 'error' ? 'it failed'
-        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") and say the query's where / group_by / measures again as steps (where, aggregate)` : ': start from the pipeline build\'s task, or continue that draft'}`
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") with the query's stages as its steps (stages)` : ': start from the pipeline build\'s task, or continue that draft'}`
           : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
       throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
     }
@@ -601,7 +605,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', stages } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }

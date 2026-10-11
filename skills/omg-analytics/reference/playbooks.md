@@ -8,8 +8,8 @@ ready payload + the reusable technique (`hack`). Report the tier (governed metri
 ---
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)
 Governed metric path. Define once, query by time grain.
-1. `build_semantic_model` — a measure `{ name, agg: "count_distinct", field: <player key> }`,
-   scoped to the relevant event by a `where`;
+1. `build_semantic_model` — a measure `{ name, expr: { fn: "count_distinct", args: [{ column: <player key> }] } }`,
+   scoped to the relevant event by the semantic model's `where` (or the measure expression's own `where`);
    or use the governed *Cumulative Sessions* / *Session Duration* definitions.
 2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
    series `order_by: [{ key: "metric_time_day" }]` (a key is a result column's name — the

@@ -25,14 +25,25 @@ test('a mode left unnamed is refused as the mode the fields belong to, with the 
   assert.match(del, /missing required property 'what'/);
 });
 
-test('a deep where tree is refused in time that grows with its size', () => {
+test('a deep and / or tree is checked, and refused, in time that grows with its size', () => {
   const e = engine();
-  const leaf = () => ({ field: { model: 'users', attribute: 'country' }, op: 'eq', value: 'US', bogus: 1 });
-  const tree = (d) => (d === 0 ? leaf() : { op: d % 2 ? 'and' : 'or', conditions: [tree(d - 1), tree(d - 1)] });
-  refusal(e, 'query_semantic_model', { context_id: 'abc123', metrics: ['x'], where: tree(1) }); // compiled once
-  const t0 = Date.now();
-  assert.ok(refusal(e, 'query_semantic_model', { context_id: 'abc123', metrics: ['x'], where: tree(9) }));
-  assert.ok(Date.now() - t0 < 5000, `512 leaves refused in ${Date.now() - t0} ms`);
+  // one tree of each level's grammar: a metric query's where over a dimension, a pipeline where over a column
+  const levels = [
+    ['query_semantic_model', { model: 'users', attribute: 'country' }, (where) => ({ context_id: 'abc123', metrics: ['x'], where })],
+    ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', stages: [{ stage: 'where', conditions }] })],
+  ];
+  for (const [tool, subject, call] of levels) {
+    const leaf = (bogus) => ({ fn: 'eq', args: [subject, { value: 'US' }], ...(bogus ? { bogus: 1 } : {}) });
+    const tree = (d, bogus) => (d === 0 ? leaf(bogus) : { fn: d % 2 ? 'and' : 'or', args: [tree(d - 1, bogus), tree(d - 1, bogus)] });
+    refusal(e, tool, call([tree(1, true)])); // compiled once
+    let t0 = Date.now();
+    assert.equal(refusal(e, tool, call([tree(9, false)])), null, tool);
+    assert.ok(Date.now() - t0 < 1000, `${tool}: 512 leaves taken in ${Date.now() - t0} ms`);
+    t0 = Date.now();
+    const refused = refusal(e, tool, call([tree(9, true)]));
+    assert.match(refused, /unexpected property 'bogus'/, tool);
+    assert.ok(Date.now() - t0 < 5000, `${tool}: 512 leaves refused in ${Date.now() - t0} ms`);
+  }
 });
 
 test('a join stage says how rows match in one field, via — a top-level on is refused', () => {
@@ -42,17 +53,26 @@ test('a join stage says how rows match in one field, via — a top-level on is r
   assert.match(both, /unexpected property 'on'/);
 });
 
-test('a read\'s condition is the column-and-constant form, and a refusal names it by its title', () => {
+test('a read\'s condition is the one grammar over the stored table\'s columns, and a refusal names the form it meant', () => {
   const e = engine();
-  const read = (where) => refusal(e, 'query_pipeline_model', { context_id: 'abc123', transform: { where } });
-  assert.equal(read([{ column: 'a', op: 'eq', value: 1 }]), null);
-  // a column compared with another column (an expression) is a pipeline step's, not a read's
-  const vsColumn = read([{ column: 'a', op: 'eq', right: { column: 'b' } }]);
-  assert.match(vsColumn, /a column and a constant/);
-  assert.match(vsColumn, /unexpected property 'right'/);
-  assert.doesNotMatch(vsColumn, /option 1/);
-  // the same leaf in having and in a measure's where
-  assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', transform: { group_by: ['a'], measures: [{ name: 'n', agg: 'count', where: [{ left: { column: 'a' }, op: 'eq', value: 1 }] }] } }), /a column and a constant/);
+  const read = (stages) => refusal(e, 'query_pipeline_model', { context_id: 'abc123', stages });
+  assert.equal(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] }]), null);
+  // a column against another column, an expression on either side: a read's too
+  assert.equal(read([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'length', args: [{ column: 'a' }] }, { column: 'b' }] }] }]), null);
+  // a stored table has no source: no event property is a leaf of a read, and the refusal names the leaves there are
+  const property = read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'a' }, { value: 1 }] }] }]);
+  assert.match(property, /a column — \{ column \}/);
+  assert.match(property, /unexpected property 'property'/);
+  assert.doesNotMatch(property, /option 1/);
+  // a field a condition does not read, in a measure's where, is refused under the condition's own title
+  assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }] } }] }]), /`stages\.0\.measures\.0\.expr\.where\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
+});
+
+test('a window aggregate takes no where, and a function that is no window takes no over — the refusal names the form', () => {
+  const e = engine();
+  const add = (stage) => refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', stages: [stage] });
+  assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
+  assert.match(add({ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'a' }, { value: 1 }], over: {} }] }), /must be exactly one of: fn: eq \| neq \| gt \| gte \| lt \| lte/);
 });
 
 test('a query is started without an offset: paging is the read\'s, by row numbers of the result', () => {

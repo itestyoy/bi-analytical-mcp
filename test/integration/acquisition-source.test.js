@@ -52,13 +52,13 @@ before(async () => {
     semantic_models: [{
       from: 'acquisition',
       measures: [
-        { name: 'cost', agg: 'sum', field: 'cost' },
-        { name: 'impressions', agg: 'sum', field: 'impressions' },
-        { name: 'clicks', agg: 'sum', field: 'clicks' },
-        { name: 'max_daily_cost', agg: 'max', field: 'cost' },
-        { name: 'avg_daily_cost', agg: 'average', field: 'cost' },
-        { name: 'p90_daily_cost', agg: 'percentile', field: 'cost', percentile: 0.9 },
-        { name: 'avg_cost_per_click', agg: 'average', field: 'cost_per_click' },
+        { name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } },
+        { name: 'impressions', expr: { fn: 'sum', args: [{ column: 'impressions' }] } },
+        { name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } },
+        { name: 'max_daily_cost', expr: { fn: 'max', args: [{ column: 'cost' }] } },
+        { name: 'avg_daily_cost', expr: { fn: 'average', args: [{ column: 'cost' }] } },
+        { name: 'p90_daily_cost', expr: { fn: 'percentile', args: [{ column: 'cost' }], percentile: 0.9 } },
+        { name: 'avg_cost_per_click', expr: { fn: 'average', args: [{ column: 'cost_per_click' }] } },
       ],
     },
     { from: 'users' }],
@@ -70,7 +70,8 @@ before(async () => {
       { name: 'avg_daily_cost', type: 'simple', measure: 'avg_daily_cost' },
       { name: 'p90_daily_cost', type: 'simple', measure: 'p90_daily_cost' },
       { name: 'avg_cost_per_click', type: 'simple', measure: 'avg_cost_per_click' },
-      { name: 'cpc', type: 'ratio', numerator: 'cost', denominator: 'clicks' },
+      // a ratio is a derived metric whose expression divides one metric by another
+      { name: 'cpc', type: 'derived', expr: { fn: 'div', args: [{ metric: 'cost' }, { metric: 'clicks' }] } },
     ],
   });
   assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);
@@ -110,8 +111,8 @@ test('every aggregation the task chose over the marked amounts, in one ungrouped
   const expected = perRow.reduce((a, b) => a + b, 0) / perRow.length;
   assert.ok(near(num(row.uacq_avg_cost_per_click), expected, 1e-6), `[aggregatable expression: mean per-row cost per click] avg cpc=${row.uacq_avg_cost_per_click} want ${expected}`);
 
-  // [a ratio metric over two task measures] 17.50 / 64.
-  assert.ok(near(num(row.uacq_cpc), 17.5 / 64, 1e-6), `[ratio of two task measures: CPC = 17.50/64] cpc=${row.uacq_cpc}`);
+  // [a derived metric dividing two task metrics] 17.50 / 64.
+  assert.ok(near(num(row.uacq_cpc), 17.5 / 64, 1e-6), `[div of two task metrics: CPC = 17.50/64] cpc=${row.uacq_cpc}`);
 });
 
 // SEED_DATA §11: cost by channel — meta 5.75, applovin 8.25, google 3.50, organic 0.
@@ -149,10 +150,10 @@ test('composite join key prevents fan-out: player+day = 12 rows, player alone = 
   if (skip(t)) return;
   const rowsAfterJoin = async (name, on) => {
     const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }] });
     await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } }] });
     await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'acquisition', via: { on }, attrs: [{ column: 'media_source' }] }] });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }] });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
     const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
@@ -171,14 +172,14 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   // declared time axis is (grouping spend by its own day needs no join).
   assert.deepEqual(dims.sort(), ['campaign', 'campaign_id', 'media_source', 'spend_date'], 'measures and the opted-out column are not attributes');
   assert.equal(model.time, 'spend_date', 'the declared axis is reported as the source\'s time');
-  // The amounts come back marked and self-describing — field, unit, meaning — and with NO
+  // The amounts come back marked and self-describing — column, unit, meaning — and with NO
   // aggregation attached, because choosing one is the caller's job, not the schema's.
-  const amounts = Object.fromEntries(model.aggregatable.map((x) => [x.field, x]));
+  const amounts = Object.fromEntries(model.aggregatable.map((x) => [x.column, x]));
   assert.deepEqual(Object.keys(amounts).sort(), ['clicks', 'cost', 'cost_per_click', 'impressions', 'total_spend']);
   assert.equal(amounts.cost.unit, 'usd');
   assert.equal(amounts.cost.label, 'UA cost');
   assert.equal(amounts.cost_per_click.expr, 'cost / nullif(clicks, 0)', 'an expression amount carries its expression');
-  for (const a of Object.values(amounts)) assert.equal(a.agg, undefined, 'no aggregation is fixed in the schema');
+  for (const a of Object.values(amounts)) assert.ok(!('fn' in a) && !('agg' in a), 'no aggregation is fixed in the schema');
   // The one declaration WITH `agg` is additionally reported as a governed measure — the free
   // choice over the same expression stays above, which is why `total_spend` appears in both.
   assert.deepEqual(model.measures.map((x) => [x.name, x.agg]), [['total_spend', 'sum']], 'the governed measure is listed with its fixed function');
@@ -188,7 +189,7 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
   const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', agg: 'count' }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');

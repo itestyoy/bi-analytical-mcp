@@ -154,25 +154,29 @@ not per task. DuckDB has no table expiry, so nothing is set there.
 path analysis with [retentioneering](https://github.com/retentioneering/retentioneering-tools) 5.x
 (Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
 
-- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads (events source,
-  time window, events kept / dropped / merged into groups (optionally the most frequent N names with
-  the rest as `other`), user attributes carried as segments through the declared relationship, optional
-  sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
-  A `where` or a segment may also name the source's own columns (any real column, e.g. an
-  environment) and its scalar event properties; `events.split` makes events out of an event's
-  parameters (by a value, or by conditions), and a group may merge those too. The window bounds the
-  partition column as well when the catalog declares one next to the time axis (the days the window
-  touches, and `partition_late_days` more for events filed under the day they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
-  as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users
-  with their whole paths; `events` keeps a share of the rows of the named events (for one that drowns
-  the rest), whose counts and surrounding transitions are then approximate.
-  A path is one user's events by default; `path` makes it one value of a column or event property of
-  the source (a bidfloor id, a tracking id, a level) or of several (a composite key: the user and a
-  bidfloor id). For event logic these rules cannot say — events defined by a window (a lag, the n-th
-  fail in a row), a match_recognize, several sources joined, a cohort — the table is built with
-  `build_pipeline_model` and the eventstream starts from its task (`from_task` + `path: [{ column }]`
-  + `columns: { event, time }`), reading that table's columns; its cards are the same transition
-  graph, step matrix and sankey.
+- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads. Its rows are an
+  events source in a time window prepared by the pipeline's own stages that keep them events —
+  `stages: [...]` of `where` (the events kept or dropped, a slice of the source, a condition on an
+  event property), `compute` (events renamed, merged or split by a parameter — a `case` or a `concat`
+  into a column that `columns.event` then names — or an event property read into a column) and
+  `join` (a related model's attributes through the declared relationship; a slowly-changing model
+  states its `between`, and a join of one without it is refused, since every version would repeat
+  each event). Then it names its columns: `columns: { event, time }` when not the source's own,
+  `path` — the column(s) one path is (the user by default; a bidfloor id, a tracking id, a level, or
+  several as a composite key) — and `segments`, columns carried as segments. `top` keeps the N most
+  frequent event names and merges the rest into `other`; `sessions` splits paths at a gap. The window
+  bounds the partition column as well when the catalog declares one next to the time axis (the days
+  the window touches, and `partition_late_days` more for events filed under the day they arrived),
+  and a source whose catalog sets `require_time_range` refuses a build without a window — as a
+  pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users with
+  their whole paths; `events` keeps a share of the rows of the named events (for one that drowns the
+  rest), whose counts and surrounding transitions are then approximate. For event logic these stages
+  cannot say — a match_recognize, several sources joined, a cohort chosen by an aggregate, a python
+  step — the table is built with `build_pipeline_model` and the eventstream starts from its task
+  (`from_task` + `path: [<column>]` + `columns: { event, time }`), reading that table's columns; its
+  cards are the same transition graph, step matrix and sankey. A start kept in an earlier spelling
+  (`events.include` / `split`, segment objects) is read in this one, and a new call in it is refused
+  with the converted request.
   It is built in SQL where the data lives and materialized; the call returns a task.
   Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
   `steps: [...]` takes one or several of the library's own steps, in order (each
@@ -312,11 +316,13 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   table over a STORED result (a query run with `materialize: true`, or a pipeline build), `levels: [{ column, label }]`: the card gets the top level —
   the header names only that one, and an opened row names the level under it ("US · by Platform") —
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
-  a level; `values: [{ column, agg, label, format }]`, each written as a KPI tile is — a number or a
-  percent, or `format: currency` with its `currency` — and re-aggregated per level with its agg, any
-  function a read's measure takes but the percentile, so sums, counts, min, max and `hll_merge` of a
-  stored sketch add up while distinct counts, averages, medians and ratios do not).
-  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
+  a level; `values: [{ column, fn, label, format }]`, each written as a KPI tile is — a number or a
+  percent, or `format: currency` with its `currency` — and re-aggregated per level with its `fn`, any
+  aggregate function a read's measure takes but the percentile and the sketch producers, so sums,
+  counts, min, max and `hll_merge` of a stored sketch add up while distinct counts, averages, medians
+  and ratios do not). Each view is a read in the pipeline's own stages (a where to the path, an
+  aggregate by the level, an order_by).
+  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], fn }` over a
   stored result grouped by those columns too: the chart is drawn folded over them, a click on
   a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform
   over time"), and the chart redraws in the same card filtered to what was clicked — a breadcrumb

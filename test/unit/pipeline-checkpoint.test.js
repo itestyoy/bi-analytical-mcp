@@ -23,8 +23,8 @@ function engine() {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, agg: 'count' }] });
-const keepEvents = (value) => ({ stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value }] });
+const agg = (name) => ({ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name, expr: { fn: 'count' } }] });
+const keepEvents = (value) => ({ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value }] }] });
 const funnel = {
   stage: 'match_recognize',
   partition_by: ['player_id_of_internal'],
@@ -43,7 +43,7 @@ test('materialize keeps the draft and records the built table as a checkpoint; t
   assert.ok(draft, 'the draft survives materialize');
   assert.equal(draft.checkpoints.length, 1);
   // The next step is validated against the CHECKPOINT's columns and reported as reading it.
-  const next = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
+  const next = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   assert.deepEqual(next.from_checkpoint, { at: 1, model: built.model, built_at: draft.checkpoints[0].built_at });
   assert.equal(next.steps_recomputed, 1, 'only the new step would be recomputed');
   // A second materialize builds under its OWN name, so it never overwrites the table it reads.
@@ -60,7 +60,7 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
   const e = engine();
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [agg('events_seen')] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   const c1 = await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 2
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'compute', name: 'twice', expr: { fn: 'mul', args: [{ column: 'events_seen' }, { value: 2 }] } }] });
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'order_by', keys: [{ key: 'twice', direction: 'desc' }] }] });
@@ -97,7 +97,7 @@ test('truncate retires the checkpoints past the kept prefix; add_steps never ret
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [agg('events_seen')] });
   await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 1
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 2
   const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'project', keep: ['player_id_of_internal'] }] });
   assert.equal(added.checkpoints_dropped, undefined, 'appending never invalidates a prefix');
@@ -118,7 +118,7 @@ test('a stage needing the source columns is refused after a checkpoint that drop
   );
   // a payload read is refused for the same reason — the column it reads is not there.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: a.context_id, stages: [{ stage: 'compute', name: 'lvl', expr: { fn: 'event_property', property: 'level_id_of_event_data' } }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: a.context_id, stages: [{ stage: 'compute', name: 'lvl', expr: { property: 'level_id_of_event_data' } }] }),
     /unknown column/,
   );
 
@@ -137,7 +137,7 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [agg('events_seen')] });
   const c1 = await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 1
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 5 }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 5 }] }] }] });
   const c2 = await e.build_pipeline_model({ action: 'materialize', context_id }); // at: 2
 
   const fork = await e.build_pipeline_model({ action: 'fork', context_id, after: 1, name: 'seg_alt' });
@@ -146,7 +146,7 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   assert.ok(!e.ctxs.hasPipelineModel(fork.context_id, c2.model), 'a checkpoint past `after` is not inherited');
 
   // The fork continues on top of the INHERITED table — only its own step is computed.
-  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: fork.context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'lt', value: 5 }] }] });
+  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: fork.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'lt', args: [{ column: 'events_seen' }, { value: 5 }] }] }] });
   assert.equal(step.from_checkpoint.model, c1.model);
   assert.equal(step.steps_recomputed, 1);
 
@@ -207,7 +207,7 @@ test('preview reports the prefix it retired instead of dropping it silently', as
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [agg('events_seen')] });
   const built = await e.build_pipeline_model({ action: 'materialize', context_id });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   // the index moved on since the prefix was built
   draftOf(e, context_id).checkpoints[0].index_run_id = 'an-older-scan';
   const pv = await e.build_pipeline_model({ action: 'preview', context_id });
@@ -227,7 +227,7 @@ test('materialize keeps each step in the spelling it was built in, and a draft s
   // the funnel as an earlier version stored it: a step condition on `property`, on a name that is an
   // event property and a column of the rows alike — which its build reads as the column
   const kept = { ...funnel, steps: [funnel.steps[0], { ...funnel.steps[1], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }] };
-  const asBuilt = [{ column: 'level_id_of_event_data', op: 'eq', value: 1 }];
+  const asBuilt = [{ fn: 'eq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] }];
   draftOf(e, context_id).stages = [kept];
   const built = await e.build_pipeline_model({ action: 'materialize', context_id });
   assert.equal(built.checkpoint.at, 1);
@@ -250,7 +250,7 @@ test('a prefix built before the first index scan is not retired by that scan', a
   await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [agg('events_seen')] });
   const built = await e.build_pipeline_model({ action: 'materialize', context_id });
   assert.equal(draftOf(e, context_id).checkpoints[0].index_run_id, null, 'nothing had been scanned yet');
-  const next = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_seen', op: 'gte', value: 2 }] }] });
+  const next = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 2 }] }] }] });
   assert.equal(next.from_checkpoint.model, built.model, 'still usable');
   assert.equal(next.checkpoints_dropped, undefined);
 });
@@ -304,15 +304,15 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   };
   const e = new Engine({ catalog: loadCatalog(CATALOG, {}), runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) });
   const textFlag = /'is_clicked_of_event_data' is a text column in the warehouse/;
-  const forms = [{ column: 'is_clicked_of_event_data' }];
-  const ordered = (left) => ({ stage: 'where', conditions: [{ ...left, op: 'gt', value: true }] });
-  // …and with the constant written on the left
-  const constantLeft = { stage: 'where', conditions: [{ left: { value: true }, op: 'gt', right: { column: 'is_clicked_of_event_data' } }] };
+  const flag = { column: 'is_clicked_of_event_data' };
+  const ordered = { stage: 'where', conditions: [{ fn: 'gt', args: [flag, { value: true }] }] };
+  // …and with the constant written first
+  const constantFirst = { stage: 'where', conditions: [{ fn: 'gt', args: [{ value: true }, flag] }] };
   const refusedBoth = async (context_id, when) => {
-    for (const left of forms) await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [ordered(left)] }), textFlag, `${when}: ${JSON.stringify(left)}`);
-    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [constantLeft] }), textFlag, `${when}: a constant on the left`);
-    // the column written as an expression is not another way to say it: it is told the one way
-    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [ordered({ left: { column: 'is_clicked_of_event_data' } })] }), /write \{ column \} instead of left: \{ column \}/, when);
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [ordered] }), textFlag, `${when}: the column first`);
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [constantFirst] }), textFlag, `${when}: a constant first`);
+    // the column written in an earlier spelling is not another way to say it: it is told the one way
+    await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ left: flag, op: 'gt', value: true }] }] }), /is written in an earlier spelling — write \{"fn":"gt","args":\[\{"column":"is_clicked_of_event_data"\},\{"value":true\}\]\}/, when);
   };
 
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', stages: [keepEvents('level_started')] });
@@ -321,7 +321,7 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   const built = await taskResult(e, started.task_id);
   assert.equal(built.status, 'done');
   await refusedBoth(context_id, 'after the checkpoint');
-  const eq = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'eq', value: true }] }] });
+  const eq = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [flag, { value: true }] }] }] });
   assert.equal(eq.from_checkpoint.model, built.model, 'the step reads the built table');
 
   const from = await e.build_pipeline_model({ action: 'start', name: 'flg2', from_task: started.task_id, include_columns: true });
@@ -352,8 +352,8 @@ const flagEngine = (runner, { workspaceRoot = mkdtempSync(join(tmpdir(), 'cp-'))
   contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot }),
 });
 const TEXT_FLAG = /'is_clicked_of_event_data' is a text column in the warehouse/;
-const flagOrdered = { stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'gt', value: true }] };
-const flagEq = { stage: 'where', conditions: [{ column: 'is_clicked_of_event_data', op: 'eq', value: true }] };
+const flagOrdered = { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'is_clicked_of_event_data' }, { value: true }] }] };
+const flagEq = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_clicked_of_event_data' }, { value: true }] }] };
 const builtFlags = async (e, context_id) => {
   const started = await e.build_pipeline_model({ action: 'materialize', context_id });
   assert.equal((await taskResult(e, started.task_id)).status, 'done');
@@ -387,18 +387,18 @@ test('where the warehouse cannot be asked about a task\'s table, the marks its b
 
 test('a draft started from a semantic query run with materialize: true has its table\'s column types from the warehouse', async () => {
   const e = flagEngine(flagRunner());
-  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
+  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
   const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ model: 'events', attribute: 'event_name' }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');
   const from = await e.build_pipeline_model({ action: 'start', name: 'slice', from_task: stored.task_id, include_columns: true });
   assert.deepEqual(from.available_columns, [{ name: 'task_cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, stages: [{ stage: 'where', conditions: [{ column: 'task_cnt', op: 'gt', value: 'many' }] }] }),
-    /'task_cnt' is a numeric column/,
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 'many' }] }] }] }),
+    /'task_cnt' is a number: compare it with a number/,
   );
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, stages: [{ stage: 'where', conditions: [{ column: 'events_event_name', op: 'gt', value: true }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'events_event_name' }, { value: true }] }] }] }),
     /'events_event_name' is a text column in the warehouse/,
   );
 });

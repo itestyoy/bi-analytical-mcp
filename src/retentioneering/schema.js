@@ -7,7 +7,7 @@
 // one from the library's prose. What the CATALOG decides (the events sources, the models a join stage
 // can bring in, the event properties an expression reads) comes from the catalog, through the
 // pipeline's own stage schemas. Names that exist only once an eventstream is built (the columns its
-// stages make, the event names it holds) are checked at call time against what the stages produced.
+// start's steps make, the event names it holds) are checked at call time against what the steps produced.
 //
 // What a call cannot carry is not offered, each for its stated reason (NOT_OFFERED): a Python callable,
 // a DuckDB statement run on the analysis runtime (code, which this server never takes from a call —
@@ -23,7 +23,7 @@ import { CARD_KINDS } from './view-model.js';
 import { form, pick, stringOtherThan, timeRange, conditionSlot } from '../schema-kit.js';
 import { STAGES } from '../pipeline/stages.js';
 import { exprSchema, conditionListSql, columnLeaf, valueLeaf, CONDITION_FNS, LOGIC_FNS, SCALAR_FNS } from '../pipeline/compute.js';
-import { CTX, NAME as CORE_NAME, TASK_READ } from '../schema/fields.js';
+import { CTX, NAME as CORE_NAME, TASK_READ, READ_PAGE } from '../schema/fields.js';
 import { cardTitle } from '../schema/display.js';
 import { ES_COLUMNS } from './names.js';
 
@@ -46,7 +46,7 @@ export const NOT_OFFERED = {
   },
   params: {
     func: 'a Python callable, which a call cannot carry',
-    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model\'s start instead (its stages: which events, what they are named, the attributes and properties carried), and keep rows by a condition after the steps with filter_events\' where (this tool writes the SQL)',
+    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model\'s start instead (its steps, the pipeline\'s SQL stages: which events, what they are named, the attributes and properties carried), and keep rows by a condition after the library\'s steps with filter_events\' where (this tool writes the SQL)',
   },
 };
 
@@ -69,9 +69,9 @@ const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
 const PATH_PARAM = 'path_col';
 export const CONDITION_DEF = 'retentioneering_condition';
 /** filter_events' expression over the eventstream's columns — a level of the one expression grammar
- *  with its own `$defs` entry, beside the pipeline's `expr` that a start's stages read. */
+ *  with its own `$defs` entry, beside the pipeline's `expr` that a start's steps read. */
 export const EVENTSTREAM_EXPR_DEF = 'eventstream_expr';
-/** The stages a start takes, as one union its `stages` list refers to. */
+/** The pipeline stages a start's `steps` take, as one union the list refers to. */
 const START_STAGE_DEF = 'eventstream_stage';
 
 const eventstreamWindow = timeRange('The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.');
@@ -98,9 +98,9 @@ export function startStages(catalog) {
   return Object.entries(STAGES).filter(([k, s]) => s.keepsSourceRows && k !== 'sample' && (typeof s.available !== 'function' || s.available(catalog))).map(([k]) => k);
 }
 
-/** When events need logic a start's stages cannot say — the one sentence every description that offers
+/** When events need logic a start's steps cannot say — the one sentence every description that offers
  *  from_task carries. */
-export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s stages cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
+export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s steps cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
 
 export function buildSchema(catalog) {
   const sources = pathSources(catalog);
@@ -114,8 +114,8 @@ export function buildSchema(catalog) {
   const columns = (required) => ({
     type: 'object', additionalProperties: false, ...(required ? { required: ['event', 'time'] } : { minProperties: 1 }),
     description: required
-      ? 'Which columns of the rows (after the stages) are the event name and its time.'
-      : `Which columns of the rows (after the stages) are the event name and its time, when not the source's own (${own}): the column a compute stage made — events renamed, merged or split by a parameter — or another time.`,
+      ? 'Which columns of the rows (after the steps) are the event name and its time.'
+      : `Which columns of the rows (after the steps) are the event name and its time, when not the source's own (${own}): the column a compute stage made — events renamed, merged or split by a parameter — or another time.`,
     properties: {
       event: column('The column of the event name.'),
       time: column('The column of the event time (a timestamp or a date) — the paths\' order.'),
@@ -123,8 +123,14 @@ export function buildSchema(catalog) {
   });
   const index = { type: 'integer', minimum: 1, description: 'edit_step / insert_step / delete_step: which step (1-based; insert_step puts the new one before it, or at the end with steps + 1).' };
   return buildForms({
-    description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start: the rows of an events source, or of a task\'s stored table, prepared by the pipeline\'s own stages), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized.',
+    description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start: the rows of an events source, or of a task\'s stored table, prepared by its steps — the pipeline\'s own SQL stages), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized.',
     sourceColumns: columns(false),
+    // a start's steps are the pipeline's SQL stages ({ stage }); the steps added after it are the
+    // library's ops ({ type }) — one word for a list run in order, each item tagged by what it is
+    startSteps: {
+      type: 'array', minItems: 1, items: { $ref: `#/$defs/${START_STAGE_DEF}` },
+      description: `The steps the rows are prepared by, in SQL — the pipeline's own stages (${kinds.join(', ')}), each { stage: … } as build_pipeline_model takes it: those that keep the rows events, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns. The library's own steps come after the build (add_steps).`,
+    },
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
       eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
@@ -133,25 +139,21 @@ export function buildSchema(catalog) {
       index,
       after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
       name: { type: 'string', pattern: NEW_EVENTSTREAM, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
-      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it — what its stages read event properties and relationships of.' },
+      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it — what its steps read event properties and relationships of.' },
       from_task: {
         type: 'string', pattern: TASK_ID_PATTERN,
-        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its stages run over that table's columns, and the time window is the pipeline's.`,
+        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its steps run over that table's columns, and the time window is the pipeline's.`,
       },
       columns: columns(true),
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },
       description: { type: 'string', description: 'What this eventstream is for, in your words — kept with this eventstream.' },
       time_range: eventstreamWindow,
-      stages: {
-        type: 'array', minItems: 1, items: { $ref: `#/$defs/${START_STAGE_DEF}` },
-        description: `The rows the paths are built from, prepared in SQL by the pipeline's own stages (${kinds.join(', ')}) — those of build_pipeline_model that keep the rows events, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns.`,
-      },
       path: {
-        type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: column('A column of the rows (after the stages).'),
+        type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: column('A column of the rows (after the steps).'),
         description: `What one path is: a column of the rows — one path per value (a bidfloor id: one path per search cycle; a tracking id; a level) — or several, a composite key (the user and a bidfloor id: one path per player per cycle). An event property is read into a column by a compute stage. Rows without every part are left out. From an events source it may be omitted: one path per user (${[...new Set(sources.map((src) => userKeyColumn(catalog, src)))].join(', ')}); from a task's table it is required.`,
       },
       segments: {
-        type: 'array', minItems: 1, uniqueItems: true, items: column('A column of the rows (after the stages).'),
+        type: 'array', minItems: 1, uniqueItems: true, items: column('A column of the rows (after the steps).'),
         description: 'Columns carried on every event as segments, as text, each under its column\'s name — what segment_overview, metric_distribution, diff and in_segment read: a column of the source itself, an attribute a join stage brought (its attrs name it), an event property a compute stage read ({ stage: "compute", name, expr: { property } }).',
       },
       top: { type: 'integer', minimum: 1, description: 'Keep only the N most frequent event names and merge the rest into "other" (omit: every event keeps its own name).' },
@@ -177,10 +179,13 @@ export function buildSchema(catalog) {
           anyOf: [by('a share of users', ['share']), by('a share of some events', ['events']), by('both', ['share', 'events'])],
         };
       })(),
+      // what a step action answers with beyond what it changed — the pipeline builder's own two flags
+      include_columns: { type: 'boolean', description: 'Also return the eventstream\'s whole shape after the call — every event, path column, segment with its levels and custom column; by default the answer says what the steps changed (the events, path columns and segments added and removed).' },
+      include_steps: { type: 'boolean', description: 'Also return every step of the eventstream, as preview lists them; by default only the steps just added (or the one put in place) and steps_count.' },
     },
     $defs: {
-      // the start's stages are the pipeline's own, each referring to the pipeline's `expr` (a compute
-      // stage's definitions bring it) — gathered under one union the `stages` list refers to
+      // the start's steps are the pipeline's own stages, each referring to the pipeline's `expr` (a
+      // compute stage's definitions bring it) — gathered under one union the `steps` list refers to
       ...Object.assign({}, ...kinds.map((k) => (typeof STAGES[k].defs === 'function' ? STAGES[k].defs(catalog) : {}))),
       [START_STAGE_DEF]: { anyOf: kinds.map((k) => STAGES[k].schema(catalog)) },
       [EVENTSTREAM_EXPR_DEF]: eventstreamExprSchema(),
@@ -195,13 +200,13 @@ export const BUILD_ACTIONS = ['start', 'add_steps', 'edit_step', 'insert_step', 
 /** What each build action does — said once, on the form of that action (and joined for the field that lists them all). */
 const ACTION_SAYS = () => ({
   start: 'declares the eventstream and builds it in SQL (a task); the default',
-  add_steps: `appends library steps — one or several, all or none — and returns what each step changed (the events, path columns and segments it added or removed) and the eventstream's shape after them: its events, path columns, segments and their levels. Each is checked by the library itself on what the eventstream holds before it, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
+  add_steps: `appends library steps — one or several, all or none — and returns each with what it changed (the events, path columns and segments it added or removed), and steps_count. Each is checked by the library itself on what the eventstream holds before it, so a step the library refuses is refused at once with the library's message (nothing runs). Not offered: ${NOT_OFFERED_OPS()}`,
   edit_step: 'replaces step `index`, re-checking every step after it and naming the first one it breaks',
   insert_step: 'inserts a step before step `index`, re-checking every step after it',
   delete_step: 'removes step `index`, re-checking every step after it',
   truncate: 'keeps steps 1..`after`',
-  fork: 'copies steps 1..`after` into a new eventstream (`name`), to try a variant without touching this one',
-  preview: 'lists the steps with what each changed',
+  fork: 'copies steps 1..`after` into a new eventstream (`name`, required), to try a variant without touching this one',
+  preview: 'lists every step with what each changed, and the eventstream\'s shape after them',
   materialize: 'runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized',
 });
 
@@ -210,15 +215,18 @@ const ACTION_SAYS = () => ({
  * table) — each with exactly its own fields, so a stray one is refused rather than ignored. `schema`
  * carries every field (`properties`), the build's description and its `$defs`.
  *
- * Both starts take the same fields — the rows' stages, their path, segments and event names — and
- * differ where the rows come from: an events source names its own event and time columns (`columns`
- * only when a stage made others: `sourceColumns`) and takes a window, a task's table names its path and
- * its columns always (its columns carry no catalog meaning) and was bounded by the pipeline that made it.
+ * Both starts take the same fields — the rows' steps (the pipeline's SQL stages: `startSteps`), their
+ * path, segments and event names — and differ where the rows come from: an events source names its own
+ * event and time columns (`columns` only when a stage made others: `sourceColumns`) and takes a window, a
+ * task's table names its path and its columns always (its columns carry no catalog meaning) and was
+ * bounded by the pipeline that made it. The actions that change the steps answer with what changed, and
+ * take the pipeline builder's two flags for more (`include_columns`, `include_steps`).
  */
 function buildForms(schema) {
-  const { properties: F, description, sourceColumns, $defs } = schema;
+  const { properties: F, description, sourceColumns, startSteps, $defs } = schema;
   const action = (value) => ({ tag: ['action', value], tagDescription: [].concat(value).map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') });
-  const declaration = ['context_id', 'name', 'description', 'stages', 'path', 'segments', 'top', 'sessions', 'sample'];
+  const declaration = ['context_id', 'name', 'description', 'path', 'segments', 'top', 'sessions', 'sample'];
+  const echo = ['include_columns', 'include_steps'];
   // a step names the context its eventstream is in — a start may omit it (a new context), a step may not
   const stepContext = { ...F.context_id, description: 'The context the eventstream is in — the context_id start returned.' };
   const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: { ...pick(F, ['context_id', 'eventstream', ...required, ...optional]), context_id: stepContext } });
@@ -226,13 +234,13 @@ function buildForms(schema) {
     type: 'object',
     description,
     anyOf: [
-      form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: { ...pick(F, ['source', 'time_range', ...declaration]), columns: sourceColumns } }),
-      form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'path', 'columns'], properties: pick(F, ['from_task', 'source', 'columns', ...declaration]) }),
-      step('add_steps', 'add steps', ['steps']),
-      step(['edit_step', 'insert_step'], 'edit or insert a step', ['index', 'step']),
-      step('delete_step', 'delete a step', ['index']),
-      step('truncate', 'truncate the steps', ['after']),
-      step('fork', 'fork the eventstream', ['name'], ['after', 'description']),
+      form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: { ...pick(F, ['source', 'time_range', ...declaration]), steps: startSteps, columns: sourceColumns } }),
+      form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'path', 'columns'], properties: { ...pick(F, ['from_task', 'source', 'columns', ...declaration]), steps: startSteps } }),
+      step('add_steps', 'add steps', ['steps'], echo),
+      step(['edit_step', 'insert_step'], 'edit or insert a step', ['index', 'step'], echo),
+      step('delete_step', 'delete a step', ['index'], echo),
+      step('truncate', 'truncate the steps', ['after'], echo),
+      step('fork', 'fork the eventstream', ['name'], ['after', 'description', ...echo]),
       step(['preview', 'materialize'], 'preview or materialize', []),
     ],
     ...($defs ? { $defs } : {}),
@@ -504,17 +512,18 @@ export function querySchema() {
     context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
     eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'Which eventstream of the context (optional when it holds one).' },
     analyses: { type: 'array', minItems: 1, items: { anyOf: analysisSchemas() }, description: 'The analyses to run, computed together in one run.' },
-    // a read is the core's (src/schema/fields.js TASK_READ); what it answers with is this side's: each
-    // analysis summarized, or every record
+    // a read is the core's (src/schema/fields.js TASK_READ), paged as the other query tools page theirs:
+    // here each table of each analysis, by its row numbers
     ...TASK_READ,
-    detail: { enum: ['summary', 'full'], default: 'summary', description: 'Reading a task: each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table (summary) — or every record it computed (full).' },
+    offset: { type: 'integer', minimum: 0, description: 'The row each table\'s page starts at — of every table of each task\'s result (an analysis\'s transitions, its step shares, its groups\' metrics, the library\'s tables; a build\'s segment levels): 0 is its first row, next_offset where the previous page ended.' },
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of each table the page holds (default ${READ_PAGE}).` },
   };
   return {
     type: 'object',
     description: 'Start path analyses over a built eventstream (its materialized steps included), or read one back.',
     anyOf: [
       form({ title: 'start analyses', required: ['context_id', 'analyses'], properties: pick(F, ['context_id', 'eventstream', 'analyses']) }),
-      form({ title: 'read tasks', required: ['task_ids'], properties: pick(F, ['task_ids', 'detail', 'wait_seconds']) }),
+      form({ title: 'read tasks', required: ['task_ids'], properties: pick(F, ['task_ids', 'wait_seconds', 'offset', 'limit']) }),
       form({ title: 'cancel tasks', required: ['task_ids', 'cancel'], properties: pick(F, ['task_ids', 'cancel']) }),
     ],
     $defs: { [CONDITION_DEF]: f.condition_schema },

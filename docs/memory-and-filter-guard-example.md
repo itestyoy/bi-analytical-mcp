@@ -126,7 +126,7 @@ RU "низкая выручка" → memory_semantic = true → нашёл EN-з
 В базе значение хранится как `Organic`. ИИ пишет фильтр `where result_of_event_data = 'organic'`:
 
 ```
-REJECTED: stages[0]: filter value(s) not verified against the real data — check the exact value
+REJECTED: steps[0]: filter value(s) not verified against the real data — check the exact value
 via semantic_index({ request: { source, property } }) and use it as stored:
   where result_of_event_data: value 'organic' is not a real value —
   the column holds it with different casing. Did you mean: 'Organic'?
@@ -214,6 +214,6 @@ await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
 const e2 = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx() });
 e2.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'Organic', freq: 10 }, { value: 'Paid', freq: 5 }] });
 const d = await e2.build_pipeline_model({ action: 'start', name: 'guard_demo', source: 'events' });
-await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'result_of_event_data' }, { value: 'organic' }] }] }] }).catch((err) => err.message); // → REJECTED, did you mean 'Organic'?
-await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'result_of_event_data' }, { value: 'Organic' }] }] }] }); // → OK
+await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'result_of_event_data' }, { value: 'organic' }] }] }] }).catch((err) => err.message); // → REJECTED, did you mean 'Organic'?
+await e2.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'result_of_event_data' }, { value: 'Organic' }] }] }] }); // → OK
 ```

@@ -23,7 +23,7 @@ import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
 import { CONFIG_ERRORS } from '../../src/retentioneering/checker.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
-import { deref, field, fieldNames, forms, pinned } from '../helpers/schema-nav.js';
+import { deref, field, fieldNames, forms, formWhere, pinned } from '../helpers/schema-nav.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 
 /** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
@@ -147,7 +147,8 @@ test('the schemas offer exactly what the library does — every choice from the 
   // every op the library registers — an eventstream's steps — but the ones not offered for their stated reason
   const b0 = e.schemas.build_retentioneering_model;
   const ops = byTag(b0, field(b0, b0, 'step'), 'type');
-  assert.deepEqual([...byTag(b0, field(b0, b0, 'steps').items, 'type').keys()], [...ops.keys()], 'add_steps offers the same steps');
+  const addSteps = formWhere(b0, b0, 'action', 'add_steps');
+  assert.deepEqual([...byTag(b0, field(b0, addSteps, 'steps').items, 'type').keys()], [...ops.keys()], 'add_steps offers the same steps');
   assert.ok(!fieldNames(q, q).includes('preprocess'), 'a query reads the eventstream as materialized: it takes no steps of its own');
   assert.deepEqual([...ops.keys()], Object.keys(f.ops).filter((op) => !NOT_OFFERED.ops[op]));
   for (const [op, fs] of ops) for (const x of fs) for (const p of Object.keys(NOT_OFFERED.params)) assert.ok(!(p in x.properties), `${op} offers no ${p}`);
@@ -155,18 +156,25 @@ test('the schemas offer exactly what the library does — every choice from the 
   const bins = field(b0, ops.get('add_segment')[0], 'metric_bins');
   assert.deepEqual([...byTag(b0, field(b0, bins, 'metric'), 'metric').keys()], f.metric_bins.metrics);
   assert.equal(forms(b0, field(b0, bins, 'bins')).find((x) => x.title === 'equal quantiles').minItems, f.metric_bins.min_quantile_bins);
-  // the build: a start is the pipeline's own stages that keep the rows events — a where, a compute, a
-  // join (one form per model, as build_pipeline_model offers it) — then the eventstream's roles, each
-  // named as a column of the rows those stages leave
+  // the build: a start's steps are the pipeline's own stages that keep the rows events — a where, a
+  // compute, a join (one form per model, as build_pipeline_model offers it) — then the eventstream's
+  // roles, each named as a column of the rows those stages leave. One word for a list run in order:
+  // a start's steps are SQL stages ({ stage }), the steps added after it the library's ops ({ type }).
   const start = forms(b0, b0).find((x) => x.title === 'start from an events source');
-  const stages = forms(b0, field(b0, start, 'stages').items);
+  const stages = forms(b0, field(b0, start, 'steps').items);
   assert.deepEqual([...new Set(stages.map((x) => pinned(b0, x, 'stage')[0]))], ['where', 'compute', 'join']);
   const bp = e.schemas.build_pipeline_model;
   assert.deepEqual(stages.filter((x) => pinned(b0, x, 'stage')[0] === 'join').map((x) => x.title), forms(bp, stageBranch(bp, 'join')).map((x) => x.title));
   assert.deepEqual(Object.keys(field(b0, start, 'columns').properties).sort(), ['event', 'time']);
   for (const k of ['path', 'segments']) assert.equal(deref(b0, field(b0, start, k).items).type, 'string', `${k}: column names`);
   assert.equal(field(b0, start, 'top').type, 'integer');
-  for (const k of ['where', 'events']) assert.ok(!fieldNames(b0, b0).includes(k), `the earlier ${k} is no field of the build`);
+  for (const k of ['where', 'events', 'stages']) assert.ok(!fieldNames(b0, b0).includes(k), `the earlier ${k} is no field of the build`);
+  // what a step action answers with beyond what it changed: the pipeline builder's two flags, on the
+  // actions that change the steps (and fork) — not on a start (a task), preview (it lists all) or materialize
+  const flagged = forms(b0, b0).filter((x) => 'include_columns' in x.properties).flatMap((x) => pinned(b0, x, 'action')).sort();
+  assert.deepEqual(flagged, ['add_steps', 'delete_step', 'edit_step', 'fork', 'insert_step', 'truncate']);
+  for (const x of forms(b0, b0)) assert.equal('include_steps' in x.properties, 'include_columns' in x.properties, x.title);
+  assert.ok(formWhere(b0, b0, 'action', 'fork').required.includes('name'), 'a fork is a new eventstream with a name of its own');
   // filter_events' where is the one grammar at its own level: the eventstream's columns and constants, no raw
   const where = deref(b0, field(b0, ops.get('filter_events')[0], 'where').items);
   assert.deepEqual(forms(b0, where).filter((x) => !x.properties?.fn).map((x) => x.title), ['a column — { column }', 'a constant — { value }']);
@@ -197,11 +205,13 @@ test('input the schema refuses is refused before anything starts', async () => {
   // a start in an earlier spelling is refused with the start written today, at the first earlier field
   const earlier = (field, today) => (err) => err.field === field && err.message.includes(`the start is written in an earlier spelling — write ${JSON.stringify(today)}`);
   const events = { name: 'x', source: 'events' };
-  await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, earlier('events', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }] }));
-  await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, earlier('where', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }));
+  await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, earlier('events', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }] }));
+  await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, earlier('where', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }));
   // a users attribute as a segment is the join stage it was, point-in-time on the slowly-changing model
   const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
-  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between }], segments: ['platform'] }));
+  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between }], segments: ['platform'] }));
+  // a start's list of stages is its steps: the earlier name is told the field's name, the stages unchanged
+  await refused('build_retentioneering_model', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }, /request has an unexpected property 'stages' — here that field is called 'steps'/);
   // a column the start names that its rows do not have is refused with the columns there are — and how one is brought in
   await refused('build_retentioneering_model', { ...events, segments: ['country'] }, (err) => err.field === 'segments' && /'country' is not a column of 'events' — a related model's attribute is brought in by a join stage/.test(err.message));
   await refused('build_retentioneering_model', { ...events, path: ['nope'] }, (err) => err.field === 'path' && /'nope' is not a column of 'events'/.test(err.message));
@@ -209,12 +219,15 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { ...events, segments: ['event_time'] }, (err) => err.field === 'segments' && /a name the eventstream uses for its own column/.test(err.message));
   // an event of a sample the source does not have is refused with the near one (the source names its events itself)
   await refused('build_retentioneering_model', { ...events, sample: { events: { levl_started: 0.5 } } }, (err) => err.field === 'sample.events' && /did you mean 'level_started'/.test(err.message));
-  // a start's stages keep the rows events: a stage that changes the grain, or draws rows at random, is not one
+  // a start's steps keep the rows events: a stage that changes the grain, or draws rows at random, is not one
   for (const stage of [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { stage: 'sample', share: 0.5 }]) {
-    await refused('build_retentioneering_model', { ...events, stages: [stage] }, /`stages\.0\.stage` must be one of: where, compute, join/);
+    await refused('build_retentioneering_model', { ...events, steps: [stage] }, /`steps\.0\.stage` must be one of: where, compute, join/);
   }
   // …and a join of a slowly-changing model states the version it reads: without it each event would repeat per version
-  await refused('build_retentioneering_model', { ...events, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }] }], segments: ['platform'] }, (err) => err.field === 'stages[0]' && err.message.includes(`between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }`));
+  await refused('build_retentioneering_model', { ...events, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }] }], segments: ['platform'] }, (err) => err.field === 'steps[0]' && err.message.includes(`between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }`));
+  // a start's steps are SQL stages, and the steps added after it the library's ops: neither list takes the other's items
+  await refused('build_retentioneering_model', { ...events, steps: [{ type: 'collapse_events', loops: true }] }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis' }] }, /invalid input/); // features: required by the library
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'has_event', metric_args: { events: ['a'] } }] }] }, /invalid input/);
@@ -230,7 +243,11 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', source: 'events', steps: [{ type: 'collapse_events', loops: true }] }, /invalid input/);
   await refused('build_retentioneering_model', { action: 'edit_step', context_id: 'abc', step: { type: 'collapse_events', loops: true } }, /invalid input/); // which step
   await refused('build_retentioneering_model', { action: 'truncate', context_id: 'abc' }, /invalid input/);
-  await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc' }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc' }, /invalid input.*missing required property 'name'/);
+  // the answer flags go with the actions that change the steps, never with a start, a preview or a build
+  for (const input of [{ ...events, include_columns: true }, { action: 'preview', context_id: 'abc', include_steps: true }, { action: 'materialize', context_id: 'abc', include_columns: true }]) {
+    await refused('build_retentioneering_model', input, /invalid input/);
+  }
   // a condition compares a metric with a constant of the metric's own kind: a date is not a time metric's value
   await refused('build_retentioneering_model', step({ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: '2026-09-26' } }), /invalid input/);
   // metric_bins is one list of bins, so a level count that disagrees with the cut points cannot be written
@@ -263,7 +280,7 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', cond({ op: 'in', metric: 'length', value: [3, 4] }), pastSchema);
   await refused('build_retentioneering_model', rules({ cases: [{ column: 'platform', op: 'in', value: ['ios', "it's"], level: 'apple' }, { column: 'platform', op: '=', value: 'web', level: 'web' }], else: 'other' }), pastSchema);
   await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', steps: [{ type: 'collapse_events', loops: true }, { type: 'split_sessions', timeout: '30m', session_col: 'visit' }] }, pastSchema);
-  for (const input of [{ action: 'edit_step', index: 1, step: { type: 'collapse_events', loops: true } }, { action: 'delete_step', index: 1 }, { action: 'truncate', after: 0 }, { action: 'fork', name: 'variant', after: 1 }, { action: 'preview' }, { action: 'materialize' }]) {
+  for (const input of [{ action: 'edit_step', index: 1, step: { type: 'collapse_events', loops: true }, include_columns: true }, { action: 'delete_step', index: 1, include_steps: true }, { action: 'truncate', after: 0 }, { action: 'fork', name: 'variant', after: 1, include_columns: true, include_steps: true }, { action: 'preview' }, { action: 'materialize' }]) {
     await refused('build_retentioneering_model', { context_id: 'abc', ...input }, pastSchema);
   }
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
@@ -313,7 +330,7 @@ test('input the schema refuses is refused before anything starts', async () => {
   // an event split by a parameter is a compute stage's case, the column it makes the event column
   await refused('build_retentioneering_model', { ...events, events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, earlier('events', {
     ...events,
-    stages: [{ stage: 'compute', name: 'es_event', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('event_name'), val('level_completed')] }, { fn: 'eq', args: [{ property: 'result_of_event_data' }, val('lose')] }], then: val('lost') }], else: col('event_name'), type: 'string' } }],
+    steps: [{ stage: 'compute', name: 'es_event', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('event_name'), val('level_completed')] }, { fn: 'eq', args: [{ property: 'result_of_event_data' }, val('lose')] }], then: val('lost') }], else: col('event_name'), type: 'string' } }],
     columns: { event: 'es_event' },
   }));
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel', title: 'Onboarding funnel, Sep 1–23' }, /unknown task_id/);
@@ -377,10 +394,11 @@ test('a request the library\'s check cannot carry is answered at once, under its
 });
 
 test('ties are ordered by code point, the same on every machine — not by the locale', async () => {
-  const { summarize } = await import('../../src/retentioneering/results.js');
+  const { readView } = await import('../../src/retentioneering/results.js');
   const edge = (source) => ({ source, target: 'x', count: 1, unique_paths: 1, proba_out: 1, proba_in: 1, time_median: 0 });
-  const s = summarize({ kind: 'transition_graph', nodes: [], edges: [edge('a'), edge('B'), edge('_c')] });
-  assert.deepEqual(s.top_transitions.map((e) => e.from), ['B', '_c', 'a']);
+  const s = readView({ kind: 'transition_graph', nodes: [], edges: [edge('a'), edge('B'), edge('_c')] });
+  const transitions = s.tables.find((t) => t.name === 'transitions');
+  assert.deepEqual(transitions.rows.map((r) => r[0]), ['B', '_c', 'a']);
 });
 
 test('with the feature off, loading the server never opens the library\'s sheet', async () => {
@@ -443,7 +461,7 @@ test('context() lists and describes a path-analysis context by its eventstreams 
   ctx.state.retentioneering.eventstreams.es2 = { ...ctx.state.retentioneering.eventstreams.es, description: 'level paths', steps: [] };
   const listed = (await e.context({ action: 'list' })).contexts.find((c) => c.context_id === ctx.id);
   assert.equal(listed.description, 'onboarding paths');
-  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps: 1, materialized_through: 0 }, { name: 'es2', description: 'level paths', source: 'events', steps: 0, materialized_through: 0 }]);
+  assert.deepEqual(listed.eventstreams, [{ name: 'es', source: 'events', steps_count: 1, materialized_through: 0 }, { name: 'es2', description: 'level paths', source: 'events', steps_count: 0, materialized_through: 0 }]);
   const d = await e.context({ action: 'describe', context_id: ctx.id });
   assert.equal(d.engine, 'retentioneering');
   assert.deepEqual(d.eventstreams.map((x) => [x.name, x.source, x.steps.map((s) => s.library), x.base.users, x.description]), [['es', 'events', ['add_start_end_events'], 3, undefined], ['es2', 'events', [], 3, 'level paths']]);
@@ -452,22 +470,103 @@ test('context() lists and describes a path-analysis context by its eventstreams 
 });
 
 // What the model reads of a distribution and of a long result: the numbers in the metric's own units,
-// the curve and every path's label left to the card. Pure functions over a result; no warehouse.
-test('a log-binned distribution is read in the metric\'s own units, without its density curve; long lists are cut', async () => {
-  const { summarize } = await import('../../src/retentioneering/results.js');
+// the curve left to the card, a long list paged as a table's rows are. Pure functions over a result; no
+// warehouse.
+test('a log-binned distribution is read in the metric\'s own units, without its density curve; a long list is paged', async () => {
+  const { readView } = await import('../../src/retentioneering/results.js');
+  const { READ_PAGE } = await import('../../src/schema/fields.js');
   const curve = [Array.from({ length: 1000 }, (_, i) => i / 100), Array.from({ length: 1000 }, () => 0.1)];
-  const s = summarize({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 1, 2], counts: [3, 4], counts_normalized: [0.43, 0.57], kde: curve, mean: 1, median: 2 }, distance: 0.5, log_scale: true } });
+  const s = readView({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 1, 2], counts: [3, 4], counts_normalized: [0.43, 0.57], kde: curve, mean: 1, median: 2 }, distance: 0.5, log_scale: true } });
   assert.deepEqual(s.values.distribution_1, { bins: [1, 10, 100], counts: [3, 4], counts_normalized: [0.43, 0.57], median: 100, geometric_mean: 10 });
   assert.equal(s.values.scale, 'log10');
   assert.equal(s.values.distance_log10, 0.5);
   assert.ok(s.scale_note);
   // not log-binned: as the library gave it, the curve still left out
-  const plain = summarize({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 5, 10], counts: [1, 2], kde: curve, mean: 4, median: 3 }, log_scale: false } });
+  const plain = readView({ kind: 'metric_distribution', values: { distribution_1: { bins: [0, 5, 10], counts: [1, 2], kde: curve, mean: 4, median: 3 }, log_scale: false } });
   assert.deepEqual(plain.values.distribution_1, { bins: [0, 5, 10], counts: [1, 2], mean: 4, median: 3 });
-  // any other long list among the values: its first items and how many there were
-  const g = summarize({ kind: 'describe', values: { labels: Array.from({ length: 1684 }, (_, i) => i % 3) } });
-  assert.equal(g.values.labels.total, 1684);
-  assert.equal(g.values.labels.first.length, 20);
+  // any other long list among the values: a page of it, by the same offset / limit as a table's rows
+  const labels = Array.from({ length: 1684 }, (_, i) => i % 3);
+  const g = readView({ kind: 'describe', values: { labels } });
+  assert.deepEqual([g.values.labels.items.length, g.values.labels.page.total_rows, g.values.labels.page.next_offset], [READ_PAGE, 1684, READ_PAGE]);
+  const last = readView({ kind: 'describe', values: { labels } }, { offset: 1680, limit: 10 });
+  assert.deepEqual([last.values.labels.items, last.values.labels.page.has_more], [labels.slice(1680), false]);
+  // a short one is as it is on the first page, and past its end holds no items, as a table's page does —
+  // paging to the end reads every item once; what an item holds comes whole with it
+  assert.deepEqual(readView({ kind: 'describe', values: { labels: [1, 2] } }).values.labels, [1, 2]);
+  const past = readView({ kind: 'describe', values: { labels: [1, 2], pairs: Array.from({ length: 60 }, (_, i) => [i, i + 1]) } }, { offset: 50, limit: 50 }).values;
+  assert.deepEqual([past.labels.items, past.labels.page.total_rows, past.labels.page.has_more], [[], 2, false]);
+  assert.deepEqual([past.pairs.items.length, past.pairs.items[0]], [10, [50, 51]]);
+});
+
+// ONE READ OF A TASK IN EVERY QUERY TOOL: an analysis is read as pages of its tables, by their row
+// numbers — its own tables first, in the order that answers (the biggest transitions, the events by
+// their peak share, a funnel's steps in order, the metrics that tell the groups apart most), then the
+// library's — each with the page block every query tool's page carries; what it computes beyond rows (a
+// group's profile) is beside them, whole. Pure functions over a result; no warehouse.
+test('a read pages each table of an analysis by its row numbers, the biggest first, with what it computes beside them', async () => {
+  const { readView, holdsPage } = await import('../../src/retentioneering/results.js');
+  const { READ_PAGE } = await import('../../src/schema/fields.js');
+  // a transition graph: the transitions by count, the events by count — every weight, rounded to 4 decimals
+  const edges = Array.from({ length: 60 }, (_, i) => ({ source: `e${i}`, target: 'x', count: i + 1, unique_paths: i, share_of_total: 0.123456, avg_per_path: 1.5, proba_out: 1 / 3, proba_in: 0.5, time_median: 12.345, time_q95: 61.04 }));
+  const graph = { kind: 'transition_graph', nodes: [{ event: 'x', count: 60 }, { event: 'e1', count: 2 }], edges };
+  const first = readView(graph);
+  const transitions = first.tables.find((t) => t.name === 'transitions');
+  // every weight the analysis computes (the facts sheet's edge_weights), a duration's in seconds
+  const { edge_weights: weights } = retentioneeringFacts();
+  assert.deepEqual(transitions.columns, ['from', 'to', ...weights.map((w) => (w.startsWith('time_') ? `${w}_s` : w))]);
+  const top = Object.fromEntries(transitions.columns.map((c, i) => [c, transitions.rows[0][i]]));
+  assert.deepEqual(top, { from: 'e59', to: 'x', count: 60, unique_paths: 59, share_of_total: 0.1235, avg_per_path: 1.5, proba_in: 0.5, proba_out: 0.3333, time_median_s: 12.3, time_q95_s: 61 });
+  assert.deepEqual([transitions.rows.length, transitions.page.offset, transitions.page.limit, transitions.page.has_more, transitions.page.next_offset, transitions.page.total_rows], [READ_PAGE, 0, READ_PAGE, true, READ_PAGE, 60]);
+  assert.deepEqual(first.tables.find((t) => t.name === 'events').rows, [['x', 60], ['e1', 2]]);
+  const next = readView(graph, { offset: 50, limit: 50 }).tables.find((t) => t.name === 'transitions');
+  assert.deepEqual([next.rows.length, next.rows[0][0], next.page.has_more], [10, 'e9', false]);
+  // a step matrix: a row per event, its share at each step, the events by the highest share they reach
+  const matrix = readView({ kind: 'step_matrix', blocks: [{ block: 0, steps: [1, 2], cells: [{ event: 'a', step: 1, share: 0.2 }, { event: 'b', step: 1, share: 0.8 }, { event: 'a', step: 2, share: 0.9 }] }] });
+  assert.deepEqual(matrix.tables.map((t) => [t.name, t.columns, t.rows]), [['step_matrix', ['event', '1', '2'], [['a', 0.2, 0.9], ['b', 0.8, 0]]]]);
+  // a funnel: its steps in order
+  const funnel = readView({ kind: 'funnel', steps: [{ step: 'a', unique_paths: 10, conversion_rate: 1, step_conversion_rate: 1 }, { step: 'b', unique_paths: 4, conversion_rate: 0.4, step_conversion_rate: 0.4 }] });
+  assert.deepEqual(funnel.tables[0].rows.map((r) => [r[0], r[1]]), [['a', 10], ['b', 4]]);
+  // a group overview: each group with its size, share and profile, whole; the metrics as a paged table,
+  // the one that tells the groups apart most first
+  const overview = readView({
+    kind: 'segment_overview', levels: ['ios', 'web'],
+    metrics: [
+      { metric: 'segment_size', label: 'paths', values: [30, 10] }, { metric: 'segment_share', label: 'share of paths', values: [0.75, 0.25] },
+      { metric: 'length', label: 'length', values: [10, 10.5] }, { metric: 'has_event_shop', label: 'share with shop', values: [0.1, 0.9] },
+    ],
+  });
+  assert.deepEqual(overview.levels.map((l) => [l.name, l.size, l.share]), [['ios', 30, 0.75], ['web', 10, 0.25]]);
+  assert.deepEqual(overview.levels[0].profile.map((p) => [p.metric, p.vs_others]), [['share with shop', -0.8], ['length', -0.5]], 'what it stands out on most first');
+  const metrics = overview.tables.find((t) => t.name === 'metrics');
+  assert.deepEqual(metrics.columns, ['metric', 'label', 'ios', 'web']);
+  assert.deepEqual(metrics.rows.map((r) => r[0]), ['has_event_shop', 'length']);
+  // the library's own tables, each a page in its own order, with its role — and whether a page needs more
+  // rows than the task holds (the rest is read from the stored table)
+  const held = { kind: 'describe', tables: [{ name: 'labels', columns: ['path', 'cluster'], rows: Array.from({ length: 20 }, (_, i) => [i, i % 2]), total_rows: 1000, truncated: true, role: 'per_path' }] };
+  const lib = readView(held, { offset: 5, limit: 10 }).tables[0];
+  assert.deepEqual([lib.name, lib.role, lib.rows[0], lib.rows.length, lib.page.total_rows, lib.page.has_more], ['labels', 'per_path', [5, 1], 10, 1000, true]);
+  assert.equal(holdsPage(held, { offset: 5, limit: 10 }), true, 'a page within the rows held');
+  assert.equal(holdsPage(held, { offset: 15, limit: 10 }), false, 'a page past them');
+  assert.equal(holdsPage(held, { offset: 2000, limit: 10 }), true, 'a page past the last row needs none');
+  // an analysis the library raised on is its error alone
+  assert.deepEqual(readView({ kind: 'funnel', error: { type: 'ValueError', message: 'x' } }), { kind: 'funnel', error: { type: 'ValueError', message: 'x' } });
+});
+
+test('a read of an eventstream pages each segment\'s levels; the read refuses detail, telling how to page', async () => {
+  const { withLevels } = await import('../../src/retentioneering/query.js');
+  const out = { kind: 'eventstream', events: 5, segment_levels: { platform: { count: 3, levels: ['ios', 'android', 'web'], users: [5, 3, 1], complete: true } } };
+  const page = withLevels(out, { offset: 1, limit: 1 }).segment_levels.platform;
+  assert.deepEqual([page.count, page.levels, page.page.total_rows, page.page.has_more, page.page.next_offset, page.complete], [3, [{ level: 'android', users: 3 }], 3, true, 2, undefined]);
+  assert.deepEqual(withLevels(out).segment_levels.platform.levels.map((l) => l.level), ['ios', 'android', 'web']);
+  // `detail` is no read's: refused before anything is waited on, with the read that pages instead
+  const e = on();
+  for (const detail of ['full', 'summary']) {
+    await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], detail }), (err) => err.field === 'detail' && /offset/.test(err.message) && /limit/.test(err.message));
+  }
+  // the read's own fields pass the schema (and stop only at the task, which does not exist)
+  await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], offset: 50, limit: 10, wait_seconds: 0 }), (err) => !/invalid input/.test(err.message));
+  await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], cancel: true, offset: 50 }), /invalid input/, 'a cancel does not page');
+  e.close();
 });
 
 test('a read of several path-analysis tasks says how long it waited for them', async () => {
@@ -501,40 +600,72 @@ test('a segment joined from a related model is compared in the type the warehous
   const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
   const start = {
     name: 'x', source: 'events', segments: ['flag'],
-    stages: [
+    steps: [
       { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'flag' }], between },
       { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'flag' }, { value: true }, { value: 'x' }] }] },
     ],
   };
-  await assert.rejects(e.build_retentioneering_model(start), (err) => err.stage === 'validate' && err.field === 'stages[1]' && /'flag' is a text column in the warehouse/.test(err.message));
+  await assert.rejects(e.build_retentioneering_model(start), (err) => err.stage === 'validate' && err.field === 'steps[1]' && /'flag' is a text column in the warehouse/.test(err.message));
   e.close();
 });
 
-// What add_steps answers: every added step under `added`, with what it changed and, when it was not
-// checked, why; the top-level step / changed are an edit's or an insert's. The library's check is a stub.
-test('add_steps lists each added step with what it changed and why one was not checked', async () => {
-  const { commitSteps } = await import('../../src/retentioneering/steps.js');
+// What a step action answers — as the pipeline builder answers: the steps just added (or the one an edit
+// or an insert put in place), each with what it changed and, when it was not checked, why, and
+// steps_count; an edit's, an insert's, a delete's or a truncate's `changed` is what the call changed of
+// the shape at the end; include_steps gives every step instead, include_columns the whole shape after
+// them. The library's check is a stub.
+test('a step action answers with each step it added and what it changed, and steps_count — every step and the whole shape when asked', async () => {
+  const { commitSteps, fork } = await import('../../src/retentioneering/steps.js');
   const shape = (events) => ({ events, paths: ['user_id'], segments: {}, columns: [] });
+  const base = { shape: shape(['a', 'shop_opened', 'tutorial']), model: 'm', summary: {} };
   const commit = (reply, action, input, steps = []) => {
     const feature = { checker: { check: async () => ({ steps: reply }) } };
-    const es = { base: { shape: shape(['a', 'shop_opened', 'tutorial']), model: 'm', summary: {} }, steps, checkpoint: null };
+    const es = { base, steps, checkpoint: null };
     return commitSteps({ ctxs: { touch() {} } }, feature, { id: 'c1', state: {} }, 'es', es, action, input);
   };
   const two = [{ type: 'rename_events', mapping: { shop_opened: 'shop' } }, { type: 'drop_events', names: ['tutorial'] }];
-  const a = await commit([{ ok: true, shape: shape(['a', 'shop', 'tutorial']) }, { ok: true, shape: shape(['a', 'shop']) }], 'add_steps', { steps: two });
-  assert.deepEqual(a.added, [
+  const checkedTwo = [{ ok: true, shape: shape(['a', 'shop', 'tutorial']) }, { ok: true, shape: shape(['a', 'shop']) }];
+  const a = await commit(checkedTwo, 'add_steps', { steps: two });
+  assert.deepEqual(a.steps_added, [
     { index: 1, type: 'rename_events', checked: true, changed: { events_added: ['shop'], events_removed: ['shop_opened'] } },
     { index: 2, type: 'drop_events', checked: true, changed: { events_removed: ['tutorial'] } },
   ]);
-  assert.deepEqual([a.step, a.changed, a.shape.events], [undefined, undefined, ['a', 'shop']]);
+  assert.deepEqual([a.steps_count, a.steps, a.step, a.changed, a.shape], [2, undefined, undefined, undefined, undefined], 'each added step says its change: no total beside them, no shape unless asked');
+  // asked for: every step (as preview lists them), and the whole shape after them
+  const all = await commit(checkedTwo, 'add_steps', { steps: two, include_steps: true, include_columns: true });
+  assert.deepEqual(all.steps.map((s) => [s.index, s.step.type, s.checked, s.materialized, s.changed]), [
+    [1, 'rename_events', true, false, { events_added: ['shop'], events_removed: ['shop_opened'] }],
+    [2, 'drop_events', true, false, { events_removed: ['tutorial'] }],
+  ]);
+  assert.deepEqual([all.steps_added, all.steps_count], [undefined, undefined], 'the list stands for both');
+  assert.deepEqual([all.shape.events, all.shape.paths], [['a', 'shop'], ['user_id']]);
+  // the whole shape is whole: no cut of the events a listing makes
+  const many = Array.from({ length: 250 }, (_, i) => `e${i}`);
+  const wide = await commit([{ ok: true, shape: shape(many) }], 'add_steps', { steps: [two[0]], include_columns: true });
+  assert.deepEqual([wide.shape.events.length, wide.shape.events_more], [250, undefined]);
   // the first step the stand-ins could not carry: its own reason, and the next one's
   const b = await commit([{ ok: null, note: 'the stand-ins could not carry it' }], 'add_steps', { steps: two });
-  assert.deepEqual(b.added.map((s) => [s.index, s.checked, typeof s.note]), [[1, false, 'string'], [2, false, 'string']]);
-  assert.equal(b.added[0].note, 'the stand-ins could not carry it');
+  assert.deepEqual(b.steps_added.map((s) => [s.index, s.checked, typeof s.note]), [[1, false, 'string'], [2, false, 'string']]);
+  assert.equal(b.steps_added[0].note, 'the stand-ins could not carry it');
   assert.deepEqual(b.unchecked_steps, [1, 2]);
-  // an edit names the step it put in place and what that step changed
-  const c = await commit([{ ok: true, shape: shape(['a', 'shop_opened']) }], 'edit_step', { index: 1, step: two[1] }, [{ step: two[0], library: {}, checked: true, shape: shape(['a', 'shop', 'tutorial']) }]);
-  assert.deepEqual([c.step, c.changed, c.added], [{ index: 1, type: 'drop_events', checked: true }, { events_removed: ['tutorial'] }, undefined]);
+  // an edit names the step it put in place with what that step changed, and what the call changed at the end
+  const kept = [{ step: two[0], library: {}, checked: true, shape: shape(['a', 'shop', 'tutorial']) }];
+  const c = await commit([{ ok: true, shape: shape(['a', 'shop_opened']) }], 'edit_step', { index: 1, step: two[1] }, kept);
+  assert.deepEqual(c.step, { index: 1, type: 'drop_events', checked: true, changed: { events_removed: ['tutorial'] } });
+  assert.deepEqual(c.changed, { events_added: ['shop_opened'], events_removed: ['shop', 'tutorial'] });
+  assert.deepEqual([c.steps_added, c.steps_count], [undefined, 1]);
+  // a delete and a truncate: the count, and the change at the end
+  const d = await commit([], 'delete_step', { index: 2 }, [...kept, { step: two[1], library: {}, checked: true, shape: shape(['a', 'shop']) }]);
+  assert.deepEqual([d.steps_count, d.changed, d.step], [1, { events_added: ['tutorial'] }, undefined]);
+  const t = await commit([], 'truncate', { after: 0 }, kept);
+  assert.deepEqual([t.steps_count, t.changed], [0, { events_added: ['shop_opened'], events_removed: ['shop'] }]);
+  // a fork: its own name, the count of the steps it copied — every step and the whole shape when asked
+  const ctx = () => ({ id: 'c1', state: { retentioneering: { eventstreams: { es: { base, steps: structuredClone(kept), checkpoint: null } } } } });
+  const engine = { ctxs: { touch() {} } };
+  const lean = fork(engine, ctx(), { name: 'variant' });
+  assert.deepEqual([lean.eventstream, lean.steps_count, lean.steps, lean.shape], ['variant', 1, undefined, undefined]);
+  const rich = fork(engine, ctx(), { name: 'variant', after: 1, include_steps: true, include_columns: true });
+  assert.deepEqual([rich.steps.map((s) => s.index), rich.steps_count, rich.shape.events], [[1], undefined, ['a', 'shop', 'tutorial']]);
 });
 
 // What a path names and what a filter_events condition holds are checked against the eventstream as
@@ -571,15 +702,15 @@ test('a path is one of the eventstream\'s path columns, and a condition\'s const
   ]) await assert.rejects(add(where), (e) => e.field === 'steps[0].where' && re.test(e.message), JSON.stringify(where));
   // …and one that is, is taken (the check could not run here: nothing refused, nothing ran)
   const ok = await add([level('gte', 2), { fn: 'or', args: [{ fn: 'not', args: [{ fn: 'in', args: [{ column: 'event' }, { value: 'a' }] }] }, level('is_null')] }]);
-  assert.equal(ok.steps, 1);
+  assert.equal(ok.steps_count, 1);
 });
 
-// A start's stages are the pipeline's: a where and a compute case's `when` hold a constant to the rule
-// every where is written by (the one writer, src/pipeline/compute.js), each refusal at its stage.
+// A start's steps are the pipeline's stages: a where and a compute case's `when` hold a constant to the
+// rule every where is written by (the one writer, src/pipeline/compute.js), each refusal at its step.
 // Input guards; no warehouse.
 test('a start\'s where and a compute case take a constant by the rule every where takes it', async () => {
   const e = on();
-  const start = (stages) => e.build_retentioneering_model({ name: 'x', source: 'events', stages });
+  const start = (steps) => e.build_retentioneering_model({ name: 'x', source: 'events', steps });
   const bundle = (fn, ...values) => ({ fn, args: [{ column: 'bundle_id' }, ...values.map((value) => ({ value }))] });
   for (const [cond, re] of [
     [bundle('eq', null), /a missing value is tested with is_null/],
@@ -588,9 +719,9 @@ test('a start\'s where and a compute case take a constant by the rule every wher
     [{ fn: 'gt', args: [{ column: 'session_number' }, { value: 'many' }] }, /'session_number' is a number: compare it with a number/],
     [{ column: 'bundle_id' }, /a where takes conditions/],
   ]) {
-    await assert.rejects(start([{ stage: 'where', conditions: [cond] }]), (err) => err.field === 'stages[0]' && /^stages\[0\] \(where\): /.test(err.message) && re.test(err.message), `where ${JSON.stringify(cond)}`);
+    await assert.rejects(start([{ stage: 'where', conditions: [cond] }]), (err) => err.field === 'steps[0]' && /^steps\[0\] \(where\): /.test(err.message) && re.test(err.message), `where ${JSON.stringify(cond)}`);
     const split = { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [cond], then: { value: 'lost' } }], else: { column: 'event_name' } } };
-    await assert.rejects(start([split]), (err) => err.field === 'stages[0]' && /^stages\[0\] \(compute\): /.test(err.message) && re.test(err.message), `when ${JSON.stringify(cond)}`);
+    await assert.rejects(start([split]), (err) => err.field === 'steps[0]' && /^steps\[0\] \(compute\): /.test(err.message) && re.test(err.message), `when ${JSON.stringify(cond)}`);
   }
   e.close();
 });
@@ -649,7 +780,7 @@ test('a start stored with columns.path is read as path: [column]', async () => {
   assert.deepEqual(now.columns, { event: 'ev', time: 'device_time' });
   // a segment renamed is a compute copy, carried under its name
   assert.deepEqual(now.segments, ['app']);
-  assert.deepEqual(now.stages, [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }]);
+  assert.deepEqual(now.steps, [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }]);
   assert.deepEqual(pathKey(now), ['player_id_of_internal']);
   // the summary a materialize answers with says the path as the stored spec meant it (the warehouse's
   // answers are stubs: one event, two paths)
@@ -659,9 +790,10 @@ test('a start stored with columns.path is read as path: [column]', async () => {
 });
 
 // A start an earlier version stored is read in today's spelling at the one point a path-analysis context
-// is opened (pathContext): its rows' fields as the pipeline's stages, its segments and path as column
-// names — so every reader after it reads one spelling. One in today's spelling is left as it is.
-// Context lifecycle and pure translation; the rows such a start keeps are proved in test/integration/.
+// is opened (pathContext): its rows' fields as the pipeline's stages, its list of them as `steps` (it
+// was `stages`), its segments and path as column names — so every reader after it reads one spelling.
+// One in today's spelling is left as it is. Context lifecycle and pure translation; the rows such a
+// start keeps are proved in test/integration/.
 test('a start stored in an earlier spelling is carried over when its context is opened; one written today is left as it is', async () => {
   const e = on();
   const { currentSpec, currentStep, currentWhere } = await import('../../src/retentioneering/earlier.js');
@@ -677,23 +809,31 @@ test('a start stored in an earlier spelling is carried over when its context is 
     sessions: { gap_minutes: 30 },
   };
   const today = currentSpec(stored, catalog);
-  assert.deepEqual(today.stages, [
+  assert.deepEqual(today.steps, [
     { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }, { value: 'level_completed' }] }] },
     { stage: 'where', conditions: [eq('bundle_id', 'com.omg.wordsearch')] },
     { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between },
   ]);
   assert.deepEqual([today.segments, today.top, today.sessions], [['platform'], 5, { gap_minutes: 30 }]);
-  for (const k of ['where', 'events']) assert.equal(today[k], undefined, k);
+  for (const k of ['where', 'events', 'stages']) assert.equal(today[k], undefined, k);
   // a start converted is one the tool takes, and converting it again changes nothing — by identity
   e.host.validate('build_retentioneering_model', today);
   assert.equal(currentSpec(today, catalog), today);
-  // the context: its kept start converted in place when it is opened, a start written today left alone
+  // a start that named its list `stages` is read with it as its steps, the stages as they were
+  const listed = { name: 'listed', source: 'events', stages: [{ stage: 'where', conditions: [eq('bundle_id', 'x')] }], segments: ['bundle_id'] };
+  const relisted = currentSpec(listed, catalog);
+  assert.deepEqual(relisted, { name: 'listed', source: 'events', steps: listed.stages, segments: ['bundle_id'] });
+  e.host.validate('build_retentioneering_model', relisted);
+  assert.equal(currentSpec(relisted, catalog), relisted);
+  // the context: its kept starts converted in place when it is opened, a start written today left alone
   const ctx = contextFor(e, {});
-  const written = { name: 'today', source: 'events', stages: [{ stage: 'where', conditions: [eq('bundle_id', 'x')] }], segments: ['bundle_id'] };
+  const written = { name: 'today', source: 'events', steps: [{ stage: 'where', conditions: [eq('bundle_id', 'x')] }], segments: ['bundle_id'] };
   ctx.state.retentioneering.eventstreams.old = { model: 'm', source: 'events', spec: stored, steps: [] };
+  ctx.state.retentioneering.eventstreams.listed = { model: 'm1', source: 'events', spec: listed, steps: [] };
   ctx.state.retentioneering.eventstreams.now = { model: 'm2', source: 'events', spec: written, steps: [] };
   pathContext(e, ctx.id);
   assert.deepEqual(ctx.state.retentioneering.eventstreams.old.spec, today);
+  assert.deepEqual(ctx.state.retentioneering.eventstreams.listed.spec, relisted);
   assert.equal(ctx.state.retentioneering.eventstreams.now.spec, written);
   // a kept step: filter_events' earlier list in the grammar (a negation as not(…), which keeps a missing
   // value as it did), the earlier path word as its column — and a step written today as it is

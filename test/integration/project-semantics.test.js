@@ -384,7 +384,7 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
     from fct_player_acquisition group by 1`)).rows;
   const got = rowsOf(await q(ACQ, {
     metrics: ['project_cost', 'project_ctr', 'project_cost_per_touch', 'project_cost_max', 'project_cost_avg', 'project_paid_rows', 'project_touches'],
-    group_by: [mediaSource], order_by: [{ key: 'media_source' }],
+    group_by: [mediaSource], steps: [{ stage: 'order_by', keys: [{ key: 'media_source' }] }],
   }));
   sumsToTotal(got, mediaSource);
   assert.deepEqual(got.map((r) => r.media_source), want.map((r) => r.media_source).sort(), '[entity] one row per media source, in order');
@@ -399,6 +399,34 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
     close(r.project_cost_max, w.cost_max, `[entity] ${w.media_source} max`);
     close(r.project_cost_avg, w.cost_avg, `[entity] ${w.media_source} avg`);
     close(r.project_paid_rows, w.paid, `[entity] ${w.media_source} paid rows`);
+  }
+  // [steps after a project metric query] the read steps run over its result by the names its rows come
+  // back with: a ratio of two metrics per row (the project's own cost per touch), a where on a metric (a
+  // having: the media sources with spend) and an order_by on it — the rows made by hand, filtered,
+  // divided and ranked; and its SQL, explained, is the query with its steps: run as shown, the same rows
+  const spent = want.filter((w) => num(w.cost) > 0).sort((a, b) => num(b.cost) - num(a.cost));
+  assert.ok(spent.length > 1 && spent.length < want.length, '[steps] the having keeps some media sources and not others');
+  const withSteps = {
+    context_id: ACQ, time_range: WINDOW,
+    metrics: ['project_cost', 'project_touches', 'project_cost_per_touch'], group_by: [mediaSource],
+    steps: [
+      { stage: 'compute', name: 'per_touch', expr: { fn: 'div', args: [{ column: 'project_cost' }, { column: 'project_touches' }] } },
+      { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'project_cost' }, { value: 0 }] }] },
+      { stage: 'order_by', keys: [{ key: 'project_cost', direction: 'desc' }] },
+    ],
+  };
+  const stepped = rowsOf(await engine.query_semantic_model(withSteps));
+  const explained = await taskResult(raw, (await raw.query_semantic_model({ ...withSteps, dry_run: true })).task_id);
+  assert.equal(explained.ok, true, JSON.stringify(explained.error));
+  noInternal(explained, '[steps] the explained query');
+  const shown = (await wh.query(explained.sql)).rows;
+  for (const [what, rows] of [['[steps]', stepped], ['[steps, the SQL as shown]', shown]]) {
+    assert.deepEqual(rows.map((r) => r.media_source), spent.map((w) => w.media_source), `${what} the media sources with spend, the largest first`);
+    for (const [i, w] of spent.entries()) {
+      close(rows[i].project_cost, w.cost, `${what} ${w.media_source} cost`);
+      close(rows[i].per_touch, num(w.cost) / (num(w.clicks) + num(w.impressions)), `${what} ${w.media_source} cost per touch`);
+      close(rows[i].per_touch, rows[i].project_cost_per_touch, `${what} ${w.media_source}: the ratio is the project's own`);
+    }
   }
   // a where on the entity and on a dimension
   const [one] = (await wh.query("select sum(cost) as cost from fct_player_acquisition where media_source in ('meta', 'google') and campaign <> 'search_brand'")).rows;

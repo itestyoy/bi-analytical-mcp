@@ -27,12 +27,13 @@ We take pipe syntax as the **design basis** because it is:
 - **uniform** — `WHERE`, `EXTEND`, `AGGREGATE`, `JOIN`, `MATCH_RECOGNIZE`, `ORDER BY`, `LIMIT` are all just operators in the same chain. So **MATCH_RECOGNIZE is not special — it is one stage among many**, exactly as requested.
 - **schema-threading** — each operator has a well-defined input table shape and output table shape, which is what makes validation and safety tractable.
 
-The declarative tool input is a direct transcription of that pipe chain:
+The declarative tool input is a direct transcription of that pipe chain — its `steps`, each a
+stage tagged by its `stage`:
 
 ```jsonc
 {
   "source": "events",
-  "stages": [
+  "steps": [
     { "stage": "where",  "conditions": [ ... ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "args": [ { "property": "words_collected" } ] } },
     { "stage": "unnest", "expr": { "property": "words_collected" }, "name": "word" },
@@ -182,11 +183,12 @@ with the YAML config header. Two consumption modes, unchanged:
 
 1. **Semantic layer on top.** A MetricFlow semantic model is declared over the
    pipeline's output (shared `user` entity → joins to `dim_users` at query time).
-   Metrics/dimensions are queried via `query_semantic_model`. This is how the
-   `match_recognize` pipeline is consumed today.
+   Metrics/dimensions are queried via `query_semantic_model`, whose `steps` re-slice the
+   metric result in the same read stages (a where step on a metric is a having). This is
+   how the `match_recognize` pipeline is consumed today.
 2. **Direct materialization.** `query_semantic_model(materialize:true)` stores a
-   result as a table named after its task; a pipeline started from that task
-   (`build_pipeline_model({ action: 'start', from_task })`) re-slices it with the same
+   result (after its steps) as a table named after its task; a pipeline started from that task
+   (`build_pipeline_model({ action: 'start', name, from_task })`) re-slices it with the same
    stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
 
 `build_semantic_model` stays the declarative way to define measures/metrics over
@@ -195,9 +197,10 @@ creator**: it accepts a `pipeline` (`source` + ordered stages — where/compute/
 aggregate/pivot/unpivot/sample/order_by/limit/project and the `match_recognize` funnel stage;
 window functions are compute expressions). A `pipeline` is materialized as a dbt model whose rows ARE the
 result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
-`query_pipeline_model({ context_id, stages })` filters and regroups the built model in the
+`query_pipeline_model({ context_id, steps })` filters and regroups the built model in steps of the
 pipeline's own stages — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project,
-rendered by `renderRead` into one statement over the stored table — and a pipeline started from it
+rendered by `renderRead` into one statement over the stored table; `dry_run: true` returns that
+statement instead of its rows — and a pipeline started from it
 with `from_task` re-slices them with every stage).
 
 ### 6.1 Continuing a pipeline on top of what it already built (checkpoints)
@@ -262,7 +265,7 @@ Declarative pipeline:
 {
   "source": "events",
   "time_range": { "start": "2026-01-01" },
-  "stages": [
+  "steps": [
     { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ],
       "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
     { "stage": "where",  "conditions": [ { "fn": "eq", "args": [ { "column": "country" }, { "value": "US" } ] } ] },

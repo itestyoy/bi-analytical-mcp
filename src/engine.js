@@ -317,10 +317,10 @@ export class Engine {
     if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
     if (job.status !== 'ready' || !job.table) {
       // a query over a pipeline model reads that model's table and stores nothing: the table it read
-      // is the one to start from, the query's stages given again as its steps
+      // is the one to start from, the query's steps given again as the draft's
       const built = job.tool === 'query_pipeline_model' && this.ctxs.has(job.contextId) ? this.ctxs.get(job.contextId).state.pipeline_model?.task_id : null;
       const why = job.status === 'error' ? 'it failed'
-        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") with the query's stages as its steps (stages)` : ': start from the pipeline build\'s task, or continue that draft'}`
+        : job.tool === 'query_pipeline_model' ? `a query over a pipeline model is not stored — it reads the model's table${built ? `: start from that build's task (from_task: "${built}") with the query's steps as the draft's (steps)` : ': start from the pipeline build\'s task, or continue that draft'}`
           : 'only a query run with materialize:true, or a pipeline build, stores its result as a table';
       throw new ToolError(`task ${job.id} holds no stored table to start from — ${why}`, { stage: 'validate', field: 'from_task' });
     }
@@ -605,7 +605,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', stages } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', steps } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }

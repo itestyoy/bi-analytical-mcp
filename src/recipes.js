@@ -17,15 +17,16 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { pythonReferenceRecipes } from './python-guide.js';
 import { currentSpelling } from './pipeline/earlier.js';
-import { currentOf, currentMetrics } from './earlier-spelling.js';
+import { currentOf, currentMetrics, currentQueryInput } from './earlier-spelling.js';
 
 /**
  * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
  * earlier version carries `{ name, pipeline: { source, time_range?, stages } }` — the one-call contract
- * no tool takes — and stages in an earlier spelling; a deployment's file is not ours to rewrite, so it
- * is read as that request here, each stage respelled as a kept draft's is (src/pipeline/earlier.js;
- * with no columns known, an unnest's `source` is read as an event property, the build's first
- * choice): what the recipe view hands over is always a request the tool accepts as it stands.
+ * no tool takes — or its first steps as `stages`, and stages in an earlier spelling; a deployment's file
+ * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage respelled
+ * as a kept draft's is (src/pipeline/earlier.js; with no columns known, an unnest's `source` is read as
+ * an event property, the build's first choice): what the recipe view hands over is always a request the
+ * tool accepts as it stands.
  */
 export function pipelineStartRequest(payload) {
   if (!payload || typeof payload !== 'object') return payload;
@@ -35,9 +36,13 @@ export function pipelineStartRequest(payload) {
     const { pipeline, context_id: _ctx, dry_run: _dry, ...rest } = payload;
     request = { action: 'start', ...rest, ...pipeline };
   }
-  if (!Array.isArray(request.stages)) return request;
-  const stages = request.stages.map((st) => currentSpelling(st));
-  return stages.every((st, i) => st === request.stages[i]) ? request : { ...request, stages };
+  if (request.steps === undefined && Array.isArray(request.stages)) {
+    const { stages, ...rest } = request;
+    request = { ...rest, steps: stages };
+  }
+  if (!Array.isArray(request.steps)) return request;
+  const steps = request.steps.map((st) => currentSpelling(st));
+  return steps.every((st, i) => st === request.steps[i]) ? request : { ...request, steps };
 }
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -123,7 +128,9 @@ export function experimentMap(e) {
   return { ...rest, arm };
 }
 
-/** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. */
+/** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. An example query
+ *  written for an earlier version (a metric query's `order_by`, a read's `stages` / `transform`) is read
+ *  as the query it is now — its steps (src/earlier-spelling.js currentQueryInput). */
 function readFile(path, origin) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -131,6 +138,7 @@ function readFile(path, origin) {
     ...r,
     ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}),
     ...(r.semantic_payload ? { semantic_payload: semanticRequest(r.semantic_payload) } : {}),
+    ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map(currentQueryInput) } : {}),
     ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
     origin,
   }));

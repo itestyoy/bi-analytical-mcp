@@ -26,7 +26,7 @@ export const semanticIndexMethods = {
       ...(payload ? { pipeline_payload: payload } : {}),
       ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its stages — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its steps — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
     };
   },
 
@@ -43,15 +43,15 @@ export const semanticIndexMethods = {
    */
   _fitRecipePipeline(payload) {
     const fitted = [];
-    const stages = payload?.stages;
-    if (!Array.isArray(stages)) return { payload: null, fitted };
+    const steps = payload?.steps;
+    if (!Array.isArray(steps)) return { payload: null, fitted };
     const source = payload.source;
     // A recipe is shipped for every deployment, so it may name a source THIS catalog does not have.
     // getModel throws on an unknown key, and the recipe view would then fail outright instead of
     // showing the recipe (the caller can still read it and adapt it). Fitting is best-effort.
     let eventTime = null;
     if (source) { try { eventTime = this.catalog.getModel(source)?.time?.column || null; } catch { eventTime = null; } }
-    const next = stages.map((st) => {
+    const next = steps.map((st) => {
       if (st?.stage !== 'join' || st.between || !st.with || !eventTime) return st;
       let m; try { m = this.catalog.getModel(st.with); } catch { return st; }
       if (!m?.scd) return st;
@@ -61,7 +61,7 @@ export const semanticIndexMethods = {
       fitted.push(`join with '${st.with}': added between { column: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
       return { ...st, between: { column: eventTime, from, to } };
     });
-    return { payload: fitted.length ? { ...payload, stages: next } : null, fitted };
+    return { payload: fitted.length ? { ...payload, steps: next } : null, fitted };
   },
 
   /**
@@ -179,7 +179,7 @@ export const semanticIndexMethods = {
       const viaable = rels.filter((r) => r.joins);
       const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
       const notes = [];
-      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { stages: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' }, with the model loaded by a semantic_models item { from: '${viaable[0].joins}' }.`);
+      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { steps: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' }, with the model loaded by a semantic_models item { from: '${viaable[0].joins}' }.`);
       // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
       // onto a unique key) — say so here, or it looks like a missing feature at query time.
       if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
@@ -640,7 +640,7 @@ export const semanticIndexMethods = {
         ...(c.pythonRuntime.method && !c.pythonRuntime.method_declared
           ? { submission_note: `Nothing declares the submission: '${c.pythonRuntime.method}' is inferred from the profile's settings, and this server writes it into every python model it generates so the frame API and the runtime agree. Declare it where dbt itself looks — dbt_project.yml, models: +submission_method — and direct \`dbt run\` outside this server matches too.` }
           : {}),
-        note: 'A pipeline may end in a `python` stage (build_pipeline_model add_steps { stages: [{ stage: "python", … }] }): dbt runs it as a Python model on the warehouse runtime.',
+        note: 'A pipeline may end in a `python` stage (build_pipeline_model add_steps { steps: [{ stage: "python", … }] }): dbt runs it as a Python model on the warehouse runtime.',
       }
       : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
     // The dbt project's own semantic layer: its metrics, queried in their context without a build —

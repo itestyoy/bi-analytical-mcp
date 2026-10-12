@@ -29,10 +29,11 @@ export function makeValidators(schemas) {
  * ONE VOCABULARY, AND THE SPELLINGS A CALLER BRINGS FROM ELSEWHERE. An aggregation is a function
  * (`fn`), the mean is `average`, a quantile is `percentile`, the name a step produces is `name`, a
  * context is `context_id`, a list of measures is `measures`, what a note is about is `about`, a
- * substring filter is `search` and a time window `time_range`; a caller used to SQL or another tool
- * (or to an earlier version of this one) writes `avg`, `q`, `agg`, `as`, `draft_id`, `aggregations`,
- * `targets`, `text`, `since` — or a stage's earlier field: a limit's `n`, a sample's `percent`,
- * unpivot's `name_as` / `value_as`, a funnel's `mode` —
+ * substring filter is `search`, a time window `time_range`, and a list a tool runs in order `steps`
+ * (one of them `step`; each item tagged by what it is — a SQL stage by `stage`); a caller used to SQL or
+ * another tool (or to an earlier version of this one) writes `avg`, `q`, `agg`, `as`, `draft_id`,
+ * `aggregations`, `targets`, `text`, `since`, `stages` — or a stage's earlier field: a limit's `n`, a
+ * sample's `percent`, unpivot's `name_as` / `value_as`, a funnel's `mode` —
  * and the refusal says what this server calls it, when that name is allowed where it was written.
  * A hint, never an alias: the other spelling is refused. (A whole value of an earlier spelling — a
  * condition, a measure — is shown converted instead: earlierSpellings below.)
@@ -55,6 +56,10 @@ export const CROSS_PATH_SPELLING = {
   since: 'time_range',
   until: 'time_range',
   model: 'source',
+  // the list a tool runs in order, and one of its items — hinted only where the field it became is
+  // taken, so a stage's own `stage` tag (its kind, in a form with no `step`) is never touched
+  stages: 'steps',
+  stage: 'step',
   // a stage's earlier field, hinted only in the stage that has the field it became (a form with a
   // `mode` of its own — a frame, a drill — takes it as written)
   n: 'limit',

@@ -38,8 +38,8 @@ export const TYPES = ['int', 'numeric', 'float', 'string'];
 export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read, an unnested element or a raw expression yields, a CASE result.' };
 
 /**
- * ONE SORT KEY — the order_by stage's keys, a window's over.order_by and a read's order_by: a column,
- * its direction, and where its NULLs go. An omitted `nulls` is last on every warehouse (each writes it
+ * ONE SORT KEY — the order_by stage's keys (a build's, a read's, the steps after a metric query) and a
+ * window's over.order_by: a column, its direction, and where its NULLs go. An omitted `nulls` is last on every warehouse (each writes it
  * explicitly: their own defaults differ), so a top-N or a row_number over a nullable key is the same rows
  * everywhere.
  */

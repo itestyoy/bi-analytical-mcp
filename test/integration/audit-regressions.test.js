@@ -88,11 +88,11 @@ const evtsTask = (eng, name, load = []) => eng.build_semantic_model({
   name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, ...load.map((from) => ({ from }))],
   metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
 });
-/** Run a pipeline of stages and return its rows. */
-async function pipeRows(source, stages, eng = engine) {
+/** Run a pipeline of steps and return its rows. */
+async function pipeRows(source, steps, eng = engine) {
   const s = await eng.build_pipeline_model({ action: 'start', name: `au_${seq++}`, source });
-  for (const stage of stages) {
-    const r = await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
+  for (const step of steps) {
+    const r = await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps failed: ${JSON.stringify(r.error || r)}`);
   }
   const c = await eng.build_pipeline_model({ action: 'materialize', context_id: s.context_id });

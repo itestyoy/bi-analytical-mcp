@@ -38,7 +38,7 @@ export const pipelineMaterializeMethods = {
    */
   _chainModels(chain, pipeline) {
     return chain.map((seg) => (seg.kind === 'sql'
-      ? { model: seg.model, kind: 'sql', input: seg.input, stages: seg.stages.map((st) => st.stage), sql: seg.sql, columns: [...seg.columns.keys()] }
+      ? { model: seg.model, kind: 'sql', input: seg.input, steps: seg.stages.map((st) => st.stage), sql: seg.sql, columns: [...seg.columns.keys()] }
       : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, functions: py.functions, bindings: py.bindings, columns: [...seg.columns.keys()] }; })()));
   },
 
@@ -94,7 +94,7 @@ export const pipelineMaterializeMethods = {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
       return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, ymlConfig: this._expiryConfig('python'), pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
-    } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
+    } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'step' }); }
   },
 
   /** The static gate over ONE python stage's function bodies (the incremental builder's path). */
@@ -151,7 +151,7 @@ export const pipelineMaterializeMethods = {
   },
 
   async _draftMaterialize(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
+    if (!draft.stages.length) throw new ToolError('draft has no steps to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
       throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });
     }
@@ -240,7 +240,7 @@ export const pipelineMaterializeMethods = {
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;
-    }, { input: { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
+    }, { input: { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), steps: stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
     draft.building.task_id = taskId;
     this.jobs.setTable(taskId, modelName); // the table this task leaves behind (paged, drawn, started from)
     // The built table STANDS FOR the first `stages.length` steps from now on: record the checkpoint
@@ -409,7 +409,7 @@ export const pipelineMaterializeMethods = {
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
           : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
-        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_pipeline_model({ request: { task_ids, offset, limit } }), or filter / regroup them with query_pipeline_model({ request: { context_id, stages } }) — the pipeline's own stages, run over the stored table.`,
+        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_pipeline_model({ request: { task_ids, offset, limit } }), or filter / regroup them with query_pipeline_model({ request: { context_id, steps } }) — the pipeline's own stages, run over the stored table.`,
       ],
       warnings: [
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
@@ -417,7 +417,7 @@ export const pipelineMaterializeMethods = {
         // reaches the caller as plausible numbers.
         ...this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
         ...((this.runner && rows.length === 0)
-          ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
+          ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the steps / widen the window.`]
           : []),
       ],
     };

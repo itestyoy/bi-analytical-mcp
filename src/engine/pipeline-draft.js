@@ -15,8 +15,8 @@ const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
 export const pipelineDraftMethods = {
   /**
    * Compose a pipeline INCREMENTALLY (single tool, `action`-driven). Each
-   * add_steps validates each stage and returns the columns now available for the next
-   * stage — pure schema propagation via renderPipeline, NO warehouse hit until materialize.
+   * add_steps validates each step and returns the columns now available for the next
+   * one — pure schema propagation via renderPipeline, NO warehouse hit until materialize.
    * The all-at-once _buildPipeline path is unchanged. Lifecycle:
    * start → add_steps* → (preview) → materialize | discard.
    */
@@ -29,11 +29,11 @@ export const pipelineDraftMethods = {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.context_id}' — start one with build_pipeline_model({ request: { action: 'start', name, source } })`, { stage: 'validate', field: 'context_id' });
     this.ctxs.touch(ctx.id);
-    if (input.action === 'add_steps') return this._draftThenBuild(ctx, draft, input, await this._draftAddSteps(ctx, draft, input.stages, input.include_columns, input.include_steps, { building: !!input.materialize }));
-    if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
-    if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
-    if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
-    if (input.action === 'truncate') return this._draftTruncate(ctx, draft, input.after, input.include_columns);
+    if (input.action === 'add_steps') return this._draftThenBuild(ctx, draft, input, await this._draftAddSteps(ctx, draft, input.steps, input.include_columns, input.include_steps, { building: !!input.materialize }));
+    if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.step, input.include_columns, input.include_steps);
+    if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.step, input.include_columns, input.include_steps);
+    if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns, input.include_steps);
+    if (input.action === 'truncate') return this._draftTruncate(ctx, draft, input.after, input.include_columns, input.include_steps);
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { context_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
@@ -244,7 +244,7 @@ export const pipelineDraftMethods = {
       // step is — at compile, naming the step — with how to mend it
       const at = this._failingStepIndex(draft.source, plan.stages, physSet, plan.from);
       const step = at != null ? plan.stepOf(at) : null;
-      throw new ToolError(`${step ? `step ${step}: ` : ''}${e.message} — a step this draft already holds; fix it with edit_step${step ? ` (index: ${step})` : ''}`, { stage: 'compile', field: 'stages' });
+      throw new ToolError(`${step ? `step ${step}: ` : ''}${e.message} — a step this draft already holds; fix it with edit_step${step ? ` (index: ${step})` : ''}`, { stage: 'compile', field: 'steps' });
     }
   },
 
@@ -322,7 +322,7 @@ export const pipelineDraftMethods = {
 
   async _draftStart(input) {
     // materialize builds the steps the call adds: a start that adds none would build nothing
-    if (input.materialize && !input.stages?.length) throw new ToolError('materialize: true builds the steps this start adds — give them in `stages`, or materialize later with build_pipeline_model({ request: { action: "materialize", context_id } })', { stage: 'validate', field: 'materialize' });
+    if (input.materialize && !input.steps?.length) throw new ToolError('materialize: true builds the steps this start adds — give them in `steps`, or materialize later with build_pipeline_model({ request: { action: "materialize", context_id } })', { stage: 'validate', field: 'materialize' });
     const found = input.from_task ? this._taskBase(input) : null;
     if (input.context_id) this._ctxToWrite(input.context_id); // refused before the warehouse is asked
     const base = found ? await this._baseWithPhysical(found.base) : null;
@@ -342,24 +342,24 @@ export const pipelineDraftMethods = {
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
-      next: `Append stages with build_pipeline_model({ request: { action: "add_steps", context_id: "${ctx.id}", stages: [...] } }) — a logical chunk at a time; each response shows what each stage added or removed (include_columns:true or preview for the full list).`,
+      next: `Append steps with build_pipeline_model({ request: { action: "add_steps", context_id: "${ctx.id}", steps: [...] } }) — a logical chunk at a time; each response shows what each step added or removed (include_columns:true or preview for the full list).`,
       recommendations: [
         base
-          ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first stage can reference (include_columns:true lists them); nothing before it is recomputed.`
-          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
+          ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first step can reference (include_columns:true lists them); nothing before it is recomputed.`
+          : `The source has ${cols.length} columns your first step can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/compute then aggregate.`,
         buildHint,
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
-    if (!input.stages?.length) return resp;
+    if (!input.steps?.length) return resp;
     // a draft may start with its first chunk of steps — start + add_steps in one call, and with
     // materialize: true the build after them too
     let added;
     try {
-      added = await this._draftAddSteps(ctx, ctx.state.draft, input.stages, input.include_columns, input.include_steps, { building: !!input.materialize });
+      added = await this._draftAddSteps(ctx, ctx.state.draft, input.steps, input.include_columns, input.include_steps, { building: !!input.materialize });
     } catch (e) {
-      throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (context_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: e.field || 'stages', code: e.code });
+      throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (context_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: e.field || 'steps', code: e.code });
     }
     const { context_id: _id, action: _a, ...rest } = added;
     // the steps are what add_steps says they are (steps_added + steps_count, or steps with include_steps);
@@ -370,25 +370,25 @@ export const pipelineDraftMethods = {
   },
 
   /**
-   * Append stages — one or several — in one call, applied SEQUENTIALLY. The response folds the per-step
-   * effects together — for each stage, how it changed the columns (added / removed count) and any
+   * Append steps — one or several — in one call, applied SEQUENTIALLY. The response folds the per-step
+   * effects together — for each step, how it changed the columns (added / removed count) and any
    * warnings — so you see the same "how each application affected the data" detail as adding them
-   * one at a time, in a single reply. ATOMIC: if any stage fails validation the whole batch is
-   * rolled back (nothing applied) and the failing step is named. One stage is a list of one: there
+   * one at a time, in a single reply. ATOMIC: if any step fails validation the whole batch is
+   * rolled back (nothing applied) and the failing step is named. One step is a list of one: there
    * is no second action for it. `building`: the same call goes on to build them (materialize: true),
    * so a step is not told to materialize when done.
    */
   async _draftAddSteps(ctx, draft, stages, includeColumns = false, includeSteps = false, { building = false } = {}) {
-    if (!Array.isArray(stages) || !stages.length) throw new ToolError('add_steps needs a non-empty `stages` array', { stage: 'validate', field: 'stages' });
+    if (!Array.isArray(stages) || !stages.length) throw new ToolError('add_steps needs a non-empty `steps` array', { stage: 'validate', field: 'steps' });
     const snapshot = draft.stages.slice(); // atomic: restore on any failure so the draft is never half-applied
     const effects = [];
     let last = null; const dropped = [];
     try {
       for (const [i, stage] of stages.entries()) {
         let r;
-        // named by its place in `stages`, one stage or several (`stage` is edit_step's field, not this one's)
+        // named by its place in `steps`, one step or several (`step` is edit_step's field, not this one's)
         try { r = await this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns: false, includeSteps: true, action: 'add_steps', building }); }
-        catch (e) { throw new ToolError(`stages[${i}]: ${e.message}`, { stage: e.stage || 'compile', field: `stages[${i}]`, code: e.code }); }
+        catch (e) { throw new ToolError(`steps[${i}]: ${e.message}`, { stage: e.stage || 'compile', field: `steps[${i}]`, code: e.code }); }
         last = r; if (r.checkpoints_dropped) dropped.push(...r.checkpoints_dropped);
         effects.push({
           step_index: r.step_index,
@@ -403,21 +403,21 @@ export const pipelineDraftMethods = {
     } catch (e) {
       draft.stages = snapshot; this.ctxs.touch(ctx.id);
       if (stages.length === 1) throw e;
-      throw new ToolError(`${e.message} — none of the ${stages.length} stages was added (fix that one and send them again)`, { stage: e.stage || 'compile', field: e.field || 'stages', code: e.code });
+      throw new ToolError(`${e.message} — none of the ${stages.length} steps was added (fix that one and send them again)`, { stage: e.stage || 'compile', field: e.field || 'steps', code: e.code });
     }
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const after = this._draftColumns(draft, physSet);
     // the steps just added — the caller has the earlier ones; the whole list with include_steps or preview
     const all = this._draftSteps(draft, physSet);
     const resp = {
-      context_id: ctx.id, action: 'add_steps', added: effects.length,
+      context_id: ctx.id, action: 'add_steps',
       ...(includeSteps ? { steps: all } : { steps_added: all.slice(-effects.length), steps_count: all.length }),
-      // what EACH stage did to the data, in order: read it top to bottom to see where it narrowed or widened
+      // what EACH step did to the data, in order: read it top to bottom to see where it narrowed or widened
       step_effects: effects,
       column_count: after.length,
       ...(last.from_checkpoint ? { from_checkpoint: last.from_checkpoint, steps_recomputed: last.steps_recomputed } : {}),
       ...(dropped.length ? { checkpoints_dropped: dropped } : {}),
-      next: 'Check step_effects (each stage\'s column changes and recommendations), then add the next logical chunk, fix a step (edit_step / insert_step / delete_step / truncate), or materialize. include_columns: true or preview gives the full column list.',
+      next: 'Check step_effects (each step\'s column changes and recommendations), then add the next logical chunk, fix a step (edit_step / insert_step / delete_step / truncate), or materialize. include_columns: true or preview gives the full column list.',
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
@@ -432,40 +432,41 @@ export const pipelineDraftMethods = {
   },
 
   /** Replace step N in place (then revalidate the whole pipeline end-to-end). */
-  async _draftEditStep(ctx, draft, index, stage, includeColumns = false) {
+  async _draftEditStep(ctx, draft, index, stage, includeColumns = false, includeSteps = false) {
     const i = this._stepIndex(draft, index, 'edit_step');
     const next = draft.stages.slice(); next[i - 1] = stage;
-    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'edit_step', stepIndex: i, dropFrom: i });
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, includeSteps, action: 'edit_step', stepIndex: i, dropFrom: i });
   },
 
   /** Insert a step BEFORE position N (1-based; N = count+1 appends). */
-  async _draftInsertStep(ctx, draft, index, stage, includeColumns = false) {
+  async _draftInsertStep(ctx, draft, index, stage, includeColumns = false, includeSteps = false) {
     if (!Number.isInteger(index) || index < 1 || index > draft.stages.length + 1) {
       throw new ToolError(`insert_step index=${index} out of range — use 1..${draft.stages.length + 1} (insert before that step; ${draft.stages.length + 1} appends)`, { stage: 'validate', field: 'index' });
     }
     const next = draft.stages.slice(); next.splice(index - 1, 0, stage);
-    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'insert_step', stepIndex: index, dropFrom: index });
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, includeSteps, action: 'insert_step', stepIndex: index, dropFrom: index });
   },
 
   /** Delete step N (then revalidate the remaining downstream steps). */
-  async _draftDeleteStep(ctx, draft, index, includeColumns = false) {
+  async _draftDeleteStep(ctx, draft, index, includeColumns = false, includeSteps = false) {
     const i = this._stepIndex(draft, index, 'delete_step');
     const next = draft.stages.slice(); next.splice(i - 1, 1);
-    return this._draftCommit(ctx, draft, next, { changedStage: null, includeColumns, action: 'delete_step', stepIndex: Math.min(i, next.length), dropFrom: i });
+    return this._draftCommit(ctx, draft, next, { changedStage: null, includeColumns, includeSteps, action: 'delete_step', stepIndex: Math.min(i, next.length), dropFrom: i });
   },
 
   /** Drop every step after position N — the cheap "go back to step N" (after=0 empties the draft). */
-  async _draftTruncate(ctx, draft, after, includeColumns = false) {
+  async _draftTruncate(ctx, draft, after, includeColumns = false, includeSteps = false) {
     if (!Number.isInteger(after) || after < 0 || after > draft.stages.length) {
       throw new ToolError(`truncate after=${after} out of range — the draft has ${draft.stages.length} step(s); use 0..${draft.stages.length}`, { stage: 'validate', field: 'after' });
     }
-    return this._draftCommit(ctx, draft, draft.stages.slice(0, after), { changedStage: null, includeColumns, action: 'truncate', stepIndex: after, dropFrom: after + 1 });
+    return this._draftCommit(ctx, draft, draft.stages.slice(0, after), { changedStage: null, includeColumns, includeSteps, action: 'truncate', stepIndex: after, dropFrom: after + 1 });
   },
 
   /**
    * Branch a NEW draft from an existing draft (or an already-materialized pipeline) keeping
    * steps 1..after — so you iterate on a variant WITHOUT re-typing the shared prefix and
-   * WITHOUT touching the original. after omitted → copy every step.
+   * WITHOUT touching the original. after omitted → copy every step. A fork is a draft of its own,
+   * under the name the call gives it (required): its builds are told apart from the original's.
    */
   async _draftFork(input) {
     const src = this._ctx(input.context_id);
@@ -475,7 +476,7 @@ export const pipelineDraftMethods = {
     const after = input.after == null ? total : input.after;
     if (!Number.isInteger(after) || after < 0 || after > total) throw new ToolError(`fork after=${input.after} out of range — the source has ${total} step(s); use 0..${total}`, { stage: 'validate', field: 'after' });
     const ctx = this.ctxs.create();
-    const name = input.name || origin.name;
+    const name = input.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
     const description = input.description || origin.description;
     ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], ...(origin.base ? { base: JSON.parse(JSON.stringify(origin.base)) } : {}), ...(description ? { description } : {}) };
@@ -510,7 +511,9 @@ export const pipelineDraftMethods = {
     const resp = {
       context_id: ctx.id, action: 'fork', forked_from: input.context_id, name, source: ctx.state.draft.source,
       materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
-      steps: this._draftSteps(ctx.state.draft, physSet), column_count: cols.length,
+      // the caller has the steps it forked; every one of them with include_steps (or preview)
+      ...(input.include_steps ? { steps: this._draftSteps(ctx.state.draft, physSet) } : { steps_count: after }),
+      column_count: cols.length,
       ...(inherited.length ? { inherited_checkpoints: inherited } : {}),
       next: 'Continue editing this NEW draft (add_steps / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
       recommendations: [
@@ -561,7 +564,7 @@ export const pipelineDraftMethods = {
       // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
       const at = this._failingStepIndex(draft.source, plan.stages, physSet, plan.from);
       const step = at != null ? plan.stepOf(at) : null;
-      throw new ToolError(step ? `step ${step}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
+      throw new ToolError(step ? `step ${step}: ${e.message}` : e.message, { stage: 'compile', field: 'step' });
     }
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
     // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.
@@ -597,15 +600,15 @@ export const pipelineDraftMethods = {
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
     const allSteps = this._draftSteps(draft, physSet);
-    // add_steps is APPEND-ONLY: the AI already saw every prior step in earlier responses, so echoing
-    // the whole (growing) steps list each call is O(n²) waste across a build. Return only the applied
-    // step + a count by default; the full list is available via include_steps:true or preview.
-    // edit/insert/delete/truncate DO reshuffle the sequence, so they always return the full list.
-    const leanSteps = action === 'add_steps' && !includeSteps;
+    // The caller already saw every step in earlier answers, so echoing the whole (growing) list on each
+    // call is O(n²) waste across a build. By default: the step this call put in place (an edit's, an
+    // insert's — a delete or a truncate places none) and steps_count; every step with include_steps:true
+    // or preview. The retentioneering builder answers the same way.
+    const leanSteps = !includeSteps;
     const resp = {
       context_id: ctx.id, action, step_index: stepIndex ?? draft.stages.length,
       ...(leanSteps
-        ? { step: allSteps.find((s) => s.index === (stepIndex ?? draft.stages.length)) || allSteps[allSteps.length - 1], steps_count: allSteps.length }
+        ? { ...(changedStage ? { step: allSteps.find((s) => s.index === (stepIndex ?? draft.stages.length)) || allSteps[allSteps.length - 1] } : {}), steps_count: allSteps.length }
         : { steps: allSteps }),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
@@ -616,13 +619,13 @@ export const pipelineDraftMethods = {
       ...(plan.checkpoint ? { from_checkpoint: { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at }, steps_recomputed: newStages.length - plan.checkpoint.at } : {}),
       ...(retiredNow.length ? { checkpoints_dropped: retiredNow } : {}),
       next: action === 'add_steps'
-        ? 'add_steps the next stages; or fix a prior step with edit_step/insert_step/delete_step/truncate; or materialize. Pass include_columns:true / preview for the full column list.'
+        ? 'add_steps the next steps; or fix a prior step with edit_step/insert_step/delete_step/truncate; or materialize. Pass include_columns:true / preview for the full column list.'
         : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include_columns:true for the full list).',
       recommendations: [
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
-        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
+        ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.joinCompletenessWarnings(changedStage, draft), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after, { building })] : []),
       ],
     };
@@ -640,7 +643,7 @@ export const pipelineDraftMethods = {
    * not run empty: the check covers the SQL models before the first one.
    */
   async _draftValidate(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to validate — add_steps first', { stage: 'validate', field: 'context_id' });
+    if (!draft.stages.length) throw new ToolError('draft has no steps to validate — add_steps first', { stage: 'validate', field: 'context_id' });
     if (!this.runner?.run) throw new ToolError('no warehouse runner configured — nothing to validate against', { stage: 'validate' });
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const plan = this._renderPlan(draft);
@@ -664,7 +667,7 @@ export const pipelineDraftMethods = {
       } finally {
         this.ctxs.removePipelineFiles(ctx.id, modelName);
       }
-    }, { input: { action: 'preview', validate: true, context_id: ctx.id, name: draft.name, source: draft.source, stages: draft.stages } });
+    }, { input: { action: 'preview', validate: true, context_id: ctx.id, name: draft.name, source: draft.source, steps: draft.stages } });
     return this._taskStarted(taskId, { context_id: ctx.id });
   },
 
@@ -672,7 +675,7 @@ export const pipelineDraftMethods = {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
-    if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_steps first.' };
+    if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No steps yet — add_steps first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
     // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.
     const plan = this._renderPlan(draft);

@@ -39,17 +39,17 @@ test('build_pipeline_model: start returns a draft + source column count (full li
 test('build_pipeline_model: add_steps propagates columns; bad step is rejected without mutating the draft', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'inc', source: 'events' });
-  const a1 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr], include_columns: true });
+  const a1 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], include_columns: true });
   assert.equal(stepEffect(a1).step_index, 1);
   const cols = a1.available_columns.map((c) => c.name);
   assert.ok(cols.includes('player_id_of_internal'), 'partition key carried');
   assert.ok(cols.includes('reached_a') && cols.includes('completed'), 'funnel output columns available');
   // a second stage references the funnel output produced by the first.
-  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], include_columns: true });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], include_columns: true });
   assert.equal(stepEffect(a2).step_index, 2);
   assert.deepEqual(a2.available_columns.map((c) => c.name), ['completed', 'n']);
   // a stage referencing a missing column is rejected and NOT persisted.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'project', keep: ['no_such_col'] }] }));
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'project', keep: ['no_such_col'] }] }));
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.equal(pv.steps.length, 2, 'rejected step not persisted');
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (schema-only)');
@@ -60,8 +60,8 @@ test('build_pipeline_model: add_steps propagates columns; bad step is rejected w
 test('build_pipeline_model: add_steps returns only the applied step by default; include_steps:true gives the full list', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'lean', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
-  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['currency_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['currency_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   // lean by default: the applied step + a count, NOT the whole steps array.
   assert.equal(a2.steps, undefined, 'the growing steps array is not re-echoed on add_steps');
   assert.equal(a2.steps_count, 2, 'steps_count reports the pipeline length');
@@ -69,19 +69,22 @@ test('build_pipeline_model: add_steps returns only the applied step by default; 
   assert.equal(a2.steps_added[a2.steps_added.length - 1].index, 2);
   assert.ok(stepNotes(a2).some((r) => /include_steps:true|preview/.test(r)), 'recommendation points to the full-list drill');
   // opt back in to the full list.
-  const a3 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }], include_steps: true });
+  const a3 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }], include_steps: true });
   assert.ok(Array.isArray(a3.steps) && a3.steps.length === 3, 'include_steps:true returns the full steps array');
   assert.equal(a3.steps_count, undefined, 'full list mode does not also send the count');
-  // edit_step still returns the full list (the sequence changed).
-  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id: s.context_id, index: 1, stage: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_failed' }] }] } });
-  assert.ok(Array.isArray(ed.steps) && ed.steps.length === 3, 'edit_step returns the full reshuffled sequence');
+  // an edit answers alike: the step it put in place + the count; the full list only when asked for
+  const where = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_failed' }] }] };
+  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id: s.context_id, index: 1, step: where });
+  assert.deepEqual([ed.steps, ed.step.index, ed.step.stage, ed.steps_count], [undefined, 1, 'where', 3], 'edit_step returns the step it placed and the count');
+  const full = await e.build_pipeline_model({ action: 'edit_step', context_id: s.context_id, index: 1, step: where, include_steps: true });
+  assert.deepEqual([full.steps.length, full.step, full.steps_count], [3, undefined, undefined], 'include_steps:true returns the full sequence');
 });
 
 // #1: by default add_steps returns a DIFF (what this stage changed), not the whole schema.
 test('build_pipeline_model: add_steps returns a column diff by default', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'diff', source: 'events' });
-  const a1 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr] });
+  const a1 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
   assert.equal(a1.available_columns, undefined, 'no full dump by default');
   assert.ok(typeof a1.column_count === 'number' && a1.column_count > 0);
   const added = stepEffect(a1).columns_added.map((c) => c.name);
@@ -93,7 +96,7 @@ test('build_pipeline_model: add_steps returns a column diff by default', async (
   const full = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.ok(full.available_columns.some((c) => c.name === 'player_id_of_internal'), 'partition key carried through, not removed');
   // aggregate then collapses to group keys + measures: prior event columns show as removed.
-  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.deepEqual(stepEffect(a2).columns_added.map((c) => c.name), ['n']); // group key 'completed' persisted; 'n' is new
   assert.ok((stepEffect(a2).columns_removed || []).includes('reached_a'), 'aggregated-away columns reported as removed (short list shown)');
   assert.equal(a2.column_count, 2);
@@ -102,18 +105,18 @@ test('build_pipeline_model: add_steps returns a column diff by default', async (
 test('build_pipeline_model: discard drops the draft; later actions error cleanly', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'inc', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
   const d = await e.build_pipeline_model({ action: 'discard', context_id: s.context_id });
   assert.equal(d.discarded, true);
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr] }), /no draft/i);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] }), /no draft/i);
   await assert.rejects(() => e.build_pipeline_model({ action: 'preview', context_id: s.context_id }), /no draft/i);
 });
 
 test('build_pipeline_model: starting again in the same context resets the draft', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'first', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr] });
-  // reuse the same context_id: a fresh start wipes prior stages + renames.
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr] });
+  // reuse the same context_id: a fresh start wipes prior steps + renames.
   const s2 = await e.build_pipeline_model({ action: 'start', context_id: s.context_id, name: 'second', source: 'events' });
   assert.equal(s2.context_id, s.context_id);
   assert.equal(s2.name, 'second');
@@ -125,9 +128,9 @@ test('build_pipeline_model: starting again in the same context resets the draft'
 test('build_pipeline_model: schema rejects malformed actions', async () => {
   const e = engine();
   await assert.rejects(() => e.build_pipeline_model({ action: 'start' }), 'start requires name');
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: 'ctx_deadbeef' }), 'add_steps requires stages');
-  // one stage is a list of one: there is no second action for it
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', context_id: 'ctx_deadbeef', stage: { stage: 'limit', limit: 1 } }), /add_steps/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: 'ctx_deadbeef' }), 'add_steps requires steps');
+  // one step is a list of one: there is no second action for it
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_step', context_id: 'ctx_deadbeef', step: { stage: 'limit', limit: 1 } }), /add_steps/);
   await assert.rejects(() => e.build_pipeline_model({ action: 'bogus' }), 'unknown action rejected');
 });
 
@@ -135,13 +138,13 @@ test('build_pipeline_model: schema rejects malformed actions', async () => {
 test('build_pipeline_model: schema rejects action-irrelevant fields', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'strict', source: 'events' });
-  // start must not carry a stage.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'x', stage: mr }), 'start + stage rejected');
+  // start must not carry a step (its first ones are `steps`).
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'strict_step', source: 'events', step: mr }), /unexpected property 'step'/, 'start + step rejected');
   // add_steps must not carry start-only fields.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr], source: 'events' }), 'add_steps + source rejected');
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [mr], name: 'x' }), 'add_steps + name rejected');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], source: 'events' }), 'add_steps + source rejected');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [mr], name: 'x' }), 'add_steps + name rejected');
   // preview/commit/discard take only context_id.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'preview', context_id: s.context_id, stage: mr }), 'preview + stage rejected');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'preview', context_id: s.context_id, step: mr }), 'preview + step rejected');
   await assert.rejects(() => e.build_pipeline_model({ action: 'materialize', context_id: s.context_id, materialized: 'view' }), 'commit + materialized rejected');
   // start MAY carry context_id (legitimate context reuse) — not rejected.
   const reuse = await e.build_pipeline_model({ action: 'start', context_id: s.context_id, name: 'reused', source: 'events' });
@@ -153,7 +156,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'pit', source: 'events' });
   // value is a base (events) column; from/to are columns of the joined model.
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{
     stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
     between: { column: 'device_time', from: 'install_date', to: 'install_date' },
   }], include_columns: true });
@@ -164,7 +167,7 @@ test('build_pipeline_model: join between (temporal window) validates and exposes
   // a window bound that is not a column of the joined model is refused by the schema, naming its columns
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{
       stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
       between: { column: 'device_time', from: 'no_such_col', to: 'install_date' },
     }] }),
@@ -177,12 +180,12 @@ test('build_pipeline_model: compute elapsed_days adds an int column and requires
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'ret', source: 'events' });
   // from an event timestamp to now → a whole-24h-day column (retention day).
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'ret_day', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }, { now: true }] } }], include_columns: true });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'ret_day', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }, { now: true }] } }], include_columns: true });
   const col = ok.available_columns.find((c) => c.name === 'ret_day');
   assert.ok(col && col.type === 'int', 'elapsed_days adds an int column');
   // missing an endpoint is rejected by schema (from+to both required).
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'ret2', source: 'events' });
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'compute', name: 'bad', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }] } }] }), 'elapsed_days needs from AND to');
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'bad', expr: { fn: 'elapsed_days', args: [{ column: 'device_time' }] } }] }), 'elapsed_days needs from AND to');
 });
 
 // #2: array ops are type-checked at add_steps (not only at commit/runtime).
@@ -191,13 +194,13 @@ test('build_pipeline_model: array op on a non-array column is rejected at add_st
   const s = await e.build_pipeline_model({ action: 'start', name: 'arr', source: 'events' });
   // array_last over a string column → rejected when the stage is ADDED, with a fix hint.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'player_id_of_internal' }] } }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'player_id_of_internal' }] } }] }),
     /not an array/,
   );
   // correct flow: json_parse_array (string → array) first, then array_last passes validation.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'arr2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'player_id_of_internal' }] } }] });
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'arr' }] } }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'arr', expr: { fn: 'json_parse_array', args: [{ column: 'player_id_of_internal' }] } }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'compute', name: 'last', expr: { fn: 'array_last', args: [{ column: 'arr' }] } }] });
   assert.equal(ok.steps_count, 2, 'array_last on a parsed array column is accepted');
 });
 
@@ -221,10 +224,10 @@ test('build_pipeline_model grounds source columns to the physical relation', asy
   assert.equal(s.not_materialized, undefined, 'grounding is silent — no not_materialized field');
 
   // a physically-present column builds fine through add_steps.
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'result_of_event_data' }] }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'result_of_event_data' }] }] }] });
   // the phantom column is rejected as an UNKNOWN COLUMN at add_steps (early + clear), not at commit.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['complete_time_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['complete_time_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }),
     /unknown column 'complete_time_of_event_data'/,
   );
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
@@ -240,25 +243,25 @@ test('build_pipeline_model: grounding is skipped without a runner (declared colu
   assert.equal(s.not_materialized, undefined);
 });
 
-// add_steps: several stages at once, with the per-step effect of each folded into one reply.
-test('build_pipeline_model: add_steps applies several stages at once with a per-step breakdown', async () => {
+// add_steps: several steps at once, with the per-step effect of each folded into one reply.
+test('build_pipeline_model: add_steps applies several steps at once with a per-step breakdown', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'multi', source: 'events' });
-  const r = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
+  const r = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
     mr,
     { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] });
   assert.equal(r.action, 'add_steps');
-  assert.equal(r.added, 3);
+  assert.equal(r.steps_added.length, 3);
   assert.equal(r.step_effects.length, 3, 'one effect entry per applied stage, in order');
   assert.deepEqual(r.step_effects.map((x) => x.stage), ['where', 'match_recognize', 'aggregate']);
   assert.ok(r.step_effects.every((x) => typeof x.column_count === 'number' && Array.isArray(x.columns_added)), 'each effect reports the column delta');
   // the steps just added are echoed (with the count); the whole list only when asked for
   assert.deepEqual([r.steps_added.length, r.steps_count, r.steps], [3, 3, undefined]);
-  const more = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }], include_steps: true });
+  const more = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 5 }], include_steps: true });
   assert.deepEqual([more.steps.length, more.steps_added], [4, undefined]);
-  const one = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 3 }] });
+  const one = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 3 }] });
   assert.deepEqual([one.steps_added.map((x) => x.index), one.steps_count], [[5], 5]);
 });
 
@@ -266,28 +269,28 @@ test('build_pipeline_model: add_steps is atomic — a bad stage rolls back the w
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'atomic', source: 'events' });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
       { stage: 'aggregate', group_by: ['no_such_col'], measures: [{ name: 'n', expr: { fn: 'count' } }] }, // breaks
     ] }),
-    /none of the 2 stages was added/,
+    /none of the 2 steps was added/,
   );
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
   assert.equal(pv.steps.length, 0, 'atomic: nothing applied, draft untouched');
 });
 
-// A refused stage is named by its place in `stages` — add_steps' own field — one stage or several.
-test('build_pipeline_model: a refused stage of add_steps is stages[i], whether one is sent or several', async () => {
+// A refused step is named by its place in `steps` — add_steps' own field — one step or several.
+test('build_pipeline_model: a refused step of add_steps is steps[i], whether one is sent or several', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'field', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 5 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 5 }] });
   const bad = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_col' }, { value: 1 }] }] };
-  const alone = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [bad] }).catch((err) => err);
-  assert.equal(alone.field, 'stages[0]');
-  assert.match(alone.message, /^stages\[0\]: step 2: /);
-  const second = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'limit', limit: 3 }, bad] }).catch((err) => err);
-  assert.equal(second.field, 'stages[1]');
-  assert.match(second.message, /^stages\[1\]: step 3: /);
+  const alone = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [bad] }).catch((err) => err);
+  assert.equal(alone.field, 'steps[0]');
+  assert.match(alone.message, /^steps\[0\]: step 2: /);
+  const second = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 3 }, bad] }).catch((err) => err);
+  assert.equal(second.field, 'steps[1]');
+  assert.match(second.message, /^steps\[1\]: step 3: /);
   assert.equal((await e.build_pipeline_model({ action: 'preview', context_id: s.context_id })).steps.length, 1, 'nothing of either was added');
 });
 
@@ -297,12 +300,12 @@ test('build_pipeline_model: an aggregate without an argument is a count only —
   const s = await e.build_pipeline_model({ action: 'start', name: 'hll', source: 'events' });
   for (const fn of ['hll_init', 'hll_merge', 'hll_merge_partial']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'x', expr: { fn } }] }] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'x', expr: { fn } }] }] }),
       (err) => /invalid input/.test(err.message) && /'args'/.test(err.message),
       fn,
     );
   }
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'players', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }, { name: 'n', expr: { fn: 'count' } }] }], include_columns: true });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'players', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }, { name: 'n', expr: { fn: 'count' } }] }], include_columns: true });
   assert.deepEqual(ok.available_columns.map((c) => [c.name, c.type]), [['event_name', 'string'], ['players', 'sketch'], ['n', 'int']]);
 });
 
@@ -326,25 +329,26 @@ test('build_pipeline_model: edit_step / insert_step / delete_step / truncate mut
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'edit', source: 'events' });
   const d = s.context_id;
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [mr] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [mr] });
   // edit step 1 in place (replace the where literal) — count unchanged.
-  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 1, stage: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] } });
+  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 1, step: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] } });
   assert.equal(ed.action, 'edit_step');
-  assert.deepEqual(ed.steps[0].conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
-  assert.equal(ed.steps.length, 2, 'edit does not change the step count');
+  assert.deepEqual(ed.step.conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
+  assert.deepEqual([ed.step.index, ed.steps_count], [1, 2], 'edit does not change the step count');
   // insert a new step BEFORE position 1.
-  const ins = await e.build_pipeline_model({ action: 'insert_step', context_id: d, index: 1, stage: { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'tutorial' }, { value: 'first_launch' }] }] } });
+  const ins = await e.build_pipeline_model({ action: 'insert_step', context_id: d, index: 1, step: { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'tutorial' }, { value: 'first_launch' }] }] }, include_steps: true });
   assert.equal(ins.steps.length, 3);
   assert.equal(ins.steps[0].conditions[0].fn, 'in', 'inserted at the front');
-  // delete step 2.
+  assert.equal(ins.steps[1].conditions[0].args[1].value, 'tutorial', 'the step that was first is second now');
+  // delete step 2: nothing placed, the count
   const del = await e.build_pipeline_model({ action: 'delete_step', context_id: d, index: 2 });
-  assert.equal(del.steps.length, 2);
+  assert.deepEqual([del.steps, del.step, del.steps_count], [undefined, undefined, 2]);
   // truncate back to a single step (the cheap "go back to step N").
-  const tr = await e.build_pipeline_model({ action: 'truncate', context_id: d, after: 1 });
-  assert.equal(tr.steps.length, 1);
+  const tr = await e.build_pipeline_model({ action: 'truncate', context_id: d, after: 1, include_steps: true });
+  assert.deepEqual(tr.steps.map((x) => [x.index, x.conditions[0].fn]), [[1, 'in']]);
   // out-of-range index/after are rejected.
-  await assert.rejects(() => e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 9, stage: mr }), /out of range/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 9, step: mr }), /out of range/);
   await assert.rejects(() => e.build_pipeline_model({ action: 'truncate', context_id: d, after: 9 }), /out of range/);
 });
 
@@ -353,11 +357,11 @@ test('build_pipeline_model: an edit breaking a downstream step reports the step 
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'brk', source: 'events' });
   const d = s.context_id;
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [mr] }); // step 1: funnel exposes reached_a/completed
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'completed' }, { value: true }] }] }] }); // step 2 uses 'completed'
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [mr] }); // step 1: funnel exposes reached_a/completed
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'completed' }, { value: true }] }] }] }); // step 2 uses 'completed'
   // replacing step 1 with a plain where removes 'completed' → step 2 can no longer reference it.
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 1, stage: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] } }),
+    () => e.build_pipeline_model({ action: 'edit_step', context_id: d, index: 1, step: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] } }),
     /step 2/,
   );
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: d });
@@ -370,34 +374,53 @@ test('build_pipeline_model: fork branches a new draft from step N; original unto
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'orig', source: 'events' });
   const d = s.context_id;
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [mr] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: d, stages: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-  const fk = await e.build_pipeline_model({ action: 'fork', context_id: d, after: 1 });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [mr] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: d, steps: [{ stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  // a fork is a new thing with a name of its own: one without a name is refused, as the
+  // retentioneering builder's fork is
+  await assert.rejects(() => e.build_pipeline_model({ action: 'fork', context_id: d, after: 1 }), (err) => err.stage === 'validate' && /'name'/.test(err.message));
+  const fk = await e.build_pipeline_model({ action: 'fork', context_id: d, name: 'variant', after: 1 });
   assert.notEqual(fk.context_id, d, 'fork is a NEW draft');
+  assert.equal(fk.name, 'variant', 'under the name the call gives it');
   assert.equal(fk.copied_steps, 1);
-  assert.equal(fk.steps.length, 1, 'only the kept prefix copied');
+  assert.deepEqual([fk.steps_count, fk.steps], [1, undefined], 'only the kept prefix copied');
   // the fork diverges independently; the source draft is never mutated.
-  const f2 = await e.build_pipeline_model({ action: 'add_steps', context_id: fk.context_id, stages: [{ stage: 'aggregate', group_by: ['reached_a'], measures: [{ name: 'm', expr: { fn: 'count' } }] }] });
+  const f2 = await e.build_pipeline_model({ action: 'add_steps', context_id: fk.context_id, steps: [{ stage: 'aggregate', group_by: ['reached_a'], measures: [{ name: 'm', expr: { fn: 'count' } }] }] });
   assert.equal(f2.steps_count, 2);
   const orig = await e.build_pipeline_model({ action: 'preview', context_id: d });
   assert.equal(orig.steps.length, 2, 'source draft untouched by the fork or its edits');
+  assert.equal(orig.name, 'orig', 'the original keeps its own name');
   assert.equal(orig.steps[1].stage, 'aggregate');
+});
+
+// The answer flags go with the actions that answer about the steps — as the retentioneering builder
+// takes them: a preview lists both already, a materialize or a discard carries neither, so there a
+// flag is refused rather than ignored.
+test('build_pipeline_model: include_columns / include_steps are refused on preview, materialize and discard', async () => {
+  const e = engine();
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'flags', source: 'events', steps: [mr] });
+  for (const action of ['preview', 'materialize', 'discard']) {
+    for (const flag of ['include_columns', 'include_steps']) {
+      await assert.rejects(() => e.build_pipeline_model({ action, context_id, [flag]: true }), /invalid input/, `${action} with ${flag}`);
+    }
+  }
+  assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused calls changed nothing');
 });
 
 // P3: a one_per_match funnel warns to filter completed=true (counts all starts otherwise).
 test('build_pipeline_model: one_per_match funnel warns to filter completed', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'opm', source: 'events' });
-  const a = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ ...mr, rows: 'one_per_match' }] });
+  const a = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ ...mr, rows: 'one_per_match' }] });
   assert.ok(stepNotes(a).some((r) => /one_per_match/.test(r) && /completed/.test(r)), 'warns that one_per_match counts all starts unless completed is filtered');
   // one_per_partition (default) does NOT raise the completed warning.
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'opp', source: 'events' });
-  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [mr] });
+  const a2 = await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [mr] });
   assert.ok(!stepNotes(a2).some((r) => /one_per_match/.test(r)), 'no one_per_match warning for one_per_partition');
 });
 
 // A card's read is the server's view of what it drew: the caller names the path and the level, never
-// stages of its own (nor the earlier `transform`).
+// steps of its own (nor the earlier `stages` or `transform`).
 test('drill_result reads only a drawn task, by the path and level of its card — never a read of the caller\'s', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const runner = { show: async () => ({ ok: true, rows: [{ a: 1 }], columns: [{ name: 'a' }] }) };
@@ -405,6 +428,7 @@ test('drill_result reads only a drawn task, by the path and level of its card �
   // the card names the path and the level; the view is the server's, made from the card as drawn
   await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, transform: { limit: 3 } }), /unexpected property 'transform'/);
   await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, stages: [{ stage: 'limit', limit: 3 }] }), /unexpected property 'stages'/);
+  await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, steps: [{ stage: 'limit', limit: 3 }] }), /unexpected property 'steps'/);
   // a task that was never drawn is not a card's to read
   const task_id = e.jobs.create({ tool: 'query_semantic_model' });
   e.jobs.ready(task_id);
@@ -414,17 +438,17 @@ test('drill_result reads only a drawn task, by the path and level of its card �
 // ── add_steps refusals moved from the integration suites: each is decided by the schema and the
 // catalog when the step is added, before any SQL exists, so no warehouse is read. ──
 
-/** Start a draft over `source` and add one stage to it (a refusal throws). */
+/** Start a draft over `source` and add one step to it (a refusal throws). */
 async function addOne(e, source, stage) {
   const s = await e.build_pipeline_model({ action: 'start', name: 'guard_step', source });
-  return e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [stage] });
+  return e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [stage] });
 }
 
 // (from test/integration/declared-joins.test.js)
 test('join guards: an undeclared relationship, a self-join and a top-level on are all rejected', async () => {
   const e = engine();
   await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }),
-    /`stages\.0\.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
+    /`steps\.0\.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
   await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
   await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property 'on'/, 'how the rows match is one field, via: a relationship or { on }');
 });
@@ -446,7 +470,7 @@ test('48. duplicate names and unknown columns are refused with the fix', async (
   // (b) a column the joined model does not have.
   await assert.rejects(
     () => addOne(e, 'crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: [{ column: 'cost' }, { column: 'nope' }] }),
-    /`stages\.0\.attrs\.1\.column` must be one of: .*cost/s,
+    /`steps\.0\.attrs\.1\.column` must be one of: .*cost/s,
     '(b) a column the joined model does not have',
   );
   // (c) a name the pipeline already carries, holding DIFFERENT data → rename it.

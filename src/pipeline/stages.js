@@ -478,14 +478,26 @@ export const READ_STAGES = ['where', 'compute', 'aggregate', 'pivot', 'unpivot',
 export const READ_FNS = Object.keys(FNS).filter((fn) => fn !== 'raw');
 
 /**
- * Root-level `$defs` of a tool that READS a stored table in stages (query_pipeline_model, a drill):
- * `expr` — the expression over the table's columns, constants and the current time (a stored table has
- * no source: no { property }, no { entity } partition; no raw SQL, READ_FNS) — and `read_stage`, the
- * union of READ_STAGES, each the pipeline's own stage schema referring to that `expr`.
+ * Root-level `$defs` of a tool that READS rows in steps (query_pipeline_model over a stored table, the
+ * steps after a metric query): the expression over the rows' columns, constants and the current time (a
+ * read has no source: no { property }, no { entity } partition; no raw SQL, READ_FNS) — under `expr`, or
+ * the name given when the tool's `expr` is another level's (a metric query's where) — and `read_stage`,
+ * the union of READ_STAGES, each the pipeline's own stage schema referring to that expression. A list of
+ * read steps is `{ type: 'array', items: { $ref: '#/$defs/read_stage' } }`.
  */
-export function readStageDefs(catalog) {
+export function readStageDefs(catalog, { expr = 'expr' } = {}) {
+  const ref = `#/$defs/${expr}`;
+  const stages = { anyOf: READ_STAGES.map((k) => STAGES[k].schema(catalog)) };
   return {
-    expr: exprSchema(catalog, { sourced: false, fns: READ_FNS }),
-    read_stage: { anyOf: READ_STAGES.map((k) => STAGES[k].schema(catalog)) },
+    [expr]: exprSchema(catalog, { ref, sourced: false, fns: READ_FNS }),
+    // the stage schemas name the pipeline's `#/$defs/expr`: pointed at this one's name instead
+    read_stage: expr === 'expr' ? stages : retargeted(stages, '#/$defs/expr', ref),
   };
+}
+
+/** A schema with every `$ref` to `from` pointed at `to` instead (copied where it changes). */
+function retargeted(node, from, to) {
+  if (Array.isArray(node)) return node.map((n) => retargeted(n, from, to));
+  if (node === null || typeof node !== 'object') return node;
+  return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, k === '$ref' && v === from ? to : retargeted(v, from, to)]));
 }

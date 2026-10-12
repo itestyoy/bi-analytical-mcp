@@ -12,15 +12,15 @@ Governed metric path. Define once, query by time grain.
    scoped to the relevant event by the semantic model's `where` (or the measure expression's own `where`);
    or use the governed *Cumulative Sessions* / *Session Duration* definitions.
 2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
-   series `order_by: [{ key: "metric_time_day" }]` (a key is a result column's name — the
-   time axis at a day is the column `metric_time_day`).
+   series `steps: [{ stage: "order_by", keys: [{ key: "metric_time_day" }] }]` (a key is a
+   result column's name — the time axis at a day is the column `metric_time_day`).
 - **Gotcha:** "last week/month" = last **complete** period; DAU ≤ MAU; distinct players,
   not rows. Sessions follow AppsFlyer logic ([Cumulative Sessions](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4503207971)).
 
 ## 2. Progression funnel / conversion (events-only)
 Use a pipeline with a `match_recognize` stage.
 1. `build_pipeline_model({ request: { action: "start", name, source: "events" } })`.
-2. `add_steps` with `stages: [{ stage: "match_recognize", … }]`: `partition_by: ["<player key>"]`, ordered `steps`
+2. `add_steps` with `steps: [{ stage: "match_recognize", … }]`: `partition_by: ["<player key>"]`, the stage's own ordered `steps`
    (each = event + an `event_data` value), e.g. `level_started → level_completed (result=win)`
    or a tutorial chain. `between_steps` defaults to `"any"` (each step the next later occurrence;
    repeats in between are allowed); set `"gap"` when a step's event in between — a repeat too — must

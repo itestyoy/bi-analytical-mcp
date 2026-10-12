@@ -1,7 +1,7 @@
 # Pipeline Recipes — analytical task → stages
 
 How to express common games-analytics questions as a **pipeline** (a `source` + an
-ordered list of stages). Modeled on BigQuery pipe syntax; each recipe shows the
+ordered list of stages: its `steps`, each tagged by its `stage`). Modeled on BigQuery pipe syntax; each recipe shows the
 declarative stages and the pipe-syntax it lowers to on BigQuery (DuckDB lowers
 the same op list to a chained CTE). Reference:
 [BigQuery pipe syntax by example](https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331).
@@ -151,5 +151,7 @@ a later stage can only use columns that exist at that point. `compute` adds colu
 without changing grain — put window functions / `date_diff` / `case` before the `aggregate` that
 consumes them, and put a post-aggregate `where` after `aggregate` to filter on a
 computed measure. A built table is read later in the same stages:
-`query_pipeline_model({ request: { context_id, stages: [...] } })` runs where, compute,
-aggregate, pivot, unpivot, order_by, limit, sample and project over it, storing nothing.
+`query_pipeline_model({ request: { context_id, steps: [...] } })` runs where, compute,
+aggregate, pivot, unpivot, order_by, limit, sample and project over it, storing nothing
+(`dry_run: true` returns that read's SQL instead); a metric query takes the same `steps` over
+its result (`query_semantic_model`).

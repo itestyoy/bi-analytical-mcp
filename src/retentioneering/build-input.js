@@ -1,8 +1,9 @@
 // A START'S INPUT, CHECKED — what an eventstream is declared from, held to what it reads: the rows of a
-// catalog source or of a task's stored table, prepared by the pipeline's own stages, and the columns of
-// those rows the start names as the path, the event, its time and the segments. What can be said before
-// the stages are built is checked first (validateStart); the names are checked against the columns the
-// stages leave (checkNamedColumns). Every mistake is refused here, naming the field and the nearest name.
+// catalog source or of a task's stored table, prepared by its steps (the pipeline's own stages), and the
+// columns of those rows the start names as the path, the event, its time and the segments. What can be
+// said before the steps are built is checked first (validateStart); the names are checked against the
+// columns the steps leave (checkNamedColumns). Every mistake is refused here, naming the field and the
+// nearest name.
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
@@ -36,7 +37,7 @@ export function namedColumns(catalog, spec) {
 }
 
 /**
- * What a start says that can be checked before its stages are built: a source whose paths have an owner
+ * What a start says that can be checked before its steps are built: a source whose paths have an owner
  * (unless the path is named), the events a sample names — when the event is the source's own column, its
  * vocabulary is the catalog's — the names the eventstream keeps for its own columns, which no segment
  * may take, and a join that would repeat the events.
@@ -58,18 +59,18 @@ export function validateStart(catalog, spec) {
   // a slowly-changing model joined on its key alone matches every version of it, so each event would
   // repeat once per version — and an eventstream is one row per event: the version valid at the event's
   // time is stated, as a pipeline states it (a pipeline only warns: its rows may be meant as versions)
-  (spec.stages || []).forEach((st, i) => {
+  (spec.steps || []).forEach((st, i) => {
     if (st?.stage !== 'join' || st.between || !catalog.models?.[st.with]) return;
     const m = catalog.getModel(st.with);
     if (!m?.scd) return;
     const bound = (v) => Object.entries(m.dimensions || {}).find(([, d]) => d.validity === v)?.[0] ?? `<its ${v === 'start' ? 'valid-from' : 'valid-until'} column>`;
-    throw new ToolError(`stages[${i}] (join): '${st.with}' is a slowly-changing model, and joined on its key alone it matches every version of a key — each event would repeat once per version, and an eventstream is one row per event. Join the version valid at the event's time: between: { column: '${cols.time ?? '<the event time column>'}', from: '${bound('start')}', to: '${bound('end')}' }`, { stage: 'validate', field: `stages[${i}]` });
+    throw new ToolError(`steps[${i}] (join): '${st.with}' is a slowly-changing model, and joined on its key alone it matches every version of a key — each event would repeat once per version, and an eventstream is one row per event. Join the version valid at the event's time: between: { column: '${cols.time ?? '<the event time column>'}', from: '${bound('start')}', to: '${bound('end')}' }`, { stage: 'validate', field: `steps[${i}]` });
   });
   return spec;
 }
 
 /**
- * The columns a start names, held to the columns its rows have after the stages (`cols`, the tracked
+ * The columns a start names, held to the columns its rows have after the steps (`cols`, the tracked
  * Map name → { type } the pipeline leaves): every path part, the event and the time column, every
  * segment — and the time column a moment, since the paths are ordered by it. `origin` says whose rows
  * they are, for the refusal.

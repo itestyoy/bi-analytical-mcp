@@ -57,7 +57,7 @@ const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.t
 test('key-only join to an SCD-2 dimension → response warns the join is incomplete (fan-out)', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
-  const r = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }] }] });
+  const r = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }] }] });
   assert.ok(hasIncompleteJoin(stepNotes(r)), `expected an incomplete-join warning, got: ${JSON.stringify(stepNotes(r))}`);
   // the warning names the exact fix (event time + the validity columns)
   const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
@@ -72,6 +72,6 @@ test('SCD-2 join WITH a point-in-time between window → no incomplete-join warn
   const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
   const r = await e.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id,
-    stages: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+    steps: [{ stage: 'join', with: 'users', via: { on: ['player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
   assert.ok(!hasIncompleteJoin(stepNotes(r)), `no warning expected once between is present, got: ${JSON.stringify(stepNotes(r))}`);
 });

@@ -58,7 +58,7 @@ test('a field the value gives at its own level still decides first', () => {
 test('a batch of queries with one bad item is refused at that item, not as a single query', () => {
   const e = engine();
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) {
-    const item = tool === 'query_semantic_model' ? { metrics: ['x'] } : { stages: [{ stage: 'limit', limit: 5 }] };
+    const item = tool === 'query_semantic_model' ? { metrics: ['x'] } : { steps: [{ stage: 'limit', limit: 5 }] };
     const msg = refusal(e, tool, { context_id: 'abc123', queries: [{ ...item, bogus: 1 }, item] });
     assert.match(msg, /`queries\.0` has an unexpected property 'bogus'/, tool);
     assert.doesNotMatch(msg, /unexpected property 'queries'/, tool);
@@ -98,7 +98,36 @@ test('a field in another path\'s spelling is told its name only where that field
   // where `source` names a catalog model, the same spelling is told its name — a view, a note's about, a pipeline
   assert.match(refusal(e, 'semantic_index', { model: 'events' }), /request has an unexpected property 'model' — here that field is called 'source'/);
   assert.match(refusal(e, 'memory', { action: 'record', notes: [{ note: 'x', about: [{ model: 'users', property: 'country' }] }] }), /`notes\.0\.about\.0` has an unexpected property 'model' — here that field is called 'source'/);
-  assert.match(refusal(e, 'build_pipeline_model', { name: 'm', model: 'events', stages: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
+  assert.match(refusal(e, 'build_pipeline_model', { name: 'm', model: 'events', steps: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
+});
+
+// A list a tool runs in order is `steps` (one of them `step`), in every builder and query tool: the
+// earlier `stages` / `stage` is told its name where that name is taken — and only there, so a stage's
+// own `stage` tag, and a form with no list of steps, are refused as they were.
+test('stages and stage are told their name, steps and step, where the form takes it', () => {
+  const e = engine();
+  const limit = { stage: 'limit', limit: 1 };
+  for (const [tool, input, field] of [
+    ['build_pipeline_model', { action: 'add_steps', context_id: 'abc123', stages: [limit] }, 'stages'],
+    ['build_pipeline_model', { name: 'started', source: 'events', stages: [limit] }, 'stages'],
+    ['build_pipeline_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
+    ['build_pipeline_model', { action: 'insert_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
+    ['query_pipeline_model', { context_id: 'abc123', stages: [limit] }, 'stages'],
+    ['query_semantic_model', { context_id: 'abc123', metrics: ['x'], stages: [limit] }, 'stages'],
+  ]) {
+    const msg = refusal(e, tool, input);
+    assert.match(msg, new RegExp(`request has an unexpected property '${field}' — here that field is called '${field === 'stages' ? 'steps' : 'step'}'`), `${tool} ${JSON.stringify(input)}`);
+  }
+  // in a batch, at the query that wrote it
+  assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', queries: [{ stages: [limit] }] }), /`queries\.0` has an unexpected property 'stages' — here that field is called 'steps'/);
+  // a step's own tag is its kind, never the field's earlier name
+  assert.equal(refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', steps: [limit] }), null);
+  // where no list of steps is taken, `stages` is a field the form does not take — no name to tell
+  const drill = refusal(e, 'drill_result', { task_id: 'abcdef123456', stages: [limit] });
+  assert.match(drill, /unexpected property 'stages'/);
+  assert.doesNotMatch(drill, /here that field is called/);
+  // and the earlier name and the current one together are not one list told twice: the earlier is refused
+  assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', steps: [limit], stages: [limit] }), /unexpected property 'stages'/);
 });
 
 // A form pinned to one source is further off than the form of the source named that lacks a field:

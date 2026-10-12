@@ -2,7 +2,7 @@
 // (AGENTS.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
 //
 // The rows are prepared by the pipeline's own stages (src/pipeline.js): the time window as a `where`,
-// then the start's stages as the caller wrote them — a `where` scoping the events, a `compute` renaming
+// then the start's steps as the caller wrote them — a `where` scoping the events, a `compute` renaming
 // them or reading a property into a column, a `join` bringing an attribute by a relationship the catalog
 // declares (point in time for a slowly-changing model, as the caller states it) — so the dialect, the
 // relationship keys and the typing of every comparison are exactly a pipeline's. On top of that one
@@ -36,14 +36,14 @@ export function pathParts(spec) {
 }
 
 /** The stages the rows are prepared by: the time window (the engine's own where, the window a pipeline
- *  applies), then the start's stages as written. */
+ *  applies), then the start's steps as written. */
 function eventstreamStages(spec, { timeConditions = null } = {}) {
-  return [...(timeConditions ? [{ stage: 'where', conditions: timeConditions }] : []), ...(spec.stages || [])];
+  return [...(timeConditions ? [{ stage: 'where', conditions: timeConditions }] : []), ...(spec.steps || [])];
 }
 
 /**
  * The pipeline over `stages`, or the refusal of the first stage it cannot build — named by its place in
- * the start's `stages`; `own` stages before them are the server's (the time window).
+ * the start's `steps`; `own` stages before them are the server's (the time window).
  */
 function prepared(catalog, spec, stages, own, opts) {
   try {
@@ -55,10 +55,10 @@ function prepared(catalog, spec, stages, own, opts) {
         const k = i - 1 - own;
         const message = at?.message || String(at);
         if (k < 0) throw new ToolError(message, { stage: 'validate', field: 'time_range' });
-        throw new ToolError(`stages[${k}] (${stages[i - 1]?.stage}): ${message}`, { stage: 'validate', field: `stages[${k}]` });
+        throw new ToolError(`steps[${k}] (${stages[i - 1]?.stage}): ${message}`, { stage: 'validate', field: `steps[${k}]` });
       }
     }
-    throw new ToolError(e?.message || String(e), { stage: 'validate', field: 'stages' });
+    throw new ToolError(e?.message || String(e), { stage: 'validate', field: 'steps' });
   }
 }
 
@@ -66,10 +66,10 @@ function prepared(catalog, spec, stages, own, opts) {
 export function renderEventstream(catalog, spec, { modelName, physicalCols = null, timeConditions = null, from = null } = {}) {
   const d = getDialect(catalog.dialect);
   const stages = eventstreamStages(spec, { timeConditions });
-  // `from`: a task's stored table (a pipeline build) is the relation the stages run over — the same
-  // start a pipeline makes from a task; the source is then only what the stages resolve names against
-  const base = prepared(catalog, spec, stages, stages.length - (spec.stages || []).length, { physicalCols, modelName, from });
-  checkNamedColumns(catalog, spec, base.columns, from ? `task ${spec.from_task}'s table${spec.stages?.length ? ' after the stages' : ''}` : `'${spec.source}'${spec.stages?.length ? ' after the stages' : ''}`);
+  // `from`: a task's stored table (a pipeline build) is the relation the steps run over — the same
+  // start a pipeline makes from a task; the source is then only what the steps resolve names against
+  const base = prepared(catalog, spec, stages, stages.length - (spec.steps || []).length, { physicalCols, modelName, from });
+  checkNamedColumns(catalog, spec, base.columns, from ? `task ${spec.from_task}'s table${spec.steps?.length ? ' after the steps' : ''}` : `'${spec.source}'${spec.steps?.length ? ' after the steps' : ''}`);
   // every column the eventstream reads of the rows is one the caller named: quoted as the dialect quotes it
   const q = (c) => d.quoteIdent(c);
   const text = (sql) => d.castExpr(sql, 'string');

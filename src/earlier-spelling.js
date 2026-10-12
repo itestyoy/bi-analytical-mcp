@@ -11,7 +11,9 @@
 //   an expression { fn: "event_property", property, field?, type? } → the leaf { property, field?, type? },
 //                 array_length / array_contains naming `property` (and `item`) → args;
 //   an unnest's   { property } / { column } → its `expr`;
-//   a read's      `transform` (where, group_by + measures, having, order_by, then) → its stages;
+//   a read's      `transform` (where, group_by + measures, having, order_by, then) → its steps;
+//   a query's     input kept with its task (currentQueryInput): a read's `stages` (or `transform`) → its
+//                 `steps`, a metric query's `order_by` → the order_by step after them;
 //   a metric      a ratio { numerator, denominator } → the derived metric dividing them, a derived
 //                 metric's SQL text over its listed `metrics` → the expression of { metric } leaves, a
 //                 side or a measure referenced as { name } → its name;
@@ -160,8 +162,8 @@ export function currentUnnest(st) {
 }
 
 /**
- * A read's earlier `transform` as the stages it is now: its where, its group_by and measures as an
- * aggregate, its having as a where after that, its order_by, and a second level (`then`) as the stages
+ * A read's earlier `transform` as the steps it is now: its where, its group_by and measures as an
+ * aggregate, its having as a where after that, its order_by, and a second level (`then`) as the steps
  * after them — the pipeline's own stages, run over the stored table. A group_by with no measures listed
  * the distinct groups; an aggregate folds something, so they come with their row count (`rows`).
  */
@@ -175,6 +177,38 @@ export function transformStages(t) {
   if (Array.isArray(t.having) && t.having.length) out.push({ stage: 'where', conditions: currentConditions(t.having) });
   if (Array.isArray(t.order_by) && t.order_by.length) out.push({ stage: 'order_by', keys: t.order_by });
   if (isObj(t.then)) out.push(...transformStages(t.then));
+  return out;
+}
+
+/** Whether a query's input says, outside its steps, what an earlier version wrote there: a read's
+ *  `transform`, or a metric query's `order_by` (a metric query names its metrics). */
+const earlierQueryParts = (v) => (isObj(v.transform) && v.steps === undefined && v.stages === undefined)
+  || (Array.isArray(v.order_by) && Array.isArray(v.metrics) && v.metrics.every((m) => typeof m === 'string'));
+
+/**
+ * A QUERY'S INPUT AS AN EARLIER VERSION KEPT IT WITH ITS TASK, in this version's spelling — what a query
+ * is read back by when it is read again (paged, drawn, its table's header written). The steps a read
+ * runs were its `stages` (its `transform` before that); a metric query's `order_by` is the order_by step
+ * after its steps, which run over the metric result. A batch's queries alike. The same object when
+ * nothing in it is of an earlier spelling. (A NEW call that writes `stages` is told the field's name by
+ * the refusal, CROSS_PATH_SPELLING; one with a `transform` or a metric query's `order_by` is shown
+ * converted, currentOf.)
+ */
+export function currentQueryInput(input) {
+  if (!isObj(input)) return input;
+  let out = input;
+  if (Array.isArray(out.queries)) {
+    const queries = out.queries.map(currentQueryInput);
+    if (queries.some((q, i) => q !== out.queries[i])) out = { ...out, queries };
+  }
+  if (out.steps === undefined && (Array.isArray(out.stages) || isObj(out.transform))) {
+    const { stages, transform, ...rest } = out;
+    out = { ...rest, steps: Array.isArray(stages) ? stages : transformStages(transform) };
+  }
+  if (Array.isArray(out.metrics) && Array.isArray(out.order_by)) {
+    const { order_by: keys, ...rest } = out;
+    out = keys.length ? { ...rest, steps: [...(rest.steps || []), { stage: 'order_by', keys }] } : rest;
+  }
   return out;
 }
 
@@ -310,10 +344,11 @@ export function currentDisplay(display) {
 
 /**
  * ANY VALUE, with every earlier form in it converted — a condition, a measure, a pivot's measure, a
- * semantic metric, an expression, an unnest, a read's transform — wherever it sits; the same value (by
- * identity) when nothing in it is of an earlier form. `opts.subject` as currentCondition's. A metric's
- * sides are read as metrics here (a list's are read by currentMetrics); a display is not walked
- * (currentDisplay).
+ * semantic metric, an expression, an unnest, a read's transform, a metric query's order_by — wherever it
+ * sits; the same value (by identity) when nothing in it is of an earlier form. `opts.subject` as
+ * currentCondition's. A metric's sides are read as metrics here (a list's are read by currentMetrics); a
+ * display is not walked (currentDisplay); a field only renamed (`stages`) is the refusal's hint, not a
+ * conversion of the whole value.
  */
 export function currentOf(value, opts = {}) {
   if (Array.isArray(value)) {
@@ -327,10 +362,7 @@ export function currentOf(value, opts = {}) {
   if (isEarlierDimension(value)) return currentDimension(value, opts);
   if (value.fn === 'event_property' || ((value.fn === 'array_length' || value.fn === 'array_contains') && value.args === undefined && value.property !== undefined) || listConstant(value)) return currentExpression(value, opts);
   if (value.stage === 'unnest' && value.expr === undefined && (value.property !== undefined || value.column !== undefined)) return currentUnnest(value);
-  if (isObj(value.transform) && value.stages === undefined) {
-    const { transform, ...rest } = value;
-    return currentOf({ ...rest, stages: transformStages(transform) }, opts);
-  }
+  if (earlierQueryParts(value)) return currentOf(currentQueryInput(value), opts);
   let changed = false;
   const out = {};
   for (const [k, v] of Object.entries(value)) {

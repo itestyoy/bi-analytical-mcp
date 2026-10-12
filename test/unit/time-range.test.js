@@ -55,31 +55,31 @@ test('require_time_range rejects an unbounded pipeline; a bounded one passes val
   assert.equal(catalog.requireTimeRangeFor('events'), true);
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr-')) }) }));
   const s = await e.build_pipeline_model({ action: 'start', name: 'guard', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   // commit without a time window → blocked by the guardrail, in the call (no task is started to fail)
   const tasksBefore = e.jobs.list().length;
   await assert.rejects(() => e.raw.build_pipeline_model({ action: 'materialize', context_id: s.context_id }), (err) => /require_time_range/.test(err.message) && err.field === 'time_range');
   // a start that builds its steps in the same call: the steps are added, the build is refused beside them
-  const built = await e.raw.build_pipeline_model({ name: 'guard2', source: 'events', stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true });
+  const built = await e.raw.build_pipeline_model({ name: 'guard2', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true });
   assert.deepEqual([built.steps_count, built.materialize.ok, built.materialize.error.stage], [1, false, 'validate']);
   assert.match(built.materialize.error.message, /require_time_range/);
   assert.equal(e.jobs.list().length, tasksBefore, 'no build task was started');
   // the same pipeline WITH a window passes validation (fails later only because no runner is wired).
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'guarded', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' } });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const out = await e.build_pipeline_model({ action: 'materialize', context_id: s2.context_id });
   assert.equal(out.kind, 'pipeline'); // reached registration (no time-range rejection)
   // a stage-level where on the time column ALSO satisfies the guard.
   const s3 = await e.build_pipeline_model({ action: 'start', name: 'wherebound', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s3.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01' }] }] }] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s3.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s3.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01' }] }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s3.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const out3 = await e.build_pipeline_model({ action: 'materialize', context_id: s3.context_id });
   assert.equal(out3.kind, 'pipeline');
   // …but the time column named inside an or / a not bounds nothing: the other branch reads every row
   const since = { fn: 'gte', args: [{ column: 'device_time' }, { value: '2026-01-01' }] };
   for (const loose of [{ fn: 'or', args: [since, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }, { fn: 'not', args: [since] }]) {
     const s4 = await e.build_pipeline_model({ action: 'start', name: 'loose', source: 'events' });
-    await e.build_pipeline_model({ action: 'add_steps', context_id: s4.context_id, stages: [{ stage: 'where', conditions: [loose] }] });
+    await e.build_pipeline_model({ action: 'add_steps', context_id: s4.context_id, steps: [{ stage: 'where', conditions: [loose] }] });
     await assert.rejects(() => e.raw.build_pipeline_model({ action: 'materialize', context_id: s4.context_id }), (err) => /require_time_range/.test(err.message), loose.fn);
   }
 });
@@ -91,7 +91,7 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
   assert.equal(catalog.requireTimeRangeFor('events'), false);
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) }));
   const s = await e.build_pipeline_model({ action: 'start', name: 'free', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const out = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.kind, 'pipeline');
 });

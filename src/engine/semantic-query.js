@@ -1,8 +1,9 @@
 // QUERY_SEMANTIC_MODEL — a metric query addressed by what and where ({ model, attribute },
 // { semantic_model, dimension }, { entity }, metric_time), resolved to MetricFlow's items and run by
-// `mf`; its SQL, plan and failures handed back in the caller's own spelling. A task's layer and the
-// project's own share one shell (order, window, paging, the early answer, the task). Methods of the
-// Engine (src/engine/helpers.js — mixin).
+// `mf` — with the read steps after it run over the SQL MetricFlow compiles for it; its SQL, plan and
+// failures handed back in the caller's own spelling. A task's layer and the project's own share one
+// shell (the steps, window, paging, the early answer, the task). Methods of the Engine
+// (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
@@ -11,8 +12,10 @@ import { PARTITION_DIM, renderContext } from '../yaml-render.js';
 import { whereSql, referenceComparisons } from '../predicate.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
+import { getDialect } from '../dialects/index.js';
+import { renderRead } from '../pipeline.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
-import { uniqueRefs, pageBlock } from './helpers.js';
+import { uniqueRefs, pageBlock, samplingNote } from './helpers.js';
 import { KEPT_ROWS } from '../schema/fields.js';
 
 export const semanticQueryMethods = {
@@ -145,7 +148,7 @@ export const semanticQueryMethods = {
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
       const built = ctx.state.pipeline_model?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', stages } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', steps } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     const project = ctx.state.engine === 'project';
@@ -296,6 +299,7 @@ export const semanticQueryMethods = {
     const groupBy = [];
     const rename = new Map();
     const groupByResolved = {};
+    const columns = []; // the result's group_by columns, as the steps after the query name them
     for (const g of input.group_by || []) {
       const item = g && g.time === 'metric_time' ? items.find((i) => i.name === 'metric_time' && !i.semantic_model) : pick(g, 'group_by');
       if (!item) throw new ToolError(`group_by: ${input.metrics.join(', ')} ${input.metrics.length > 1 ? 'share' : 'has'} no time axis to group by`, { stage: 'validate', field: 'group_by' });
@@ -304,6 +308,8 @@ export const semanticQueryMethods = {
       const column = columnOf(item, grain);
       if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
       groupBy.push(tok); rename.set(tok, column);
+      // (the manifest says which dimension is a time; of the others it gives no type)
+      columns.push({ name: column, type: grain ? 'time' : 'unknown' });
       if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item)] = column;
     }
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
@@ -320,8 +326,8 @@ export const semanticQueryMethods = {
       }
       return { kind: 'dimension', path: item.dunder_name };
     }) : [];
-    // order_by: a requested metric or a result column of group_by
-    const { orderBy } = this._metricOrderBy(input, { groupBy, rename });
+    // the steps after the query, over its result's columns: checked here, before anything runs
+    const tail = this._metricTail(input, { columns: [...columns, ...input.metrics.map((name) => ({ name, type: 'unknown' }))], rename });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a
     // window for — or every one, when the deployment does — is not scanned whole
@@ -330,48 +336,93 @@ export const semanticQueryMethods = {
     const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
     const conversionNotes = this._conversionNotes(layer, input.metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
-    const paging = this._metricPaging(input);
+    const paging = this._metricPaging(input, tail.ordered);
     const explain = this._compileOnly(input);
-    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
+    const qopts = { metrics: input.metrics, groupBy, where, orderBy: tail.orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
     const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(input.metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
     const respond = (raw) => {
       this.ctxs.touch(ctx.id);
-      const early = this._metricEarlyAnswer(raw, { explain, input, speak, extra: conversionNotes.length ? { warnings: conversionNotes } : {} });
+      const early = this._metricEarlyAnswer(raw, { explain, input, speak, extra: { output_columns: tail.outputColumns, ...(conversionNotes.length ? { warnings: conversionNotes } : {}) } });
       if (early) return early;
-      const columns = (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c));
-      const { rows: pageRows, page } = paging.page((raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v]))));
+      const { rows: pageRows, page } = paging.page(raw.rows || []);
       const recs = [];
       if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
       if (page.has_more) recs.push(this._keptRowsNote(page));
       return {
-        ok: true, columns, rows: pageRows, row_count: pageRows.length, page,
+        ok: true, columns: raw.columns || [], rows: pageRows, row_count: pageRows.length, page,
         ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
         provenance: { tier: 'project_metric', metrics: input.metrics, semantic_models: reads },
         warnings: [...windowWarnings, ...conversionNotes],
         recommendations: recs,
       };
     };
-    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });
+    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond, tail });
   },
 
   // THE SHELL A METRIC QUERY RUNS IN — one for a task's context (_semanticQueryWork) and a project
-  // semantic model's (_projectQueryWork): order_by, the window and its guardrail, paging, the answer
-  // to a failure or an explain, and the task that runs it. What differs between the two is only how a
-  // reference is resolved to MetricFlow's tokens and what a finished answer carries besides its rows.
+  // semantic model's (_projectQueryWork): the steps after the query, the window and its guardrail,
+  // paging, the answer to a failure or an explain, and the task that runs it. What differs between the
+  // two is only how a reference is resolved to MetricFlow's tokens and what a finished answer carries
+  // besides its rows.
 
-  /** order_by → MetricFlow's order tokens. A key is a name the rows come back with — a requested
-   *  metric, or the result column of a group_by item — never the token it is resolved to: that
-   *  spelling is the server's own, and is free to change. → { orderBy, orderableKeys } */
-  _metricOrderBy(input, { groupBy, rename }) {
-    const orderable = new Set([...input.metrics, ...groupBy]);
-    const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
-    const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
-    const sayable = new Set(orderableKeys);
-    const orderBy = (input.order_by || []).map((o) => {
-      if (!sayable.has(o.key)) throw new ToolError(`order_by key '${o.key}' is not a requested metric or the result column of a group_by item. Orderable: ${orderableKeys.join(', ')}`, { stage: 'validate', field: 'order_by' });
-      return `${o.direction === 'desc' ? '-' : ''}${byFriendly.get(o.key) || o.key}`;
-    });
-    return { orderBy, orderableKeys };
+  /**
+   * THE STEPS AFTER A METRIC QUERY — the read steps query_pipeline_model takes (READ_STAGES), over the
+   * result's columns as the caller names them: `columns` [{ name, type }], the group_by items' result
+   * columns and then the metrics, each typed where it is known ('unknown' — a constant is written as it
+   * is — otherwise). Checked here, before anything runs, by the read compiler they run through: a step
+   * naming a column the result does not have is refused with the columns there are at that step. The
+   * query's where filters the rows a metric folds; a where step filters the result (a having).
+   * What MetricFlow says itself runs as `mf query`: no steps, or one order_by step whose keys it orders
+   * as asked (`orderBy`, its order tokens — `rename` maps each token to the caller's name); any other
+   * step runs over the SQL it compiles for the query (`viaSql`, _metricRead).
+   * → { steps, columns, orderBy, viaSql, ordered, outputColumns, sample }
+   */
+  _metricTail(input, { columns, rename }) {
+    const steps = input.steps || [];
+    let read;
+    try { read = renderRead(this.catalog, '_metrics', columns, steps); } catch (e) {
+      throw new ToolError(e.message, { stage: 'validate', field: 'steps' });
+    }
+    const only = steps.length === 1 && steps[0].stage === 'order_by' ? steps[0] : null;
+    const said = !!only && only.keys.every((k) => metricFlowOrders(this.catalog.dialect, k));
+    const tokenOfColumn = new Map([...rename].map(([tok, name]) => [name, tok]));
+    return {
+      steps, columns, ordered: read.ordered, viaSql: steps.length > 0 && !said,
+      orderBy: said ? only.keys.map((k) => `${k.direction === 'desc' ? '-' : ''}${tokenOfColumn.get(k.key) ?? k.key}`) : [],
+      outputColumns: [...read.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      sample: steps.find((st) => st.stage === 'sample') || null,
+    };
+  },
+
+  /**
+   * A metric query's result as SQL under the caller's names: the SQL MetricFlow compiled for it, its
+   * group_by columns renamed (`rename`: MetricFlow's token → the result column) and then its metrics,
+   * every name quoted — what a materialized query stores, and what the steps after a query read.
+   */
+  _metricRelation(sql, { groupBy = [], metrics }, rename) {
+    const d = getDialect(this.catalog.dialect);
+    const cols = [...groupBy.map((g) => `${d.quoteIdent(g)} AS ${d.quoteIdent(rename.get(g) ?? g)}`), ...metrics.map((m) => d.quoteIdent(m))];
+    return `SELECT ${cols.join(', ')} FROM (\n${sql}\n) _q`;
+  },
+
+  /**
+   * A metric query with steps after it, run as SQL: MetricFlow compiles the query — with no order and no
+   * limit, since the steps work on the whole result — the read compiler renders the steps over it
+   * (_metricRelation), and the warehouse runs that through the dbt client's show on the context's
+   * project, `qopts.limit` rows of it. Only compiled (explain), it answers the read's SQL — capped at the
+   * query's limit when it names one, as MetricFlow's own compiled query is — and MetricFlow's plan.
+   * → what a metric query answers: { ok, columns, rows } | { ok, sql, plan? } | a failure.
+   */
+  async _metricRead(ctx, { qopts, input, rename, explain, tail }) {
+    const dir = this.ctxs.dir(ctx.id);
+    const { limit, orderBy: _order, ...query } = qopts;
+    const compiled = await this.runner.query(dir, { ...query, explain: true, plan: explain && !!input.include_plan });
+    if (!compiled.ok) return compiled;
+    const steps = explain && input.limit ? [...tail.steps, { stage: 'limit', limit: input.limit }] : tail.steps;
+    const read = renderRead(this.catalog, `(\n${this._metricRelation(compiled.sql, query, rename)}\n) AS _metrics`, tail.columns, steps);
+    if (explain) return { ok: true, sql: read.sql, ...(compiled.plan !== undefined ? { plan: compiled.plan } : {}) };
+    const shown = await this.runner.show(dir, read.sql, limit);
+    return shown.ok ? { ok: true, columns: [...read.columns.keys()].map((name) => ({ name })), rows: shown.rows } : shown;
   },
 
   /** The window: the cost guardrail (`guarded` names what requires a bounded one), the timezone, the
@@ -426,16 +477,16 @@ export const semanticQueryMethods = {
   },
 
   /** The rows a query task keeps — the first `limit` of its result (a read pages them) — and one row
-   *  over them fetched, so has_more says whether the result goes on past them. */
-  _metricPaging(input) {
+   *  over them fetched, so has_more says whether the result goes on past them; `ordered` whether its
+   *  steps end in an order_by (a limit after it aside). */
+  _metricPaging(input, ordered) {
     const limit = input.limit ?? KEPT_ROWS;
-    const ordered = !!input.order_by?.length;
     return { limit, fetch: limit + 1, page: (rows) => { const kept = rows.slice(0, limit); return { rows: kept, page: pageBlock({ offset: 0, limit, returned: kept.length, has_more: rows.length > limit, ordered }) }; } };
   },
 
   /** What a query whose result goes on past the rows its task keeps is told: how to have the rest. */
   _keptRowsNote(page) {
-    return `More rows exist past the ${page.limit} this task keeps — query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to the last one; or add order_by so the rows kept are the ones that matter.`;
+    return `More rows exist past the ${page.limit} this task keeps — query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to the last one; or end the steps with an order_by step so the rows kept are the ones that matter.`;
   },
 
   /** Whether a query is only compiled (dry_run); a plan is asked for only with it, and a result is
@@ -461,18 +512,27 @@ export const semanticQueryMethods = {
   },
 
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
-   *  the query — stored as a table with materialize, else answered by `respond`. */
-  _metricTask(ctx, { qopts, input, rename, speak, explain, respond }) {
+   *  the query — stored as a table after its steps with materialize; else run by MetricFlow when it
+   *  says the whole of it (`mf query`), or over the SQL it compiles with the steps after it
+   *  (_metricRead) — its rows under the caller's names and in one form either way (oneForm), answered
+   *  by `respond`. */
+  _metricTask(ctx, { qopts, input, rename, speak, explain, respond, tail }) {
     return async (id) => {
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
-      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id, speak);
-      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.include_plan }));
+      // (stored, the steps order the rows: MetricFlow's own order would be undone by them)
+      const out = input.materialize && !explain
+        ? await this._materialize(ctx, tail.steps.length ? { ...qopts, orderBy: [] } : qopts, input, rename, id, speak, { columns: tail.columns })
+        : await respond(oneForm(tail.viaSql
+          ? await this._metricRead(ctx, { qopts, input, rename, explain, tail })
+          : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.include_plan }), rename), tail.outputColumns));
+      // a result read through a sample of its rows is approximate, and says so (as a sampled read does)
+      return tail.sample && !explain && out?.ok !== false ? { ...out, sampled: true, sampling: samplingNote(tail.sample.share) } : out;
     };
   },
 
   /**
-   * One metric query, checked: every mistake is refused HERE (metrics, group_by, where values,
-   * order_by, the time window), and what is returned is the work its task runs.
+   * One metric query, checked: every mistake is refused HERE (metrics, group_by, where values, the
+   * steps after it, the time window), and what is returned is the work its task runs.
    */
   _semanticQueryWork(ctx, input) {
 
@@ -489,15 +549,16 @@ export const semanticQueryMethods = {
     // refuses it, saying what is reachable (_reachableHint)
     const groupBy = [];
     // Result columns are named after the reference the caller made — `<model>_<attribute>` and
-    // `metric_time_<grain>` — so nothing the caller reads back or addresses later (order_by, a
-    // card, a pipeline started from the stored result) ever carries MetricFlow's internal `__` spelling.
+    // `metric_time_<grain>` — so nothing the caller reads back or addresses later (a step, a card, a
+    // pipeline started from the stored result) ever carries MetricFlow's internal `__` spelling.
     const rename = new Map(); // MetricFlow output name → the column name the caller sees
     const groupByResolved = {}; // "<model>.<attribute>" → the result column
+    const columns = []; // the result's group_by columns, as the steps after the query name them
     for (const gRaw of input.group_by || []) {
       const g = this._normalizeRef(ctx, gRaw, 'group_by'); // a string is refused here with the fix
       if (typeof g === 'object' && g.time === 'metric_time') {
         const tok = `metric_time__${g.grain || 'day'}`;
-        groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
+        groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); columns.push({ name: rename.get(tok), type: 'time' }); continue;
       }
       const friendly = `${gRaw.model}_${gRaw.attribute}`;
       if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
@@ -505,12 +566,8 @@ export const semanticQueryMethods = {
       const grain = this._timeGrainOf(ctx, gRaw);
       const tok = grain ? `${g}__${grain}` : g;
       groupBy.push(tok); rename.set(tok, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
+      columns.push({ name: friendly, type: grain ? 'time' : this._attributeType(ctx, gRaw) });
     }
-    /** Apply the friendly names to a result (columns + row keys). */
-    const friendlyResult = (columns, rows) => ({
-      columns: (columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c)),
-      rows: (rows || []).map((r) => { const o = {}; for (const [k, v] of Object.entries(r)) o[rename.get(k) || k] = v; return o; }),
-    });
     let where = [];
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
@@ -534,17 +591,17 @@ export const semanticQueryMethods = {
       }));
       filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
     }
-    // order_by: a requested metric or a result column of group_by
-    const { orderBy, orderableKeys } = this._metricOrderBy(input, { groupBy, rename });
+    // the steps after the query, over its result's columns: checked here, before anything runs
+    const tail = this._metricTail(input, { columns: [...columns, ...input.metrics.map((name) => ({ name, type: 'unknown' }))], rename });
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail covers every source this context reads, whichever one the metrics come from
     const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k)).map((k) => `source ${k}`);
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
-    const paging = this._metricPaging(input);
+    const paging = this._metricPaging(input, tail.ordered);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, input.metrics);
     const explain = this._compileOnly(input);
-    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...partitionWhere], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...partitionWhere], orderBy: tail.orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
     // …and the partition filter this query adds for its window, named as the caller would name it
@@ -552,13 +609,12 @@ export const semanticQueryMethods = {
     const partitionToken = source && this.catalog.primaryEntityName(source) ? [[`${this.catalog.primaryEntityName(source)}__${PARTITION_DIM}`, `${source}_${PARTITION_DIM}`]] : [];
     const spelled = new Map([...this._queryTokens((ctx.state.metrics || []).map((m) => m.name)), ...partitionToken, ...whereNames, ...rename]);
     const speak = this._callerSpelling(spelled);
-    const respond = async (raw) => {
+    const respond = async (res) => {
       this.ctxs.touch(ctx.id);
-      const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
       // an explain or a failure is text that may quote any item MetricFlow resolved: spelled with its list
       const listed = !res.ok || explain ? await this._listedGroupBys(ctx, input.metrics) : null;
       const fully = listed ? this._callerSpelling(new Map([...this._localTimeTokens(this._previewLayer(ctx).layer), ...this._listedTokens(listed.groupBys), ...spelled])) : speak;
-      const early = this._metricEarlyAnswer(res, { explain, input, speak: fully, extra: { orderable_keys: orderableKeys, ...(filterWarnings.length ? { warnings: filterWarnings } : {}) } });
+      const early = this._metricEarlyAnswer(res, { explain, input, speak: fully, extra: { output_columns: tail.outputColumns, ...(filterWarnings.length ? { warnings: filterWarnings } : {}) } });
       if (early) return early;
       const { rows: pageRows, page } = paging.page(res.rows);
       // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
@@ -592,7 +648,7 @@ export const semanticQueryMethods = {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       if (page.has_more) recs.push(this._keptRowsNote(page));
-      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ request: { action: \'start\', from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
+      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ request: { action: \'start\', name, from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
         columns: res.columns,
@@ -618,7 +674,15 @@ export const semanticQueryMethods = {
     // The query is a TASK: validated above, run below, its response read with query_semantic_model({ request: { task_ids } }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
-    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });
+    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond, tail });
+  },
+
+  /** The type a { model, attribute } group_by column comes back in, as the steps after the query read it:
+   *  the catalog's for a column of the model; 'unknown' for a dimension the task computed (a constant
+   *  compared with it is written as it is). A time dimension is a time (_timeGrainOf). */
+  _attributeType(ctx, { model, attribute }) {
+    if (this._taskDimOf(ctx, model, attribute)) return 'unknown';
+    return this.catalog.modelColumns(model).find((c) => c.name === attribute)?.type || 'unknown';
   },
 
   /**
@@ -636,3 +700,51 @@ export const semanticQueryMethods = {
     }
   },
 };
+
+/** What `mf query` answered, under the caller's names: its columns and each row's keys renamed
+ *  (`rename`: MetricFlow's token → the result column). A failure or a compiled query is as it came. */
+function callerNamed(raw, rename) {
+  if (!raw?.ok || !Array.isArray(raw.rows)) return raw;
+  return {
+    ...raw,
+    columns: (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c)),
+    rows: raw.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v]))),
+  };
+}
+
+/**
+ * A metric query's rows in ONE FORM, whichever path ran it: `mf query` writes a CSV, every dimension as
+ * text (a moment as Python prints it, '2026-01-01 00:00:00'; a number as its digits), while the dbt
+ * client's show writes JSON (the moment ISO, a number a number). Keyed by the result's typed columns
+ * (`columns`, [{ name, type }]): a moment is written ISO, 'T' between its day and its time, and a numeric
+ * column's number is a number — an integer past 2^53 kept as the digits written, as show keeps one
+ * (src/dbt/output.js). Every other value, a failure and a compiled query are as they came.
+ */
+function oneForm(raw, columns = []) {
+  if (!raw?.ok || !Array.isArray(raw.rows)) return raw;
+  const time = new Set(columns.filter((c) => c.type === 'time').map((c) => c.name));
+  const numeric = new Set(columns.filter((c) => NUMERIC_TYPES.has(c.type)).map((c) => c.name));
+  if (!time.size && !numeric.size) return raw;
+  const written = (k, v) => {
+    if (typeof v !== 'string') return v;
+    if (time.has(k)) return v.replace(/^(\d{4}-\d{2}-\d{2}) (?=\d)/, '$1T');
+    if (!numeric.has(k) || v.trim() === '' || !Number.isFinite(Number(v))) return v;
+    return /^\s*-?\d+\s*$/.test(v) && !Number.isSafeInteger(Number(v)) ? v : Number(v);
+  };
+  return { ...raw, rows: raw.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, written(k, v)]))) };
+}
+/** The column types whose values are numbers. */
+const NUMERIC_TYPES = new Set(['numeric', 'int', 'float']);
+
+// Where a warehouse puts NULLs in an ORDER BY key that names no place: last on DuckDB; on BigQuery
+// first in an ascending sort, last in a descending one.
+const NULLS_UNSAID = { duckdb: () => 'last', bigquery: (direction) => (direction === 'desc' ? 'last' : 'first') };
+
+/**
+ * Whether MetricFlow orders a sort key as an order_by step means it. Its ORDER BY names no place for
+ * NULLs, so they go where the warehouse puts them, while a step puts them last unless it says first —
+ * the same on every warehouse. A key MetricFlow would place otherwise is the read compiler's to write.
+ */
+function metricFlowOrders(dialect, key) {
+  return NULLS_UNSAID[dialect]?.(key.direction) === (key.nulls === 'first' ? 'first' : 'last');
+}

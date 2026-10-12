@@ -1,8 +1,9 @@
-// A READ IS THE PIPELINE'S OWN STAGES over a stored table (src/pipeline.js renderRead): the stages that
-// re-slice rows — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — built by
-// the pipeline's own builders over the table's columns. A stage that makes a new table (a join, an
-// unnest, a funnel, a python model) is a build from the task, and a stored table has no source, so an
-// event property or a declared relationship is not a thing it can read.
+// A READ IS STEPS OF THE PIPELINE'S OWN STAGES over a stored table, or over a metric query's result
+// (src/pipeline.js renderRead): the stages that re-slice rows — where, compute, aggregate, pivot,
+// unpivot, order_by, limit, sample, project — built by the pipeline's own builders over the relation's
+// columns. A stage that makes a new table (a join, an unnest, a funnel, a python model) is a build from
+// the task, and a read has no source, so an event property or a declared relationship is not a thing it
+// can read.
 //
 // Input-validation guards and the column set a read leaves (allowed by the test rules): nothing here
 // reads generated SQL. The rows a read returns are proven on DATA in test/integration/.
@@ -63,18 +64,43 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
     { stage: 'match_recognize', partition_by: ['user__country'], steps: [{ name: 'a', event_name: ['first_launch'] }] },
     { stage: 'python' },
   ]) {
-    assert.throws(() => read([{ stage: 'limit', limit: 1 }, st]), (e) => e.message.startsWith('stages[1]: a read takes where, compute, aggregate')
+    assert.throws(() => read([{ stage: 'limit', limit: 1 }, st]), (e) => e.message.startsWith('steps[1]: a read takes where, compute, aggregate')
       && e.message.includes(`a ${st.stage} stage makes a new table`) && /from_task/.test(e.message), st.stage);
   }
+  // a step that arrived without its `stage` is said so, at its place
+  assert.throws(() => read([{ limit: 3 }]), (e) => e.message.startsWith('steps[0]: a read takes') && /names no `stage`/.test(e.message));
   // the tool's schema offers a read's stages alone
   const v = makeValidators(buildSchemas(catalog));
   const q = (request) => validateInput(v.query_pipeline_model, request);
-  assert.equal(q({ context_id: 'abcdef123456', stages: [{ stage: 'limit', limit: 3 }] }).ok, true);
-  assert.match(q({ context_id: 'abcdef123456', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`stages\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
-  // no stages is a read of the table as it is: the field is left out, never an empty list
-  assert.match(q({ context_id: 'abcdef123456', stages: [] }).errors.join(' | '), /at least 1 item/);
+  assert.equal(q({ context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
+  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  // no steps is a read of the table as it is: the field is left out, never an empty list
+  assert.match(q({ context_id: 'abcdef123456', steps: [] }).errors.join(' | '), /at least 1 item/);
   assert.equal(q({ context_id: 'abcdef123456' }).ok, true);
-  assert.equal(q({ context_id: 'abcdef123456', queries: [{ stages: [{ stage: 'limit', limit: 3 }] }, { limit: 5 }] }).ok, true);
+  assert.equal(q({ context_id: 'abcdef123456', queries: [{ steps: [{ stage: 'limit', limit: 3 }] }, { limit: 5 }] }).ok, true);
+});
+
+// The steps after a metric query are the same read, over the SQL MetricFlow compiled for it (a
+// subquery relation whose columns carry the caller's names, each typed where it is known): a step
+// naming a column the result does not have — MetricFlow's own spelling of one included — is refused
+// with the result's columns.
+test('a read runs over a query as over a table: its steps over the result\'s columns, refused with them', () => {
+  const RESULT = [{ name: 'metric_time_day', type: 'time' }, { name: 'users_country', type: 'string' }, { name: 'revenue', type: 'unknown' }];
+  const over = (steps) => renderRead(catalog, '(\nselect 1\n) AS _metrics', RESULT, steps);
+  const having = over([
+    { stage: 'where', conditions: [cond('gt', 'revenue', 100), cond('gte', 'metric_time_day', '2026-01-01')] },
+    { stage: 'compute', name: 'per_user', expr: { fn: 'div', args: [{ column: 'revenue' }, { value: 1000 }] } },
+    { stage: 'order_by', keys: [{ key: 'per_user', direction: 'desc' }] },
+    { stage: 'limit', limit: 5 },
+  ]);
+  assert.deepEqual([...having.columns.keys()], ['metric_time_day', 'users_country', 'revenue', 'per_user']);
+  assert.equal(having.ordered, true);
+  // a regroup of the result: by country, over every day
+  assert.deepEqual([...over([{ stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }] }]).columns.keys()], ['users_country', 'total']);
+  // MetricFlow's spelling of a column is not the result's
+  for (const key of ['metric_time__day', 'metric_time', 'nonsense']) {
+    assert.throws(() => over([{ stage: 'order_by', keys: [{ key }] }]), (e) => new RegExp(`^steps\\[0\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, users_country, revenue\\)`).test(e.message), key);
+  }
 });
 
 test('a stored table has no source: an event property and a declared relationship are refused, its columns are read', () => {
@@ -82,13 +108,13 @@ test('a stored table has no source: an event property and a declared relationshi
   assert.throws(() => read([{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }]), /\{ entity \} names a relationship of a pipeline's source, and these rows read none/);
   // …and the schema of the read offers no { property } leaf
   const v = makeValidators(buildSchemas(catalog));
-  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', stages: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
+  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
 });
 
 // input-validation guards (allowed by the test rules): unsafe input is rejected, a name not a column of
 // the table is refused with the columns it has, a constant is typed as the column it meets.
 test('a read refuses what is not a column of the table, a name that is no identifier, and a constant of another type', () => {
-  assert.throws(() => read([{ stage: 'aggregate', group_by: ['a; drop table x'], measures: [{ name: 'x', expr: { fn: 'count' } }] }]), /stages\[0\]: .*unknown column 'a; drop table x' at this stage \(available: user__country, mon_revenue, day, n\)/);
+  assert.throws(() => read([{ stage: 'aggregate', group_by: ['a; drop table x'], measures: [{ name: 'x', expr: { fn: 'count' } }] }]), /steps\[0\]: .*unknown column 'a; drop table x' at this stage \(available: user__country, mon_revenue, day, n\)/);
   assert.throws(() => read([{ stage: 'where', conditions: [cond('eq', '1=1', 1)] }]), /unknown column '1=1'/);
   assert.throws(() => read([{ stage: 'order_by', keys: [{ key: 'x y' }] }]), /unknown column 'x y'/);
   assert.throws(() => read([{ stage: 'aggregate', measures: [{ name: 'x); --', expr: { fn: 'count' } }] }]), /unsafe SQL identifier/);
@@ -103,19 +129,19 @@ test('a read refuses what is not a column of the table, a name that is no identi
   }
 });
 
-test('a read written as an earlier `transform` is refused with the stages it is now; its converter reads every part of one', () => {
+test('a read written as an earlier `transform` is refused with the steps it is now; its converter reads every part of one', () => {
   const v = makeValidators(buildSchemas(catalog));
   const transform = { where: [{ column: 'user__country', op: 'eq', value: 'US' }], group_by: ['day'], measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] };
-  const stages = [
+  const steps = [
     { stage: 'where', conditions: [cond('eq', 'user__country', 'US')] },
     { stage: 'aggregate', group_by: ['day'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
   ];
   const refused = validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', transform });
   assert.equal(refused.ok, false);
-  assert.ok(refused.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ context_id: 'abcdef123456', stages })}`), refused.errors.join(' | '));
+  assert.ok(refused.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ context_id: 'abcdef123456', steps })}`), refused.errors.join(' | '));
   // having is a where after the aggregate, order_by its stage, then a second level; a group_by alone counts its rows
   assert.deepEqual(transformStages({ ...transform, having: [{ column: 'rev', op: 'gt', value: 10 }], order_by: [{ key: 'rev', direction: 'desc' }], then: { group_by: ['rev'] } }), [
-    ...stages,
+    ...steps,
     { stage: 'where', conditions: [cond('gt', 'rev', 10)] },
     { stage: 'order_by', keys: [{ key: 'rev', direction: 'desc' }] },
     { stage: 'aggregate', group_by: ['rev'], measures: [{ name: 'rows', expr: { fn: 'count' } }] },

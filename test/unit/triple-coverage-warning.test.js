@@ -14,7 +14,7 @@ function engine() {
   const catalog = loadCatalog(CATALOG, {});
   return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tri-')) }) }));
 }
-const add = (e, id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id: id, stages: [stage] });
+const add = (e, id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id: id, steps: [stage] });
 
 // TRIPLE: a field NULL for the scoped (bundle × event) combination → warned after the step
 // that uses it (the field is wrong FOR THIS APP+EVENT, so the step yields no values).

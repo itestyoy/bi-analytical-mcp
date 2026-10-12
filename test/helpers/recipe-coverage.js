@@ -20,7 +20,7 @@ export const DATA_TESTED = {
   ratio_metric: 'analytics-tasks.test.js:TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment',
   payload_property_measure_and_dimension: 'analytics-tasks.test.js:TASK payload_property_measure_and_dimension: ad revenue & impressions by network/placement',
   two_event_scopes_and_a_net: 'analytics-tasks.test.js:TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source split',
-  experiment_conversion: 'end-to-end.test.js:5a. build_pipeline_model fed the conversion recipe stages → per-variant aggregates (control 6/6, variant 1/6)',
+  experiment_conversion: 'end-to-end.test.js:5a. build_pipeline_model fed the conversion recipe steps → per-variant aggregates (control 6/6, variant 1/6)',
   experiment_revenue: 'model-results.test.js:revenue/user: DB aggregates → Welch t-test (means 10.833 vs 3.333)',
   experiment_cuped: 'model-results.test.js:CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-period)',
   experiment_ratio: 'model-results.test.js:ratio: DB per-user sums → delta-method test (level completion 16/16 vs 10/12)',

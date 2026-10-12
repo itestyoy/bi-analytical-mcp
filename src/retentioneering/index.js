@@ -23,11 +23,12 @@
 import { join } from 'node:path';
 import { createDbt, dbtFailure } from '../dbt/index.js';
 import { ToolError } from '../validate.js';
+import { READ_PAGE } from '../schema/fields.js';
 import { buildSchema, querySchema, displaySchema, retentioneeringFacts, pathSources, analysisKinds, offeredOps, COMPLEX_EVENT_LOGIC } from './schema.js';
 import { renderEventstream } from './eventstream.js';
 import { LibraryChecker } from './checker.js';
 import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI } from './view-model.js';
-import { summarize } from './results.js';
+import { readView } from './results.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 import { SIDE, BUILD, QUERY, DISPLAY } from './names.js';
 import { contextFor, pathContext, basePaths } from './contexts.js';
@@ -39,8 +40,8 @@ import { drawnAlready, display } from './display.js';
 export { SIDE };
 
 export const TOOL_DESCRIPTIONS = {
-  [BUILD]: `Build and shape the eventstream a path analysis reads, step by step like a pipeline. start (the default) declares it and builds it in SQL where the data lives: an events source and window, its rows prepared by the pipeline\'s own stages — a where keeping the events the paths are about, a compute renaming, merging or splitting events by a parameter (ad_finished by is_error into ad_finished_failed / ad_finished_success) or reading a property, a join bringing a related model\'s attribute — then the columns that are the event, the path and the segments; optional sessions, a deterministic sample, a top N of events. ${COMPLEX_EVENT_LOGIC} It returns a task_id; query_retentioneering_model({ request: { task_ids } }) returns its summary — users, events, the vocabulary with counts, each segment\'s levels. Then shape the paths with the library\'s own steps (filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …): add_steps checks each one with the library itself on what the eventstream holds at that point and answers at once — refused with the library\'s message, or what each changed and the shape after them (events, path columns, segments and their levels) — so fix a step when it is refused rather than waiting for a run. edit_step / insert_step / delete_step / truncate re-check every step after; fork tries a variant in a new eventstream; preview lists the steps; materialize runs them on the warehouse (a task), and the analyses read the eventstream as materialized. Use it for paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.`,
-  [QUERY]: 'Run retentioneering over a built eventstream (as materialized: its steps included), or read a task back. { context_id, eventstream, analyses: [...] } checks the analyses with the library itself on what the eventstream holds — refused at once, with its message — and starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. The paths are shaped by the eventstream\'s own steps (build_retentioneering_model add_steps), not here: a variant is a fork of it. It returns a task_id at once. { task_ids: [id] } waits up to 30s and returns, for each task, each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table — or, with detail: "full", every record; { task_ids, cancel: true } stops it. Event names are the eventstream\'s own (as its start named them, and after its steps).',
+  [BUILD]: `Build and shape the eventstream a path analysis reads, step by step like a pipeline. start (the default) declares it and builds it in SQL where the data lives: an events source and window, its rows prepared by its steps, the pipeline\'s stages — a where keeping the events the paths are about, a compute renaming, merging or splitting events by a parameter (ad_finished by is_error into ad_finished_failed / ad_finished_success) or reading a property, a join bringing a related model\'s attribute — then the columns that are the event, the path and the segments; optional sessions, a deterministic sample, a top N of events. ${COMPLEX_EVENT_LOGIC} It returns a task_id; query_retentioneering_model({ request: { task_ids } }) returns its summary — users, events, the vocabulary with counts, each segment\'s levels. Then shape the paths with the library\'s own steps (filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …): add_steps checks each one with the library itself on what the eventstream holds at that point and answers at once — refused with the library\'s message, or each step with what it changed (the events, path columns and segments) — so fix a step when it is refused rather than waiting for a run. edit_step / insert_step / delete_step / truncate re-check every step after; fork tries a variant in a new eventstream; preview lists the steps; materialize runs them on the warehouse (a task), and the analyses read the eventstream as materialized. Use it for paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.`,
+  [QUERY]: `Run retentioneering over a built eventstream (as materialized: its steps included), or read a task back. { context_id, eventstream, analyses: [...] } checks the analyses with the library itself on what the eventstream holds — refused at once, with its message — and starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. The paths are shaped by the eventstream\'s own steps (build_retentioneering_model add_steps), not here: a variant is a fork of it. It returns a task_id at once. { task_ids: [id] } waits up to 30s and returns, for each task, a page of each analysis\'s tables — ${READ_PAGE} rows from offset (a row number, 0 the first) unless limit says, the biggest first: transitions by count, events by their share at each step, metrics by how far they set the groups apart — with what it computes beyond rows (each group\'s profile); { task_ids, cancel: true } stops it. Event names are the eventstream\'s own (as its start named them, and after its steps).`,
   [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters, a segment overview, a distribution\'s histogram, or a diff\'s heatmaps — in hosts that render MCP Apps. Other analyses (describe, conversion_rate, path_metrics) have no card: answer them in words from the read. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ request: { task_ids } })) to know what it found; draw the analysis the person should see before summarising it. These cards are the one picture of paths and transitions — for an eventstream built from a pipeline table (from_task) as for one from a source — so there is no need to draw a diagram of your own.',
 };
 
@@ -126,10 +127,10 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview, a distribution\'s histogram or a diff\'s heatmaps.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
-      // what the MODEL reads of a drawn card: the analysis as a read summarizes it — the card holds every
-      // record (the structured copy), and every path's cluster label or a density's thousand points
-      // would not fit the conversation
-      forModel: (drawn) => (drawn?.result ? { ...drawn, result: summarize(drawn.result), note: 'The card holds every record; this is the summary a read gives (query_retentioneering_model with detail: "full" for all of it).' } : drawn),
+      // what the MODEL reads of a drawn card: the analysis as a read's first page gives it — the card
+      // holds every record (the structured copy), and every path's cluster label or a density's thousand
+      // points would not fit the conversation
+      forModel: (drawn) => (drawn?.result ? { ...drawn, result: readView(drawn.result), note: `The card holds every record; this is the first page a read gives — ${QUERY}({ request: { task_ids, offset, limit } }) pages the rest of each table.` } : drawn),
     },
     guide: { name: GUIDE_NAME, build: () => retentioneeringGuide(), triggers: ROUTING_TRIGGERS },
     skill: () => retentioneeringSkill(),
@@ -151,7 +152,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
  * A path-analysis context as context() shows it: each eventstream — its description, its source (or
  * the task it was started from), what it was forked from, its steps as preview gives them, how far
  * they are materialized and the shape at the end — and how to go on with it. `brief` is the listing's
- * line: the eventstreams by name, with their step counts. (A context stored before an eventstream kept
+ * line: the eventstreams by name, with their steps_count. (A context stored before an eventstream kept
  * its own description carries one for the context: shown as it was.)
  */
 function describePathContext(ctx) {
@@ -168,7 +169,7 @@ function describePathContext(ctx) {
     engine: SIDE,
     ...(state.description ? { description: state.description } : {}),
     eventstreams,
-    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, ...(e.description ? { description: e.description } : {}), source: e.source, steps: e.steps.length, materialized_through: e.materialized_through })) },
+    brief: { ...(state.description ? { description: state.description } : {}), eventstreams: eventstreams.map((e) => ({ name: e.name, ...(e.description ? { description: e.description } : {}), source: e.source, steps_count: e.steps.length, materialized_through: e.materialized_through })) },
     continue_with: `${BUILD}({ request: { action: 'preview' | 'add_steps' | 'materialize' | 'fork', context_id: '${ctx.id}', eventstream } }) shapes an eventstream; ${QUERY}({ request: { context_id: '${ctx.id}', eventstream, analyses } }) runs analyses over it.`,
   };
 }
@@ -197,13 +198,13 @@ async function buildAction(engine, feature, input, action) {
 
 async function start(engine, feature, input) {
   // a task's stored table (a pipeline build) as the rows — found, and checked to be there, the way a
-  // pipeline started from a task finds it; the source is then what its stages read properties and
+  // pipeline started from a task finds it; the source is then what its steps read properties and
   // relationships of
   const found = input.from_task ? engine.host.taskBase({ from_task: input.from_task, source: input.source }) : null;
   const spec = validateStart(engine.catalog, found ? { ...input, source: found.source } : input);
   // the source's real columns, and those of every model a join stage brings in, as a pipeline's are
   // grounded: a column is compared in the type the warehouse stores it in (a flag kept as text as text)
-  const physicalCols = found ? null : await engine.host.grounding(spec.source, spec.stages || []);
+  const physicalCols = found ? null : await engine.host.grounding(spec.source, spec.steps || []);
   const ctx = contextFor(engine, input);
   const state = ctx.state.retentioneering;
   // a table of its own for every start: a later start of the same name makes a new one, so a fork of

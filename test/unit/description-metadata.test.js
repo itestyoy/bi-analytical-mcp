@@ -33,7 +33,7 @@ test('a draft keeps its description, reports it, and hands it to the fork', asyn
   const note = 'revenue per player for the payer-share question';
   const start = await e.build_pipeline_model({ action: 'start', name: 'lbl', source: 'events', description: note });
   assert.equal(start.description, note, 'the start response echoes what it recorded');
-  await e.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, stages: [AGG] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, steps: [AGG] });
 
   const described = await e.context({ action: 'describe', context_id: start.context_id });
   assert.equal(described.draft?.description, note);
@@ -41,10 +41,10 @@ test('a draft keeps its description, reports it, and hands it to the fork', asyn
   assert.equal(listed.description, note, 'a listing says why the context exists, not only what is in it');
 
   // a fork inherits the parent's note (it is the same question, one variant on)…
-  const fork = await e.build_pipeline_model({ action: 'fork', context_id: start.context_id });
+  const fork = await e.build_pipeline_model({ action: 'fork', context_id: start.context_id, name: 'lbl_fork' });
   assert.equal(e.ctxs.get(fork.context_id).state.draft.description, note);
   // …and can say what makes it different instead
-  const fork2 = await e.build_pipeline_model({ action: 'fork', context_id: start.context_id, description: 'same, but payers only' });
+  const fork2 = await e.build_pipeline_model({ action: 'fork', context_id: start.context_id, name: 'lbl_payers', description: 'same, but payers only' });
   assert.equal(e.ctxs.get(fork2.context_id).state.draft.description, 'same, but payers only');
 });
 
@@ -53,7 +53,7 @@ test('the description belongs to the draft, not to every action on it', async ()
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lbl2', source: 'events', description: 'x' });
   // add_steps / materialize describe a STEP, not the pipeline: a note there would have nowhere to go
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [AGG], description: 'nope' }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [AGG], description: 'nope' }),
     /invalid input|description/i,
   );
   await assert.rejects(

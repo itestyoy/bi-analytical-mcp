@@ -11,7 +11,7 @@
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
 //                    country → build_semantic_model action update adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
-//   5. A/B         — build_pipeline_model fed the conversion recipe's stages one-at-a-
+//   5. A/B         — build_pipeline_model fed the conversion recipe's steps one-at-a-
 //                    time → materialize → per-variant aggregates → experiment analyze + check_split +
 //                    plan: the conversion recipe's data proof (model-results.test.js runs the
 //                    others).
@@ -81,7 +81,7 @@ test('3a. build_pipeline_model: start → add_steps (funnel) → preview → com
   S.draftId = s.context_id;
 
   // default add_steps returns a DIFF; the funnel columns show up as added.
-  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: S.draftId, stages: [matchActivation()] });
+  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: S.draftId, steps: [matchActivation()] });
   assert.equal(stepEffect(a1).step_index, 1);
   const cols = stepEffect(a1).columns_added.map((c) => c.name);
   assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
@@ -203,16 +203,16 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
 });
 
 // ───────────────────────── 5. A/B over the experiments role ─────────────────────────
-test('5a. build_pipeline_model fed the conversion recipe stages → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
+test('5a. build_pipeline_model fed the conversion recipe steps → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
   if (skip(t)) return;
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
-  // stages one at a time, then commit. (_buildPipeline with the same payload
+  // steps one at a time, then commit. (_buildPipeline with the same payload
   // is the documented fallback; here we prove the add_steps path also works.)
   const r = recipes.list.find((x) => x.id === 'experiment_conversion');
-  const stages = r.pipeline_payload.stages;
+  const steps = r.pipeline_payload.steps;
   const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
-  for (const stage of stages) {
-    const a = await engine.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, stages: [stage] });
+  for (const step of steps) {
+    const a = await engine.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, steps: [step] });
     assert.ok(Number.isInteger(stepEffect(a).step_index), 'each add_steps advances the draft');
   }
   const commit = await engine.build_pipeline_model({ action: 'materialize', context_id: start.context_id });
@@ -285,7 +285,7 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
   }
   const conv = await engine.semantic_index({ recipe: 'experiment_conversion' });
   assert.equal(conv.id, 'experiment_conversion');
-  assert.ok(conv.pipeline_payload?.action === 'start' && conv.pipeline_payload.stages?.length, 'A/B recipe carries a pipeline_payload: a start request with its stages');
+  assert.ok(conv.pipeline_payload?.action === 'start' && conv.pipeline_payload.steps?.length, 'A/B recipe carries a pipeline_payload: a start request with its steps');
   assert.ok(typeof conv.hack === 'string' && conv.hack.length > 0, 'recipe carries a generalizable hack');
   const power = await engine.semantic_index({ recipe: 'experiment_power' });
   assert.ok(Array.isArray(power.tool_calls) && power.tool_calls.length > 0, 'tool-only recipe carries tool_calls');

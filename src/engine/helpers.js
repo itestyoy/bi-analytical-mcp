@@ -50,7 +50,7 @@ export function pageBlock({ offset = 0, limit, returned, has_more = false, total
   return {
     offset, limit, returned, ...(known != null ? { total_rows: known } : {}), has_more,
     ...(has_more ? { next_offset: offset + returned } : {}),
-    ...(ordered === false ? { ordered: false, order_note: 'no order_by: the rows come in no particular order — add order_by for a ranking, and for pages that hold the same rows each time' } : {}),
+    ...(ordered === false ? { ordered: false, order_note: 'no order_by step: the rows come in no particular order — end the steps with an order_by step for a ranking, and for pages that hold the same rows each time' } : {}),
   };
 }
 

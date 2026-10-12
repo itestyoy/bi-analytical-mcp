@@ -42,7 +42,7 @@ const funnel = (extra = {}) => ({
 
 async function columnsAfter(e, stage) {
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [stage], include_columns: true });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [stage], include_columns: true });
   return { context_id, types: new Map(added.available_columns.map((c) => [c.name, c.type])) };
 }
 
@@ -52,19 +52,19 @@ test('a capture cannot take the name of a column the funnel outputs anyway', asy
   // the fixed columns, the partition key, each step's own, and a capture taken twice
   for (const name of ['completed', 'first_seen_at', 'furthest_step_name', 'player_id_of_internal', 'reached_a', 'at_b']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
-      (err) => err.field === 'stages[0]' && new RegExp(`capture '${name}': the funnel already outputs a column of that name`).test(err.message),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
+      (err) => err.field === 'steps[0]' && new RegExp(`capture '${name}': the funnel already outputs a column of that name`).test(err.message),
       name,
     );
   }
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name: 'lvl', step: 'a', column: 'level_id_of_event_data' }, { name: 'lvl', step: 'b', column: 'level_id_of_event_data' }] })] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ capture: [{ name: 'lvl', step: 'a', column: 'level_id_of_event_data' }, { name: 'lvl', step: 'b', column: 'level_id_of_event_data' }] })] }),
     /capture 'lvl': the funnel already outputs a column of that name/,
   );
   // nor the name of a working column of the match itself (the axis, each step's time and flag)
   for (const name of ['ts', 't1', 't2', 'is1', 'is2']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ capture: [{ name, step: 'b', column: 'level_id_of_event_data' }] })] }),
       new RegExp(`capture '${name}': the funnel uses that name for a working column of its own`),
       name,
     );
@@ -84,7 +84,7 @@ test('only the working columns THIS funnel makes are refused as a capture name â
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   for (const name of ['t3', 'is3']) {
     await assert.rejects(
-      () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ ...three, capture: [{ name, step: 'c', column: 'level_id_of_event_data' }] }] }),
+      () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ ...three, capture: [{ name, step: 'c', column: 'level_id_of_event_data' }] }] }),
       new RegExp(`capture '${name}': the funnel uses that name for a working column of its own`),
       name,
     );
@@ -115,10 +115,10 @@ test('a capture of a column the warehouse stores as text keeps that mark, as a c
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   const captured = funnel({ capture: [{ name: 'clicked', step: 'b', column: 'is_clicked_of_event_data' }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'clicked' }, { value: true }] }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [captured, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'clicked' }, { value: true }] }] }] }),
     /'clicked' is a text column in the warehouse/,
   );
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [captured, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'clicked' }, { value: true }] }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [captured, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'clicked' }, { value: true }] }] }] });
   assert.equal(ok.steps_count, 2);
   // the column map the next stage reads: the capture is marked as the compute copy of the same column is
   for (const dialect of ['duckdb', 'bigquery']) {
@@ -137,7 +137,7 @@ test('a capture naming a step the funnel does not have is refused as the capture
   const e = engine();
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ capture: [{ name: 'x', step: 'zz', column: 'level_id_of_event_data' }] })] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ capture: [{ name: 'x', step: 'zz', column: 'level_id_of_event_data' }] })] }),
     (err) => /capture 'x' names step 'zz'/.test(err.message) && /steps: a, b/.test(err.message) && !/metric/.test(err.message),
   );
 });
@@ -149,10 +149,10 @@ test('at_<step> and first_seen_at are of the sequence axis\'s type: a moment by 
   const { context_id, types } = await columnsAfter(e, funnel({ order_by: 'session_number' }));
   assert.deepEqual(['first_seen_at', 'at_a', 'at_b'].map((c) => types.get(c)), ['numeric', 'numeric', 'numeric']);
   // two of them compare as numbers: a constant is written as one, and a date is refused as the number column it is
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'at_b' }, { column: 'at_a' }] }, { fn: 'gte', args: [{ column: 'at_a' }, { value: '2' }] }] }] });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'at_b' }, { column: 'at_a' }] }, { fn: 'gte', args: [{ column: 'at_a' }, { value: '2' }] }] }] });
   assert.equal(ok.steps_count, 2);
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'at_a' }, { value: '2026-01-01' }] }] }] }),
+    () => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'at_a' }, { value: '2026-01-01' }] }] }] }),
     /'at_a' is a number: compare it with a number/,
   );
 });
@@ -170,8 +170,8 @@ test('between_steps is the one choice of what lies between steps: any by default
   // `mode` is gone: the choice it made is between_steps' â€” refused, not read beside it
   const e = engine();
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ mode: 'strict' })] }), /unexpected property 'mode'/);
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [funnel({ between_steps: 'none' })] }), /between_steps/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ mode: 'strict' })] }), /unexpected property 'mode'/);
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [funnel({ between_steps: 'none' })] }), /between_steps/);
   // where a row-pattern match runs it, the adjacent-events funnel builds the same columns as any other
   const cols = (between) => [...renderPipeline(catalog, 'bigquery', 'events', [funnel({ between_steps: between })], { physicalCols: SOURCE_COLS }).columns.keys()];
   assert.deepEqual(cols('none'), cols('any'));

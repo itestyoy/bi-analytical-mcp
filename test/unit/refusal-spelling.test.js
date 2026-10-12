@@ -24,7 +24,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
-const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', stages: [st] });
+const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', steps: [st] });
 const measure = (name, expr) => stage({ stage: 'aggregate', measures: [{ name, expr }] });
 
 test("a pipeline measure refuses `avg` (and `mean`, `quantile`) and says how it is spelled here", () => {
@@ -109,10 +109,54 @@ test('sum_boolean is refused with the list of functions, and no word-for-word ad
 // and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
 // name in the refusal (a hint, not an alias).
 test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', stages: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.equal(res.ok, false);
   assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
+  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
+});
+
+// A list a tool runs in order is `steps` in every tool, its items tagged by what they are. What changed
+// only its name (`stages`, `stage`) is told the name (refusal-views.test.js); what changed its shape — a
+// read's `transform`, a metric query's `order_by`, now an order_by step after the query — is shown as it
+// is written now, in a batch at the query that wrote it.
+test("a read's transform and a metric query's order_by are shown as the steps they are now", () => {
+  const read = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } });
+  assert.equal(read.ok, false);
+  assert.ok(text(read).includes(`request is written in an earlier spelling — write ${JSON.stringify({ context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] })}`), text(read));
+  const keys = [{ key: 'revenue', direction: 'desc' }];
+  const ordered = check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'], order_by: keys, limit: 5 });
+  assert.equal(ordered.ok, false);
+  assert.ok(text(ordered).includes(`request is written in an earlier spelling — write ${JSON.stringify({ context_id: 'ctxabc123456', metrics: ['revenue'], limit: 5, steps: [{ stage: 'order_by', keys }] })}`), text(ordered));
+  const batch = check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ metrics: ['revenue'] }, { metrics: ['revenue'], order_by: keys }] });
+  assert.equal(batch.ok, false);
+  assert.ok(text(batch).includes(`\`queries.1\` is written in an earlier spelling — write ${JSON.stringify({ metrics: ['revenue'], steps: [{ stage: 'order_by', keys }] })}`), text(batch));
+  // …and what it says now is taken: the order_by step, a where step on a metric (a having), the time
+  for (const steps of [
+    [{ stage: 'order_by', keys }],
+    [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }],
+    [{ stage: 'compute', name: 'recent', expr: { fn: 'gte', args: [{ column: 'metric_time_day' }, { now: true }] } }],
+  ]) assert.equal(check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'], steps }).ok, true, JSON.stringify(steps));
+  assert.equal(check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ metrics: ['revenue'], steps: [{ stage: 'order_by', keys }] }] }).ok, true);
+});
+
+// The steps after a metric query read its RESULT: a level of the expression grammar of their own, beside
+// the where's — so a step names a result column ({ column }), and the query's where a dimension as
+// group_by names it; neither takes the other's leaves, and a step that makes a new table is a build's.
+test("a metric query's where and the steps after it each take their own leaves", () => {
+  const q = (extra) => check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'], ...extra });
+  const country = { model: 'users', attribute: 'country' };
+  assert.equal(q({ where: [{ fn: 'eq', args: [country, { value: 'US' }] }] }).ok, true);
+  const dimensionInStep = q({ steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }] });
+  assert.equal(dimensionInStep.ok, false);
+  assert.match(text(dimensionInStep), /`steps\.0\.conditions\.0\.args\.0` has an unexpected property 'model' — a column — \{ column \} takes column/);
+  const columnInWhere = q({ where: [{ fn: 'eq', args: [{ column: 'users_country' }, { value: 'US' }] }] });
+  assert.equal(columnInWhere.ok, false);
+  assert.match(text(columnInWhere), /`where\.0\.args\.0` has an unexpected property 'column'/);
+  // a read's stages only: a join makes a new table, and raw SQL is a build's escape hatch
+  assert.match(text(q({ steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] })), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  assert.equal(q({ steps: [{ stage: 'compute', name: 'y', expr: { fn: 'raw', sql: '1', args: [] } }] }).ok, false);
+  // a list of no steps says nothing: it is left out instead
+  assert.equal(q({ steps: [] }).ok, false);
 });
 
 test('a pipeline step names its context with context_id; `draft_id` is refused with that name', () => {
@@ -121,7 +165,7 @@ test('a pipeline step names its context with context_id; `draft_id` is refused w
   assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
   assert.equal(check('build_pipeline_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
   // a start may omit its action (the default) and name a context to start the draft in
-  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', stages: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
+  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; here the rows are counted by a count with no argument. The refusal for

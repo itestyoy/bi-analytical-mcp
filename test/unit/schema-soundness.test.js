@@ -104,7 +104,7 @@ test('every tool schema compiles for an events source with no declared event voc
   const events = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'from').includes('events'));
   assert.ok(events, 'the events source can be declared');
   // and the funnel stage, which builds its own step vocabulary, is offered too
-  assert.ok(field(engine.schemas.build_pipeline_model, engine.schemas.build_pipeline_model, 'stage'), 'the pipeline tool is still offered');
+  assert.ok(field(engine.schemas.build_pipeline_model, engine.schemas.build_pipeline_model, 'step'), 'the pipeline tool is still offered');
 });
 
 // The backstop: whatever the catalog, no built schema may carry an empty enum/oneOf/anyOf/allOf.

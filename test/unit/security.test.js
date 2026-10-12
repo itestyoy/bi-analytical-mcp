@@ -18,7 +18,7 @@ test('a task is addressed by its id alone — no table name or path reaches a re
     assert.equal(v(tool, { ...id('aabbccddeeff'), table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
     assert.ok(v(tool, id('aabbccddeeff')).ok);
   }
-  assert.equal(v('drill_result', { task_id: 'aabbccddeeff', stages: [{ stage: 'limit', limit: 1 }], table: 'qr_aabbccddeeff' }).ok, false);
+  assert.equal(v('drill_result', { task_id: 'aabbccddeeff', steps: [{ stage: 'limit', limit: 1 }], table: 'qr_aabbccddeeff' }).ok, false);
 });
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
   for (const tool of ['query_semantic_model', 'delete_context.context', 'context.describe']) {
@@ -54,9 +54,11 @@ test('derived metric expr is restricted to a safe arithmetic grammar', () => {
 // drill). And no raw SQL anywhere carries a Jinja opener: the model file is rendered by dbt, which would run it.
 test('a read takes no raw SQL, and no raw SQL carries a Jinja opener', () => {
   const raw = { stage: 'compute', name: 'x', expr: { fn: 'raw', sql: "{{ run_query('drop table users') }}" } };
-  assert.equal(v('query_pipeline_model', { context_id: 'abc123', stages: [raw] }).ok, false);
+  assert.equal(v('query_pipeline_model', { context_id: 'abc123', steps: [raw] }).ok, false);
+  // the steps after a metric query are a read too
+  assert.equal(v('query_semantic_model', { context_id: 'abc123', metrics: ['m'], steps: [raw] }).ok, false);
   const nested = [{ stage: 'aggregate', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ fn: 'raw', sql: '{1} * 2', args: [{ column: 'a' }] }] } }] }];
-  assert.throws(() => renderRead(catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], nested), /stages\[0\]: raw SQL is a build's escape hatch/);
+  assert.throws(() => renderRead(catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], nested), /steps\[0\]: raw SQL is a build's escape hatch/);
   const build = (sql) => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql, args: [{ column: 'event_name' }] } }], { physicalCols: new Set(['event_name']) });
   for (const sql of ["upper({1}) || '{{ env_var(\"X\") }}'", '{% if true %}{1}{% endif %}', '{1} {# a note #}']) assert.throws(() => build(sql), /may not hold \{\{, \{% or \{#/, sql);
   assert.ok(build('upper({1})').columns.has('x'));

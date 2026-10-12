@@ -36,12 +36,12 @@
 - **Агент никогда не пишет путь соединения.** Атрибут адресуется только тем, где он лежит:
   `group_by: [{ model: 'users', attribute: 'country' }]`,
   `where: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }]`,
-  `order_by: [{ key: 'users_country' }]` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
+  `steps: [{ stage: 'order_by', keys: [{ key: 'users_country' }] }]` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —
   `groupable_attributes` в обзоре и `groupable` в ответе `build_semantic_model`. Колонки результата
   тоже без внутреннего разделителя: `users_country`, `crashlytics_app_version`, `metric_time_day` —
-  ими же адресуются `order_by`, карточка (`display_model_result`) и пайплайн от сохранённого результата (`from_task`); соответствие возвращается в
+  ими же адресуются шаги после запроса (`steps`), карточка (`display_model_result`) и пайплайн от сохранённого результата (`from_task`); соответствие возвращается в
   `group_by_resolved`; внутреннего написания MetricFlow агент не видит ни на входе, ни на выходе.
 - **Оба текста индексируются для поиска** (`semantic_index({ search })`), с меньшим весом,
   чем имя. Поэтому слова, которыми аналитик называет поле вслух, работают: попадут в
@@ -712,7 +712,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
 | `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ from }` без мер подключает модель ради её атрибутов), `metrics` |
-| `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, stages }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
+| `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, steps }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
 | `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
 | `experiment` | для A/B | `{ action: 'analyze', metric, group_field, arm }` — сопоставление колонок результата → группа `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, arm: { n }, expected_ratio? }` → `experiment({ action: 'check_split' })`. Файл развёртывания с прежними плоскими ключами `<поле>_field` (`n_field`, `sumY_field`, `sumNum_field` …) читается как такой `arm` | см. таблицу ниже |
@@ -800,7 +800,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
     "action": "start",
     "name": "ab_checkout_conversion",
     "source": "events",
-    "stages": [
+    "steps": [
       { "stage": "join", "with": "experiments", "via": "user",
         "attrs": [{ column: "experiment_name" }, { column: "variant_group" }, { column: "assigned_at" }, { column: "ended_at" }] },
       { "stage": "where", "conditions": [
@@ -883,7 +883,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "requires": "python_models",
   "runtime": "bigframes",
   "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
-  "pipeline_payload": { "action": "start", "name": "lookup_merge", "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] },
+  "pipeline_payload": { "action": "start", "name": "lookup_merge", "source": "events", "steps": ["…SQL-стадии…", "…стадия python…"] },
   "notes": "…",
   "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group."
 }

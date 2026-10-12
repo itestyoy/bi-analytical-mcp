@@ -28,7 +28,10 @@ export const skip = (t) => { if (!ENV) { t.skip('dbt environment retentioneering
 
 export const FUNNEL = ['tutorial', 'level_started', 'shop_opened', 'iap_purchase_completed'];
 
-/** A start's stage that brings the user's platform: a join of the users model by the declared
+/** A read of every row of every table of a task: one page as long as a read takes. */
+export const EVERY_ROW = { limit: 100000 };
+
+/** A start's step that brings the user's platform: a join of the users model by the declared
  *  relationship, at the event's time (the model is slowly changing — a start refuses it without). */
 export const usersJoin = (attrs) => ({ stage: 'join', with: 'users', via: 'user', attrs, between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } });
 export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
@@ -36,7 +39,7 @@ export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
 /** Each user's event names in path order, collapsed runs of one event into one. */
 export const collapsed = (list) => list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]);
 
-/** One of the library's tables of a result, as records. */
+/** One table of an analysis — a read's page of it, or a drawn card's — as records. */
 export const table = (result, name) => {
   const t = result.tables.find((x) => x.name === name);
   assert.ok(t, `a table '${name}' (has ${result.tables.map((x) => x.name).join(', ')})`);
@@ -44,24 +47,17 @@ export const table = (result, name) => {
 };
 
 /**
- * A segment overview's (or a clustering's) sizes, level by level, from either read: the summary's groups
- * ({ name, size, … } under levels, or clusters) or a full read's level names with the segment_size
- * metric beside them. An analysis that failed, or a result of neither shape, fails the test saying what
- * it holds, under `label`.
+ * A segment overview's (or a clustering's) sizes, level by level, from its read: its groups ({ name,
+ * size, … } under levels, or clusters). An analysis that failed, or a read without them, fails the test
+ * saying what it holds, under `label`.
  */
 export const sizes = (overview, label = 'sizes') => {
   assert.ok(overview, `${label}: no such analysis in the result`);
   assert.equal(overview.error, undefined, `${label}: the analysis failed — ${JSON.stringify(overview.error)}`);
   const groups = overview.levels ?? overview.clusters;
   assert.ok(Array.isArray(groups) && groups.length, `${label}: no levels or clusters (has ${Object.keys(overview).join(', ')})`);
-  if (groups.every((g) => g && typeof g === 'object')) {
-    assert.ok(groups.every((g) => 'name' in g && 'size' in g), `${label}: a group without name and size — ${JSON.stringify(groups[0])}`);
-    return Object.fromEntries(groups.map((g) => [g.name, g.size]));
-  }
-  const size = overview.metrics?.find((m) => m.metric === 'segment_size');
-  assert.ok(size, `${label}: level names without a segment_size metric (metrics: ${(overview.metrics || []).map((m) => m.metric).join(', ') || 'none'})`);
-  assert.equal(size.values.length, groups.length, `${label}: segment_size has a value per level`);
-  return Object.fromEntries(groups.map((l, i) => [l, size.values[i]]));
+  assert.ok(groups.every((g) => g && typeof g === 'object' && 'name' in g && 'size' in g), `${label}: a group without name and size — ${JSON.stringify(groups[0])}`);
+  return Object.fromEntries(groups.map((g) => [g.name, g.size]));
 };
 
 /**
@@ -77,8 +73,9 @@ export async function openWorld() {
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-ctx-')), timeSpineDialect: 'duckdb' });
   const engine = settle(new Engine({
     catalog, contextManager: ctxs, runner, dbPath: join(mkdtempSync(join(tmpdir(), 'rete-db-')), 'x.sqlite'),
-    // a read keeps 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
-    // eventstream's are, and every whole read is proved by the numbers
+    // a task holds 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
+    // eventstream's are: a page past them is read from the stored table, and every such read is proved
+    // by the numbers
     features: [createRetentioneeringFeature({ runner, keptRows: 7 })], featureStatus: [{ id: 'retentioneering', available: true }],
   }));
   const close = async () => { try { engine.close(); } catch { /* noop */ } await wh.stop(); };
@@ -98,10 +95,11 @@ export async function openWorld() {
     for (const list of by.values()) list.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : a.e.localeCompare(b.e)));
     return by;
   };
-  /** The analyses of one call over `eventstream`, read back. */
-  const analyze = async (ctx, eventstream, analyses, detail) => {
+  /** The analyses of one call over `eventstream`, read back — a page of each table (`page`: { offset,
+   *  limit }; EVERY_ROW for all of it). */
+  const analyze = async (ctx, eventstream, analyses, page = {}) => {
     const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream, analyses });
-    const r = await readDone(q.task_id, { ...(detail ? { detail } : {}) });
+    const r = await readDone(q.task_id, page);
     assert.equal(r.status, 'done', JSON.stringify(r.error));
     return r.analyses;
   };
@@ -109,9 +107,9 @@ export async function openWorld() {
   try {
     // the rows every expectation is counted from: each event, its user, its time — in path order
     rows = (await wh.query('select player_id_of_internal as u, event_name as e, device_time as t from fct_analytics_events order by 1, 3, 2')).rows;
-    // the platform arrives by a join stage — users is slowly changing, so at each event's time — and
+    // the platform arrives by a join step — users is slowly changing, so at each event's time — and
     // is carried as a segment under its column's name
-    const b = await engine.build_retentioneering_model({ name: 'paths', source: 'events', stages: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
+    const b = await engine.build_retentioneering_model({ name: 'paths', source: 'events', steps: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
     built = await readDone(b.task_id);
     assert.equal(built.status, 'done', `the users' paths: ${JSON.stringify(built.error)}`);
     perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows

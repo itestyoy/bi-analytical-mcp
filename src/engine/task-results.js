@@ -24,8 +24,11 @@ export const taskResultMethods = {
    * card drawn once the answer is gone). The table is the durable result: a read
    * (query_semantic_model({ request: { task_ids, offset, limit } })) pages it to its last row, after the
    * in-memory answer is gone too, a card drills into it, and a pipeline can start from it (from_task).
+   * A query with read `steps` stores what they leave: the result, under the caller's names, read by
+   * them (renderRead) — `columns` the result's columns as the steps name them, each with its type where
+   * it is known ([{ name, type }]; by name alone otherwise).
    */
-  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename)) {
+  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename), { columns = null } = {}) {
     const dir = this.ctxs.dir(ctx.id);
     // The TABLE is the deliverable here, so it holds the whole result. `limit` is how many of its rows
     // the task keeps as its answer, read back below; baking it into the query would persist only those
@@ -35,17 +38,26 @@ export const taskResultMethods = {
     if (!explain.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(explain.stdout, explain.stderr)) } };
     // The stored table's columns get the caller-facing names (`<model>_<attribute>`,
     // `metric_time_<grain>`), never `__` — they are what a card and a pipeline address.
-    const projected = rename.size
-      ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
-      : explain.sql;
+    const projected = this._metricRelation(explain.sql, full, rename);
+    // the rows are stored in the order the steps leave them — none without an order_by step (a page
+    // says so, as the same query unstored does)
+    let stored = projected;
+    let ordered = false;
+    if (input.steps?.length) {
+      const named = columns || [...(full.groupBy || []).map((g) => rename.get(g) ?? g), ...full.metrics].map((name) => ({ name, type: 'unknown' }));
+      let read;
+      try { read = renderRead(this.catalog, `(\n${projected}\n) AS _metrics`, named, input.steps); } catch (e) { return { ok: false, error: { stage: 'read', message: e.message } }; }
+      stored = read.sql;
+      ordered = read.ordered;
+    }
     const table = `${RESULT_MODEL_PREFIX}${id}`;
     const kept = input.limit ?? KEPT_ROWS;
     this.jobs.setTable(id, table, { keptRows: kept });
-    const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
-    this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
+    const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, time_range: input.time_range, ...(input.steps?.length ? { steps: input.steps } : {}) });
+    this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${stored}\n`);
     const r = await this.runner.run(dir, table);
     if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: speak(this._sqlRunMessage(r.stdout, r.stderr)) } };
-    return this._readTable(dir, table, kept);
+    return this._readTable(dir, table, kept, { ordered });
   },
 
   /**
@@ -59,12 +71,7 @@ export const taskResultMethods = {
     let base = `select * from ${ref}`;
     let sampled = null;
     if (stages?.length) {
-      // a table whose columns nothing here knows (an intermediate model of a chain) is asked for them —
-      // each in the type the warehouse has it, as a source's own columns are
-      if (!columns?.length && this.runner?.relationColumns) {
-        const phys = await this.runner.relationColumns(dir, table).catch(() => null);
-        if (phys?.ok) columns = phys.columns.map((c) => ({ name: c.name, type: physicalColumnType(String(c.dtype ?? c.data_type ?? '')), physical: true }));
-      }
+      columns = await this._readColumns(dir, table, columns);
       let read;
       // the stages were checked against the table's columns when the read was asked for; what refuses
       // here is a table that changed under it (rebuilt with other columns), said as the read's failure
@@ -102,6 +109,15 @@ export const taskResultMethods = {
     };
   },
 
+  /** The columns a read of a stored table is built over: those given — or, for a table whose columns
+   *  nothing here knows (an intermediate model of a chain), the warehouse's, each in the type it has
+   *  them, as a source's own columns are. */
+  async _readColumns(dir, table, columns) {
+    if (columns?.length || !this.runner?.relationColumns) return columns || [];
+    const phys = await this.runner.relationColumns(dir, table).catch(() => null);
+    return phys?.ok ? phys.columns.map((c) => ({ name: c.name, type: physicalColumnType(String(c.dtype ?? c.data_type ?? '')), physical: true })) : columns || [];
+  },
+
   /**
    * The columns of a stored result table as this server knows them, without asking the warehouse — what
    * a read of it in stages is built over: each with its type where a pipeline build said it (the
@@ -132,7 +148,7 @@ export const taskResultMethods = {
 
   /** How to have rows past what a task keeps — said in the terms of the tool that ran it. */
   _pageHint(job) {
-    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_pipeline_model({ request: { context_id, stages, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
+    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_pipeline_model({ request: { context_id, steps, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
     if (this._taskSide(job) === 'pipeline') return 'build it again — a pipeline build stores its table, which a read then pages to its last row';
     return 'run the query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to its last row';
   },
@@ -206,11 +222,11 @@ export const taskResultMethods = {
 
   /**
    * QUERY A BUILT PIPELINE MODEL — the pipeline side's twin of query_semantic_model. Two modes:
-   * with a query ({ context_id, stages?, limit? }) it STARTS a task that reads the context's built
-   * model, optionally through the pipeline's own stages (where, compute, aggregate … run read-only over
-   * the stored table, nothing upstream recomputed), keeps its first `limit` rows and returns its task_id
-   * at once; with { task_ids } it waits for pipeline tasks (a build, or such a query) and returns a page
-   * of each.
+   * with a query ({ context_id, steps?, limit?, dry_run? }) it STARTS a task that reads the context's
+   * built model, optionally through steps in the pipeline's own stages (where, compute, aggregate … run
+   * read-only over the stored table, nothing upstream recomputed), keeps its first `limit` rows and
+   * returns its task_id at once — with dry_run, the read's SQL instead of its rows; with { task_ids } it
+   * waits for pipeline tasks (a build, or such a query) and returns a page of each.
    */
   async query_pipeline_model(input) {
     this._validate('query_pipeline_model', input);
@@ -218,7 +234,10 @@ export const taskResultMethods = {
     if (input.task_ids) return this._pollTasks(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
     if (input.queries) return this._startBatch(ctx, 'query_pipeline_model', input.queries, (q) => this._pipelineQueryWork(ctx, q));
-    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input), { input }), { context_id: ctx.id });
+    // A read only compiled (dry_run) runs nothing on the warehouse: it waits for the build it reads,
+    // not behind the reads queued before it — as a metric query only compiled does.
+    const slot = input.dry_run ? { batch: this.tasks.afterBuilds(ctx) } : {};
+    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input), { input, ...slot }), { context_id: ctx.id });
   },
 
   /** One query over a context's built pipeline model, checked against its columns; returns the work its task runs. */
@@ -233,22 +252,38 @@ export const taskResultMethods = {
     if (!columns) {
       throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
     }
-    // the stages are built HERE, over the model's columns, by the compiler the read runs through: a
+    // the steps are built HERE, over the model's columns, by the compiler the read runs through: a
     // mistake is refused in the call (the columns are unknown only while a first build whose plan was
-    // edited away runs — the schema alone holds the stages then, and the read builds them when it runs)
-    if (input.stages?.length && columns.length) {
-      // (a refusal names the stage, and an unknown column the columns there are at that stage)
-      try { renderRead(this.catalog, `{{ ref('${building?.model || ctx.state.model}') }}`, columns, input.stages); } catch (e) {
-        throw new ToolError(e.message, { stage: 'validate', field: 'stages' });
+    // edited away runs — the schema alone holds the steps then, and the read builds them when it runs)
+    if (input.steps?.length && columns.length) {
+      // (a refusal names the step, and an unknown column the columns there are at that step)
+      try { renderRead(this.catalog, `{{ ref('${building?.model || ctx.state.model}') }}`, columns, input.steps); } catch (e) {
+        throw new ToolError(e.message, { stage: 'validate', field: 'steps' });
       }
     }
-    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    if (!this.runner && !input.dry_run) throw new ToolError('no query engine configured', { stage: 'query' });
     return async () => {
       const table = ctx.state.model; // resolved when the query runs: after any build queued before it
       if (!table || !this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table || ''} is not there (its build failed, or it was deleted) — build it again` } };
-      const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? KEPT_ROWS, { stages: input.stages, columns: this._storedColumns(ctx.id, table, ctx.state.pipeline_model?.task_id) });
+      const stored = this._storedColumns(ctx.id, table, ctx.state.pipeline_model?.task_id);
+      if (input.dry_run) return this._pipelineReadSql(ctx, table, input, stored);
+      const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? KEPT_ROWS, { stages: input.steps, columns: stored });
       return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table, ...(out.sampled ? { approximate: true } : {}) } };
     };
+  },
+
+  /**
+   * A read only compiled (dry_run): the statement a query over the stored table runs — its steps
+   * rendered by the read compiler over the table's columns, capped at the rows the task keeps when the
+   * query names a limit — and the columns it answers with. Nothing runs on the warehouse (a table whose
+   * columns nothing here knows is asked for them, as a read of it is).
+   */
+  async _pipelineReadSql(ctx, table, input, columns) {
+    const steps = [...(input.steps || []), ...(input.limit ? [{ stage: 'limit', limit: input.limit }] : [])];
+    const known = steps.length ? await this._readColumns(this.ctxs.dir(ctx.id), table, columns) : columns;
+    let read;
+    try { read = renderRead(this.catalog, `{{ ref('${table}') }}`, known, steps); } catch (e) { return { ok: false, error: { stage: 'read', message: e.message } }; }
+    return { ok: true, dry_run: true, model: table, sql: read.sql, output_columns: [...read.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })) };
   },
 
   /** Wait for tasks to settle, `seconds` at most (src/task-runner.js). Returns the seconds waited. */
@@ -287,7 +322,9 @@ export const taskResultMethods = {
       return { ok: false, ...head, status: 'error', table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone) — run it again to rebuild it` } };
     }
     if (held && page && (!stored || !more || page.offset + page.limit <= held.rows.length)) return { ...head, ...this._heldPage(job, held, page, stored), ...this._showHint(id, held) };
-    if (kept && !paging && !(held && page)) {
+    // an answer with no rows to page (a query only compiled: its SQL) is that answer, paged or not
+    const rowless = !stored && isPlainObject(kept?.out) && kept.out.ok !== false && !Array.isArray(kept.out.rows);
+    if (kept && (!paging || rowless) && !(held && page)) {
       const out = kept.out;
       const failed = isPlainObject(out) && out.ok === false;
       return { ...head, ...(isPlainObject(out) ? out : { result: out }), status: failed ? 'error' : 'done', ...(failed ? {} : this._showHint(id, out)) };

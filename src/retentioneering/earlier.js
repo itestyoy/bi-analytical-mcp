@@ -3,8 +3,10 @@
 // and what it holds is read again: an eventstream's start by every summary of it, and its steps by every
 // re-check after an edit. What an earlier version spelled another way is translated here, once, before
 // it is read — its conditions and expressions through the one converter table (src/earlier-spelling.js):
-//   - a start declared its rows with fields of its own; they are the pipeline's stages now, and the
-//     columns the start names:
+//   - a start named the pipeline stages its rows are prepared by `stages`; they are its `steps` now, the
+//     one word for a list a tool runs in order (each item still a stage, { stage });
+//   - before that, a start declared its rows with fields of its own; they are the pipeline's stages now
+//     (its steps), and the columns the start names:
 //       where → a where stage (a condition on a segment after the stage that makes the segment);
 //       events.include / exclude → a where stage: in / not_in on the event column;
 //       events.split / groups → compute stages making the event column, which columns.event names;
@@ -25,10 +27,12 @@
 //     not_like (and the tree's != and not_in) were NOT of what they negate. A comparison with a missing
 //     value does not hold now, neq's too, and not(…) keeps one: so each negation is carried over as
 //     not(eq / in / like), and a step keeps the rows it kept.
-// What is in the current spelling passes through unchanged.
+// What is in the current spelling passes through unchanged. A NEW call in an earlier spelling is refused
+// (refuseEarlierSpelling, refuseEarlierRead), never taken as an alias.
 
 import { ES_COLUMNS } from './names.js';
 import { ToolError } from '../validate.js';
+import { READ_PAGE } from '../schema/fields.js';
 import { NAME_RE } from '../pipeline/sql.js';
 import { currentCondition, currentConditions, isEarlierCondition } from '../earlier-spelling.js';
 
@@ -97,10 +101,17 @@ export function currentStep(step) {
 /** An earlier start's condition named an event property `property` — never a column of that name. */
 const AS_PROPERTY = { subject: () => 'property' };
 
-/** Whether a stored start is in an earlier spelling: a field no start takes since, or a path part or a
- *  segment named by an object. */
+/** Whether a stored start declares its rows with the first spelling's fields: a field no start takes
+ *  since, or a path part or a segment named by an object. */
 const isEarlierSpec = (s) => s.where !== undefined || s.events !== undefined || s.columns?.path !== undefined
   || (Array.isArray(s.path) && s.path.some(isObj)) || (Array.isArray(s.segments) && s.segments.some(isObj));
+
+/** A start whose stages list is named `stages` — its `steps` now (the stages themselves unchanged). */
+function stepsNamed(spec) {
+  if (spec.stages === undefined) return spec;
+  const { stages, ...rest } = spec;
+  return { ...rest, steps: [...(Array.isArray(stages) ? stages : []), ...(Array.isArray(rest.steps) ? rest.steps : [])] };
+}
 
 /** The column an earlier segment was carried as. */
 const segmentName = (seg) => (isObj(seg) ? seg.name ?? seg.column ?? seg.property ?? seg.attribute : seg);
@@ -120,14 +131,21 @@ function joinStage(catalog, source, seg, name, timeColumn) {
 }
 
 /**
- * A stored start in the current spelling — its rows' stages and the columns it names — in the order
- * the earlier start applied them: the events kept, the conditions on the source, the events made and
- * merged, the path, the segments, the conditions on a segment. `catalog` says what the earlier start
- * read of the source implicitly: its event and time columns, the relationship a segment was carried by,
- * a slowly-changing model's validity window, and which properties are stored under their own name.
+ * A stored start in the current spelling — its steps (the rows' stages) and the columns it names. A
+ * start of the first spelling is converted in the order it applied its fields: the events kept, the
+ * conditions on the source, the events made and merged, the path, the segments, the conditions on a
+ * segment. `catalog` says what that start read of the source implicitly: its event and time columns,
+ * the relationship a segment was carried by, a slowly-changing model's validity window, and which
+ * properties are stored under their own name.
  */
 export function currentSpec(spec, catalog = null) {
-  if (!isObj(spec) || !isEarlierSpec(spec)) return spec;
+  if (!isObj(spec)) return spec;
+  const named = stepsNamed(spec);
+  return isEarlierSpec(named) ? fromFields(named, catalog) : named;
+}
+
+/** A start of the first spelling as steps and the columns it names. */
+function fromFields(spec, catalog) {
   const { where = [], events = {}, segments = [], path, columns = {}, ...rest } = spec;
   const { path: tablePath, ...named } = columns;
   const source = spec.from_task === undefined ? spec.source : null;
@@ -199,9 +217,11 @@ export function currentSpec(spec, catalog = null) {
   if (late.length) stages.push({ stage: 'where', conditions: currentConditions(late, AS_PROPERTY) });
 
   const outColumns = { ...named, ...(event !== eventColumn ? { event } : {}) };
+  // (a start of that spelling had no steps of its own: any there come after what its fields said)
+  const steps = [...stages, ...(Array.isArray(rest.steps) ? rest.steps : [])];
   return {
     ...rest,
-    ...(stages.length ? { stages } : {}),
+    ...(steps.length ? { steps } : {}),
     ...(Object.keys(outColumns).length ? { columns: outColumns } : {}),
     ...(pathColumns ? { path: pathColumns } : {}),
     ...(segmentColumns.length ? { segments: segmentColumns } : {}),
@@ -211,17 +231,18 @@ export function currentSpec(spec, catalog = null) {
 
 /**
  * A NEW call written in an earlier spelling is refused — never taken as an alias — with what it says now:
- * a start's fields as its stages and named columns, and filter_events' where as the expression grammar,
+ * a start's fields as its steps and named columns, and filter_events' where as the expression grammar,
  * its negations as not(…). (The general hint of src/validate.js would write an earlier neq as neq, which
- * now leaves a missing value out: the hint here keeps what the caller's condition kept.)
+ * now leaves a missing value out: the hint here keeps what the caller's condition kept.) A start that only
+ * names its list `stages` is left to that hint (stages → steps): the rename is all there is to say.
  */
 export function refuseEarlierSpelling(input, catalog) {
   if (!isObj(input)) return;
   const refuse = (what, now, field = what) => { throw new ToolError(`invalid input: ${what} is written in an earlier spelling — write ${JSON.stringify(now)}`, { stage: 'validate', field }); };
-  if ((input.action ?? 'start') === 'start') {
+  if ((input.action ?? 'start') === 'start' && isEarlierSpec(input)) {
     const now = currentSpec(input, catalog);
     // (the field named is the first the start no longer takes in that shape)
-    if (now !== input) refuse('the start', now, ['where', 'events', 'segments', 'path', 'columns'].find((k) => input[k] !== undefined && JSON.stringify(input[k]) !== JSON.stringify(now[k])));
+    refuse('the start', now, ['where', 'events', 'segments', 'path', 'columns'].find((k) => input[k] !== undefined && JSON.stringify(input[k]) !== JSON.stringify(now[k])));
   }
   const steps = Array.isArray(input.steps) ? input.steps.map((s, i) => [`steps[${i}]`, s]) : isObj(input.step) ? [['step', input.step]] : [];
   for (const [field, s] of steps) {
@@ -229,6 +250,16 @@ export function refuseEarlierSpelling(input, catalog) {
     const where = currentWhere(s.where);
     if (where !== s.where) refuse(`${field}.where`, where);
   }
+}
+
+/**
+ * A read that asks for `detail` is refused with how a read is made now: it pages each table by its row
+ * numbers, as the other query tools page theirs — the whole of a table is its pages (or one page as
+ * long as it is), and a card still draws every row.
+ */
+export function refuseEarlierRead(input) {
+  if (!isObj(input) || input.detail === undefined || input.task_ids === undefined) return;
+  throw new ToolError(`invalid input: a read takes no detail — it pages each table of a result by its row numbers: { task_ids, offset, limit } (offset: the row a page starts at, 0 the first, next_offset the next page's; limit: how many rows, ${READ_PAGE} unless it says) — every row of a table is in its pages, and a card draws every row`, { stage: 'validate', field: 'detail' });
 }
 
 /**

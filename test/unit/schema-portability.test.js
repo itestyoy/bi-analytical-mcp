@@ -247,13 +247,20 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
     }
   }
   // …and the fold actually happened where it was worth it: the stage union is ONE definition that
-  // both the single-stage and the list-of-stages field point at.
+  // both the one-step field and the list of steps point at.
   const bnm = schemas.build_pipeline_model;
   assert.ok(bnm.$defs?.pipeline_stage, 'the stage union is a definition');
-  const stageField = forms(bnm, bnm).map((f) => f.properties?.stage).find(Boolean);
-  const stagesField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.stages).find(Boolean));
-  assert.equal(deref(bnm, stageField), bnm.$defs.pipeline_stage, 'the stage field points at it');
-  assert.equal(deref(bnm, stagesField.items), bnm.$defs.pipeline_stage, 'and so does every item of the list of stages');
+  const stepField = forms(bnm, bnm).map((f) => f.properties?.step).find(Boolean);
+  const stepsField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.steps).find(Boolean));
+  assert.equal(deref(bnm, stepField), bnm.$defs.pipeline_stage, 'the step field points at it');
+  assert.equal(deref(bnm, stepsField.items), bnm.$defs.pipeline_stage, 'and so does every item of the list of steps');
+  // the read steps are one definition too, in both query tools: a pipeline read's, and the steps after a
+  // metric query — each in an expression of its own beside that tool's where
+  for (const tool of ['query_pipeline_model', 'query_semantic_model']) {
+    const s = schemas[tool];
+    const steps = deref(s, forms(s, s).map((f) => f.properties?.steps).find(Boolean));
+    assert.equal(deref(s, steps.items), s.$defs.read_stage, `${tool}: every step is a read stage`);
+  }
 });
 
 // The point of the fold is SIZE — what every request carries before a word of the conversation: the
@@ -310,7 +317,10 @@ test('the card declaration (display) is structural: each kind is a closed branch
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
   assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_ids with a query');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], stages: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with stages');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], steps: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with steps');
+  // a read is only compiled at its start, never at a read of its task
+  assert.equal(validateInput(validators.query_pipeline_model, { context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], dry_run: true }).ok, false, 'task_ids with dry_run');
   assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
   assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

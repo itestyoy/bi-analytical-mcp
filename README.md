@@ -27,8 +27,8 @@ Design docs:
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
-| `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
-| `query_pipeline_model` | read a built pipeline's rows, or query its stored table in the pipeline's own stages (where, compute, aggregate, pivot, …) |
+| `query_semantic_model` | run `mf query` against a context (metrics + group_by + where), then optional `steps` over its result in the pipeline's own read stages (a where step on a metric is a having) |
+| `query_pipeline_model` | read a built pipeline's rows, or query its stored table in `steps` of the pipeline's own stages (where, compute, aggregate, pivot, …) |
 | `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
 
 Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.

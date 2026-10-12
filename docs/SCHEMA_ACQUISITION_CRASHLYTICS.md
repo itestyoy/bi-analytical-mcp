@@ -427,7 +427,7 @@ semantic_index({ request: { source: 'acquisition' } }) describes them.
 крутилась, когда приложение упало, у игрока из какой страны, купленного по какому каналу».
 
 ```json
-{ "source": "crashlytics", "stages": [
+{ "source": "crashlytics", "steps": [
   { "stage": "join", "with": "events",      "via": "ad_funnel_rewarded", "kind": "inner", "attrs": [{ "column": "event_id" }] },
   { "stage": "join", "with": "users",       "via": "user", "kind": "inner", "attrs": [{ "column": "country" }],
     "between": { "column": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
@@ -558,7 +558,7 @@ MetricFlow умеет соединять только по уникальном�
 То же самое через pipeline, с явным окном:
 
 ```json
-{ "source": "acquisition", "stages": [
+{ "source": "acquisition", "steps": [
   { "stage": "join", "with": "users", "via": "user",
     "between": { "column": "spend_date", "from": "install_time_valid_from", "to": "install_time_valid_until" },
     "kind": "inner", "attrs": [{ "column": "country" }] },
@@ -570,7 +570,7 @@ MetricFlow умеет соединять только по уникальном�
 Какая рекламная воронка крутилась, когда приложение упало:
 
 ```json
-{ "source": "crashlytics", "stages": [
+{ "source": "crashlytics", "steps": [
   { "stage": "join", "with": "events", "via": "ad_funnel_rewarded",
     "kind": "inner", "attrs": [{ "column": "event_id" }, { "column": "event_name", "name": "ad_event_name" }] }
 ] }
@@ -594,7 +594,7 @@ MetricFlow умеет соединять только по уникальном�
 следующий шаг:
 
 ```json
-{ "source": "acquisition", "stages": [
+{ "source": "acquisition", "steps": [
   { "stage": "compute", "name": "cost_per_click",
     "expr": { "fn": "div", "args": [{ "column": "cost" }, { "column": "clicks" }] } },
   { "stage": "aggregate", "group_by": ["media_source"],

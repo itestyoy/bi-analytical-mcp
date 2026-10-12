@@ -166,14 +166,17 @@ export async function checkSteps(feature, view, from, fieldOf) {
   return entries;
 }
 
-/** A shape as a read shows it: the event names (the first 200), the path columns, each segment's
- *  levels (the first 30) and the custom columns. */
-export function describeShape(shape) {
+/** A shape as a listing shows it (preview, a context's description): the event names (the first 200),
+ *  the path columns, each segment's levels (the first 30) and the custom columns — or, `whole` (a step
+ *  action's include_columns), every event and every level the shape knows. */
+export function describeShape(shape, { whole = false } = {}) {
   if (!shape) return null;
+  const events = whole ? Infinity : 200;
+  const levels = whole ? Infinity : 30;
   return {
-    events: shape.events.slice(0, 200), ...(shape.events.length > 200 ? { events_more: shape.events.length - 200 } : {}),
+    events: shape.events.slice(0, events), ...(shape.events.length > events ? { events_more: shape.events.length - events } : {}),
     paths: shape.paths,
-    segments: Object.fromEntries(Object.entries(shape.segments).map(([s, l]) => [s, { levels: l.levels.slice(0, 30), ...(l.levels.length > 30 ? { levels_more: l.levels.length - 30 } : {}), ...(l.complete ? {} : { complete: false }) }])),
+    segments: Object.fromEntries(Object.entries(shape.segments).map(([s, l]) => [s, { levels: l.levels.slice(0, levels), ...(l.levels.length > levels ? { levels_more: l.levels.length - levels } : {}), ...(l.complete ? {} : { complete: false }) }])),
     ...(shape.columns?.length ? { columns: shape.columns } : {}),
   };
 }
@@ -203,6 +206,8 @@ export async function editSteps(engine, feature, ctx, name, es, action, input) {
 
 export async function commitSteps(engine, feature, ctx, name, es, action, input) {
   const n = es.steps.length;
+  // the shape at the end before the change: what the call changed is told against it
+  const endBefore = shapeAtEnd(es);
   const inRange = (i, max, field) => { if (!Number.isInteger(i) || i < 1 || i > max) throw new ToolError(`${field} ${i} is not a step of eventstream '${name}' (it has ${n}${n ? `: 1..${n}` : ''})`, { stage: 'validate', field }); };
   let list = es.steps.slice();
   let from = null;
@@ -234,25 +239,46 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   es.steps = list;
   if (dropped) { es.checkpoint = null; es.model = es.base.model; es.summary = es.base.summary; }
   engine.ctxs.touch(ctx.id);
-  // the step an edit or an insert put in place; added steps are each listed under `added`, with what
-  // each changed and why one was not checked
+  // ANSWERED AS THE PIPELINE BUILDER ANSWERS: what the call changed, the steps it added (or the one an
+  // edit or an insert put in place) each with what it changed and why one was not checked, and
+  // steps_count — every step with include_steps, the whole shape after them with include_columns
   const at = action === 'edit_step' || action === 'insert_step' ? from : null;
-  const entry = at ? es.steps[at - 1] : null;
+  const net = action === 'add_steps' ? null : shapeChange(endBefore, shapeAtEnd(es));
   const pending = es.steps.length - (es.checkpoint?.upto || 0);
   const unchecked = es.steps.map((s, i) => (s.checked ? null : i + 1)).filter(Boolean);
   return {
-    ok: true, context_id: ctx.id, eventstream: name, action, steps: es.steps.length,
-    ...(entry ? { step: { index: at, type: entry.step.type, checked: entry.checked, ...(entry.note ? { note: entry.note } : {}) } } : {}),
-    ...(action === 'add_steps' ? { added: checked.map((e, j) => ({ index: from + j, type: e.step.type, checked: e.checked, ...(e.note ? { note: e.note } : {}), ...(shapeChange(shapeBefore(view, from + j), e.shape) ? { changed: shapeChange(shapeBefore(view, from + j), e.shape) } : {}) })) } : {}),
-    ...(entry && shapeChange(shapeBefore(es, at), entry.shape) ? { changed: shapeChange(shapeBefore(es, at), entry.shape) } : {}),
-    shape: describeShape(shapeAtEnd(es)),
+    ok: true, context_id: ctx.id, eventstream: name, action,
+    ...(input.include_steps
+      ? { steps: listSteps(es) }
+      : {
+        ...(action === 'add_steps' ? { steps_added: checked.map((_, j) => stepEntry(es, from + j)) } : {}),
+        ...(at ? { step: stepEntry(es, at) } : {}),
+        steps_count: es.steps.length,
+      }),
+    ...(net && Object.keys(net).length ? { changed: net } : {}),
+    ...(input.include_columns ? { shape: describeShape(shapeAtEnd(es), { whole: true }) } : {}),
     ...(unchecked.length ? { unchecked_steps: unchecked } : {}),
     materialized_through: es.checkpoint?.upto || 0,
     ...(dropped ? { checkpoint_dropped: `the table of steps 1..${upto} no longer stands for them — the next materialize builds from the eventstream's start` } : {}),
     next: pending
-      ? `add more steps, or materialize them: ${BUILD}({ request: { action: 'materialize', context_id: '${ctx.id}', eventstream: '${name}' } }) — the analyses read what is materialized`
+      ? `add more steps, or materialize them: ${BUILD}({ request: { action: 'materialize', context_id: '${ctx.id}', eventstream: '${name}' } }) — the analyses read what is materialized (include_columns: true or preview gives the eventstream's whole shape)`
       : `nothing to materialize: ${QUERY}({ request: { context_id: '${ctx.id}', eventstream: '${name}', analyses: [...] } }) reads it as it is`,
   };
+}
+
+/** Step `k` (1-based) of an eventstream as an answer names it: its index and op, whether the library
+ *  checked it (and why not), and what it changed of the shape it read. */
+function stepEntry(es, k) {
+  const s = es.steps[k - 1];
+  const changed = shapeChange(shapeBefore(es, k), s.shape);
+  return { index: k, type: s.step.type, checked: s.checked, ...(s.note ? { note: s.note } : {}), ...(changed ? { changed } : {}) };
+}
+
+/** Every step of an eventstream as preview lists them: each in today's spelling and as the library
+ *  takes it, whether it was checked and materialized, and what it changed. */
+function listSteps(es) {
+  const upto = es.checkpoint?.upto || 0;
+  return (es.steps || []).map((s, i) => ({ index: i + 1, step: currentStep(s.step), library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) }));
 }
 
 export function preview(ctx, name, es) {
@@ -261,7 +287,7 @@ export function preview(ctx, name, es) {
     ok: true, context_id: ctx.id, eventstream: name, action: 'preview',
     // (an eventstream a former version of the server stored may carry no base: said, not thrown)
     base: es.base ? { model: es.base.model, ...(es.base.summary ? { events: es.base.summary.events, users: es.base.summary.users } : { building: es.base.task_id }) } : { missing: 'this eventstream was stored without its base table — start it again' },
-    steps: (es.steps || []).map((s, i) => ({ index: i + 1, step: currentStep(s.step), library: s.library, checked: s.checked, ...(s.note ? { note: s.note } : {}), materialized: i < upto, ...(shapeChange(shapeBefore(es, i + 1), s.shape) ? { changed: shapeChange(shapeBefore(es, i + 1), s.shape) } : {}) })),
+    steps: listSteps(es),
     materialized_through: upto,
     ...(es.checkpoint ? { table: es.checkpoint.model } : {}),
     shape: describeShape(shapeAtEnd(es)),
@@ -285,9 +311,10 @@ export function fork(engine, ctx, input) {
   if (input.description) child.description = input.description;
   engine.ctxs.touch(ctx.id);
   return {
-    ok: true, context_id: ctx.id, eventstream: input.name, action: 'fork', forked_from: child.forked_from, steps: after,
+    ok: true, context_id: ctx.id, eventstream: input.name, action: 'fork', forked_from: child.forked_from,
+    ...(input.include_steps ? { steps: listSteps(child) } : { steps_count: after }),
     materialized_through: child.checkpoint?.upto || 0,
-    shape: describeShape(shapeAtEnd(child)),
+    ...(input.include_columns ? { shape: describeShape(shapeAtEnd(child), { whole: true }) } : {}),
     next: `shape '${input.name}' with its own steps (add_steps, edit_step, …) — '${parentName}' is not touched`,
   };
 }
@@ -362,5 +389,5 @@ export async function materializeSteps(engine, feature, ctx, name, es) {
   es.building = { task_id: id, model: modelName };
   engine.jobs.setTable(id, modelName);
   engine.ctxs.touch(ctx.id);
-  return engine.tasks.started(id, { context_id: ctx.id, eventstream: name, steps: through });
+  return engine.tasks.started(id, { context_id: ctx.id, eventstream: name, steps_materialized: through });
 }

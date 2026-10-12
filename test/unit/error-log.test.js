@@ -100,12 +100,12 @@ test('the log is bounded by age and by count', () => {
 
 test('a task that ends in an error is kept once, with its input — its reads are not kept again', async () => {
   const engine = makeEngine({ recipes: false });
-  const id = engine._startTask(null, 'query_pipeline_model', async () => ({ ok: false, error: { stage: 'query', message: 'Catalog Error: Table x does not exist' } }), { input: { stages: [{ stage: 'limit', limit: 1 }] } });
+  const id = engine._startTask(null, 'query_pipeline_model', async () => ({ ok: false, error: { stage: 'query', message: 'Catalog Error: Table x does not exist' } }), { input: { steps: [{ stage: 'limit', limit: 1 }] } });
   const thrown = engine._startTask(null, 'query_pipeline_model', async () => { throw new Error('the sidecar exited'); });
   await engine._awaitTasks([id, thrown], 5);
   const tasks = engine.explore_errors({ source: 'task' });
   assert.deepEqual(tasks.errors.map((e) => e.task_id).sort(), [id, thrown].sort());
-  assert.deepEqual(engine.explore_errors({ task_id: id, detail: 'full' }).errors[0].args, { stages: [{ stage: 'limit', limit: 1 }] });
+  assert.deepEqual(engine.explore_errors({ task_id: id, detail: 'full' }).errors[0].args, { steps: [{ stage: 'limit', limit: 1 }] });
   await runTool(engine, 'query_pipeline_model', { request: { task_ids: [id] } });
   assert.equal(engine.explore_errors({}).total, 2);
 });
@@ -115,16 +115,16 @@ test('an error carries what reproduces it: the draft a refused step was added to
   const source = engine.catalog.facts[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'repro', source });
   const col = engine.catalog.modelColumns(source)[0].name;
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: col }] }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: col }] }] }] });
   // a step naming a column that is not there is refused — and the draft it was added to is kept with it
-  const refused = await runTool(engine, 'build_pipeline_model', { request: { action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'is_null', args: [{ column: 'no_such_col' }] }] }] } });
+  const refused = await runTool(engine, 'build_pipeline_model', { request: { action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_null', args: [{ column: 'no_such_col' }] }] }] } });
   assert.equal(refused.result.isError, true);
   const [row] = engine.explore_errors({ tool: 'build_pipeline_model' }).errors;
   const full = engine.explore_errors({ id: row.id }).error;
   assert.equal(full.context_id, s.context_id);
   assert.deepEqual(full.context.state.draft.stages.map((st) => st.stage), ['where']);
   assert.equal(full.context.state.draft.source, source);
-  assert.equal(full.args.request.stages[0].conditions[0].args[0].column, 'no_such_col');
+  assert.equal(full.args.request.steps[0].conditions[0].args[0].column, 'no_such_col');
   assert.equal(full.runtime.node, process.version);
   assert.equal(full.runtime.dialect, engine.catalog.dialect);
   // a task that failed on a generated model keeps that model's code, as the message names it

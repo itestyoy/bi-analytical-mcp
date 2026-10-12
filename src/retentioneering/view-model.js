@@ -259,23 +259,26 @@ function funnelDiff(head, r) {
   };
 }
 
+/** How far a metric tells the groups apart: the spread of its values across them, relative to the
+ *  metric's own scale (a share moves in 0..1, a duration in seconds) — what the card and a read rank a
+ *  group overview's metrics by, the widest first. */
+export function metricSpread(m) {
+  const v = m.values.filter((x) => x != null);
+  if (v.length < 2) return 0;
+  const hi = Math.max(...v); const lo = Math.min(...v);
+  return (hi - lo) / (Math.max(Math.abs(hi), Math.abs(lo)) || 1);
+}
+
 function overview(head, r) {
   if (!r.levels?.length) return none('empty');
   const size = r.metrics.find((m) => m.metric === 'segment_size');
   const share = r.metrics.find((m) => m.metric === 'segment_share');
-  // the metrics that tell the groups apart most come first: the spread across the groups, relative to
-  // the metric's own scale (a share moves in 0..1, a duration in seconds)
-  const spread = (m) => {
-    const v = m.values.filter((x) => x != null);
-    if (v.length < 2) return 0;
-    const hi = Math.max(...v); const lo = Math.min(...v);
-    return (hi - lo) / (Math.max(Math.abs(hi), Math.abs(lo)) || 1);
-  };
   const clusters = r.kind === 'cluster_analysis';
   return {
     ...head,
     levels: r.levels.map((l, i) => ({ name: l, label: clusters ? `Cluster ${i + 1}` : l, size: size?.values[i] ?? null, share: share?.values[i] ?? null })),
-    metrics: r.metrics.filter((m) => m !== size && m !== share).map((m, i) => ({ ...m, spread: spread(m), order: i })).sort((a, b) => b.spread - a.spread || a.order - b.order),
+    // the metrics that tell the groups apart most come first
+    metrics: r.metrics.filter((m) => m !== size && m !== share).map((m, i) => ({ ...m, spread: metricSpread(m), order: i })).sort((a, b) => b.spread - a.spread || a.order - b.order),
     ...(r.silhouette ? { silhouette: r.silhouette } : {}),
     ...(r.best_params ? { best_params: r.best_params } : {}),
   };

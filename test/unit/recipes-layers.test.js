@@ -104,12 +104,21 @@ test('every shipped pipeline_payload is a build_pipeline_model start request the
 });
 
 // A deployment's file is not ours to rewrite: one written for an earlier version carries the
-// one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes. It is
-// served as the start request it stands for.
-test('a deployment recipe in the earlier { name, pipeline } shape is served as the start request', () => {
-  const stages = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }];
-  const mine = deploymentFile([{ id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages } } }]);
-  assert.deepEqual(loadRecipes(SYSTEM, mine).get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' }, stages });
+// one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes — or a start
+// request naming its first steps `stages`. Each is served as the start request it stands for, its
+// list under `steps`; a request written today is served as it is.
+test('a deployment recipe in the earlier { name, pipeline } shape, or with its list as stages, is served as the start request', () => {
+  const steps = [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }];
+  const window = { start: '2026-01-01', end: '2026-01-31' };
+  const mine = deploymentFile([
+    { id: 'old_shape', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { name: 'old_shape', description: 'kept', pipeline: { source: 'events', time_range: window, stages: steps } } },
+    { id: 'old_list', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload: { action: 'start', name: 'old_list', source: 'events', stages: steps } },
+    { id: 'today', task_type: 't', title: 'today', when_to_use: '', hack: '', pipeline_payload: { action: 'start', name: 'today', source: 'events', steps } },
+  ]);
+  const recipes = loadRecipes(SYSTEM, mine);
+  assert.deepEqual(recipes.get('old_shape').pipeline_payload, { action: 'start', name: 'old_shape', description: 'kept', source: 'events', time_range: window, steps });
+  assert.deepEqual(recipes.get('old_list').pipeline_payload, { action: 'start', name: 'old_list', source: 'events', steps });
+  assert.deepEqual(recipes.get('today').pipeline_payload, { action: 'start', name: 'today', source: 'events', steps });
 });
 
 // Its stages and its semantic payload, written in an earlier spelling, are served in today's: the
@@ -136,7 +145,8 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   const recipes = loadRecipes(SYSTEM, mine);
   const p = recipes.get('old_stages').pipeline_payload;
   const firstLaunch = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] };
-  assert.deepEqual(p.stages, [{ stage: 'where', conditions: [firstLaunch] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
+  assert.deepEqual(p.steps, [{ stage: 'where', conditions: [firstLaunch] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
+  assert.equal(p.stages, undefined, 'the list is served under its one name');
   const pr = validateInput(validators.build_pipeline_model, p);
   assert.equal(pr.ok, true, (pr.errors || []).join(' | '));
   const s = recipes.get('old_sem').semantic_payload;
@@ -153,6 +163,17 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   const today = { name: 'today', semantic_models: s.semantic_models, metrics: s.metrics };
   const again = loadRecipes(SYSTEM, deploymentFile([{ id: 'today', task_type: 't', title: 'today', when_to_use: '', hack: '', semantic_payload: today }])).get('today').semantic_payload;
   assert.deepEqual(again, today);
+});
+
+// An example query written for an earlier version ranks with the metric query's `order_by`, which the
+// tool refuses now: it is served with that order as an order_by step, and one written today as it is.
+test('a deployment recipe\'s example query with a metric order_by is served with an order_by step', () => {
+  const keys = [{ key: 'x', direction: 'desc' }];
+  const today = { metrics: ['x'], group_by: [{ time: 'metric_time', grain: 'day' }], steps: [{ stage: 'limit', limit: 3 }] };
+  const mine = deploymentFile([{ id: 'old_query', task_type: 't', title: 'old', when_to_use: '', hack: '', example_queries: [{ metrics: ['x'], order_by: keys }, today] }]);
+  const [old, kept] = loadRecipes(SYSTEM, mine).get('old_query').example_queries;
+  assert.deepEqual(old, { metrics: ['x'], steps: [{ stage: 'order_by', keys }] });
+  assert.deepEqual(kept, today, 'a query in today\'s spelling is served as written');
 });
 
 // The same for an experiment block written for an earlier version: its columns are named by flat

@@ -105,7 +105,7 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   const draft = await start(stored.task_id, { include_columns: true });
   assert.equal(draft.reads, done.table);
   assert.deepEqual(draft.available_columns.map((c) => c.name), ['task_cnt']);
-  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: draft.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }] });
+  const step = await e.build_pipeline_model({ action: 'add_steps', context_id: draft.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }] });
   assert.equal(step.column_count, 1);
   // the table's owner cannot be dropped under the draft that reads it
   assert.throws(() => e._dropContext({ context_id: created.context_id }), /reads|READS|consumer|force/i);
@@ -151,29 +151,29 @@ const WHERE_EVENT = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 
 const asksToMaterialize = (r) => [r.next, ...(r.recommendations || []), ...(r.step_effects || []).flatMap((s) => s.recommendations || [])]
   .filter((h) => typeof h === 'string' && /\bmaterialize\b(?!\.task_id)/.test(h));
 
-test('query_pipeline_model: the stages are checked in the call, and a query behind a build reads THAT build', async () => {
+test('query_pipeline_model: the steps are checked in the call, and a query behind a build reads THAT build', async () => {
   const runner = heldBuilds();
   const e = engine(runner);
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [WHERE_EVENT] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [WHERE_EVENT] });
   // nothing built and nothing building: refused
   await assert.rejects(() => e.query_pipeline_model({ context_id }), /no built pipeline model/);
   const first = await e.build_pipeline_model({ action: 'materialize', context_id });
   // the first build is in flight: a query on it is accepted, checked against that build's columns
   const byEvent = (groupBy = ['event_name']) => ({ stage: 'aggregate', group_by: groupBy, measures: [{ name: 'count', expr: { fn: 'count' } }] });
-  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [byEvent(['no_such_column'])] }), (err) => err.field === 'stages' && /^stages\[0\]: .*no_such_column/.test(err.message));
-  // an order on a column the regroup did not keep is refused at the stage that names it
-  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [byEvent(), { stage: 'order_by', keys: [{ key: 'player_id_of_internal' }] }] }), (err) => err.field === 'stages' && /^stages\[1\]: .*player_id_of_internal/.test(err.message));
+  await assert.rejects(() => e.query_pipeline_model({ context_id, steps: [byEvent(['no_such_column'])] }), (err) => err.field === 'steps' && /^steps\[0\]: .*no_such_column/.test(err.message));
+  // an order on a column the regroup did not keep is refused at the step that names it
+  await assert.rejects(() => e.query_pipeline_model({ context_id, steps: [byEvent(), { stage: 'order_by', keys: [{ key: 'player_id_of_internal' }] }] }), (err) => err.field === 'steps' && /^steps\[1\]: .*player_id_of_internal/.test(err.message));
   // a stage that makes a new table is a build from the task, not a read
-  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }), /invalid input/);
-  const q1 = await e.query_pipeline_model({ context_id, stages: [byEvent(), { stage: 'order_by', keys: [{ key: 'count' }] }] });
+  await assert.rejects(() => e.query_pipeline_model({ context_id, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }), /invalid input/);
+  const q1 = await e.query_pipeline_model({ context_id, steps: [byEvent(), { stage: 'order_by', keys: [{ key: 'count' }] }] });
   assert.ok(isStartedTask(q1) && q1.read_with === 'query_pipeline_model');
   await until(() => runner.held.length);
   runner.held.shift()();
   const built1 = await taskResult(e, first.task_id);
   assert.equal((await taskResult(e, q1.task_id)).model, built1.model, 'the query read the build it was queued behind');
   // a second build starts; a query issued now reads the NEW table, not the one standing
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', limit: 5 }] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'limit', limit: 5 }] });
   const second = await e.build_pipeline_model({ action: 'materialize', context_id });
   const q2 = await e.query_pipeline_model({ context_id });
   await until(() => runner.held.length);
@@ -182,24 +182,147 @@ test('query_pipeline_model: the stages are checked in the call, and a query behi
   assert.notEqual(built2.model, built1.model);
   assert.equal((await taskResult(e, q2.task_id)).model, built2.model);
   // a sum needs its argument: refused by the schema, in the call
-  await assert.rejects(() => e.query_pipeline_model({ context_id, stages: [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum' } }] }] }), /invalid input.*'args'/);
-  // and a read written as the earlier transform is refused with its stages
-  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }] } }), /invalid input/);
+  await assert.rejects(() => e.query_pipeline_model({ context_id, steps: [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum' } }] }] }), /invalid input.*'args'/);
+  // and a read written as the earlier transform is refused with its steps
+  await assert.rejects(() => e.query_pipeline_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }] } }), /invalid input.*"steps"/);
+});
+
+// A read only compiled (dry_run) is a task like the read, slotted behind the context's builds only: it
+// answers the statement the read would run over the build it waits for, and the columns it answers
+// with — read back as it is, paged or not (it holds no rows to page).
+test('query_pipeline_model dry_run: a task that waits for the build, answering the read\'s SQL and its columns', async () => {
+  const runner = heldBuilds();
+  const e = engine(runner);
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', steps: [WHERE_EVENT] });
+  const build = await e.build_pipeline_model({ action: 'materialize', context_id });
+  const byEvent = { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] };
+  // checked in the call, as the read is
+  await assert.rejects(() => e.query_pipeline_model({ context_id, steps: [{ stage: 'order_by', keys: [{ key: 'nope' }] }], dry_run: true }), (err) => err.field === 'steps' && /^steps\[0\]: .*unknown column 'nope'/.test(err.message));
+  const dry = await e.query_pipeline_model({ context_id, steps: [byEvent, { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }], limit: 3, dry_run: true });
+  assert.ok(isStartedTask(dry) && dry.read_with === 'query_pipeline_model');
+  await until(() => runner.held.length);
+  assert.equal((await one(e.query_pipeline_model({ task_ids: [dry.task_id], wait_seconds: 0 }))).status, 'running', 'it waits for the build it reads');
+  runner.held.shift()();
+  const built = await taskResult(e, build.task_id);
+  const out = await taskResult(e, dry.task_id);
+  assert.deepEqual([out.status, out.dry_run, out.model, typeof out.sql], ['done', true, built.model, 'string']);
+  assert.deepEqual(out.output_columns.map((c) => c.name), ['event_name', 'n']);
+  assert.equal(out.rows, undefined, 'nothing was read');
+  // a page of an answer that holds no rows is that answer
+  const paged = await one(e.query_pipeline_model({ task_ids: [dry.task_id], offset: 0, limit: 5 }));
+  assert.deepEqual([paged.status, paged.dry_run, paged.output_columns], ['done', true, out.output_columns]);
+  // a batch member may be compiled only, beside one that reads
+  const batch = await e.query_pipeline_model({ context_id, queries: [{ steps: [byEvent], dry_run: true }, { steps: [byEvent] }] });
+  const [compiled, rows] = (await e.query_pipeline_model({ task_ids: batch.task_ids, wait_seconds: 5 })).results;
+  assert.deepEqual([compiled.dry_run, compiled.rows, Array.isArray(rows.rows)], [true, undefined, true]);
+});
+
+// THE STEPS AFTER A METRIC QUERY are the read steps of query_pipeline_model over the result's columns as
+// the caller names them, checked in the call. What MetricFlow says itself runs as `mf query`; any other
+// step over the SQL it compiles — the answer is one shape either way: the caller's names, whether the
+// rows are in a stated order, a sample said to be one.
+/** A runner whose metric query answers in MetricFlow's names (and compiles to SQL when only explained),
+ *  and whose read of SQL answers in the caller's names — the same rows whichever way a query runs. */
+function tailRunner(rows) {
+  const r = {
+    async parse() { return { ok: true }; },
+    async run() { return { ok: true, stdout: '', stderr: '' }; },
+    async query(_dir, opts) {
+      if (opts.explain) return { ok: true, sql: 'select 1' };
+      return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'task_cnt' }], rows: rows.map((x) => ({ metric_time__day: x.metric_time_day, task_cnt: x.task_cnt })) };
+    },
+    async show() { return { ok: true, columns: [{ name: 'metric_time_day' }, { name: 'task_cnt' }], rows }; },
+    async relationColumns() { return { ok: false }; },
+  };
+  return r;
+}
+
+test('the steps after a metric query are checked against the result\'s columns, in the call — a batch at the query that names one', async () => {
+  const e = engine(tailRunner([]));
+  const { context_id } = await e.build_semantic_model(TASK);
+  const daily = { metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const before = e._listTasks().tasks.length;
+  for (const key of ['nonsense', 'metric_time__day', 'metric_time']) {
+    await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps: [{ stage: 'order_by', keys: [{ key }] }] }),
+      (err) => err.field === 'steps' && new RegExp(`^steps\\[0\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, task_cnt\\)`).test(err.message), key);
+  }
+  // a column a step makes is there for the steps after it, and gone after an aggregate that drops it
+  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps: [{ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'task_cnt' }] } }] }, { stage: 'order_by', keys: [{ key: 'metric_time_day' }] }] }),
+    (err) => err.field === 'steps' && /^steps\[1\]: .*unknown column 'metric_time_day' at this stage \(available: total\)/.test(err.message));
+  await assert.rejects(() => e.query_semantic_model({ context_id, queries: [daily, { ...daily, steps: [{ stage: 'order_by', keys: [{ key: 'nonsense' }] }] }] }),
+    (err) => err.field === 'queries[1].steps' && /^queries\[1\]: steps\[0\]: .*unknown column 'nonsense'/.test(err.message));
+  // the earlier order_by is refused with the step it is now
+  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, order_by: [{ key: 'task_cnt', direction: 'desc' }] }),
+    (err) => err.message.includes(JSON.stringify({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] })));
+  assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
+});
+
+test('a metric query answers in the caller\'s names whatever its steps — ordered by an order_by step, approximate after a sample', async () => {
+  const rows = [{ metric_time_day: '2026-01-02', task_cnt: 7 }, { metric_time_day: '2026-01-01', task_cnt: 3 }];
+  const e = engine(tailRunner(rows));
+  const { context_id } = await e.build_semantic_model(TASK);
+  const daily = { context_id, metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const read = async (extra) => taskResult(e, (await e.query_semantic_model({ ...daily, ...extra })).task_id);
+  const desc = { stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] };
+  for (const [steps, ordered] of [
+    [undefined, false],
+    [[desc], true],
+    [[{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }, desc, { stage: 'limit', limit: 10 }], true],
+    [[desc, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }], false],
+  ]) {
+    const out = await read(steps ? { steps } : {});
+    assert.equal(out.status, 'done', JSON.stringify(out.error || {}));
+    assert.deepEqual(out.rows, rows, JSON.stringify(steps));
+    assert.deepEqual(out.columns.map((c) => c.name), ['metric_time_day', 'task_cnt'], JSON.stringify(steps));
+    // (a page in no stated order says so; an ordered one has nothing to warn of)
+    assert.equal(out.page.ordered, ordered ? undefined : false, JSON.stringify(steps));
+    assert.equal(out.sampled, undefined);
+  }
+  const sampled = await read({ steps: [{ stage: 'sample', share: 0.5 }] });
+  assert.deepEqual([sampled.status, sampled.sampled, typeof sampled.sampling], ['done', true, 'object'], 'with the note a sampled read carries');
+  // a query only compiled: the SQL after its steps, and the columns it answers with — a read of it, paged or not
+  const dry = await e.query_semantic_model({ ...daily, steps: [{ stage: 'compute', name: 'per_day', expr: { fn: 'div', args: [{ column: 'task_cnt' }, { value: 2 }] } }], dry_run: true });
+  const compiled = await taskResult(e, dry.task_id);
+  assert.deepEqual([compiled.status, compiled.dry_run, typeof compiled.sql], ['done', true, 'string']);
+  assert.deepEqual(compiled.output_columns.map((c) => c.name), ['metric_time_day', 'task_cnt', 'per_day']);
+  assert.equal(compiled.output_columns[0].type, 'time', 'metric_time is a time');
+  assert.equal(compiled.orderable_keys, undefined, 'output_columns says what orderable_keys did');
+  const paged = await one(e.query_semantic_model({ task_ids: [dry.task_id], offset: 0, limit: 5 }));
+  assert.deepEqual([paged.status, paged.output_columns], ['done', compiled.output_columns]);
+  // stored, the table is the result after its steps
+  const stored = await read({ steps: [desc], materialize: true });
+  assert.deepEqual([stored.status, stored.table], ['done', `qr_${stored.task_id}`]);
+});
+
+// ONE FORM WHICHEVER PATH RAN IT: `mf query` answers as its CSV writes (a moment as Python prints it), the
+// dbt client's show as its JSON does (the moment ISO) — the answer reads the same either way.
+test('a metric query\'s values read the same whether MetricFlow or the steps\' SQL ran it', async () => {
+  const iso = [{ metric_time_day: '2026-01-02T00:00:00', task_cnt: 7 }, { metric_time_day: '2026-01-01T00:00:00', task_cnt: 3 }];
+  const runner = { ...tailRunner(iso), async query(_dir, opts) {
+    if (opts.explain) return { ok: true, sql: 'select 1' };
+    return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'task_cnt' }], rows: iso.map((x) => ({ metric_time__day: x.metric_time_day.replace('T', ' '), task_cnt: x.task_cnt })) };
+  } };
+  const e = engine(runner);
+  const { context_id } = await e.build_semantic_model(TASK);
+  const read = async (extra) => taskResult(e, (await e.query_semantic_model({ context_id, metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }], ...extra })).task_id);
+  const byMetricFlow = await read({ steps: [{ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] }] });
+  const bySql = await read({ steps: [{ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc', nulls: 'first' }] }] });
+  assert.deepEqual([byMetricFlow.rows, bySql.rows], [iso, iso]);
 });
 
 test('a draft starts with its first steps, and adding steps may start its build in the same call', async () => {
   const runner = heldBuilds();
   const e = engine(runner);
-  const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', limit: 5 }] });
+  const started = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', steps: [WHERE_EVENT, { stage: 'limit', limit: 5 }] });
   assert.equal(e.ctxs.get(started.context_id).state.draft.stages.length, 2, 'both steps are on the draft');
   // the answer says the steps it holds: the ones added and their count, never an empty list beside them
   assert.equal(started.steps, undefined, 'no steps: [] beside the steps added');
   assert.deepEqual([started.steps_count, started.steps_added.map((s) => s.index)], [2, [1, 2]]);
-  const listed = await e.build_pipeline_model({ action: 'start', name: 'lvl2', source: 'events', stages: [WHERE_EVENT], include_steps: true });
+  const listed = await e.build_pipeline_model({ action: 'start', name: 'lvl2', source: 'events', steps: [WHERE_EVENT], include_steps: true });
   assert.deepEqual(listed.steps.map((s) => s.index), [1], 'include_steps: the whole list');
   // a step that cannot compile leaves the draft started, with none of the batch
-  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'stages[0]');
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, stages: [{ stage: 'limit', limit: 3 }], materialize: true });
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'steps[0]');
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, steps: [{ stage: 'limit', limit: 3 }], materialize: true });
   assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
   assert.deepEqual(asksToMaterialize(added), [], 'nothing asks for the build this call started');
   await until(() => runner.held.length);
@@ -214,9 +337,9 @@ test('a start is the default action, and a start with its steps and materialize:
   const e = engine(runner);
   const before = e.ctxs.list().length;
   // materialize builds the steps the start adds: with none, it is refused, and no context is made
-  await assert.rejects(() => e.build_pipeline_model({ name: 'lvl', source: 'events', materialize: true }), (err) => err.field === 'materialize' && /stages/.test(err.message));
+  await assert.rejects(() => e.build_pipeline_model({ name: 'lvl', source: 'events', materialize: true }), (err) => err.field === 'materialize' && /`steps`/.test(err.message));
   assert.equal(e.ctxs.list().length, before, 'a refused start makes no context');
-  const started = await e.build_pipeline_model({ name: 'lvl', source: 'events', stages: [WHERE_EVENT, { stage: 'limit', limit: 5 }], materialize: true });
+  const started = await e.build_pipeline_model({ name: 'lvl', source: 'events', steps: [WHERE_EVENT, { stage: 'limit', limit: 5 }], materialize: true });
   assert.equal(started.action, 'start');
   assert.equal(e.ctxs.get(started.context_id).state.draft.stages.length, 2, 'both steps are on the draft');
   assert.ok(isStartedTask(started.materialize), JSON.stringify(started));
@@ -231,10 +354,10 @@ test('a start is the default action, and a start with its steps and materialize:
 
 test('the context a draft is in is context_id on every action; draft_id is refused with that name', async () => {
   const e = engine(heldBuilds());
-  const { context_id } = await e.build_pipeline_model({ name: 'lvl', source: 'events', stages: [WHERE_EVENT] });
-  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: context_id, stages: [{ stage: 'limit', limit: 3 }] }), /'draft_id' — here that field is called 'context_id'/);
+  const { context_id } = await e.build_pipeline_model({ name: 'lvl', source: 'events', steps: [WHERE_EVENT] });
+  await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', draft_id: context_id, steps: [{ stage: 'limit', limit: 3 }] }), /'draft_id' — here that field is called 'context_id'/);
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused call added nothing');
-  const fork = await e.build_pipeline_model({ action: 'fork', context_id });
+  const fork = await e.build_pipeline_model({ action: 'fork', context_id, name: 'lvl_variant' });
   assert.deepEqual([fork.forked_from, typeof fork.context_id], [context_id, 'string']);
   assert.notEqual(fork.context_id, context_id, 'a fork is a context of its own');
 });
@@ -242,13 +365,13 @@ test('the context a draft is in is context_id on every action; draft_id is refus
 test('add_steps with materialize while a build runs: the steps are added, and the build that could not start says why', async () => {
   const runner = heldBuilds();
   const e = engine(runner);
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', stages: [WHERE_EVENT] });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events', steps: [WHERE_EVENT] });
   const first = await e.build_pipeline_model({ action: 'materialize', context_id });
   await until(() => runner.held.length);
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'limit', limit: 3 }], materialize: true });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'limit', limit: 3 }], materialize: true });
   // answered, not refused: the step is on the draft (once), and the answer says so beside the build's refusal
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 2);
-  assert.deepEqual([added.added, added.steps_count], [1, 2]);
+  assert.deepEqual([added.steps_added.length, added.steps_count], [1, 2]);
   assert.equal(added.materialize.ok, false);
   assert.equal(added.materialize.error.stage, 'validate');
   // the build in flight computes fewer steps than the draft holds: not "the same pipeline", but build again once it ends
@@ -275,7 +398,7 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
   const runner = heldBuilds();
   const e = engine(runner);
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, stages: [WHERE_EVENT] });
+  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [WHERE_EVENT] });
   const build = await e.build_pipeline_model({ action: 'materialize', context_id });
   await until(() => runner.held.length);
   const t0 = Date.now();
@@ -321,7 +444,7 @@ test('a stored result is paged by the warehouse, each page in one shape, the bui
   const e = engine(runner);
   // the build's answer holds the table's first 50 rows, and more follow
   replies = [{ ok: true, columns: [{ name: 'event_id' }], rows: ids(0, 51) }];
-  const build = await e.build_pipeline_model({ action: 'start', name: 'events_page', source: 'events', stages: [WHERE_EVENT], materialize: true });
+  const build = await e.build_pipeline_model({ action: 'start', name: 'events_page', source: 'events', steps: [WHERE_EVENT], materialize: true });
   const id = build.materialize.task_id;
   const first = await taskResult(e, id);
   assert.deepEqual([first.status, first.rows.length, first.page.has_more], ['done', 50, true]);
@@ -356,7 +479,7 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
   const e1 = make(runner);
   const { context_id } = await e1.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
-  await e1.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e1.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const build = await e1.build_pipeline_model({ action: 'materialize', context_id });
   await taskResult(e1, build.task_id);
   const display = { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'n' }] };

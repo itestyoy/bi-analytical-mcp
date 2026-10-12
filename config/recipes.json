@@ -475,7 +475,7 @@
         "action": "start",
         "name": "retention",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "match_recognize",
             "partition_by": [
@@ -1515,7 +1515,7 @@
         "action": "start",
         "name": "ab_checkout_conversion",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "experiments",
@@ -1907,7 +1907,7 @@
         "action": "start",
         "name": "ab_revenue_per_user",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "experiments",
@@ -2097,7 +2097,7 @@
         "action": "start",
         "name": "ab_revenue_cuped",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "experiments",
@@ -2445,7 +2445,7 @@
         "action": "start",
         "name": "ab_level_completion_ratio",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "experiments",
@@ -2742,7 +2742,7 @@
         "action": "start",
         "name": "ab_srm_counts",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "experiments",
@@ -2897,7 +2897,7 @@
         "action": "start",
         "name": "table_wide_stats",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -3010,7 +3010,7 @@
         "action": "start",
         "name": "scaled_player_features",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -3119,7 +3119,7 @@
         "action": "start",
         "name": "dn_retention_curve",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -3208,7 +3208,7 @@
         "action": "start",
         "name": "gap_sessions",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "prev_ts",
@@ -3405,7 +3405,7 @@
         "action": "start",
         "name": "revenue_pop",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -3539,7 +3539,7 @@
         "action": "start",
         "name": "event_volume_audit",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "aggregate",
             "group_by": [
@@ -3651,7 +3651,7 @@
         "action": "start",
         "name": "lookup_merge",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -3747,7 +3747,7 @@
         "action": "start",
         "name": "group_back_to_rows",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -3845,7 +3845,7 @@
         "action": "start",
         "name": "distinct_pairs",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -3920,7 +3920,7 @@
         "action": "start",
         "name": "top_payers",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4004,7 +4004,7 @@
         "action": "start",
         "name": "series_ops",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -4110,7 +4110,7 @@
         "action": "start",
         "name": "frame_statistics",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4198,7 +4198,7 @@
         "action": "start",
         "name": "distribution_cut",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -4292,7 +4292,7 @@
         "action": "start",
         "name": "filter_by_other",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4378,7 +4378,7 @@
         "action": "start",
         "name": "ml_predict_column",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4506,7 +4506,7 @@
         "action": "start",
         "name": "ml_estimator_params",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4641,7 +4641,7 @@
         "action": "start",
         "name": "ml_output_shape",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [
@@ -4761,7 +4761,7 @@
         "action": "start",
         "name": "ml_supervised",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -4914,7 +4914,7 @@
         "action": "start",
         "name": "ml_model_score",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -5052,7 +5052,7 @@
         "action": "start",
         "name": "ml_pca_components",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -5191,7 +5191,7 @@
         "action": "start",
         "name": "ml_categorical_features",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -5372,7 +5372,7 @@
         "action": "start",
         "name": "cache_intermediate",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -5464,7 +5464,7 @@
         "action": "start",
         "name": "bbq_functions",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -5557,7 +5557,7 @@
         "action": "start",
         "name": "pandas_last_resort",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "compute",
             "name": "price",
@@ -6023,7 +6023,7 @@
         "action": "start",
         "name": "crash_ad_funnel",
         "source": "crashlytics",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "events",
@@ -6089,7 +6089,7 @@
         "action": "start",
         "name": "spend_by_country_pit",
         "source": "acquisition",
-        "stages": [
+        "steps": [
           {
             "stage": "join",
             "with": "users",
@@ -6163,7 +6163,7 @@
         "action": "start",
         "name": "activation_sequence",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "match_recognize",
             "partition_by": [
@@ -6256,7 +6256,7 @@
         "action": "start",
         "name": "breadcrumb_frequency",
         "source": "crashlytics",
-        "stages": [
+        "steps": [
           {
             "stage": "unnest",
             "expr": {
@@ -6323,7 +6323,7 @@
         "action": "start",
         "name": "revenue_long",
         "source": "events",
-        "stages": [
+        "steps": [
           {
             "stage": "where",
             "conditions": [

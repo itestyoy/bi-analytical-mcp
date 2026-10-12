@@ -5,7 +5,7 @@ Project index router for this repository. It keeps orientation short; the rules 
 
 ## Snapshot
 
-- Last reviewed: 2026-10-11
+- Last reviewed: 2026-10-12
 - Repository path: `bi-analytical-mcp/`
 - Role: an MCP server for product analytics over a fixed data catalog — governed metrics (dbt semantic layer + MetricFlow) and one-off pipeline tables, queried as tasks, drawn as cards in MCP Apps hosts.
 
@@ -41,8 +41,8 @@ Project index router for this repository. It keeps orientation short; the rules 
 
 - Schemas and refusals: `src/schema.js`, `src/schema/`, `src/schema-kit.js`, `src/validate.js` — every change is held by `test/unit/schema-portability.test.js` and the size budget.
 - The expression grammar every tool shares: `src/pipeline/compute.js` (the function table, `exprSchema`, `exprSql`), `src/conditions.js` (`predicateSql`), `src/earlier-spelling.js` (the one converter table for earlier spellings).
-- Pipelines: `src/pipeline/` (stages, reads of stored tables — `renderRead`) and `src/pipeline/earlier.js` (steps stored by an earlier version).
-- The semantic side: `src/compile.js`, `src/engine/semantic-query.js`, `src/project-semantics.js`.
+- Pipelines: `src/pipeline/` (stages, reads of stored tables — `renderRead`, which also runs the steps after a metric query) and `src/pipeline/earlier.js` (steps stored by an earlier version).
+- The semantic side: `src/compile.js`, `src/engine/semantic-query.js` (a metric query and its `steps` — `mf query`, or MetricFlow's compiled SQL under the read compiler), `src/project-semantics.js`.
 - The dbt client: `src/dbt/` — the only place dbt and `mf` are spawned.
 
 ## Domain Map

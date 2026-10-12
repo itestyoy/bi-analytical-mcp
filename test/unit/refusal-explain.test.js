@@ -30,7 +30,7 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   // one tree of each level's grammar: a metric query's where over a dimension, a pipeline where over a column
   const levels = [
     ['query_semantic_model', { model: 'users', attribute: 'country' }, (where) => ({ context_id: 'abc123', metrics: ['x'], where })],
-    ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', stages: [{ stage: 'where', conditions }] })],
+    ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
     const leaf = (bogus) => ({ fn: 'eq', args: [subject, { value: 'US' }], ...(bogus ? { bogus: 1 } : {}) });
@@ -49,13 +49,13 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
 test('a join stage says how rows match in one field, via — a top-level on is refused', () => {
   const e = engine();
   const base = { action: 'add_steps', context_id: 'abc123' };
-  const both = refusal(e, 'build_pipeline_model', { ...base, stages: [{ stage: 'join', with: 'users', via: 'user', on: ['player_id'], attrs: [{ column: 'country' }] }] });
+  const both = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', with: 'users', via: 'user', on: ['player_id'], attrs: [{ column: 'country' }] }] });
   assert.match(both, /unexpected property 'on'/);
 });
 
 test('a read\'s condition is the one grammar over the stored table\'s columns, and a refusal names the form it meant', () => {
   const e = engine();
-  const read = (stages) => refusal(e, 'query_pipeline_model', { context_id: 'abc123', stages });
+  const read = (steps) => refusal(e, 'query_pipeline_model', { context_id: 'abc123', steps });
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] }]), null);
   // a column against another column, an expression on either side: a read's too
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'length', args: [{ column: 'a' }] }, { column: 'b' }] }] }]), null);
@@ -65,12 +65,12 @@ test('a read\'s condition is the one grammar over the stored table\'s columns, a
   assert.match(property, /unexpected property 'property'/);
   assert.doesNotMatch(property, /option 1/);
   // a field a condition does not read, in a measure's where, is refused under the condition's own title
-  assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }] } }] }]), /`stages\.0\.measures\.0\.expr\.where\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
+  assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }] } }] }]), /`steps\.0\.measures\.0\.expr\.where\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
 });
 
 test('a window aggregate takes no where, and a function that is no window takes no over — the refusal names the form', () => {
   const e = engine();
-  const add = (stage) => refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', stages: [stage] });
+  const add = (stage) => refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', steps: [stage] });
   assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
   assert.match(add({ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'a' }, { value: 1 }], over: {} }] }), /must be exactly one of: fn: eq \| neq \| gt \| gte \| lt \| lte/);
 });

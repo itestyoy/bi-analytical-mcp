@@ -306,12 +306,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the transport folds into `$defs`.
 - ONE VOCABULARY PER CONCEPT, IN EVERY TOOL (HARD RULE): an aggregation is a FUNCTION (`fn`:
   `average`, a quantile `percentile` with its `percentile` parameter), the name a step produces is
-  `name`, a time bucket is `grain`, tasks are read with `task_ids`, and a condition, a measure and a
-  computed value are ONE EXPRESSION GRAMMAR — `{ fn, args: [expressions], …its parameters }` over
+  `name`, a time bucket is `grain`, a list a tool runs in order is `steps` (one of them: `step`) — the
+  pipeline builder's and a read's, the steps after a metric query, an eventstream's start and its
+  library steps — each item tagged by what it is (a SQL stage by `stage`, a library op by `type`),
+  tasks are read with `task_ids` and paged by `offset` / `limit` in every query tool, and a condition,
+  a measure and a computed value are ONE EXPRESSION GRAMMAR — `{ fn, args: [expressions], …its parameters }` over
   leaves, nested to any depth. Every level's schema comes from ONE builder (`exprSchema`,
   src/pipeline/compute.js: one closed form per leaf the level takes, one per function shape, `args`
   recursive through the level's own def — the pipeline's, a read's and the semantic tool's
-  `$defs.expr`) and its SQL from ONE writer (`exprSql`, and `conditionListSql` for a slot); the
+  `$defs.expr`, and beside the last its steps' `$defs.read_expr`, a read's level: `readStageDefs`)
+  and its SQL from ONE writer (`exprSql`, and `conditionListSql` for a slot); the
   functions are one table (`FNS`, src/pipeline/compute.js — scalar, condition, logic, aggregate,
   window; a function is added there once, its schema form and its SQL beside each other). A CONDITION
   is an expression with a boolean value: a comparison (`eq neq gt gte lt lte`, `in not_in` with each
@@ -325,7 +329,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   boolean a compute stage stores is never NULL. Only the LEAVES differ by LEVEL: over a pipeline's rows
   `{ column }`, `{ property, field?, type? }` (an event property read where it is stored, while the
   rows are that source's events), `{ value }` (a scalar, never a list) and `{ now: true }`; over a
-  stored table (a read) the same without `{ property }`; on a semantic model `{ column }` (a column, an
+  stored table or a metric result (a read, the steps after a metric query) the same without
+  `{ property }`; on a semantic model `{ column }` (a column, an
   entity key, a declared amount), `{ property }` on an events source and `{ value }`; in a derived
   metric `{ metric }` and numbers; in a metric query's `where` the dimension references as its
   group_by names them and `{ value }`; in filter_events the eventstream's `{ column }` and `{ value }`.
@@ -342,13 +347,18 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   a derived metric's `expr` (its inputs read off the leaves; a ratio is `div` of two metrics) — and a
   model is loaded into a task by an item of `semantic_models` (`{ from }` alone loads it for its
   attributes), in a declaration and an update alike. A SORT KEY over a table's rows (the
-  order_by stage, a window's order, a read) is ONE item `{ key, direction?, nulls? }` (`SORT_KEY`),
+  order_by stage — a build's, a read's, the steps after a metric query — and a window's order) is ONE
+  item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
   funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a time window is
   `time_range` `{ start, end, timezone }` (ONE builder, `timeRange` in src/schema-kit.js, read by
   src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a catalog
   entity is addressed `{ source }`, `{ source, property }` or `{ source, event }` — semantic_index's views
-  and what a memory note is `about` alike; a week is the ISO
+  and what a memory note is `about` alike; a variant of a build is a `fork` under a `name` of its own;
+  both builders answer a step with what it changed (the columns, the eventstream's shape: added and
+  removed) and `steps_count` — `include_columns` / `include_steps` for all of them; a query's
+  `dry_run` is its SQL after the steps with its `output_columns`, reading no data (a pipeline read's
+  SQL is written over `{{ ref('<model>') }}`, as a preview's `model_sql`); a week is the ISO
   week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE
   expression of that grammar (a compute stage's `expr`; one that is a condition is stored as a boolean); a
   window function takes `over` (`sum average min max count` with it are windows), and
@@ -356,14 +366,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   where each goes, written quoted by the server — POSITIONAL: a word of its text spelled exactly as a
   column of the step is refused, with no list of words beside it; the rest goes as written, except a
   Jinja opener (`{{`, `{%`, `{#` — dbt would run it; a text holding one is a constant in `args`). It is a
-  build's escape hatch: a read (query_pipeline_model, a drill) takes no raw (`READ_FNS`). A constant
+  build's escape hatch: a read (query_pipeline_model, the steps after a metric query, a drill) takes
+  no raw (`READ_FNS`). A constant
   is written in the type of the first argument that is not a constant, one rule for every comparison.
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
   every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is
   told this server's (src/validate.js); a whole value in an EARLIER spelling of this server — a condition
   `{ column, op, value }` or a group `{ or: [...] }`, a measure `{ name, agg, column }`, a read's
-  `transform` — is refused with the value converted, never accepted, and what a store kept in one is
-  carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
+  `transform`, a metric query's `order_by` (an order_by step now) — is refused with the value
+  converted, never accepted (a field only renamed — `stages`, `stage` — is told its name: `steps`,
+  `step`), and what a store kept in one is carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
   retentioneering steps keep the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
@@ -385,11 +397,18 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
   `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
   pipeline materialize) or a query
-  (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
-  stages })` — a read of the stored table in the pipeline's own stages, those that keep it one table:
-  where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project; a join, an unnest, a
+  (`query_semantic_model({ context_id, metrics…, steps? })`, `query_pipeline_model({ context_id,
+  steps })` — a read in `steps` of the pipeline's own stages, those that keep it one table: where,
+  compute, aggregate, pivot, unpivot, order_by, limit, sample, project — of the stored table, or of a
+  metric query's result over its columns as the caller names them (the query's `where` filters the
+  rows a metric folds, a where step the result: a having); a join, an unnest, a
   funnel or a python step is a build from the task) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — dry_run — which waits for the context's build alone). A query tool also takes a
+  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — dry_run, on either side: its SQL after the steps and its `output_columns` — which waits for the context's build alone). A metric query with no steps, or
+  with a lone order_by step MetricFlow orders as asked (its ORDER BY writes no NULLS), runs as `mf
+  query`; any other steps run over the SQL MetricFlow compiles for it, its columns renamed to the
+  caller's names, rendered by the one read compiler (`renderRead`, src/pipeline.js) and run through
+  the dbt client's `show` — the same answer, paging and KEPT_ROWS either way, and `materialize: true`
+  stores the result after the steps. A query tool also takes a
   BATCH — `{ context_id, queries: [...] }`, of any size — which checks EVERY query before
   any starts (one mistake refuses the batch), starts one task per query and returns ONLY
   `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process
@@ -438,12 +457,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
   only when asked with `card: true` on analyze (a card offered to an Apps client alone: `card: true`
   from any other is refused, `false` — no card — is what it gets anyway). A stored result is
-  built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
-  })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
+  built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', name,
+  from_task })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
   through tasks or display_model_result. The one sanctioned exception is a FEATURE's side (below):
   it has the same three roles — its builder, its query tool that starts AND reads back its own tasks
-  (its side registered with the engine, a task of another side refused), and its OWN drawing tool,
+  in the same read (`{ task_ids, wait_seconds?, offset?, limit? }`; its side registered with the engine, a task of
+  another side refused), and its OWN drawing tool,
   which draws only that side's finished tasks, each analysis at most once; display_model_result stays
   the only tool that draws a semantic or pipeline result. A feature is written against the engine's
   public surface — `engine.tasks` (the task runtime), `engine.host` (validation, a context, the time
@@ -459,22 +479,26 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   as the core's, a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
 - RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
-  PIPELINE — `start` declares the eventstream: an events source (or a task's table) prepared by the
-  pipeline's own stages that keep the rows events (where, compute, join — a join of a slowly-changing
+  PIPELINE — `start` declares the eventstream: an events source (or a task's table) prepared by its
+  `steps`, the pipeline's own stages that keep the rows events (where, compute, join — a join of a slowly-changing
   model states its `between`, refused without one), then the columns it names (`columns.event` / `time`,
   `path`, `segments` — column names of the prepared rows), rendered in SQL, materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
   (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
-  (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
+  (below) and answered at once with what it changed and `steps_count`, as the pipeline builder answers
+  (`include_columns` / `include_steps` for the whole shape / every step); `materialize` runs the steps not yet materialized
   in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
   order carried in the table), a checkpoint an edit at or before it retires. Every start builds a table
   of its own (a fork of an earlier one keeps reading its rows), one build action at a time runs on a
   context, and a column a step makes must be an identifier the warehouse stores (quoted wherever SQL
   names it); query = the COMPUTATION —
   every analysis of one call over the eventstream AS MATERIALIZED (a query takes no steps of its own:
-  a variant is a fork), read back with a table's first rows kept (the whole of it on detail: "full" or
-  for the card that draws it) and its card's scope from the table it read, in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
+  a variant is a fork), read back a page of each table by its row numbers (`offset` / `limit`,
+  READ_PAGE rows unless `limit` says, in the order its summary ranks them — the biggest transitions
+  first — with what it computes beyond rows, a group's profile, whole; a page past the rows a task
+  holds is read from the stored table), the card that draws it reading every row, and its card's
+  scope from the table it read, in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
   inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
   deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds and a fixed
@@ -510,9 +534,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   step that passes returns the shape it leaves, read off the stand-ins by the library's own schema — what
   the next step is checked against, as a pipeline stage is checked against the columns before it. It
   does not restate the library's checks in JS; a check that cannot run refuses nothing. No cap on analyses, steps, rows or
-  tasks: nothing the library computes or returns is cut — only what a READ holds in memory is bounded
-  (a table's first rows, `keptRows`), and every row is there on detail: "full" and for the card that
-  draws it. Left out, each for the
+  tasks: nothing the library computes or returns is cut — only what a task holds in memory is bounded
+  (a table's first rows, `keptRows`): a read pages every row by `offset` / `limit`, and the card that
+  draws it reads every row. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
   eventstream's shape rules out. The build reaches the source's OWN columns and event properties, a
@@ -589,7 +613,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   task that ended in an error, with its input (the task runtime's `start`); what a start could not serve (the
   project's layer, a join `servable` leaves out, a feature that cannot run). Each carries what
   REPRODUCES it: the arguments / the task's input (every task start passes its input — a pipeline
-  build its stages), the state of the context it worked on (`Engine._errorContext`: the declaration,
+  build its steps), the state of the context it worked on (`Engine._errorContext`: the declaration,
   a draft with every step, an eventstream with its steps), for a task the code of each generated model
   its message names (as written and as dbt ran it — where a warehouse line:column points), and the
   runtime (server version + surface fingerprint, dbt, dialect). A read of a failed task is not kept again. Bounded by MCP_ERROR_RETENTION_DAYS / MCP_ERROR_MAX_ROWS, not cleared by
@@ -658,7 +682,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
   the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
   one spelling per item — and `{ entity }` in group_by / where: what a dimension is and
-  where it lives (order_by names the result column a group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
+  where it lives (the steps after the query name the result column a group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
   item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
   with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
   RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's
@@ -676,7 +700,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
   model the catalog requires a window for (the dbt model dbt itself records the semantic model reads —
   manifest.json depends_on, `semanticModelSources` in the dbt client). Their queries run side by side (nothing writes to them)
-  in the SAME shell as a task's (`_metricOrderBy` / `_metricWindow` / `_metricPaging` /
+  in the SAME shell as a task's (`_metricTail` / `_metricWindow` / `_metricPaging` /
   `_metricEarlyAnswer` / `_metricTask` — only how a reference resolves differs); their stored
   results are carried over a restart (a start that parses nothing keeps them for the next) and
   retired by CONTEXT_TTL_MS by age unless a live pipeline reads them. A semantic model no metric

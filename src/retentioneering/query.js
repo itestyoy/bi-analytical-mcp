@@ -1,20 +1,24 @@
 // QUERY_RETENTIONEERING_MODEL — the analyses of one call, checked by the library on the eventstream's
 // shape and run together in one dbt Python model over the eventstream as materialized; and a task read
-// back: its tables' first rows kept (every row on detail: "full"), with what the eventstream was.
+// back: a page of each of its tables by their row numbers (offset / limit, as every query tool pages a
+// result), with what the eventstream was.
 
 import yaml from 'js-yaml';
 import { dbtFailure } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
+import { READ_PAGE } from '../schema/fields.js';
+import { pageBlock } from '../engine/helpers.js';
 import { retentioneeringFacts } from './schema.js';
 import { pathParts, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
-import { parseResultRows, summarize, truncatedTables } from './results.js';
+import { parseResultRows, readView, holdsPage } from './results.js';
 import { hasCard, diffForm, CHARTED_DIFF_KINDS } from './view-model.js';
 import { SIDE, BUILD, QUERY, DISPLAY, ES_COLUMNS } from './names.js';
 import { pathContext } from './contexts.js';
 import { suggest, namedColumns } from './build-input.js';
+import { refuseEarlierRead } from './earlier.js';
 import { ORDER_COL, ROLES_COL } from './steps.js';
 import { drawnAlready } from './display.js';
 
@@ -128,6 +132,8 @@ export function validateAnalyses(es, shape, analyses) {
 }
 
 export async function query(engine, feature, input) {
+  // a read in an earlier spelling is refused with how a read is made now (src/retentioneering/earlier.js)
+  refuseEarlierRead(input);
   engine.host.validate(QUERY, input);
   if (input.cancel) return engine.tasks.cancel(input, SIDE);
   if (input.task_ids) return readTasks(engine, feature, input);
@@ -187,22 +193,24 @@ export async function query(engine, feature, input) {
   return engine.tasks.started(id, { context_id: ctx.id, eventstream: es.name, analyses: order });
 }
 
-/** How many rows of each table a read holds: every chart's records whole, and of a table as long as
- *  the paths (a cluster's label per path) its first rows — the rest stays in the stored table, read
- *  only when asked for (detail: "full"). */
+/** How many rows of each table a task holds in memory: every chart's records whole, and of a table as
+ *  long as the paths (a cluster's label per path) its first rows — a page past them is read from the
+ *  stored table, and a card reads every row there. */
 export const KEPT_ROWS = 1000;
 
-/** The stored result table of a query task, read and shaped: every record but a table's rows past
- *  `rows` (Infinity: all of them), of every analysis or of one. */
-export async function readResult(engine, feature, dir, model, { context_id, eventstream, order, rows = feature.keptRows, analysis = null }) {
+/** The stored result table of a query task, read and shaped: every record but a table's rows outside
+ *  `from`..`from + rows` (rows Infinity: every one from `from`), of every analysis or of one. */
+export async function readResult(engine, feature, dir, model, { context_id, eventstream, order, rows = feature.keptRows, from = 0, analysis = null }) {
   const d = getDialect(engine.catalog.dialect);
-  const where = [Number.isFinite(rows) ? `(part <> 'row' or seq < ${Number(rows)})` : null, analysis ? `analysis = ${d.sqlLiteral(analysis)}` : null].filter(Boolean);
-  const from = `from {{ ref('${model}') }}${where.length ? ` where ${where.join(' and ')}` : ''}`;
-  const n = await feature.runner.show(dir, `select count(*) as n ${from}`, 1);
+  const first = Math.trunc(Number(from)) || 0;
+  const window = [first > 0 ? `seq >= ${first}` : null, Number.isFinite(rows) ? `seq < ${first + Math.trunc(Number(rows))}` : null].filter(Boolean);
+  const where = [window.length ? `(part <> 'row' or (${window.join(' and ')}))` : null, analysis ? `analysis = ${d.sqlLiteral(analysis)}` : null].filter(Boolean);
+  const sql = `from {{ ref('${model}') }}${where.length ? ` where ${where.join(' and ')}` : ''}`;
+  const n = await feature.runner.show(dir, `select count(*) as n ${sql}`, 1);
   if (!n.ok) return dbtFailure('fetch', n);
-  const res = await feature.runner.show(dir, `select analysis, kind, part, seq, payload ${from} order by analysis, part, seq`, Math.max(Number(n.rows[0]?.n) || 0, 1));
+  const res = await feature.runner.show(dir, `select analysis, kind, part, seq, payload ${sql} order by analysis, part, seq`, Math.max(Number(n.rows[0]?.n) || 0, 1));
   if (!res.ok) return dbtFailure('fetch', res);
-  return { ok: true, kind: 'analyses', context_id, eventstream, analyses: parseResultRows(res.rows, order) };
+  return { ok: true, kind: 'analyses', context_id, eventstream, analyses: parseResultRows(res.rows, order, { from: first }) };
 }
 
 /**
@@ -218,59 +226,65 @@ export function resultOrigin(state, table) {
   return { eventstream: null, table: null, gone: `the result in ${table} was stored by an earlier version of this server, before its rows were numbered within their tables — run the same query again to read it` };
 }
 
-/** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
-export function answer(engine, feature, id, out, detail = 'summary') {
-  if (out?.kind === 'eventstream') return withLevels(out, detail);
+/** What a read of a finished task answers, a page of it (`at`: { offset, limit }): the eventstream's
+ *  summary, or each analysis's tables paged with what it computes beyond them (readView). */
+export function answer(engine, feature, id, out, at = {}) {
+  if (out?.kind === 'eventstream') return withLevels(out, at);
   if (out?.kind !== 'analyses') return out;
   const drawable = Object.keys(out.analyses).filter((a) => !out.analyses[a].error && hasCard(out.analyses[a].kind, diffForm(out.analyses[a])) && !drawnAlready(engine, feature, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
-    analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
+    analyses: Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, readView(r, at)])),
     ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { request: { task_id: id, analysis: drawable[0] } }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
   };
 }
 
-/** An eventstream read: each segment's levels with their users — the first 30 (every one with detail:
- *  "full"), and how many there are. */
-export function withLevels(out, detail) {
+/** An eventstream read: each segment's levels with their users, the most users first — a page of them
+ *  (`limit` from `offset`, READ_PAGE unless the read says), and how many levels there are. */
+export function withLevels(out, { offset = 0, limit = READ_PAGE } = {}) {
   if (!out.segment_levels) return out;
-  const cut = detail === 'full' ? Infinity : 30;
   return {
     ...out,
-    segment_levels: Object.fromEntries(Object.entries(out.segment_levels).map(([s, l]) => [s, {
-      count: l.count,
-      levels: l.levels.slice(0, cut).map((level, i) => ({ level, users: l.users[i] })),
-      ...(l.levels.length > cut ? { levels_more: l.levels.length - cut } : {}),
-      ...(l.complete ? {} : { complete: false }),
-    }])),
+    segment_levels: Object.fromEntries(Object.entries(out.segment_levels).map(([s, l]) => {
+      const levels = l.levels.slice(offset, offset + limit).map((level, i) => ({ level, users: l.users[offset + i] }));
+      return [s, {
+        count: l.count,
+        levels,
+        page: pageBlock({ offset, limit, returned: levels.length, has_more: offset + levels.length < l.levels.length, total: l.levels.length }),
+        ...(l.complete ? {} : { complete: false }),
+      }];
+    })),
   };
 }
 
-export async function readTask(engine, feature, id, { wait_seconds: wait, detail, waited: already = null } = {}) {
+export async function readTask(engine, feature, id, { wait_seconds: wait, waited: already = null, offset = 0, limit = READ_PAGE } = {}) {
   const job = engine.tasks.forSide(id, SIDE);
   // a read of several waits for all of them once, and each answer says how long that was
   const waited = already ?? await engine.tasks.await([id], TaskRunner.clampWait(wait));
   const { head, pending } = engine.tasks.status(id, waited);
   if (pending) return pending;
   const now = engine.jobs.get(id);
-  // a full read not held in memory reads every row at once (not the kept rows, then all of them)
-  let out = await taskOutput(engine, feature, now, detail === 'full' ? { rows: Infinity } : {});
+  let out = await taskOutput(engine, feature, now);
   if (!out) return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: now.error || 'this task\'s result is gone — run it again' } };
   if (out.ok === false) return { ...head, ...out, status: 'error' };
-  // every record, when asked for: a table the kept read cut is read whole from the stored table (and
-  // not kept — it is as long as the paths)
-  if (detail === 'full' && out.kind === 'analyses' && Object.values(out.analyses).some((r) => truncatedTables(r))) {
-    const whole = await readResult(engine, feature, engine.ctxs.dir(job.contextId), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: Object.keys(out.analyses), rows: Infinity });
-    if (whole.ok) out = whole;
+  // a page past the rows the task holds is read from the stored table — each table's rows from offset,
+  // limit of them (not kept: a table as long as the paths is paged, never held whole)
+  const at = { offset, limit };
+  if (out.kind === 'analyses' && !Object.values(out.analyses).every((r) => holdsPage(r, at))) {
+    if (!engine.ctxs.has(job.contextId)) return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: 'this task\'s stored result is gone with its context (dropped, or expired) — run the analyses again' } };
+    const page = await readResult(engine, feature, engine.ctxs.dir(job.contextId), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: Object.keys(out.analyses), rows: limit, from: offset });
+    if (page.ok === false) return { ...head, ...page, status: 'error' };
+    out = page;
   }
-  return { ...head, status: 'done', ...answer(engine, feature, id, out, detail) };
+  return { ...head, status: 'done', ...answer(engine, feature, id, out, at) };
 }
 
 export async function readTasks(engine, feature, input) {
   for (const id of input.task_ids) engine.tasks.forSide(id, SIDE);
   const waited = await engine.tasks.await(input.task_ids, TaskRunner.clampWait(input.wait_seconds));
   const results = [];
-  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { waited, detail: input.detail }));
+  // each task's result paged alike: every table of it from offset, limit rows (READ_PAGE unless asked)
+  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { waited, offset: input.offset, limit: input.limit }));
   return TaskRunner.readAnswer(results, QUERY, { waited_seconds: waited });
 }
 

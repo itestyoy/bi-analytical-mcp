@@ -118,7 +118,7 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_pipeline_model({
-    action: 'add_steps', context_id: s.context_id, stages: [
+    action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
       { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
@@ -142,7 +142,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
   await engine.build_pipeline_model({
-    action: 'add_steps', context_id: s.context_id, stages: [
+    action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
       { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
       { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] },
@@ -160,7 +160,7 @@ test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 ro
 test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
+  const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
   const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(stepNotes(r))}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
@@ -169,6 +169,6 @@ test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real c
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
   const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, stages: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
+  const r2 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
   assert.ok(!stepNotes(r2).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

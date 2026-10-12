@@ -6,12 +6,13 @@
 // takes are retentioneering-steps.test.js; both stand on retentioneering-harness.js and run side by side.
 //
 // Every analysis of the users' paths is ONE call (Q1, in before()) — the charted ones, the diffs and the
-// ones without a card alike: each test below reads its own of them, from the summary or from the one read
-// of every record — but for one call of analyses without a card only (T31: a call with nothing to draw
-// offers no card, which no call that has a card can show). A check that names an earlier test (T8, T17,
-// …) in its message is that test's, merged into a scenario that shares its builds and runs. What one
-// python model costs is a dbt process and the library's import, so a check rides on a run that happens
-// anyway wherever it can.
+// ones without a card alike: each test below reads its own of them, from the default read (a page of each
+// table) or from the one read of every row, or from its drawn card — but for one call of analyses without
+// a card only (T31: a call with nothing to draw offers no card, which no call that has a card can show).
+// A read rounds its numbers to 4 decimals: a share read from it is held to the rows within that. A check
+// that names an earlier test (T8, T17, …) in its message is that test's, merged into a scenario that
+// shares its builds and runs. What one python model costs is a dbt process and the library's import, so
+// a check rides on a run that happens anyway wherever it can.
 //
 // Skipped when the environment is not built (npm run dbt:env -- create retentioneering).
 
@@ -19,8 +20,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { retentioneeringViewModel } from '../../src/retentioneering/view-model.js';
 import { toCallToolResult } from '../../src/mcp-surface.js';
+import { READ_PAGE } from '../../src/schema/fields.js';
 import { one } from '../helpers/settle.js';
-import { ENV, opts, skip, FUNNEL, table, sizes, openWorld, usersJoin } from './retentioneering-harness.js';
+import { ENV, opts, skip, FUNNEL, table, sizes, openWorld, usersJoin, EVERY_ROW } from './retentioneering-harness.js';
 
 let w; let engine; let wh; let rows; let built; let analyses;
 /** Users per platform ({ platform: users }), each user's platform, the platforms with paths in order. */
@@ -98,13 +100,16 @@ before(async () => {
       { kind: 'step_matrix', name: 'unmatched', path_pattern: `${pair[0]}->.*->${pair[1]}` },
     ],
   });
-  // the summary the model reads, and every record the card draws — each read once
-  analyses = { task_id: q.task_id, read: await readDone(q.task_id), full: await readDone(q.task_id, { detail: 'full' }) };
+  // the read the model gets by default (a page of each table), and one of every row — each read once
+  analyses = { task_id: q.task_id, read: await readDone(q.task_id), full: await readDone(q.task_id, EVERY_ROW) };
 }, opts);
 after(async () => { await w?.close(); });
 
-/** One analysis of Q1 in full — every cell the card draws, not the summary the model reads. */
+/** One analysis of Q1, every row of each of its tables — what a page of the default read may cut. */
 const full = (id) => analyses.full.analyses[id];
+/** A share read back (rounded to 4 decimals) is the rows' own within the rounding — `n` such shares
+ *  added or taken from each other, within n times it. */
+const near = (got, want, n = 1) => Math.abs(got - want) <= n * 5e-5 + 1e-12;
 
 test('the eventstream holds every event of every user, and its vocabulary is the source\'s own counts', opts, async (t) => {
   if (skip(t)) return;
@@ -132,46 +137,64 @@ test('transition graph: every transition count is the number of consecutive pair
     const seq = ['path_start', ...list.map((r) => r.e), 'path_end'];
     for (let i = 0; i + 1 < seq.length; i += 1) add(seq[i], seq[i + 1]);
   }
-  const g = full('transition_graph');
-  assert.deepEqual(new Map(g.edges.map((e) => [`${e.source}>${e.target}`, e.count])), expected);
+  const transitions = table(full('transition_graph'), 'transitions');
+  assert.deepEqual(new Map(transitions.map((e) => [`${e.from}>${e.to}`, e.count])), expected);
+  // the read ranks them: the biggest transitions first
+  assert.deepEqual(transitions.map((e) => e.count), [...expected.values()].sort((a, b) => b - a), 'the biggest transitions first');
   // proba_out: the share of the source's departures
   const out = {};
   for (const [k, n] of expected) { const s = k.split('>')[0]; out[s] = (out[s] || 0) + n; }
+  for (const e of transitions) assert.ok(near(e.proba_out, e.count / out[e.from]), `${e.from}>${e.to}`);
+  // the card draws the same transitions, its weights unrounded, and its layout places every event,
+  // deterministically
+  const g = (await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'transition_graph' })).result;
+  assert.deepEqual(new Map(g.edges.map((e) => [`${e.source}>${e.target}`, e.count])), expected);
   for (const e of g.edges) assert.ok(Math.abs(e.proba_out - e.count / out[e.source]) < 1e-9, `${e.source}>${e.target}`);
-  // the layout places every event, deterministically
   assert.ok(g.nodes.every((n) => Number.isFinite(n.x) && Number.isFinite(n.y)));
 });
 
 test('step matrix: the share at each step is the share of paths whose t-th position is that event', opts, async (t) => {
   if (skip(t)) return;
   const users = paths();
-  const m = full('step_matrix');
-  const cells = new Map(m.blocks[0].cells.map((c) => [`${c.step}|${c.event}`, c.share]));
-  for (const step of m.blocks[0].steps) {
+  // the read's table: a row per event, its share of the paths at each step (a column per step)
+  const tb = full('step_matrix').tables.find((x) => x.name === 'step_matrix');
+  const steps = tb.columns.slice(1).map(Number);
+  const cells = new Map(tb.rows.flatMap(([e, ...shares]) => shares.map((s, k) => [`${steps[k]}|${e}`, s])));
+  for (const step of steps) {
     const count = {};
     for (const list of users.values()) {
       const seq = ['path_start', ...list.map((r) => r.e), 'path_end'];
       const e = step < seq.length ? seq[step] : 'path_end';
       count[e] = (count[e] || 0) + 1;
     }
-    for (const [e, n] of Object.entries(count)) assert.ok(Math.abs((cells.get(`${step}|${e}`) || 0) - n / users.size) < 1e-9, `step ${step} ${e}`);
+    for (const [e, n] of Object.entries(count)) assert.ok(near(cells.get(`${step}|${e}`) || 0, n / users.size), `step ${step} ${e}`);
   }
+  // the events by the highest share they reach
+  const peaks = tb.rows.map(([, ...shares]) => Math.max(...shares));
+  assert.deepEqual(peaks, [...peaks].sort((a, b) => b - a), 'the events by their peak share');
 });
 
 test('step sankey: the flows out of each step add up to that step\'s shares', opts, async (t) => {
   if (skip(t)) return;
-  const s = full('step_sankey');
+  // the card's flows and shares, unrounded
+  const s = (await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'step_sankey' })).result;
   const [block] = s.blocks;
   assert.ok(block.links.length > 0);
   const out = {};
   for (const l of block.links) out[`${l.step}|${l.source}`] = (out[`${l.step}|${l.source}`] || 0) + l.share;
   for (const c of block.cells) if (c.step < block.steps.at(-1)) assert.ok(Math.abs((out[`${c.step}|${c.event}`] || 0) - c.share) < 1e-9, `step ${c.step} ${c.event}`);
+  // the read's flows are the card's, the biggest first
+  const flows = table(full('step_sankey'), 'flows');
+  assert.equal(flows.length, block.links.length, 'the read holds every flow');
+  for (const l of block.links) assert.ok(flows.some((f) => f.step === l.step && f.from === l.source && f.to === l.target && near(f.share, l.share)), `the flow ${l.step} ${l.source}>${l.target}`);
+  assert.deepEqual(flows.map((f) => f.share), flows.map((f) => f.share).sort((a, b) => b - a), 'the flows by share');
 });
 
 test('funnel: the paths that reach each step in order', opts, async (t) => {
   if (skip(t)) return;
-  const f = analyses.read.analyses.funnel;
-  assert.deepEqual(f.steps.map((s) => s.unique_paths), reach(paths().values()));
+  // the read's funnel table, its steps in funnel order
+  const f = table(analyses.read.analyses.funnel, 'funnel');
+  assert.deepEqual(f.map((s) => s.unique_paths), reach(paths().values()));
 });
 
 test('clusters cover every path once; segment overview sizes are the users per platform', opts, async (t) => {
@@ -181,27 +204,32 @@ test('clusters cover every path once; segment overview sizes are the users per p
   assert.ok(c.silhouette.length === 2 && c.silhouette.filter((s) => s.best).length === 1);
   const s = analyses.read.analyses.segment_overview;
   assert.deepEqual(sizes(s), perPlatform);
-  // the summary is the groups' profiles plus the library's own tables — the label of every path among
-  // them, its first rows shown and all of them counted — never the metric list spread into it
-  for (const summary of [c, s]) assert.deepEqual(Object.keys(summary).filter((k) => /^\d+$/.test(k)), []);
-  const labels = c.tables.find((tb) => tb.total_rows === built.users);
-  assert.ok(labels, `a table with a row per path (${c.tables.map((tb) => `${tb.name}: ${tb.total_rows}`).join(', ')})`);
-  assert.equal(labels.rows.length, Math.min(built.users, 7), 'the summary shows the first rows the read kept');
-  // detail: "full" reads every row of it from the stored table — the read kept only its first
-  const whole = full('cluster_analysis').tables.find((tb) => tb.name === labels.name);
-  assert.equal(whole.rows.length, built.users);
+  // the read is the groups' profiles beside a page of each table — the groups' metrics, and the
+  // library's own: the label of every path among them, counted — never the metric list spread into it
+  for (const read of [c, s]) assert.deepEqual(Object.keys(read).filter((k) => /^\d+$/.test(k)), []);
+  const labels = c.tables.find((tb) => tb.name !== 'metrics' && tb.page.total_rows === built.users);
+  assert.ok(labels, `a table with a row per path (${c.tables.map((tb) => `${tb.name}: ${tb.page.total_rows}`).join(', ')})`);
+  // a page of READ_PAGE rows holds them — past the 7 the task holds, read from the stored table
+  assert.equal(labels.rows.length, Math.min(built.users, READ_PAGE), 'the default page holds its rows, past those the task holds');
+  assert.deepEqual(full('cluster_analysis').tables.find((tb) => tb.name === labels.name).rows, labels.rows, 'the same rows as the read of every row');
 });
 
 test('a metric asked for at two aggs — or twice — in one overview is computed, each number the one it has alone', opts, async (t) => {
   if (skip(t)) return;
   const r = analyses.full;
   assert.equal(r.status, 'done', JSON.stringify(r.error));
-  const values = (id, name) => r.analyses[id].metrics.find((m) => m.metric === name)?.values;
+  // a metric's row of the groups' metrics table: its value per group, by the group's name
+  const values = (id, name) => {
+    const tb = r.analyses[id].tables.find((x) => x.name === 'metrics');
+    const row = tb.rows.find((x) => x[0] === name);
+    return row && Object.fromEntries(tb.columns.slice(2).map((group, i) => [group, row[i + 2]]));
+  };
+  const groups = (id) => (r.analyses[id].levels ?? r.analyses[id].clusters).map((g) => g.name);
   for (const [both, alone] of [['both', ''], ['clusters_both', 'clusters_']]) {
-    assert.deepEqual(r.analyses[both].levels, r.analyses[`${alone}mean`].levels);
+    assert.deepEqual(groups(both), groups(`${alone}mean`));
     assert.deepEqual(values(both, 'length_mean'), values(`${alone}mean`, 'length_mean'));
     assert.deepEqual(values(both, 'length_median'), values(`${alone}median`, 'length_median'));
-    assert.ok(values(both, 'length_mean').length > 1);
+    assert.ok(Object.keys(values(both, 'length_mean')).length > 1);
   }
   // …and the platform sizes are the warehouse's users per platform, as for any overview
   assert.deepEqual(sizes(r.analyses.both, 'both'), perPlatform);
@@ -214,7 +242,7 @@ test('display draws one analysis once — the card model is built from the store
   assert.equal(d.drawn, true);
   const vm = retentioneeringViewModel(d, { task_id: analyses.task_id, analysis: 'funnel' });
   assert.equal(vm.title, 'Tutorial to first purchase');
-  assert.deepEqual(vm.steps.map((s) => s.value), analyses.read.analyses.funnel.steps.map((s) => s.unique_paths));
+  assert.deepEqual(vm.steps.map((s) => s.value), table(analyses.read.analyses.funnel, 'funnel').map((s) => s.unique_paths));
   assert.ok(toCallToolResult(d, 'display_retentioneering_result', {}, engine).structuredContent, 'a drawn card carries its structured result');
   await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel' }), /shown already/);
   // two calls at once for one analysis: one draws it, the other is refused — never two cards
@@ -241,7 +269,7 @@ test('every event keeps its name by default; the card carries its scope and path
   if (skip(t)) return;
   assert.ok(!built.vocabulary.some((v) => v.event === 'other'), 'no "other" by default');
   // an analysis knows how many paths it read; the card, who and when
-  assert.equal(analyses.read.analyses.funnel && full('funnel').paths, built.users);
+  assert.equal(analyses.read.analyses.funnel.paths, built.users);
   const d = await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel_sessions' });
   assert.equal(d.result.paths, built.sessions, 'per-session paths');
   assert.deepEqual({ users: d.scope.users, events: d.scope.events }, { users: built.users, events: rows.length });
@@ -254,7 +282,7 @@ test('an analysis the library raises on keeps its error; the call\'s other analy
   assert.equal(r.analyses.unmatched.error.type, 'PatternNoMatchError');
   // the graph is computed all the same: its transitions are the pairs of the paths
   const pairs = [...paths().values()].reduce((n, l) => n + l.length + 1, 0);
-  assert.equal(r.analyses.transition_graph.edges.reduce((n, e) => n + e.count, 0), pairs);
+  assert.equal(table(r.analyses.transition_graph, 'transitions').reduce((n, e) => n + e.count, 0), pairs);
   assert.notEqual(r.show_to_user?.arguments.request.analysis, 'unmatched', 'the failed one is not offered as a card');
   await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'unmatched' }), (e) => e.field === 'analysis' && /PatternNoMatchError/.test(e.message));
   assert.ok(JSON.stringify(await engine.explore_errors({ task_id: analyses.task_id })).includes('PatternNoMatchError'), 'the failure is in the error log');
@@ -298,8 +326,8 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
   for (const s of vf.steps) assert.equal(s.delta.value, s.first.value - s.second.value, 'T17: the difference');
   // the default read carries the same numbers: each step for both groups and their difference
   const sm = r.analyses.funnel_diff;
-  assert.deepEqual([sm.diff, sm.groups], [true, { segment: 'platform', first: p1, second: p2 }], 'T17: the summary says the diff and its groups');
-  assert.deepEqual(sm.steps.map((s) => [s.first.unique_paths, s.second.unique_paths, s.difference.unique_paths]), vf.steps.map((s) => [s.first.value, s.second.value, s.delta.value]), 'T17: the summary\'s steps are the card\'s');
+  assert.deepEqual([sm.diff, sm.groups], [true, { segment: 'platform', first: p1, second: p2 }], 'T17: the read says the diff and its groups');
+  assert.deepEqual(table(sm, 'funnel').map((s) => [s.first_unique_paths, s.second_unique_paths, s.difference_unique_paths]), vf.steps.map((s) => [s.first.value, s.second.value, s.delta.value]), 'T17: the read\'s steps are the card\'s');
 
   // T33 — once the funnel is drawn, the anchored diff is the card offered next
   const again = await readDone(q.task_id);
@@ -316,8 +344,9 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
     const part = (role) => m.tables.find((x) => x.role === role && x.block === b);
     const value = (tb, row, j) => tb.rows.find((x) => x[0] === row)?.[j] ?? 0;
     const [diff, first, second] = ['diff', 'first', 'second'].map(part);
+    // (three shares read back rounded: the difference of two, against the third)
     for (const row of diff.rows) diff.columns.slice(1).forEach((_, k) => {
-      assert.ok(Math.abs(row[k + 1] - (value(first, row[0], k + 1) - value(second, row[0], k + 1))) < 1e-9, `T33: block ${b} ${row[0]} step ${diff.columns[k + 1]}`);
+      assert.ok(near(row[k + 1], value(first, row[0], k + 1) - value(second, row[0], k + 1), 3), `T33: block ${b} ${row[0]} step ${diff.columns[k + 1]}`);
     });
   }
   const dm = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix_diff' }), {});
@@ -364,10 +393,10 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
   }
 });
 
-// Q1's analyses no card draws: their numbers are in the read (a summary by default, every record with
-// detail: "full"), no card is offered for them — passed over in Q1, and none at all for a call of them
-// alone — and a draw asked for anyway is refused without leaving a mark.
-test('analyses without a card: the library\'s tables, the rows\' numbers, a summary by default and every record in full — none offered, and a refused draw leaves no mark', opts, async (t) => {
+// Q1's analyses no card draws: their numbers are in the read (a page of each table, by row numbers), no
+// card is offered for them — passed over in Q1, and none at all for a call of them alone — and a draw
+// asked for anyway is refused without leaving a mark.
+test('analyses without a card: the library\'s tables, the rows\' numbers, every table paged by its row numbers — none offered, and a refused draw leaves no mark', opts, async (t) => {
   if (skip(t)) return;
   const q = { task_id: analyses.task_id };
   const summary = analyses.read;
@@ -412,12 +441,26 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
     assert.equal(m.has_event_shop_opened, list.some((r) => r.e === 'shop_opened') ? 1 : 0, `T31: shop_opened of ${u}`);
   }
 
-  // T34 — a read is a summary by default and every record with detail: "full"
+  // T34 — a read pages every table of every analysis by its row numbers: the default page counts every
+  // row; and two pages — the first rows, which the task holds, and the rest, read past them from the
+  // stored table — put together are the read of every row, table by table
   const [tb] = summary.analyses.path_metrics.tables;
-  assert.equal(tb.total_rows, built.users, 'T34: the summary counts every row');
-  // the first rows the read kept (7 in this suite), up to the 20 a summary shows
-  assert.equal(tb.rows.length, Math.min(built.users, 20, 7), 'T34: the summary shows the first rows the read kept');
-  assert.equal(a.path_metrics.tables[0].rows.length, built.users, 'T34: detail "full" reads every row');
+  assert.equal(tb.page.total_rows, built.users, 'T34: a page counts every row');
+  assert.equal(tb.rows.length, Math.min(built.users, READ_PAGE), 'T34: the default page holds READ_PAGE rows');
+  const cut = 5;
+  const head = await readDone(q.task_id, { offset: 0, limit: cut });
+  const rest = await readDone(q.task_id, { offset: cut, limit: EVERY_ROW.limit });
+  let paged = 0;
+  for (const [id, analysis] of Object.entries(a)) {
+    for (const [i, whole] of (analysis.tables || []).entries()) {
+      const [first, second] = [head.analyses[id].tables[i], rest.analyses[id].tables[i]];
+      assert.deepEqual([first.name, second.name], [whole.name, whole.name], `T34: ${id}: the pages hold the same tables`);
+      assert.deepEqual([...first.rows, ...second.rows], whole.rows, `T34: ${id} ${whole.name}: two pages are every row`);
+      assert.deepEqual([first.page.has_more, first.page.next_offset], whole.rows.length > cut ? [true, cut] : [false, undefined], `T34: ${id} ${whole.name}: the first page says where the next starts`);
+      if (whole.rows.length > 7) paged += 1;
+    }
+  }
+  assert.ok(paged > 0, 'guard: a table goes on past the 7 rows the task holds');
 });
 
 // (A sample drawn by a hash — two starts of one sampled spec — is retentioneering-steps.test.js's, with
@@ -431,7 +474,7 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, a summ
 test('filter_events.where: every operator, a number compared as a number, not(…) keeps a missing value where neq drops it, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l, device_time as t from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', stages: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
+  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', steps: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
   const levels = await readDone(b.task_id);
   assert.equal(levels.status, 'done', `T16 levels: ${JSON.stringify(levels.error)}`);
   const ctx = levels.context_id;
@@ -561,7 +604,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   if (skip(t)) return;
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it — the
   // platform a join stage brings under that name
-  const first = await readDone((await engine.build_retentioneering_model({ name: 'origin', source: 'events', description: 'every event', stages: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
+  const first = await readDone((await engine.build_retentioneering_model({ name: 'origin', source: 'events', description: 'every event', steps: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
   assert.equal(first.status, 'done', `T23 origin: ${JSON.stringify(first.error)}`);
   const ctx = first.context_id;
   assert.deepEqual(Object.fromEntries(first.segment_levels.group.levels.map((l) => [l.level, l.users])), perPlatform, 'T23: a segment named for a keyword is carried, level by level');
@@ -580,7 +623,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
 
   // T28 + T21 — a later start of the same name, and a step on it that waits for that build — while a
   // preview of another eventstream of the context answers at once
-  const restart = await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
+  const restart = await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
   const order = [];
   const stepping = engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'origin', steps: [{ type: 'collapse_events', loops: true }] }).then(() => order.push('step'));
   await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'origin_copy' }).then(() => order.push('preview'));
@@ -595,17 +638,16 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   // the fork reads the rows it was made from (T21), the keyword segment among them (T23) — and Q1's
   // clustering and graph run again over them (T9)
   const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'origin_copy', analyses: [{ kind: 'transition_graph' }, { kind: 'segment_overview', segment_col: 'group', metrics: [mean()] }, clusters()] });
-  const a = await readDone(q.task_id, { detail: 'full' });
+  const a = await readDone(q.task_id, EVERY_ROW);
   assert.equal(a.status, 'done', JSON.stringify(a.error));
-  assert.deepEqual(a.analyses.transition_graph.nodes.map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort(), 'T21: a fork of the earlier eventstream keeps reading its rows');
+  assert.deepEqual(table(a.analyses.transition_graph, 'events').map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort(), 'T21: a fork of the earlier eventstream keeps reading its rows');
   // T9 — the same analyses in another call give the same numbers: the rows are the users' paths Q1 read
   // (every event of every user; this eventstream has no sessions, and names its platform segment `group`)
   assert.deepEqual([first.events, first.users], [built.events, built.users], 'guard: the fork holds the rows of the users\' paths');
   assert.deepEqual(a.analyses.cluster_analysis, full('cluster_analysis'), 'T9: the clusters of Q1');
   assert.deepEqual(a.analyses.transition_graph, full('transition_graph'), 'T9: the transition graph of Q1');
-  // a full read holds the overview as this server reshapes the library's rows — the level names, and
-  // each metric's values level by level, segment_size among them (the library's own tables are under
-  // `tables`)
+  // a read holds the overview's groups as this server reshapes the library's rows — each level with
+  // its size and profile (the metrics by level, and the library's own tables, are under `tables`)
   assert.deepEqual(sizes(a.analyses.segment_overview, 'T23: an overview of the keyword segment'), perPlatform, 'T23: an overview of the keyword segment');
   // …and the first build's task still says them
   const reread = await readDone(first.task_id);
@@ -616,14 +658,14 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
 });
 
-test('the source\'s own columns and event properties filter the paths and carry as segments, by the start\'s stages — no join needed', opts, async (t) => {
+test('the source\'s own columns and event properties filter the paths and carry as segments, by the start\'s steps — no join needed', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select player_id_of_internal as u, event_name as e, bundle_id as b, level_id_of_event_data as l from fct_analytics_events')).rows;
   // a where on a column of the source, a compute copying a column under another name, a compute reading
   // an event property into a column — and the two columns carried as segments
   const b = await engine.build_retentioneering_model({
     name: 'one_app', source: 'events',
-    stages: [
+    steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'com.omg.colorfit' }] }] },
       { stage: 'compute', name: 'app', expr: { column: 'bundle_id' } },
       { stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } },
@@ -639,8 +681,8 @@ test('the source\'s own columns and event properties filter the paths and carry 
   assert.deepEqual([...new Set(es.map((x) => x.app))], ['com.omg.colorfit'], 'the column carried as a segment');
   const byLevel = (list, key) => list.reduce((m, x) => m.set(String(x[key] ?? ''), (m.get(String(x[key] ?? '')) || 0) + Number(x.n ?? 1)), new Map());
   assert.deepEqual(byLevel(es, 'level'), byLevel(kept.map((x) => ({ level: x.l })), 'level'), 'the property carried as a segment, value by value');
-  // a column the table does not have is refused before anything runs, by the stage that names it, with the ones it has
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such' }, { value: 1 }] }] }] }), (e) => e.field === 'stages[0]' && /no_such/.test(e.message) && /bundle_id/.test(e.message));
+  // a column the table does not have is refused before anything runs, by the step that names it, with the ones it has
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such' }, { value: 1 }] }] }] }), (e) => e.field === 'steps[0]' && /no_such/.test(e.message) && /bundle_id/.test(e.message));
 });
 
 // K — FROM A PIPELINE'S TASKS. An event only a window can define — a level started again right after a
@@ -665,7 +707,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   }
   assert.ok(expected.get('level_restarted') > 0, 'T41: the fixture has restarts to find');
   const p = await engine.build_pipeline_model({ action: 'start', name: 'restarts', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, steps: [
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }, { fn: 'eq', args: [{ column: 'prev' }, { value: 'level_started' }] }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
     { stage: 'project', keep: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
@@ -673,8 +715,8 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const m = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const firstBuild = await one(engine.query_pipeline_model({ task_ids: [m.task_id] }));
   assert.equal(firstBuild.status, 'done', `T41 the draft's first build: ${JSON.stringify(firstBuild.error)}`);
-  // the start's stages run over the task's table as over a source: here a compute copying a column under the segment's name
-  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, stages: [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }], segments: ['app'] });
+  // the start's steps run over the task's table as over a source: here a compute copying a column under the segment's name
+  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, steps: [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }], segments: ['app'] });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', `T41 from_pipe: ${JSON.stringify(r.error)}`);
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'T41: the events a window defined, counted from the rows');
@@ -682,16 +724,16 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   assert.deepEqual(r.path, ['player_id_of_internal'], 'T41: the summary says what one path is');
   // the analyses read it like any eventstream — here the task's table itself, before any step
   const q = await engine.query_retentioneering_model({ context_id: r.context_id, eventstream: 'from_pipe', analyses: [{ kind: 'transition_graph' }] });
-  const g = await readDone(q.task_id, { detail: 'full' });
+  const g = await readDone(q.task_id, EVERY_ROW);
   assert.equal(g.status, 'done', JSON.stringify(g.error));
-  assert.equal(new Map(g.analyses.transition_graph.nodes.map((n) => [n.event, n.count])).get('level_restarted'), expected.get('level_restarted'), 'T41: the analysis reads the window-defined event');
+  assert.equal(new Map(table(g.analyses.transition_graph, 'events').map((n) => [n.event, n.count])).get('level_restarted'), expected.get('level_restarted'), 'T41: the analysis reads the window-defined event');
   // what the table cannot say is refused before anything runs, with where it belongs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] }] }), (e) => e.field === 'stages[0]' && /result_of_event_data/.test(e.message), 'T41: a property of the source is not the table\'s');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] }] }), (e) => e.field === 'steps[0]' && /result_of_event_data/.test(e.message), 'T41: a property of the source is not the table\'s');
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['no_such'], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /ev/.test(e.message), 'T41: a path column the table does not have');
 
   // T43 — the draft's second build (every event but the first launch; the case renames only level_started)
   const n = Number((await wh.query("select count(*) as n from fct_analytics_events where event_name <> 'first_launch'")).rows[0].n);
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
   const second = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
   const rebuilt = await one(engine.query_pipeline_model({ task_ids: [second.task_id] }));
   assert.equal(rebuilt.status, 'done', `T43 the draft's rebuild: ${JSON.stringify(rebuilt.error)}`);
@@ -700,7 +742,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   assert.equal(rr.status, 'done', `T43 from_rebuild: ${JSON.stringify(rr.error)}`);
   assert.equal(rr.events, n, 'T43: the eventstream over the rebuild finds the table it builds on');
   const pq = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const pm = await engine.build_pipeline_model({ action: 'materialize', context_id: pq.context_id });
   const counted = await one(engine.query_pipeline_model({ task_ids: [pm.task_id] }));
   assert.equal(counted.status, 'done', `T43 on_rebuild: ${JSON.stringify(counted.error)}`);

@@ -141,25 +141,39 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.equal((await wh.query(limited.sql)).rows.length, 3, '[dry run] compiled with the caller\'s limit');
   assert.equal((await wh.query(planned.sql)).rows.length, 7, '[dry run] without a limit, every one of the 7 days');
 
-  // #4b: an order_by key is a result column's name — the day axis is metric_time_day; dry_run
-  // surfaces the orderable keys; a key that is no result column (the bare `metric_time` too, which
-  // with two grains in group_by named only one of them) is refused with the list.
-  assert.ok(planned.orderable_keys.includes('metric_time_day') && planned.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(planned.orderable_keys)}`);
-  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day' }] });
+  // #4b: the steps after a query name its result columns — the day axis is metric_time_day; dry_run
+  // surfaces the columns the rows come back with; an order_by step naming a column the result does not
+  // have (the bare `metric_time` too, which with two grains in group_by named only one of them) is
+  // refused with the columns there are.
+  const byDay = [{ time: 'metric_time', grain: 'day' }];
+  const sortBy = (...keys) => [{ stage: 'order_by', keys }];
+  assert.deepEqual(planned.output_columns.map((c) => c.name).sort(), ['active_users_dau', 'metric_time_day'], `output_columns: ${JSON.stringify(planned.output_columns)}`);
+  // a lone order_by step is MetricFlow's own order: the rows of the plain query, in that order
+  const plain = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay });
+  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day' }) });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
   assert.equal(sorted.row_count, 7, '[by day] 7 distinct active days, in ascending order');
   assert.equal(Math.max(...sorted.rows.map((r) => num(r.active_users_dau))), 6, '[by day] peak DAU 6 (2026-01-05)');
   assert.ok(sorted.rows.every((r) => num(r.active_users_dau) <= mau), '[by day] DAU <= MAU');
-  const at = sorted.rows.map((r) => new Date(r.metric_time_day).getTime());
-  assert.deepEqual(at, [...at].sort((a, b) => a - b), '[order_by] ascending days');
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }], order_by: [{ key: 'metric_time' }] }), /Orderable: .*metric_time_day.*metric_time_week/);
+  const day = (r) => String(r.metric_time_day).slice(0, 10); // an ISO day: its text sorts as the day does
+  const at = sorted.rows.map(day);
+  assert.deepEqual(at, [...at].sort(), '[order_by step] ascending days');
+  const pairs = (rows) => rows.map((r) => [day(r), num(r.active_users_dau)]);
+  assert.deepEqual(pairs(sorted.rows), pairs(plain.rows).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), '[order_by step] the plain query\'s rows, in that order');
+  // the same order asked with NULLs first — no NULL day here — is written by the read compiler over
+  // MetricFlow's SQL: the same rows in the same order
+  const nullsFirst = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day', nulls: 'first' }) });
+  assert.deepEqual(pairs(nullsFirst.rows), pairs(sorted.rows), '[order_by step, over the SQL] the same rows in the same order');
+  // …and in the same form: a day reads the same whichever path ran the query (`mf query`'s CSV, the dbt client's show)
+  assert.deepEqual(nullsFirst.rows, sorted.rows, '[one form] the same values, whichever path ran the query');
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'nonsense' }) }), /steps\[0\]: .*unknown column 'nonsense'.*available: metric_time_day, active_users_dau/);
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [...byDay, { time: 'metric_time', grain: 'week' }], steps: sortBy({ key: 'metric_time' }) }), /unknown column 'metric_time'.*available: metric_time_day, metric_time_week/);
   // a key is the result column it is handed as — the same 7 days, desc puts the latest first — never
   // the token the server resolves it to
-  const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time_day', direction: 'desc' }] });
+  const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day', direction: 'desc' }) });
   assert.equal(byColumn.row_count, 7);
   assert.deepEqual(byColumn.rows.map((r) => String(r.metric_time_day)), sorted.rows.map((r) => String(r.metric_time_day)).reverse());
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time__day' }] }), /Orderable:/);
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time__day' }) }), /unknown column 'metric_time__day'/);
 });
 
 // ── 2. joins: group_by_joined_attribute ──────────────────────────────────────
@@ -453,13 +467,14 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const day = await eventsPerDay();
   const at = (d) => day.get(d) || 0;
   const created = await engine.build_semantic_model(CUMULATIVE_TASK);
-  const r = await engine.query_semantic_model({
+  const query = {
     context_id: created.context_id,
     metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'],
     group_by: [{ time: 'metric_time', grain: 'day' }],
-    order_by: [{ key: 'metric_time_day' }],
     time_range: { start: '2026-01-03', end: '2026-01-05' },
-  });
+  };
+  const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];
+  const r = await engine.query_semantic_model({ ...query, steps: byDay });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const got = r.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]);
   const days = ['2026-01-03', '2026-01-04', '2026-01-05'];
@@ -467,4 +482,9 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const upTo = (d) => [...day].filter(([k]) => k <= d).reduce((a, [, n]) => a + n, 0);
   assert.ok(at('2026-01-02') > 0, 'the fixture has events the day before the range');
   assert.deepEqual(got, days.map((d) => [at(d), at(prev[d]) + at(d), upTo(d)]));
+  // a where step filters the RESULT, not the rows a metric folds (that is the query's where, or its
+  // window): the days it keeps carry the sums the whole query gave them, the days before them included
+  const later = await engine.query_semantic_model({ ...query, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
+  assert.equal(later.ok, true, JSON.stringify(later.error));
+  assert.deepEqual(later.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
 });

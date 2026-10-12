@@ -99,9 +99,9 @@ export async function settleMcp(client, name, args, { deadlineMs = 10 * 60 * 100
   return { res, out };
 }
 
-/** What add_steps said about the stages it added: each stage's recommendations, in order, as one list. */
+/** What add_steps said about the steps it added: each step's recommendations, in order, as one list. */
 export const stepNotes = (r) => (r.step_effects || []).flatMap((e) => e.recommendations || []);
-/** The one stage an add_steps of a single stage added: its effect on the data. */
+/** The one step an add_steps of a single step added: its effect on the data. */
 export const stepEffect = (r) => r.step_effects[r.step_effects.length - 1];
 
 /**

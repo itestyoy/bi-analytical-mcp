@@ -260,35 +260,39 @@ const holdsRaw = (v) => (Array.isArray(v) ? v.some(holdsRaw) : v !== null && typ
 
 /**
  * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_pipeline_model and a card's
- * drill run: the stages of READ_STAGES (where, compute, aggregate, pivot, unpivot, order_by, limit,
- * sample, project), built by the stage builders over the table's columns and rendered by the dialect
- * into one statement over `relation`; nothing is materialized, its rows are the answer. The table has no
- * source: a { property } or an { entity } partition is refused; raw SQL is a build's (READ_FNS); and a
- * stage that makes a new table (a join, an unnest, a funnel, a python model) is a build from the task instead.
+ * drill run, and the steps after a metric query: stages of READ_STAGES (where, compute, aggregate, pivot,
+ * unpivot, order_by, limit, sample, project), built by the stage builders over the relation's columns
+ * and rendered by the dialect into one statement over `relation`; nothing is materialized, its rows are
+ * the answer. The relation has no source: a { property } or an { entity } partition is refused; raw SQL
+ * is a build's (READ_FNS); and a stage that makes a new table (a join, an unnest, a funnel, a python
+ * model) is a build from the task instead.
  *   catalog   — whose dialect writes the SQL (`dialect` names another);
- *   relation  — the stored table as SQL (`{{ ref('…') }}`);
- *   columns   — its columns: [{ name, type?, physical? }] or a tracked Map;
- *   stages    — the read's stages (an empty list reads the table as it is).
- * → { sql, columns (Map name → { type }), ordered (its last stage that is not a limit is an order_by) }.
- * A refusal is an Error whose message names the stage (`stages[i]: …`).
+ *   relation  — what is read, as SQL a FROM takes: a stored table (`{{ ref('…') }}`), or a query as a
+ *               parenthesized, aliased subquery (`(\n<sql>\n) AS _q`) whose columns carry the names the
+ *               steps use;
+ *   columns   — its columns: [{ name, type?, physical? }] or a tracked Map (a type a constant is
+ *               written in; 'unknown' when it is not known);
+ *   steps     — the read's steps, each a stage (an empty list reads the relation as it is).
+ * → { sql, columns (Map name → { type }), ordered (its last step that is not a limit is an order_by) }.
+ * A refusal is an Error whose message names the step (`steps[i]: …`).
  */
-export function renderRead(catalog, relation, columns, stages = [], { dialect = catalog.dialect } = {}) {
+export function renderRead(catalog, relation, columns, steps = [], { dialect = catalog.dialect } = {}) {
   const d = getDialect(dialect);
   let cols = columnMap(columns);
   const ops = [];
-  stages.forEach((st, i) => {
+  steps.forEach((st, i) => {
     const kind = st?.stage;
     if (!READ_STAGES.includes(kind)) {
-      throw new Error(`stages[${i}]: a read takes ${READ_STAGES.join(', ')} — ${kind === undefined ? 'this stage names no `stage`' : `a ${kind} stage makes a new table`}: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
+      throw new Error(`steps[${i}]: a read takes ${READ_STAGES.join(', ')} — ${kind === undefined ? 'this step names no `stage`' : `a ${kind} stage makes a new table`}: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
     }
     // what reaches a read without its schema (a card's drill, a kept value) is held to it here too
-    if (holdsRaw(st)) throw new Error(`stages[${i}]: raw SQL is a build's escape hatch, not a read's — build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
+    if (holdsRaw(st)) throw new Error(`steps[${i}]: raw SQL is a build's escape hatch, not a read's — build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
     let res;
     try { res = STAGES[kind].build({ d, catalog, cols, source: null, physical: null }, st); }
-    catch (e) { throw new Error(`stages[${i}]: ${e.message}`); }
+    catch (e) { throw new Error(`steps[${i}]: ${e.message}`); }
     ops.push(...(res.ops || [res.op]));
     cols = res.cols;
   });
-  const last = [...stages].reverse().find((st) => st?.stage !== 'limit');
+  const last = [...steps].reverse().find((st) => st?.stage !== 'limit');
   return { sql: d.renderPipeline(relation, ops), columns: cols, ordered: last?.stage === 'order_by' };
 }

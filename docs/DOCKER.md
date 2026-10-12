@@ -155,8 +155,8 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
 (Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
 
 - **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads. Its rows are an
-  events source in a time window prepared by the pipeline's own stages that keep them events —
-  `stages: [...]` of `where` (the events kept or dropped, a slice of the source, a condition on an
+  events source in a time window prepared by its `steps`, the pipeline's own stages that keep them
+  events — `steps: [...]` of `where` (the events kept or dropped, a slice of the source, a condition on an
   event property), `compute` (events renamed, merged or split by a parameter — a `case` or a `concat`
   into a column that `columns.event` then names — or an event property read into a column) and
   `join` (a related model's attributes through the declared relationship; a slowly-changing model
@@ -175,8 +175,9 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   step — the table is built with `build_pipeline_model` and the eventstream starts from its task
   (`from_task` + `path: [<column>]` + `columns: { event, time }`), reading that table's columns; its
   cards are the same transition graph, step matrix and sankey. A start kept in an earlier spelling
-  (`events.include` / `split`, segment objects) is read in this one, and a new call in it is refused
-  with the converted request.
+  (its list as `stages`, `events.include` / `split`, segment objects) is read in this one, and a new
+  call in it is refused with the converted request (one that only names its list `stages` is told
+  the field's name, `steps`).
   It is built in SQL where the data lives and materialized; the call returns a task.
   Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
   `steps: [...]` takes one or several of the library's own steps, in order (each
@@ -185,8 +186,10 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   `truncate`, `fork` and `preview` work as in a pipeline draft. The library itself checks each one, in a warm local
   process on the feature's environment, over stand-in eventstreams of what the eventstream holds at
   that step — a step it refuses is refused at once with its message; each one it takes comes back with what
-  it changed (events, path columns, segments added or removed), and the answer ends with the eventstream's
-  shape after them (its events, path columns, segments and their levels). `action: "materialize"` runs the steps
+  it changed (events, path columns, segments added or removed) and the answer with `steps_count`, as a
+  pipeline draft answers: `include_columns: true` adds the eventstream's shape after them (its events,
+  path columns, segments and their levels), `include_steps: true` every step. `fork` takes a `name` of
+  its own. `action: "materialize"` runs the steps
   on the warehouse (one dbt Python model, a task) and stores the eventstream after them.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, eventstream, analyses: [...] }`
   runs every listed analysis over the eventstream as materialized — each a library method with its own
@@ -195,7 +198,10 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   between two segment levels — checked by the library first on what the eventstream holds.
   It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
   BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
-  start. `{ task_ids }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  start. `{ task_ids, offset?, limit? }` reads it back as the other query tools do: a page of each
+  analysis's tables by their row numbers (50 rows unless `limit` says), the rows in the order the
+  analysis ranks them (the biggest transitions first), with what it computes beyond rows (a group's
+  profile) whole; every row is in the pages, and a card draws every row. The
   feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
   for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
@@ -336,7 +342,8 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
   and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
   query) returns only `{ task_id }` and never waits; the query tool of the same side, given
-  `{ task_ids }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  `{ task_ids }`, waits for it (up to 30 s per call) and returns a page of the rows (`offset` /
+  `limit`) — and never draws;
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is

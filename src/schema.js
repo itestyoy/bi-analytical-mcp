@@ -89,11 +89,12 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   };
 
   // the window a pipeline reads its source in — the built-in-one-call contract and the builder's start alike
-  const pipelineWindow = timeRange('Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied before the stages — avoids hand-written time literals and keeps whole-session windows intact.');
+  const pipelineWindow = timeRange('Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied before the steps — avoids hand-written time literals and keeps whole-session windows intact.');
 
   // a pipeline built in one call (build_pipeline_model.pipeline): a derived dbt model from a declarative PIPELINE
   // (a pipe-syntax transformation, optionally ending in a match_recognize funnel)
-  // and materialize it. The pipeline's rows ARE the result.
+  // and materialize it. The pipeline's rows ARE the result. No caller writes this contract (a draft's
+  // materialize hands its steps over in it), so its list keeps the engine's own name, `stages`.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
     description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/compute/unnest/join/aggregate/pivot/unpivot/sample/order_by/limit/project, and the match_recognize funnel stage; window functions are compute expressions). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ request: { task_ids } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
@@ -115,10 +116,10 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     },
   };
 
-  // build_pipeline_model: compose a pipeline INCREMENTALLY, one stage at a time. A
-  // single stateful tool with an `action`; add_steps validates each stage and
-  // returns the columns now available for the NEXT stage (schema only — nothing is
-  // materialized until materialize).
+  // build_pipeline_model: compose a pipeline INCREMENTALLY, one step at a time. A
+  // single stateful tool with an `action`; add_steps validates each step and
+  // returns the columns now available for the NEXT one (schema only — nothing is
+  // materialized until materialize). A step is a stage, tagged by its `stage`.
   const pipelineFields = {
     context_id: { type: 'string', pattern: CTX, description: 'The context the draft is in — the context_id start returned. For fork it may also be a context whose pipeline was already materialized.' },
     name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -127,47 +128,52 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     from_task: { type: 'string', pattern: TASK_ID, description: 'Begin from the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) without recomputing it.' },
     source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
     time_range: pipelineWindow,
-    stage: { $ref: '#/$defs/pipeline_stage', description: 'One pipe stage, placed at `index` (edit_step replaces it, insert_step goes before it), validated against the columns available at that point.' },
-    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Stages to append in order — one or several; with start, the draft\'s first ones. All or none; the response reports each stage\'s effect on the data. A logical chunk at a time (scope, then the funnel, then the aggregate) shows how each changes the data.' },
+    step: { $ref: '#/$defs/pipeline_stage', description: 'One step — a stage { stage: "where" | "compute" | …, … } — placed at `index` (edit_step replaces it, insert_step goes before it), validated against the columns available at that point.' },
+    steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Steps to append in order, each a stage { stage: "where" | "compute" | …, … } — one or several; with start, the draft\'s first ones. All or none; the response reports each step\'s effect on the data. A logical chunk at a time (scope, then the funnel, then the aggregate) shows how each changes the data.' },
     materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects. The steps are added either way; a build that cannot start (one still running, say) is answered under `materialize` with why.' },
-    index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the stage before this position (count+1 appends).' },
+    index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the step before this position (count+1 appends).' },
     after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
     validate: { type: 'boolean', description: 'preview only: check the draft\'s SQL against the warehouse without reading data (dbt run --empty) — a task, read with query_pipeline_model. Worth it before an expensive materialize.' },
     include_columns: { type: 'boolean', description: 'Also return the full list of available columns; by default each answer gives only what a step added and removed.' },
-    include_steps: { type: 'boolean', description: 'Also return every step of the draft; by default only the steps just added and steps_count.' },
+    include_steps: { type: 'boolean', description: 'Also return every step of the draft, as preview lists them; by default only the steps just added (or the one put in place) and steps_count.' },
   };
+  // what an answer about the steps echoes: offered to the actions that change them (and fork), not to
+  // preview — which lists both already — nor to materialize / discard, whose answers carry neither
   const echo = ['include_columns', 'include_steps'];
   // One form per action, each with exactly the fields that action takes: a stray field is refused
   // rather than silently ignored, and nothing is said about it beside the form — it is not in it.
-  const step = (action, title, tagDescription, required, optional = []) => form({ title, tag: ['action', action], tagDescription, required: ['context_id', ...required], properties: pick(pipelineFields, ['context_id', ...required, ...optional, ...echo]) });
+  const step = (action, title, tagDescription, required, optional = [], flags = echo) => form({ title, tag: ['action', action], tagDescription, required: ['context_id', ...required], properties: pick(pipelineFields, ['context_id', ...required, ...optional, ...flags]) });
   // a start makes the draft: in a new context, or — context_id given — in that one (its draft replaced)
   const startFields = { ...pipelineFields, context_id: { type: 'string', pattern: CTX, description: 'Start the draft in this context (one a build returned; a draft already in it is replaced). Omit it for a new context.' } };
   // a source is read within a window; a task's table was computed under its own already (a where step
   // filters it), so its form takes none
-  const startOptional = ['context_id', 'description', 'materialized', 'stages', 'materialize', ...echo];
+  const startOptional = ['context_id', 'description', 'materialized', 'steps', 'materialize', ...echo];
   const buildModel = {
     type: 'object',
-    description: 'One form per `action`: start (the default — with `stages`, its first steps) → add_steps → optionally preview → materialize, then more steps and materialize again; materialize: true on start or add_steps builds right after the steps. Every edit revalidates the whole pipeline and names the step it breaks. A materialized table stands for the steps so far: later steps read it instead of recomputing the prefix, and editing a step at or before it retires it (from_checkpoint / steps_recomputed / checkpoints_dropped say which).',
+    description: 'One form per `action`: start (the default — with `steps`, its first ones) → add_steps → optionally preview → materialize, then more steps and materialize again; materialize: true on start or add_steps builds right after the steps. Every edit revalidates the whole pipeline and names the step it breaks. A materialized table stands for the steps so far: later steps read it instead of recomputing the prefix, and editing a step at or before it retires it (from_checkpoint / steps_recomputed / checkpoints_dropped say which).',
     anyOf: [
       form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over a catalog source (returns its context_id + the source columns).', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', 'time_range', ...startOptional]) }),
       form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(startFields, ['name', 'from_task', 'source', ...startOptional]) }),
-      step('add_steps', 'add steps', 'add_steps: append stages — one or several, in order, all or none; returns what each did to the data.', ['stages'], ['materialize']),
-      step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a stage before `index`.', ['index', 'stage']),
+      step('add_steps', 'add steps', 'add_steps: append steps — one or several, in order, all or none; returns what each did to the data.', ['steps'], ['materialize']),
+      step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a step before `index`.', ['index', 'step']),
       step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
       step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),
-      step('fork', 'fork the draft', 'fork: branch a new draft from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; name defaults to the source draft\'s, description overrides the parent\'s.', [], ['name', 'description', 'after']),
-      step('preview', 'preview the draft', 'preview: the steps and the SQL that would run. With validate: true it starts a task instead (read with query_pipeline_model) that runs the SQL with every input limited to zero rows (dbt run --empty): what the warehouse refuses is said in seconds, reading no data.', [], ['validate']),
-      step(['materialize', 'discard'], 'materialize or discard', 'materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', []),
+      step('fork', 'fork the draft', 'fork: branch a new draft, under a name of its own, from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; description overrides the parent\'s.', ['name'], ['description', 'after']),
+      step('preview', 'preview the draft', 'preview: the steps and the SQL that would run. With validate: true it starts a task instead (read with query_pipeline_model) that runs the SQL with every input limited to zero rows (dbt run --empty): what the warehouse refuses is said in seconds, reading no data.', [], ['validate'], []),
+      step(['materialize', 'discard'], 'materialize or discard', 'materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', [], [], []),
     ],
   };
 
-  const pdefs = whereDefs(catalog, project);
+  // a metric query's where (`$defs.expr`, over the references its group_by takes) and the steps after it
+  // (`$defs.read_stage`, over the result's columns, in their own expression: `$defs.read_expr`)
+  const pdefs = { ...whereDefs(catalog, project), ...readStageDefs(catalog, { expr: 'read_expr' }) };
   // A READ OF THE BUILT TABLE IS WRITTEN IN THE PIPELINE'S OWN STAGES — those that re-slice rows without
   // making a new table (READ_STAGES), over the table's columns: `$defs.read_stage`, beside the read's
   // `$defs.expr` (the expression with no event property: a stored table has no source).
   const pipelineQueryFields = {
-    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/read_stage' }, description: 'The stages run over the stored table, in order — the pipeline\'s own where, compute, aggregate, pivot, unpivot, order_by, limit, sample and project, over its columns; nothing upstream is recomputed and nothing is stored. A where after an aggregate keeps the groups it holds for (a having); a second aggregate folds the groups again (how many passed). Omitted: the table as it is. A join, an unnest, a funnel or a python step makes a new table: build it from the task (build_pipeline_model start with from_task).' },
+    steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/read_stage' }, description: 'The steps run over the stored table, in order, each a stage of the pipeline\'s own — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — over its columns; nothing upstream is recomputed and nothing is stored. A where after an aggregate keeps the groups it holds for (a having); a second aggregate folds the groups again (how many passed). Omitted: the table as it is. A join, an unnest, a funnel or a python step makes a new table: build it from the task (build_pipeline_model start with from_task).' },
     limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the read the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
+    dry_run: { type: 'boolean', description: 'Return the read\'s SQL without running it — written as dbt runs it, the stored table as {{ ref("<model>") }} (as a preview\'s model_sql) — and the columns it answers with (it waits for the context\'s build only).' },
   };
 
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
@@ -202,11 +208,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         },
       },
       where: conditionSlot('#/$defs/expr', 'Row filter applied before aggregation: conditions on dimensions / metric_time, named as group_by names them, that all hold — e.g. [{ fn: "eq", args: [{ model: "users", attribute: "country" }, { value: "US" }] }]; any one of several is { fn: "or", args: [...] }.'),
-      order_by: { type: 'array', description: 'Sort order, by the names the rows come back with: a requested metric, or the result column of a group_by item ("users_country", "metric_time_day").', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
       time_range: METRIC_TIME_RANGE,
+      steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/read_stage' }, description: 'Steps run over the metric result, in order, each a stage of the pipeline\'s own — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — over its columns by the names the rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"). The query\'s where filters the rows a metric folds; a where step filters the result (a having on a metric). [{ stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] }] ranks the rows, so the ones a task keeps are the top ones.' },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
       materialize: { type: 'boolean', description: 'Store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
-      dry_run: { type: 'boolean', description: 'Return the compiled SQL without running it (it waits for the context\'s build only).' },
+      dry_run: { type: 'boolean', description: 'Return the compiled SQL — the query with its steps after it — and the columns it answers with, without running it (it waits for the context\'s build only).' },
       include_plan: { type: 'boolean', description: 'With dry_run: also MetricFlow\'s dataflow plan — thousands of tokens; the SQL alone is usually what is wanted.' },
   };
   const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where.`);
@@ -256,7 +262,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     query_semantic_model: query,
     query_pipeline_model: {
       type: 'object',
-      description: 'Query a built pipeline model (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
+      description: 'Query a built pipeline model in steps (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
       $defs: readStageDefs(catalog),
       anyOf: queryModes(
         { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the context_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },

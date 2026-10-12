@@ -69,7 +69,7 @@ function engine(runner, { workspaceRoot, registryPath } = {}) {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const add = (e, context_id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [stage] });
+const add = (e, context_id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [stage] });
 const materialize = (e, context_id) => e.build_pipeline_model({ action: 'materialize', context_id });
 
 async function startedDraft(e, name = 'seg') {
@@ -227,7 +227,7 @@ test('an edit during a build does not remove the files that build is producing',
   await untilHeld(runner);
 
   // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
-  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id, index: 1, stage: AGG });
+  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id, index: 1, step: AGG });
   assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
   assert.deepEqual(draftOf(e, context_id).checkpoints, []);
   // …but the model it is building stays on disk, so the task's own result is still readable

@@ -232,7 +232,7 @@ test('a measure is typed by its aggregate: the earliest or latest of a column is
 test('a condition is a function: an earlier spelling is refused with the value written today; a field a function does not read is refused', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'cond', source: 'events' });
-  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id, stages: [{ stage: 'where', conditions: [c] }] });
+  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
   const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
   for (const [earlier, today] of [
     [{ column: 'session_number', op: 'gt', value: 1 }, { fn: 'gt', args: [col('session_number'), val(1)] }],

@@ -19,7 +19,7 @@ import { renderPipeline } from '../../src/pipeline.js';
 import { DERIVED_FNS } from '../../src/compile.js';
 import {
   currentCondition, currentConditions, currentExpression, currentMeasure, currentDimension, currentUnnest,
-  transformStages, currentOf, isEarlierCondition, isEarlierMeasure,
+  transformStages, currentOf, currentQueryInput, isEarlierCondition, isEarlierMeasure,
 } from '../../src/earlier-spelling.js';
 import { beside, forms, pinned } from '../helpers/schema-nav.js';
 
@@ -73,8 +73,15 @@ test('each level offers its own leaves and functions under a $defs entry its arg
   assert.ok(!query.leaves.some((t) => /\{ column \}|\{ property \}/.test(t)));
   for (const fn of ['eq', 'or', 'not', 'date_part']) assert.ok(query.fns.has(fn), fn);
   for (const fn of ['sum', 'count', 'row_number', 'raw']) assert.ok(!query.fns.has(fn), `a metric query's where offers no ${fn}`);
+  // the steps after a metric query read its result as a read reads a stored table — in an expression
+  // of their own beside the where's: its columns, constants and the time; a read's functions, no raw
+  const tail = level('query_semantic_model', 'read_expr');
+  assert.deepEqual(tail.leaves, read.leaves);
+  assert.deepEqual([...tail.fns].sort(), [...read.fns].sort());
+  for (const fn of ['sum', 'count', 'gt', 'row_number']) assert.ok(tail.fns.has(fn), `a step after a metric query computes ${fn}`);
+  assert.ok(!tail.fns.has('raw'), 'a read takes no raw SQL');
   // every level recursive through its own definition; the event_property function is gone everywhere
-  for (const [tool, def] of [['build_pipeline_model', 'expr'], ['query_pipeline_model', 'expr'], ['build_semantic_model', 'expr'], ['build_semantic_model', 'metric_expr'], ['query_semantic_model', 'expr']]) {
+  for (const [tool, def] of [['build_pipeline_model', 'expr'], ['query_pipeline_model', 'expr'], ['build_semantic_model', 'expr'], ['build_semantic_model', 'metric_expr'], ['query_semantic_model', 'expr'], ['query_semantic_model', 'read_expr']]) {
     const l = level(tool, def);
     assert.equal(l.argsRef, `#/$defs/${def}`, `${tool}.${def}: its arguments are its own expressions`);
     assert.ok(!l.fns.has('event_property'), `${tool}.${def}: an event property is a leaf`);
@@ -84,7 +91,7 @@ test('each level offers its own leaves and functions under a $defs entry its arg
 });
 
 test('a function takes its own arguments and parameters, and nothing else', () => {
-  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', stages: [stage] });
+  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [stage] });
   const refused = (stage, re) => { const r = step(stage); assert.equal(r.ok, false, JSON.stringify(stage)); assert.match(r.errors.join(' | '), re, JSON.stringify(stage)); };
   // arity
   refused(where({ fn: 'between', args: [col('a'), val(1)] }), /at least 3 items/);
@@ -164,7 +171,7 @@ test('a missing value is tested with is_null / is_not_null: a comparison with a 
   // a constant is a scalar, never a list (an in whose members are one list is an earlier spelling: a
   // kept step is carried over, a call refused with its members as arguments)
   assert.throws(() => render([where({ fn: 'eq', args: [col('event_name'), val(['a', 'b'])] })]), /a list is written as arguments of their own/);
-  const listed = validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', stages: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] });
+  const listed = validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] });
   assert.ok(listed.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'in', args: [col('event_name'), val('a'), val('b')] })}`), listed.errors.join(' | '));
 });
 
@@ -226,9 +233,42 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   assert.deepEqual(currentUnnest({ stage: 'unnest', column: 'arr', name: 'i', field: 'id' }), { stage: 'unnest', expr: col('arr'), name: 'i', field: 'id' });
   const unnestToday = { stage: 'unnest', expr: { property: 'items' }, name: 'i' };
   assert.equal(currentUnnest(unnestToday), unnestToday);
-  // a read's transform is its stages
-  assert.deepEqual(currentOf({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', stages: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
+  // a read's transform is its steps
+  assert.deepEqual(currentOf({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', steps: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   assert.deepEqual(transformStages({}), []);
+  // a metric query's order_by is the order_by step after its steps
+  const keys = [{ key: 'revenue', direction: 'desc' }];
+  assert.deepEqual(currentOf({ context_id: 'abcdef123456', metrics: ['revenue'], order_by: keys, limit: 5 }), { context_id: 'abcdef123456', metrics: ['revenue'], limit: 5, steps: [{ stage: 'order_by', keys }] });
+  // a field only renamed is the refusal's hint (here that field is called 'steps'), not a conversion
+  const named = { context_id: 'abcdef123456', stages: [{ stage: 'limit', limit: 5 }] };
+  assert.equal(currentOf(named), named);
+});
+
+// A QUERY'S INPUT KEPT WITH ITS TASK is read back in today's spelling (src/earlier-spelling.js
+// currentQueryInput): a read's steps were its `stages` (its `transform` before that), and a metric
+// query's `order_by` is the order_by step after its steps — a batch's queries alike, and the same object
+// when nothing in it is of an earlier spelling.
+test('a stored query input is carried over as steps: stages, transform and a metric query\'s order_by', () => {
+  const limit = { stage: 'limit', limit: 3 };
+  // a pipeline read
+  assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', stages: [limit] }), { context_id: 'abcdef123456', steps: [limit] });
+  assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', steps: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
+  // a metric query: its order_by after the steps it already had
+  const keys = [{ key: 'metric_time_day', direction: 'desc' }];
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: keys }), { metrics: ['dau'], steps: [{ stage: 'order_by', keys }] });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], steps: [limit], order_by: keys }), { metrics: ['dau'], steps: [limit, { stage: 'order_by', keys }] });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: [] }), { metrics: ['dau'] }, 'an empty order_by orders nothing');
+  // a batch: each query alike, the ones already in today's spelling kept by identity
+  const today = { metrics: ['dau'], steps: [limit] };
+  const batch = currentQueryInput({ context_id: 'abcdef123456', queries: [today, { metrics: ['dau'], order_by: keys }, { stages: [limit] }] });
+  assert.equal(batch.queries[0], today);
+  assert.deepEqual(batch.queries.slice(1), [{ metrics: ['dau'], steps: [{ stage: 'order_by', keys }] }, { steps: [limit] }]);
+  // today's spelling is the same object
+  for (const v of [today, { context_id: 'abcdef123456' }, { task_ids: ['abcdef123456'], offset: 0, limit: 10 }, { context_id: 'abcdef123456', queries: [today] }]) assert.equal(currentQueryInput(v), v, JSON.stringify(v));
+  // a window's order_by is not a metric query's (no metrics beside it)
+  assert.equal(currentQueryInput(OVER), OVER);
+  const windowed = { stage: 'compute', name: 'n', expr: { fn: 'row_number', over: OVER } };
+  assert.equal(currentOf(windowed), windowed);
 });
 
 test('currentOf converts what is old anywhere in a value, keeps what is not by identity, and leaves the libraries\' own grammars alone', () => {

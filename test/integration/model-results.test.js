@@ -128,6 +128,13 @@ test('monetization: revenue by users.media_source = meta 25 / organic 30 / googl
   const by = mapCol(r.rows, 'users_media_source', 'mon_revenue');
   assert.equal(by.meta, 25); assert.equal(by.organic, 30); assert.equal(by.google, 20); assert.equal(by.applovin, 10);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
+  // an aggregate step folds a finer result again: by media source and country, summed back to media source
+  const refolded = await q('mon', {
+    metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'media_source' }, { model: 'users', attribute: 'country' }],
+    steps: [{ stage: 'aggregate', group_by: ['users_media_source'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] }],
+  });
+  assert.equal(refolded.ok, true, JSON.stringify(refolded.error));
+  assert.deepEqual(mapCol(refolded.rows, 'users_media_source', 'revenue'), by, '[aggregate step] the finer rows summed back are the coarser query\'s');
 });
 
 test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 50', opts, async (t) => {
@@ -146,16 +153,62 @@ test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) =
 });
 
 // (the plain revenue by product_id, p1 15 / p2 30 / p3 40, is analytics-tasks' ratio_metric task)
-test('monetization: revenue by product_id, order_by + limit 1: the top product = 40', opts, async (t) => {
+test('monetization: revenue by product_id, an order_by step + limit 1: the top product = 40', opts, async (t) => {
   if (skip(t)) return;
   const top = await q('mon', {
     metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }],
     where: [{ fn: 'is_not_null', args: [{ model: 'events', attribute: 'product_id_of_event_data' }] }],
-    order_by: [{ key: 'mon_revenue', direction: 'desc' }], limit: 1,
+    steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] }], limit: 1,
   });
   assert.equal(top.ok, true, JSON.stringify(top.error));
   assert.equal(top.row_count, 1);
   assert.equal(numOrNaN(top.rows[0].mon_revenue), 40);
+});
+
+// THE STEPS AFTER A METRIC QUERY run over its result, by the names its rows come back with: a ratio of
+// two metrics computed per row, a where on a metric (a having) and an order_by on it. The truth is the
+// plain query's rows (by media source: meta 25 / organic 30 / google 20 / applovin 10), filtered,
+// divided and ranked here — and the ratio is the governed ARPPU of the same row. The same steps run,
+// stored (materialize: the table holds the rows after them, read back by row number once the held answer
+// is gone) and only compiled (dry_run: its SQL, run as shown, gives the same rows).
+test('monetization: steps after the metric query — revenue per payer by media source, a having on revenue, ranked (organic 30 / meta 25 / google 20) — run, stored and compiled alike', opts, async (t) => {
+  if (skip(t)) return;
+  const bySource = [{ model: 'users', attribute: 'media_source' }];
+  const metrics = ['mon_revenue', 'mon_payers', 'mon_arppu'];
+  const plain = await q('mon', { metrics, group_by: bySource });
+  assert.equal(plain.ok, true, JSON.stringify(plain.error));
+  const want = plain.rows.filter((r) => numOrNaN(r.mon_revenue) >= 20)
+    .sort((a, b) => numOrNaN(b.mon_revenue) - numOrNaN(a.mon_revenue))
+    .map((r) => [String(r.users_media_source), numOrNaN(r.mon_revenue), numOrNaN(r.mon_revenue) / numOrNaN(r.mon_payers)]);
+  assert.deepEqual(want.map(([source, revenue]) => [source, revenue]), [['organic', 30], ['meta', 25], ['google', 20]], 'the plain rows the steps work on');
+  const steps = [
+    { stage: 'compute', name: 'per_payer', expr: { fn: 'div', args: [{ column: 'mon_revenue' }, { column: 'mon_payers' }] } },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'mon_revenue' }, { value: 20 }] }] },
+    { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] },
+  ];
+  const same = (rows, what) => {
+    assert.deepEqual(rows.map((r) => [String(r.users_media_source), numOrNaN(r.mon_revenue)]), want.map(([source, revenue]) => [source, revenue]), `${what}: the having and the order`);
+    for (const [i, r] of rows.entries()) assert.ok(Math.abs(numOrNaN(r.per_payer) - want[i][2]) < 1e-9, `${what}: ${r.users_media_source} revenue per payer`);
+  };
+  const ran = await q('mon', { metrics, group_by: bySource, steps });
+  assert.equal(ran.ok, true, JSON.stringify(ran.error));
+  same(ran.rows, '[run]');
+  for (const r of ran.rows) assert.ok(Math.abs(numOrNaN(r.per_payer) - numOrNaN(r.mon_arppu)) < 1e-9, `[run] ${r.users_media_source}: the ratio is the governed ARPPU`);
+  // stored: the table holds the rows after the steps; once the held answer is gone a read pages the
+  // table by row number, and two pages together are the whole of it
+  const stored = await q('mon', { metrics, group_by: bySource, steps, materialize: true });
+  assert.equal(stored.ok, true, JSON.stringify(stored.error));
+  same(stored.rows, '[stored]');
+  engine.raw._taskResults.delete(stored.task_id);
+  const first = await one(engine.query_semantic_model({ task_ids: [stored.task_id], offset: 0, limit: 1 }));
+  const rest = await one(engine.query_semantic_model({ task_ids: [stored.task_id], offset: 1, limit: 10 }));
+  same([...first.rows, ...rest.rows], '[stored, paged]');
+  assert.deepEqual([first.rows.length, rest.page.has_more, rest.page.total_rows], [1, false, want.length], '[stored, paged] the pages cover the table once');
+  // only compiled: the SQL after the steps, in the caller's names — run as shown, the same rows
+  const dry = await q('mon', { metrics, group_by: bySource, steps, dry_run: true });
+  assert.equal(dry.dry_run, true, JSON.stringify(dry.error || dry));
+  same((await wh.query(dry.sql)).rows, '[compiled]');
+  assert.deepEqual(dry.output_columns.map((c) => c.name).sort(), Object.keys(ran.rows[0]).sort(), '[compiled] the columns the rows come back with');
 });
 
 // The fixture is partitioned by event_date, so a metric query's window also bounds the partition
@@ -303,10 +356,10 @@ test('one materialized revenue-by-country task: started without waiting, read ba
   assert.equal(m.rows.reduce((s, x) => s + num(x.mon_revenue), 0), 85, '[never waits] revenue by country sums to the grand total');
 
   // 'a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)'
-  const from = async (name, stages) => {
+  const from = async (name, steps) => {
     const d = await engine.build_pipeline_model({ action: 'start', name, from_task: m.task_id });
     assert.equal(d.reads, m.table, '[from_task] the draft reads the task\'s table');
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, stages });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, steps });
     const built = await engine.build_pipeline_model({ action: 'materialize', context_id: d.context_id });
     assert.equal(built.status, 'done', JSON.stringify(built.error));
     return built.rows;
@@ -361,7 +414,7 @@ test('a drawn card reads its views from its own task: a row opens into a level t
   assert.equal(inj.rows.length, 0);
 });
 
-// QUERYING A BUILT PIPELINE MODEL: query_pipeline_model({ context_id, stages }) filters, groups
+// QUERYING A BUILT PIPELINE MODEL: query_pipeline_model({ context_id, steps }) filters, groups
 // and aggregates the stored table in the pipeline's own stages without recomputing it. A count of a column must count
 // NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on DATA: a pipeline derives
 // `price` (populated only on iap_purchase_completed, NULL on every other event), so count(price) <
@@ -370,15 +423,15 @@ test('a drawn card reads its views from its own task: a row opens into a level t
 test('query_pipeline_model over a built model: count(column) counts NON-NULL only, values are literals', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'nullcount', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }] });
   const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const fold = (...measures) => ({ stage: 'aggregate', measures });
   const where = (...conditions) => ({ stage: 'where', conditions });
-  const started = await engine.raw.query_pipeline_model({ context_id: s.context_id, stages: [fold({ name: 'total', expr: { fn: 'count' } })] });
+  const started = await engine.raw.query_pipeline_model({ context_id: s.context_id, steps: [fold({ name: 'total', expr: { fn: 'count' } })] });
   assert.ok(isStartedTask(started), 'a query over a built model is a task too');
   const totalR = await taskResult(engine, started.task_id);
-  const read = (...stages) => engine.query_pipeline_model({ context_id: s.context_id, stages });
+  const read = (...steps) => engine.query_pipeline_model({ context_id: s.context_id, steps });
   const nnR = await read(fold({ name: 'nn', expr: { fn: 'count', args: [{ column: 'price' }] } }));
   const nullR = await read(where({ fn: 'is_null', args: [{ column: 'price' }] }), fold({ name: 'nulls', expr: { fn: 'count' } }));
   assert.equal(totalR.ok !== false && nnR.ok !== false && nullR.ok !== false, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
@@ -390,11 +443,23 @@ test('query_pipeline_model over a built model: count(column) counts NON-NULL onl
   const byEvent = await read(where({ fn: 'is_not_null', args: [{ column: 'price' }] }), { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ column: 'price' }] } }] });
   assert.ok(byEvent.rows.every((r) => String(r.event_name).startsWith('iap_purchase')), JSON.stringify(byEvent.rows));
   assert.equal(byEvent.rows.reduce((a, r) => a + num(r.n), 0), nonNull);
+  // a read only compiled (dry_run): its SQL, run as it stands on the context's project, gives the read's
+  // own rows, and its output columns are the columns those rows come back with
+  const priced = [where({ fn: 'is_not_null', args: [{ column: 'price' }] }), { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ column: 'price' }] } }] }, { stage: 'order_by', keys: [{ key: 'event_name' }] }];
+  const dry = await engine.query_pipeline_model({ context_id: s.context_id, steps: priced, dry_run: true });
+  assert.equal(dry.dry_run, true, JSON.stringify(dry.error || dry));
+  const shown = await backend.show(engine.raw.ctxs.dir(s.context_id), dry.sql, 1000);
+  assert.equal(shown.ok, true, JSON.stringify(shown));
+  const pairs = (rows) => rows.map((r) => [String(r.event_name), num(r.n)]);
+  const ranRead = await read(...priced);
+  assert.deepEqual(pairs(shown.rows), pairs(ranRead.rows), '[dry_run] the SQL is the read');
+  assert.deepEqual(pairs(ranRead.rows).sort(), pairs(byEvent.rows).sort(), '[dry_run] the read is the grouped count');
+  assert.deepEqual(dry.output_columns.map((c) => c.name).sort(), Object.keys(ranRead.rows[0]).sort(), '[dry_run] its output columns');
   // injection/escaping proven on DATA: the literal matches nothing, and the query runs
   const inj = await read(where({ fn: 'eq', args: [{ column: 'event_name' }, { value: "x'); drop table x; --" }] }), fold({ name: 'n', expr: { fn: 'count' } }));
   assert.equal(num(inj.rows[0].n), 0);
   // a read sorts as the order_by stage does: NULL prices last unless a key asks them first, on every warehouse
-  const first = async (key) => (await engine.query_pipeline_model({ context_id: s.context_id, stages: [{ stage: 'order_by', keys: [key, { key: 'event_id' }] }], limit: 1 })).rows[0].price;
+  const first = async (key) => (await engine.query_pipeline_model({ context_id: s.context_id, steps: [{ stage: 'order_by', keys: [key, { key: 'event_id' }] }], limit: 1 })).rows[0].price;
   const extremes = await read(fold({ name: 'lo', expr: { fn: 'min', args: [{ column: 'price' }] } }, { name: 'hi', expr: { fn: 'max', args: [{ column: 'price' }] } }));
   assert.equal(num(await first({ key: 'price' })), num(extremes.rows[0].lo));
   assert.equal(num(await first({ key: 'price', direction: 'desc' })), num(extremes.rows[0].hi));
@@ -414,16 +479,16 @@ test('query_pipeline_model: conditional aggregates and a second aggregate stage 
   const per = new Map();
   for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
   const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
-  const step = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, include_columns: true, stages: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
+  const step = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, include_columns: true, steps: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
   const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const prev = await engine.query_pipeline_model({ context_id: s.context_id, stages: [
+  const prev = await engine.query_pipeline_model({ context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'prev_event' }] }] },
     { stage: 'aggregate', group_by: ['prev_event'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] });
   assert.ok(prev.rows.every((r) => typeof r.prev_event === 'string' && src.some((x) => x.e === r.prev_event)), 'its values are event names');
-  const r = await engine.query_pipeline_model({ context_id: s.context_id, stages: [
+  const r = await engine.query_pipeline_model({ context_id: s.context_id, steps: [
     { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [
       { name: 'starts', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }] } },
       { name: 'completes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] } },
@@ -441,10 +506,10 @@ test('query_pipeline_model: conditional aggregates and a second aggregate stage 
   assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
   assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
   // the second aggregate reads the first one's columns only
-  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.context_id, stages: [
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.context_id, steps: [
     { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
     { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'event_name' }] } }] },
-  ] }), /stages\[1\]: .*unknown column 'event_name'/);
+  ] }), /steps\[1\]: .*unknown column 'event_name'/);
 });
 
 // PAGING IS THE READ'S: a read's offset/limit are row numbers of the task's result. A query keeps the
@@ -452,12 +517,12 @@ test('query_pipeline_model: conditional aggregates and a second aggregate stage 
 // last row, its first answer included — a page past the rows the task holds is read from the table.
 test('a held result pages by its row numbers, and a page past the rows it kept says how to have them', opts, async (t) => {
   if (skip(t)) return;
-  const order_by = [{ key: 'users_country', direction: 'asc' }];
-  const full = await engine.query_semantic_model({ context_id: ctxOf.mon, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by });
+  const steps = [{ stage: 'order_by', keys: [{ key: 'users_country', direction: 'asc' }] }];
+  const full = await engine.query_semantic_model({ context_id: ctxOf.mon, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], steps });
   assert.ok(full.rows.length >= 3, `expected at least 3 country rows, got ${full.rows.length}`);
   const countries = full.rows.map((r) => r.users_country);
   // the task keeps its first 2 rows
-  const started = await engine.raw.query_semantic_model({ context_id: ctxOf.mon, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by, limit: 2 });
+  const started = await engine.raw.query_semantic_model({ context_id: ctxOf.mon, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], steps, limit: 2 });
   await taskResult(engine.raw, started.task_id);
   const second = await one(engine.query_semantic_model({ task_ids: [started.task_id], offset: 1, limit: 1 }));
   assert.deepEqual(second.rows.map((r) => r.users_country), [countries[1]], 'offset 1 is the result\'s second row');
@@ -504,11 +569,11 @@ test('a stored result pages to its last row: a page past the rows the task holds
   for (const r of late.rows) assert.ok(all.rows.some((a) => a.users_country === r.users_country && num(a.mon_revenue) === num(r.mon_revenue)), JSON.stringify(r));
 });
 
-test('a pipeline build pages its stored table to the last row, and a read of it in stages keeps its first limit rows', opts, async (t) => {
+test('a pipeline build pages its stored table to the last row, and a read of it in steps keeps its first limit rows', opts, async (t) => {
   if (skip(t)) return;
   const truth = (await wh.query('select event_id from fct_analytics_events order by event_id')).rows.map((r) => r.event_id);
   assert.ok(truth.length > 100, `expected more than two pages of events, got ${truth.length}`);
-  const started = await engine.raw.build_pipeline_model({ action: 'start', name: 'paged_events', source: 'events', stages: [{ stage: 'project', keep: ['event_id', 'event_name'] }, { stage: 'order_by', keys: [{ key: 'event_id' }] }], materialize: true });
+  const started = await engine.raw.build_pipeline_model({ action: 'start', name: 'paged_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id', 'event_name'] }, { stage: 'order_by', keys: [{ key: 'event_id' }] }], materialize: true });
   const built = { task_id: started.materialize?.task_id, context_id: started.context_id };
   assert.ok(built.task_id, JSON.stringify(started));
   const first = await taskResult(engine.raw, built.task_id);
@@ -533,7 +598,7 @@ test('a pipeline build pages its stored table to the last row, and a read of it 
   assert.deepEqual([across.provenance?.tier, across.model_sql], ['pipeline', undefined]);
   // a build that ends unsorted says so on every page — those read from its table past the rows held too —
   // and its pages still hold every row once
-  const loose = await engine.raw.build_pipeline_model({ action: 'start', name: 'loose_events', source: 'events', stages: [{ stage: 'project', keep: ['event_id'] }], materialize: true });
+  const loose = await engine.raw.build_pipeline_model({ action: 'start', name: 'loose_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id'] }], materialize: true });
   assert.equal((await taskResult(engine.raw, loose.materialize?.task_id)).status, 'done');
   const pages = [];
   for (let off = 0; off != null && pages.length < 20;) {
@@ -544,8 +609,8 @@ test('a pipeline build pages its stored table to the last row, and a read of it 
   assert.ok(pages.every((p) => p.page.ordered === false), JSON.stringify(pages.map((p) => p.page)));
   assert.deepEqual(pages.flatMap((p) => p.rows.map((r) => r.event_id)).sort(), [...truth].sort());
   await engine._deletePipelineModel({ context_id: loose.context_id });
-  // a read of the built model in stages keeps its first 60 rows: a read of that task pages them by row number
-  const q = await engine.raw.query_pipeline_model({ context_id: built.context_id, stages: [{ stage: 'order_by', keys: [{ key: 'event_id' }] }], limit: 60 });
+  // a read of the built model in steps keeps its first 60 rows: a read of that task pages them by row number
+  const q = await engine.raw.query_pipeline_model({ context_id: built.context_id, steps: [{ stage: 'order_by', keys: [{ key: 'event_id' }] }], limit: 60 });
   await taskResult(engine.raw, q.task_id);
   const tail = await one(engine.query_pipeline_model({ task_ids: [q.task_id], offset: 50 }));
   assert.deepEqual(tail.rows.map((r) => r.event_id), [...truth].sort().slice(50, 60));
@@ -566,12 +631,12 @@ test('a read merges a stored sketch with hll_merge and counts with approx_count_
     { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }, { name: 'n', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
   ] } });
   assert.equal(sketched.build?.ok, true, JSON.stringify(sketched.error || sketched.build));
-  const merged = await engine.query_pipeline_model({ context_id: sketched.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'buyers', expr: { fn: 'hll_merge', args: [{ column: 'sk' }] } }, { name: 'naive', expr: { fn: 'sum', args: [{ column: 'n' }] } }] }] });
+  const merged = await engine.query_pipeline_model({ context_id: sketched.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'buyers', expr: { fn: 'hll_merge', args: [{ column: 'sk' }] } }, { name: 'naive', expr: { fn: 'sum', args: [{ column: 'n' }] } }] }] });
   assert.equal(merged.ok !== false, true, JSON.stringify(merged.error));
   assert.equal(num(merged.rows[0].buyers), 7);
   assert.equal(num(merged.rows[0].naive), 8);
   const raw = await engine._buildPipeline({ name: 'buyer_rows', pipeline: { source: 'events', stages: [purchases] } });
-  const approx = await engine.query_pipeline_model({ context_id: raw.context_id, stages: [{ stage: 'aggregate', measures: [{ name: 'buyers', expr: { fn: 'approx_count_distinct', args: [{ column: 'player_id_of_internal' }] } }, { name: 'exact', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] });
+  const approx = await engine.query_pipeline_model({ context_id: raw.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'buyers', expr: { fn: 'approx_count_distinct', args: [{ column: 'player_id_of_internal' }] } }, { name: 'exact', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] });
   assert.equal(num(approx.rows[0].buyers), 7);
   assert.equal(num(approx.rows[0].exact), 7);
   await engine._deletePipelineModel({ context_id: sketched.context_id });
@@ -772,7 +837,7 @@ test('a deployment recipe in the earlier { name, pipeline } shape is served as a
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
   const shipped = recipes.get('experiment_conversion').pipeline_payload;
   const file = join(mkdtempSync(join(tmpdir(), 'rp-old-')), 'mine.json');
-  writeFileSync(file, JSON.stringify({ recipes: [{ id: 'my_conversion', task_type: 'experiment', title: 'mine', when_to_use: '', hack: '', pipeline_payload: { name: 'my_conversion', pipeline: { source: shipped.source, stages: shipped.stages } } }] }));
+  writeFileSync(file, JSON.stringify({ recipes: [{ id: 'my_conversion', task_type: 'experiment', title: 'mine', when_to_use: '', hack: '', pipeline_payload: { name: 'my_conversion', pipeline: { source: shipped.source, stages: shipped.steps } } }] }));
   const served = loadRecipes(join(process.cwd(), 'config', 'recipes.json'), file).get('my_conversion').pipeline_payload;
   const out = await startAndBuild(engine, served);
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));

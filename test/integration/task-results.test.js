@@ -79,7 +79,7 @@ test('one ungrouped revenue task: started at once and read back with show_to_use
 // the card draws exactly that — and the card's numbers are the warehouse's.
 test('one revenue-by-country task: its grouping, a refused KPI over many rows, the bar drawn in row order, a second draw refused, a read that draws nothing', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry, order_by: [{ key: 'mon_revenue', direction: 'asc' }] });
+  const done = await q({ group_by: byCountry, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc' }] }] });
   // [a query task keeps its grouping and the caller-facing column names]
   const by = Object.fromEntries(done.rows.map((r) => [String(r.users_country), Number(r.mon_revenue)]));
   assert.deepEqual([by.US, by.GB, by.BR], [35, 25, 25], '[grouping] revenue by country');
@@ -98,6 +98,12 @@ test('one revenue-by-country task: its grouping, a refused KPI over many rows, t
   assert.deepEqual(m.chart.bars.map((b) => b.label), done.rows.map((r) => String(r.users_country)), '[bar] in row order');
   assert.deepEqual(m.chart.bars.map((b) => b.value), [25, 25, 35, 0], '[bar] the warehouse\'s numbers');
   assert.equal(m.chart.bars[2].label, 'US');
+  // [an order_by step puts NULLs where it says] the same sort with NULLs first — MetricFlow's own ORDER BY
+  // names no place for them, so it is written over its SQL — leads with the country that has no revenue
+  const nullFirst = await q({ group_by: byCountry, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc', nulls: 'first' }] }] });
+  const revenueOf = (r) => (r.mon_revenue == null ? null : Number(r.mon_revenue));
+  assert.deepEqual(nullFirst.rows.map(revenueOf), [null, 25, 25, 35], '[nulls first] the country with none, then ascending');
+  assert.equal(String(nullFirst.rows[0].users_country), String(done.rows[3].users_country), '[nulls first] the country the default order put last');
   // [a task is drawn once: a second display_model_result is refused, and reading it again draws nothing]
   // ONE RESULT, ONE CARD — by construction: display_model_result draws a task once, and nothing else draws.
   await assert.rejects(engine.display_model_result({ task_id: done.task_id, display }), /shown already/);
@@ -118,7 +124,7 @@ test('a query that FAILS in the warehouse is a task that ended in error', opts, 
 
 test('a declared funnel follows the declared steps, not the column names', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry, where: paying, order_by: [{ key: 'mon_revenue', direction: 'desc' }] });
+  const done = await q({ group_by: byCountry, where: paying, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] }] });
   const card = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'funnel', steps: { label_column: 'users_country', value_column: 'mon_revenue' } } });
   const m = buildViewModel('display_model_result', card);
   assert.equal(m.kind, 'funnel');

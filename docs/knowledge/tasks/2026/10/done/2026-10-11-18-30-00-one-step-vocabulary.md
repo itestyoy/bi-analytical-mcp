@@ -1,6 +1,6 @@
 ---
 title: One step vocabulary across the build and query tools
-status: in-progress
+status: done
 last_reviewed: 2026-10-11
 last_used: 2026-10-11
 tags: [schema, pipeline, semantic, retentioneering, read]
@@ -11,7 +11,7 @@ source_of_truth: [src/schema.js, src/pipeline.js, src/engine/semantic-query.js, 
 
 ## Status
 
-in-progress
+done
 
 ## Last Reviewed
 
@@ -106,3 +106,6 @@ One list of SQL and library steps in the retentioneering build; renaming a where
 
 All edits first; then ONE run: `npm run lint:names`, `npm test`, `npm run test:integration`,
 `npm run eval:check`; fix; commit; push. Tests assert on data.
+
+Result (2026-10-12, dbt-v2): lint:names clean; unit 775/775; integration 312/312; eval:check — all
+14 cases hold.

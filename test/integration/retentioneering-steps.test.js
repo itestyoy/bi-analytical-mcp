@@ -16,7 +16,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { ENV, opts, skip, collapsed, table, sizes, openWorld } from './retentioneering-harness.js';
+import { ENV, opts, skip, collapsed, table, sizes, openWorld, EVERY_ROW } from './retentioneering-harness.js';
 
 let w; let engine; let wh; let built;
 const readDone = (id, extra) => w.readDone(id, extra);
@@ -73,15 +73,16 @@ test('segments a step makes and collapsed paths: each level holds its paths, no 
     context_id: ctx, eventstream: 'long_paths',
     analyses: [{ kind: 'transition_graph' }, { kind: 'describe' }, overview('by_value', 'length_band'), overview('by_quantile', 'half'), overview('by_store', 'store')],
   });
-  const a = await readDone(q.task_id, { detail: 'full' });
+  const a = await readDone(q.task_id, EVERY_ROW);
   assert.equal(a.status, 'done', JSON.stringify(a.error));
   const expected = new Map();
   for (const list of paths().values()) {
     const seq = ['path_start', ...collapsed(list), 'path_end'];
     for (let i = 0; i + 1 < seq.length; i += 1) expected.set(`${seq[i]}>${seq[i + 1]}`, (expected.get(`${seq[i]}>${seq[i + 1]}`) || 0) + 1);
   }
-  assert.deepEqual(new Map(a.analyses.transition_graph.edges.map((e) => [`${e.source}>${e.target}`, e.count])), expected, 'T13: collapsed loops — the transitions of the collapsed paths');
-  assert.ok(!a.analyses.transition_graph.edges.some((e) => e.source === e.target), 'T13: no self-loops');
+  const transitions = table(a.analyses.transition_graph, 'transitions');
+  assert.deepEqual(new Map(transitions.map((e) => [`${e.from}>${e.to}`, e.count])), expected, 'T13: collapsed loops — the transitions of the collapsed paths');
+  assert.ok(!transitions.some((e) => e.from === e.to), 'T13: no self-loops');
   assert.equal(a.analyses.describe.values['shape'].n_paths, built.users, 'T13: collapsing loops keeps every path');
   const count = (f) => lengths.filter(f).length;
   assert.deepEqual(sizes(a.analyses.by_value, 'by_value'), Object.fromEntries(Object.entries({ short: count((n) => n < 5), mid: count((n) => n >= 5 && n < 10), long: count((n) => n >= 10) }).filter(([, n]) => n)), 'T19 by value: each bin holds the paths whose length falls in it');
@@ -120,14 +121,15 @@ test('each step is checked by the library as it is added, and says what it chang
   if (skip(t)) return;
   const ctx = await stepsContext();
   await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'paths', name: 'loop', after: 0 });
-  const add = (step) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'loop', steps: [step] });
+  const add = (step, extra = {}) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'loop', steps: [step], ...extra });
   const started = Date.now();
   const s1 = await add({ type: 'rename_events', mapping: { shop_opened: 'shop' } });
-  assert.deepEqual([s1.added[0].checked, s1.added[0].changed.events_added, s1.added[0].changed.events_removed], [true, ['shop'], ['shop_opened']]);
+  assert.deepEqual([s1.steps_added[0].checked, s1.steps_added[0].changed.events_added, s1.steps_added[0].changed.events_removed, s1.steps_count], [true, ['shop'], ['shop_opened'], 1]);
   const s2 = await add({ type: 'split_sessions', timeout: '30m', session_col: 'visit' });
-  assert.deepEqual(s2.added[0].changed.paths_added, ['visit']);
-  const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } });
-  assert.deepEqual(s3.added[0].changed.segments_added, ['band']);
+  assert.deepEqual(s2.steps_added[0].changed.paths_added, ['visit']);
+  // with include_columns, the whole shape the steps leave: the segment's levels among it
+  const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } }, { include_columns: true });
+  assert.deepEqual(s3.steps_added[0].changed.segments_added, ['band']);
   assert.deepEqual(s3.shape.segments.band.levels.sort(), ['long', 'short']);
   // refused by the library, with its own message, on what the eventstream holds at that step
   const refusedStep = (step, re) => assert.rejects(add(step), (e) => e.field === 'steps[0]' && re.test(e.message) && /nothing changed/.test(e.message));
@@ -140,12 +142,13 @@ test('each step is checked by the library as it is added, and says what it chang
   assert.deepEqual(p.steps.map((x) => [x.index, x.step.type, x.checked]), [[1, 'rename_events', true], [2, 'split_sessions', true], [3, 'add_segment', true]]);
   // an edit is checked with every step after it: renaming another event leaves step 2 and 3 as they are
   const e1 = await engine.build_retentioneering_model({ action: 'edit_step', context_id: ctx, eventstream: 'loop', index: 1, step: { type: 'rename_events', mapping: { level_started: 'start' } } });
-  assert.equal(e1.steps, 3);
-  // an inserted step is checked on what the step before it left, and moves the rest along
+  assert.equal(e1.steps_count, 3);
+  // an inserted step is checked on what the step before it left, and moves the rest along: the step says
+  // what it changed, and the answer what the eventstream's end gained and lost
   const i1 = await engine.build_retentioneering_model({ action: 'insert_step', context_id: ctx, eventstream: 'loop', index: 2, step: { type: 'drop_events', names: ['tutorial'] } });
-  assert.deepEqual([i1.steps, i1.step.index, i1.changed.events_removed], [4, 2, ['tutorial']]);
+  assert.deepEqual([i1.steps_count, i1.step.index, i1.step.changed.events_removed, i1.changed.events_removed], [4, 2, ['tutorial'], ['tutorial']]);
   await assert.rejects(engine.build_retentioneering_model({ action: 'insert_step', context_id: ctx, eventstream: 'loop', index: 2, step: { type: 'drop_events', names: ['level_started'] } }), (e) => /level_started/.test(e.message) && /nothing changed/.test(e.message)); // renamed by step 1
-  assert.equal((await engine.build_retentioneering_model({ action: 'delete_step', context_id: ctx, eventstream: 'loop', index: 2 })).steps, 3);
+  assert.equal((await engine.build_retentioneering_model({ action: 'delete_step', context_id: ctx, eventstream: 'loop', index: 2 })).steps_count, 3);
   // ...while deleting the step that makes the session column breaks a later step that reads it
   await engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'loop', steps: [{ type: 'filter_paths', condition: { op: '>', metric: 'length', value: 1 }, path: 'visit' }] });
   await assert.rejects(engine.build_retentioneering_model({ action: 'delete_step', context_id: ctx, eventstream: 'loop', index: 2 }), (e) => /step 3 \(filter_paths\)|step 4|visit/.test(e.message) && /nothing changed/.test(e.message));
@@ -160,7 +163,7 @@ test('each step is checked by the library as it is added, and says what it chang
   assert.deepEqual(read.paths, ['user_id', 'session_id', 'visit']);
   // the numbers: a path per visit, as many as the table holds
   const visits = Number((await wh.query(`select count(distinct visit) as n from ${read.model}`)).rows[0].n);
-  const d = await analyze(ctx, 'loop', [{ kind: 'path_metrics', metrics: [{ metric: 'length' }], path: 'visit' }], 'full');
+  const d = await analyze(ctx, 'loop', [{ kind: 'path_metrics', metrics: [{ metric: 'length' }], path: 'visit' }], EVERY_ROW);
   assert.equal(table(d.path_metrics, 'result').length, visits);
   // an edit at or before the materialized steps retires their table: the next materialize rebuilds
   const t1 = await engine.build_retentioneering_model({ action: 'truncate', context_id: ctx, eventstream: 'loop', after: 2 });
@@ -176,7 +179,7 @@ test('steps asked for at once are all applied, and a materialize racing an edit 
   // T22 — steps asked for at once are applied one after the other: none is lost
   const steps = [{ type: 'rename_events', mapping: { shop_opened: 'shop' } }, { type: 'drop_events', names: ['tutorial'] }, { type: 'collapse_events', loops: true }];
   const answers = await Promise.all(steps.map((step) => engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'racing', steps: [step] })));
-  assert.deepEqual(answers.map((a) => a.steps).sort(), [1, 2, 3], 'T22: each answer is one step further');
+  assert.deepEqual(answers.map((a) => a.steps_count).sort(), [1, 2, 3], 'T22: each answer is one step further');
   const p = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'racing' });
   assert.deepEqual(p.steps.map((x) => x.step.type).sort(), steps.map((x) => x.type).sort(), 'T22: none is lost');
   assert.ok(p.steps.every((x) => x.checked), 'T22: each is checked');
@@ -200,10 +203,10 @@ test('steps asked for at once are all applied, and a materialize racing an edit 
   assert.ok(now.includes('tutorial') && !now.includes('level_completed'), 'T26: materialized again, the table holds the edited steps\' events');
 });
 
-// ── what a start takes: its stages, its path, its window, its sample — decided in SQL ────────────────
+// ── what a start takes: its steps, its path, its window, its sample — decided in SQL ─────────────────
 // A start below carries two of these specs where the checks of each read numbers the other leaves as they
 // are: events renamed with a path or with a window, a where with a top N. A sample by a hash is two
-// starts of one spec. Events renamed, merged or split by a parameter are a compute stage — a case over the
+// starts of one spec. Events renamed, merged or split by a parameter are a compute step — a case over the
 // event and its properties — whose column `columns.event` names.
 
 /** How many distinct values `f` gives over `list` — a missing part of a key makes no path. */
@@ -226,7 +229,7 @@ test('a path by an event property, its events renamed by a value (with names of 
   // whose column is the event, and the property's own column as the path
   const b = await engine.build_retentioneering_model({
     name: 'by_level', source: 'events', path: ['level_id_of_event_data'],
-    stages: [renamed([{ when: [eventIs('level_completed'), { fn: 'eq', args: [result, { value: 'win' }] }], then: { value: 'level_won' } }, byResult])],
+    steps: [renamed([{ when: [eventIs('level_completed'), { fn: 'eq', args: [result, { value: 'win' }] }], then: { value: 'level_won' } }, byResult])],
     columns: { event: 'ev' },
   });
   const r = await readDone(b.task_id);
@@ -241,7 +244,7 @@ test('a path by an event property, its events renamed by a value (with names of 
   const expected = counts(withLevel.map((x) => (x.e !== 'level_completed' || x.r == null ? x.e : x.r === 'win' ? 'level_won' : `level_completed_${x.r}`)));
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'renamed by value: the named value under its name, any other as <event>_<value>, every other event as it was');
   // an unknown parameter is refused before anything runs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])], columns: { event: 'ev' } }), /invalid input|no_such/, 'an unknown parameter');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', steps: [renamed([{ when: [eventIs('level_completed')], then: { property: 'no_such' } }])], columns: { event: 'ev' } }), /invalid input|no_such/, 'an unknown parameter');
 });
 
 // A window in a timezone, and events made from an event's parameters by conditions: one start.
@@ -256,7 +259,7 @@ test('a time window scopes the eventstream on the partitioned source (in a timez
   // with a missing value does not hold)
   const b = await engine.build_retentioneering_model({
     name: 'windowed', source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' },
-    stages: [renamed([
+    steps: [renamed([
       { when: [eventIs('level_completed'), { fn: 'eq', args: [result, { value: 'lose' }] }], then: { value: 'level_lost' } },
       { when: [eventIs('level_completed')], then: { value: 'level_passed' } },
     ])],
@@ -292,7 +295,7 @@ test('a path by a composite key of columns, its events renamed and merged into o
   };
   const b = await engine.build_retentioneering_model({
     name: 'by_player_session', source: 'events', path: ['player_id_of_internal', 'session_number'],
-    stages: [renamed([levelEnd, byResult])],
+    steps: [renamed([levelEnd, byResult])],
     columns: { event: 'ev' },
   });
   const composite = await readDone(b.task_id);
@@ -304,8 +307,8 @@ test('a path by a composite key of columns, its events renamed and merged into o
   const n = (f) => src.filter(f).length;
   assert.equal(vocab.get('level_end'), n((x) => (x.e === 'level_completed' && ['win', 'lose'].includes(x.r)) || x.e === 'shop_opened'), 'an or of an and and an event merges two results of an event and an event of the source');
   assert.deepEqual([vocab.get('level_completed_win'), vocab.get('level_completed_lose'), vocab.get('shop_opened')], [undefined, undefined, undefined], 'the merged events are under its name only');
-  // an event column the stages did not make is refused, and a path column the source does not have
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', stages: [renamed([levelEnd])], columns: { event: 'evnt' } }), (e) => e.field === 'columns.event' && /evnt/.test(e.message), 'an event column the stages did not make');
+  // an event column the steps did not make is refused, and a path column the source does not have
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', steps: [renamed([levelEnd])], columns: { event: 'evnt' } }), (e) => e.field === 'columns.event' && /evnt/.test(e.message), 'an event column the steps did not make');
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', path: ['no_such'] }), (e) => e.field === 'path', 'a path column the source does not have');
 
   // a sample the caller left unseeded is drawn with a fixed seed: the same paths on every materialize
@@ -326,7 +329,7 @@ test('a path by a composite key of columns, its events renamed and merged into o
 test('a where between two values (both ends included), and a top N: the most frequent events of those rows keep their names, the rest is "other" — no event dropped', opts, async (t) => {
   if (skip(t)) return;
   const src = (await wh.query('select session_number as s, event_name as e from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'sessions_1_2', source: 'events', stages: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
+  const b = await engine.build_retentioneering_model({ name: 'sessions_1_2', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'between', args: [{ column: 'session_number' }, { value: 1 }, { value: 2 }] }] }], top: 3 });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   const inSessions = src.filter((x) => x.s >= 1 && x.s <= 2);

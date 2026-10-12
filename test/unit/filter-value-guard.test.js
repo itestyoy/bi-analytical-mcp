@@ -14,7 +14,7 @@ function engine() {
   const catalog = loadCatalog(CATALOG, {});
   return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'fvg-')) }) }));
 }
-const whereStep = (e, draftId, column, op, value) => e.build_pipeline_model({ action: 'add_steps', context_id: draftId, stages: [{ stage: 'where', conditions: [{ fn: op, args: [{ column }, { value }] }] }] });
+const whereStep = (e, draftId, column, op, value) => e.build_pipeline_model({ action: 'add_steps', context_id: draftId, steps: [{ stage: 'where', conditions: [{ fn: op, args: [{ column }, { value }] }] }] });
 
 // A wrong-CASED filter value on a categorical event property is REJECTED with the real value,
 // not silently filtered to nothing (the 'organic' vs 'Organic' problem).
@@ -40,7 +40,7 @@ test('a wrong-cased value is rejected at any depth of and / or / not, on a colum
   const e = engine();
   e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'deep', source: 'events' });
-  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [c] }] });
+  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [c] }] });
   const miscased = (err) => /different casing/.test(err.message) && /'win'/.test(err.message);
   await assert.rejects(() => add({ fn: 'not', args: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'in', args: [{ column: 'result_of_event_data' }, { value: 'lose' }, { value: 'Win' }] }] }] }), miscased);
   await assert.rejects(() => add({ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'Win' }] }), miscased);

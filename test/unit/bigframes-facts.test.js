@@ -56,7 +56,7 @@ test('nothing in the guide or the recipes prescribes a parameter the library doe
     ...(guide.examples || []).flatMap((ex) => ex.do || []),
     ...recipes.list.filter((r) => r.runtime === 'bigframes').flatMap((r) => [
       r.approach, r.hack,
-      ...(r.pipeline_payload?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => JSON.stringify(f.body))),
+      ...(r.pipeline_payload?.steps || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => JSON.stringify(f.body))),
     ]),
   ].join('\n');
   assert.ok(!/std\(ddof/.test(prescribed), `ddof is still prescribed: ${/[^\n]*std\(ddof[^\n]*/.exec(prescribed)?.[0]}`);
@@ -89,7 +89,7 @@ test('distinct values: drop_duplicates works, bare unique() is the one that rais
 
 test('an estimator returns its own frame — the prediction is not assigned back', () => {
   const ml = recipes.get('bf_ml_predict_as_column');
-  const fn = ml.pipeline_payload.stages.find((s) => s.stage === 'python').functions[0];
+  const fn = ml.pipeline_payload.steps.find((s) => s.stage === 'python').functions[0];
   const body = JSON.stringify(fn.body);
   assert.match(body, /model\.predict\(df\)/, 'predict is called on the frame…');
   assert.match(body, /return out/, '…and its result is what the stage returns');
@@ -129,13 +129,13 @@ test('every bigframes recipe prepares its table in SQL before the python stage',
   const bf = recipes.list.filter((r) => r.runtime === 'bigframes' && !r.reference);
   assert.ok(bf.length >= 10, 'precondition: the bigframes family is shipped');
   for (const r of bf) {
-    const stages = r.pipeline_payload.stages;
-    const at = stages.findIndex((s) => s.stage === 'python');
+    const { steps } = r.pipeline_payload;
+    const at = steps.findIndex((s) => s.stage === 'python');
     assert.ok(at > 0, `${r.id}: the python stage is first — nothing prepares its input`);
-    const before = stages.slice(0, at).map((s) => s.stage);
+    const before = steps.slice(0, at).map((s) => s.stage);
     assert.ok(before.some((s) => REDUCES.has(s)), `${r.id}: stages before python (${before.join(', ') || 'none'}) do not narrow or reduce anything`);
     // …and the python stage declares what it hands on, so the SQL stages after it have columns
-    const py = stages[at];
+    const py = steps[at];
     assert.ok(py.output?.columns?.length, `${r.id}: the python stage declares no output columns`);
   }
 });
@@ -159,7 +159,7 @@ test('the ml constructor signatures are extracted, and nothing prescribes a keyw
     ...(guide.examples || []).flatMap((ex) => ex.do || []),
     ...recipes.list.filter((r) => r.runtime === 'bigframes').flatMap((r) => [
       r.approach, r.hack,
-      ...(r.pipeline_payload?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => (f.body || []))),
+      ...(r.pipeline_payload?.steps || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => (f.body || []))),
     ]),
   ].filter(Boolean).join('\n');
 

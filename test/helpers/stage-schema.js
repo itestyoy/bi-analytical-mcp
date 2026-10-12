@@ -9,11 +9,12 @@
 
 import { deref, field, forms, pinned } from './schema-nav.js';
 
-/** The stage union of a tool schema, wherever the tool puts it (`stage`, or `pipeline.stages`): one
- *  entry per stage — a stage written as several forms (project: keep or drop) is one entry, its union. */
-export function stageUnion(toolSchema, prop = 'stage') {
-  const node = prop === 'stage'
-    ? field(toolSchema, toolSchema, 'stage')
+/** The stage union of a tool schema, wherever the tool puts it (the builder's `step`, or the one-call
+ *  contract's `pipeline.stages`): one entry per stage — a stage written as several forms (project: keep
+ *  or drop) is one entry, its union. */
+export function stageUnion(toolSchema, prop = 'step') {
+  const node = prop === 'step'
+    ? field(toolSchema, toolSchema, 'step')
     : deref(toolSchema, field(toolSchema, field(toolSchema, toolSchema, 'pipeline'), 'stages')?.items);
   return (deref(toolSchema, node)?.anyOf || []).map((b) => deref(toolSchema, b));
 }
@@ -24,11 +25,11 @@ export function stageOf(toolSchema, branch) {
 }
 
 /** One branch of it, by the stage name its forms pin. */
-export function stageBranch(toolSchema, name, prop = 'stage') {
+export function stageBranch(toolSchema, name, prop = 'step') {
   return stageUnion(toolSchema, prop).find((b) => stageOf(toolSchema, b) === name);
 }
 
 /** The stage names a tool offers — what is available on this deployment. */
-export function stageNames(toolSchema, prop = 'stage') {
+export function stageNames(toolSchema, prop = 'step') {
   return stageUnion(toolSchema, prop).map((b) => stageOf(toolSchema, b));
 }

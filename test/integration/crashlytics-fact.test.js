@@ -163,7 +163,7 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
   const a = await engine.build_pipeline_model({
     action: 'add_steps',
     context_id: s.context_id,
-    stages: [{
+    steps: [{
       stage: 'match_recognize',
       partition_by: ['player_id_of_internal'],
       steps: [
@@ -194,7 +194,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   const [want] = (await wh.query('select count(*) filter (where is_fatal_of_event_data) as yes, count(*) filter (where not is_fatal_of_event_data) as no from fct_crashlytics_events')).rows;
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
   const s0 = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s0.context_id, stages: [{ stage: 'aggregate', measures: [
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s0.context_id, steps: [{ stage: 'aggregate', measures: [
     { name: 'true_text', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }] } },
     { name: 'false_upper', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'FALSE' }] }] } },
     { name: 'either', expr: { fn: 'count', where: [{ fn: 'in', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }, { value: false }] }] } },
@@ -209,7 +209,7 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.equal(num(got.flipped), num(want.yes), "['true' = the column] the constant on the left");
   // a constant that is no boolean is refused in the call, naming the column
   const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
 });
 
 // A funnel step's condition follows the same rule: a flag spelled "true" is compared as TRUE.
@@ -221,7 +221,7 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
   await engine.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id,
-    stages: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] }] });
+    steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] }] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
@@ -230,7 +230,7 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   const bad = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({
     action: 'add_steps', context_id: bad.context_id,
-    stages: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }, { name: 'again', event_name: names }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
+    steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }, { name: 'again', event_name: names }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
 });
 
 // A column a caller names may be a SQL keyword: every stage writes it quoted, so it is a column.
@@ -238,7 +238,7 @@ test('columns named like keywords (group, order) flow through the stages as colu
   if (skip(t)) return;
   const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
     { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
@@ -257,8 +257,8 @@ test('a raw expression takes its columns in args, with functions, keywords and s
   const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
   const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
   // the same column written by name in the text is refused when the step is added
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, stages: [
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'fatal_flag' }, { value: 'fatal_x' }] }] } }] },
   ] });

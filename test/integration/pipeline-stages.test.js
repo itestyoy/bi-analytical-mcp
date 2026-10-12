@@ -822,7 +822,7 @@ test('a semantic measure\'s where and a metric query\'s where take or and the te
   if (skip(t)) return;
   const built = await engine.build_semantic_model({
     name: 'cond_sem',
-    semantic_models: [{ from: 'events', dimensions: [{ column: 'event_name' }], measures: [
+    semantic_models: [{ source: 'events', dimensions: [{ column: 'event_name' }], measures: [
       { name: 'picked', expr: { fn: 'count', where: [{ fn: 'or', args: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: 1 }] }, { fn: 'gte', args: [{ property: 'level_id_of_event_data' }, { value: 3 }] }] }] } },
       { name: 'rows', expr: { fn: 'count' } },
     ] }],
@@ -841,7 +841,7 @@ test('a semantic measure\'s where and a metric query\'s where take or and the te
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
   const w = await engine.query_semantic_model({
     context_id: built.context_id, metrics: ['cond_sem_rows'], time_range: { start: '2020-01-01', end: '2030-12-31' },
-    where: [{ fn: 'or', args: [{ fn: 'contains', args: [{ model: 'events', attribute: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ model: 'events', attribute: 'event_name' }, { value: 'tutorial' }] }] }],
+    where: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }],
   });
   assert.equal(w.ok, true, JSON.stringify(w.error));
   assert.equal(num(w.rows[0].cond_sem_rows), named, '[query where] the rows the or of text operators keeps');
@@ -1817,7 +1817,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'jtut',
-    semantic_models: [{ from: 'events', measures: [{ name: 's1', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: 'step_1' }] }] }, label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: '{{ "step_1" }}' }] }] } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 's1', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: 'step_1' }] }] }, label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: '{{ "step_1" }}' }] }] } }] }],
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));

@@ -41,8 +41,8 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
   // the one grammar of every where: conditions over the columns of the rows here and the source's event
-  // properties, each compared in its own type
-  const props = !step.where?.length ? [] : conditionListSql(d, prepCols, step.where, `step '${step.name || 'unnamed'}' where`, { catalog, source }).map((x) => `(${x})`);
+  // properties, each compared in its own type (a funnel is a step over a source's rows)
+  const props = !step.where?.length ? [] : conditionListSql(d, prepCols, step.where, `step '${step.name || 'unnamed'}' where`, { catalog, source, place: 'source_rows' }).map((x) => `(${x})`);
   return [ev, ...props].join(' AND ');
 }
 
@@ -82,7 +82,7 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
     ...(names.length ? [{ fn: 'in', args: [{ column: m.event_name.column }, ...names.map((v) => ({ value: v }))] }] : []),
     ...prefilterConditions(catalog, source, f.where),
   ];
-  return conditions.length ? conditionListSql(d, cols, conditions, 'filter', { catalog, source }).map((x) => `(${x})`).join(' AND ') : '';
+  return conditions.length ? conditionListSql(d, cols, conditions, 'filter', { catalog, source, place: 'source_rows' }).map((x) => `(${x})`).join(' AND ') : '';
 }
 
 /**
@@ -424,6 +424,8 @@ function matchRecognizeSchema(catalog) {
 }
 
 registerStage('match_recognize', {
+  // it needs the rows still a source's events, in order: listed apart from the SQL over any rows
+  group: 'events',
   schema: (catalog) => matchRecognizeSchema(catalog),
   recommend: () => ["The funnel columns (reached_<step>, at_<step>, completed, furthest_step_name, the captures) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country)."],
   build: ({ d, catalog, cols, source }, p) => {

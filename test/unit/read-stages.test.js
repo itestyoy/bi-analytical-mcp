@@ -3,7 +3,9 @@
 // unpivot, order_by, limit, sample, project — built by the pipeline's own builders over the relation's
 // columns. A stage that makes a new table (a join, an unnest, a funnel, a python model) is a build from
 // the task, and a read has no source, so an event property or a declared relationship is not a thing it
-// can read.
+// can read. The tool's schema is the one stage and the one expression, built for what a read takes —
+// its PLACE (STAGE_PLACES.read, PLACES.stored_rows) — which is also checked as each step is built, for a
+// caller past the schema (a card's drill).
 //
 // Input-validation guards and the column set a read leaves (allowed by the test rules): nothing here
 // reads generated SQL. The rows a read returns are proven on DATA in test/integration/.
@@ -12,10 +14,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
-import { renderRead, READ_STAGES } from '../../src/pipeline.js';
+import { renderRead, STAGE_PLACES } from '../../src/pipeline.js';
 import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { transformStages } from '../../src/earlier-spelling.js';
+// the stages registered beside the core's (a funnel, a python model), as a server has them
+import '../../src/match-recognize.js';
+import '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -26,7 +31,7 @@ const read = (stages, columns = COLUMNS) => renderRead(catalog, TABLE, columns, 
 const cond = (fn, column, ...values) => ({ fn, args: [{ column }, ...values.map((value) => ({ value }))] });
 
 test('a read takes the stages that re-slice the stored rows, and leaves the columns they make', () => {
-  assert.deepEqual(READ_STAGES, ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project']);
+  assert.deepEqual(STAGE_PLACES.read.stages, ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project']);
   // where, a regroup, a where after it (what a having was), an order and a cap — a quoted value is a constant
   const out = read([
     { stage: 'where', conditions: [cond('in', 'user__country', "US'); drop", 'GB')] },
@@ -65,15 +70,18 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
     { stage: 'python' },
   ]) {
     assert.throws(() => read([{ stage: 'limit', limit: 1 }, st]), (e) => e.message.startsWith('steps[1]: a read takes where, compute, aggregate')
-      && e.message.includes(`a ${st.stage} stage makes a new table`) && /from_task/.test(e.message), st.stage);
+      && new RegExp(`an? ${st.stage} stage makes a new table`).test(e.message) && /from_task/.test(e.message), st.stage);
   }
   // a step that arrived without its `stage` is said so, at its place
   assert.throws(() => read([{ limit: 3 }]), (e) => e.message.startsWith('steps[0]: a read takes') && /names no `stage`/.test(e.message));
-  // the tool's schema offers a read's stages alone
+  // the tool's schema is the one stage definition, built for its place: a read's stages and no other — a
+  // join is no stage there, refused by the schema; the read's place refuses it as the step is built
+  // (above), for a caller past the schema (a card's drill)
   const v = makeValidators(buildSchemas(catalog));
   const q = (request) => validateInput(v.query_pipeline_model, request);
   assert.equal(q({ context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
   assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'nope' }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   // no steps is a read of the table as it is: the field is left out, never an empty list
   assert.match(q({ context_id: 'abcdef123456', steps: [] }).errors.join(' | '), /at least 1 item/);
   assert.equal(q({ context_id: 'abcdef123456' }).ok, true);
@@ -103,12 +111,20 @@ test('a read runs over a query as over a table: its steps over the result\'s col
   }
 });
 
-test('a stored table has no source: an event property and a declared relationship are refused, its columns are read', () => {
-  assert.throws(() => read([{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }]), /reads an event property of a pipeline's source, and these rows read none \(a stored table\) — name one of their columns/);
+test('a stored table has no source: an event property, a ref and a declared relationship are refused, its columns are read', () => {
+  // the read's place names what it takes, and where an event property is read (a build from the task)
+  const place = /is not what a read of stored rows takes — it takes \{ column \}, \{ value \}, \{ now: true \}, and every function but raw\. .*from_task/;
+  assert.throws(() => read([{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }]), (e) => /^steps\[0\]: compute 'p': \{ property \} /.test(e.message) && place.test(e.message));
+  assert.throws(() => read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }]), (e) => /\{ source, column \} /.test(e.message) && place.test(e.message));
+  assert.throws(() => read([{ stage: 'compute', name: 'm', expr: { metric: 'revenue' } }]), (e) => /\{ metric \} /.test(e.message) && place.test(e.message));
   assert.throws(() => read([{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }]), /\{ entity \} names a relationship of a pipeline's source, and these rows read none/);
-  // …and the schema of the read offers no { property } leaf
+  // …and the read's tool, whose one expression is built for its place, has no such leaf: its schema
+  // refuses it before the place is asked
   const v = makeValidators(buildSchemas(catalog));
   assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
+  // …nor a window restarting per a declared relationship (a source's rows alone have one)
+  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, false);
+  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
 });
 
 // input-validation guards (allowed by the test rules): unsafe input is rejected, a name not a column of

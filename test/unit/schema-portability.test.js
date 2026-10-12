@@ -19,10 +19,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
-import { buildSchemas } from '../../src/schema.js';
+import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { eachSchema, transportSchema } from '../../src/schema/transport.js';
-import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema } from '../../src/retentioneering/schema.js';
+import { PLACES } from '../../src/pipeline/compute.js';
+import { STAGE_PLACES } from '../../src/pipeline.js';
+import { REF_PLACES, refKind } from '../../src/schema/refs.js';
+import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema, startPlace } from '../../src/retentioneering/schema.js';
 import { buildToolDefs } from '../../src/mcp-surface.js';
 import { Engine } from '../../src/engine.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -136,6 +139,8 @@ test('semantic_index accepts one view at a time and refuses a name without its s
     { source: 'users' },
     { source: 'events', event: 'first_launch' },
     { source: 'events', property: 'level_id_of_event_data', limit: 5 },
+    { source: 'users', column: 'country', limit: 5 },
+    { source: 'events', column: 'event_name' },
     { search: 'retention' },
     { status: true },
     { guide: true },
@@ -149,7 +154,10 @@ test('semantic_index accepts one view at a time and refuses a name without its s
   assert.match(text, /\{ source, event \}/, 'and the mode the caller was closest to');
 
   for (const bad of [
-    { property: 'level_id_of_event_data' },            // same, for a column
+    { property: 'level_id_of_event_data' },            // same, for an event property
+    { column: 'country' },                             // and for a model's column
+    { source: 'users', property: 'country' },          // a model's column is `column`, not an event property
+    { source: 'events', column: 'level_id_of_event_data' }, // and an event's payload is `property`
     { model: 'events' },                               // the model view is { source }
     { source: 'events', fuzzy: true },                 // fuzzy does not apply to { source }
     { source: 'events', search: 'x' },                 // two views at once
@@ -249,19 +257,117 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   // …and the fold actually happened where it was worth it: the stage union is ONE definition that
   // both the one-step field and the list of steps point at.
   const bnm = schemas.build_pipeline_model;
-  assert.ok(bnm.$defs?.pipeline_stage, 'the stage union is a definition');
+  assert.ok(bnm.$defs?.stage, 'the stage union is a definition');
   const stepField = forms(bnm, bnm).map((f) => f.properties?.step).find(Boolean);
   const stepsField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.steps).find(Boolean));
-  assert.equal(deref(bnm, stepField), bnm.$defs.pipeline_stage, 'the step field points at it');
-  assert.equal(deref(bnm, stepsField.items), bnm.$defs.pipeline_stage, 'and so does every item of the list of steps');
-  // the read steps are one definition too, in both query tools: a pipeline read's, and the steps after a
-  // metric query — each in an expression of its own beside that tool's where
+  assert.equal(deref(bnm, stepField), bnm.$defs.stage, 'the step field points at it');
+  assert.equal(deref(bnm, stepsField.items), bnm.$defs.stage, 'and so does every item of the list of steps');
+  // the read steps are the one stage definition in both query tools, built for a read's place: a pipeline
+  // read's, and the steps after a metric query
   for (const tool of ['query_pipeline_model', 'query_semantic_model']) {
     const s = schemas[tool];
     const steps = deref(s, forms(s, s).map((f) => f.properties?.steps).find(Boolean));
-    assert.equal(deref(s, steps.items), s.$defs.read_stage, `${tool}: every step is a read stage`);
+    assert.equal(deref(s, steps.items), s.$defs.stage, `${tool}: every step is the one stage`);
   }
 });
+
+// ONE DEFINITION PER CONCEPT, IN EVERY TOOL: an expression is `$defs.expr`, a step `$defs.stage`, a name
+// of a thing of the catalog or the semantic layer `$defs.ref` — the same name in each tool that takes one,
+// built for that tool's places, never a definition per place beside it (where two places of one tool
+// take different parts, each narrows the one definition as the value is built).
+test('each tool schema holds one expr, one stage and one ref where it takes them, and no definition per place', () => {
+  const all = allSchemas(CATALOG);
+  const takes = {
+    build_pipeline_model: ['expr', 'stage'],
+    'build_pipeline_model.pipeline': ['expr', 'stage'],
+    query_pipeline_model: ['expr', 'stage'],
+    build_semantic_model: ['expr'],
+    query_semantic_model: ['expr', 'stage', 'ref'],
+    semantic_index: ['ref'],
+    memory: ['ref'],
+    build_retentioneering_model: ['expr', 'stage'],
+  };
+  const PER_PLACE = ['pipeline_stage', 'read_stage', 'eventstream_stage', 'read_expr', 'metric_expr', 'eventstream_expr'];
+  for (const [name, schema] of Object.entries(all)) {
+    const defs = schema.$defs || {};
+    for (const gone of PER_PLACE) assert.equal(defs[gone], undefined, `${name}: $defs.${gone} — a definition per place`);
+    for (const concept of ['expr', 'stage', 'ref']) {
+      assert.equal(concept in defs, (takes[name] || []).includes(concept), `${name}: $defs.${concept} ${(takes[name] || []).includes(concept) ? 'missing' : 'unexpected'}`);
+    }
+  }
+  // the stage is grouped by what a step needs — SQL over rows, over a source's events, on a runtime — and
+  // each group's forms are tagged by `stage`; a tool's holds the groups its places take (a group left
+  // empty is left out): the retentioneering tool's start takes SQL stages that keep the rows events, and
+  // its library's ops are its runtime group
+  const groups = (schema) => deref(schema, schema.$defs.stage).anyOf.map((g) => deref(schema, g).title);
+  const SQL = 'SQL over rows — needs a table';
+  const RUNTIME = 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows';
+  assert.deepEqual(groups(all.build_pipeline_model), [SQL, 'over a source\'s events — needs the rows still that source\'s events']);
+  for (const tool of ['query_pipeline_model', 'query_semantic_model']) assert.deepEqual(groups(all[tool]), [SQL], `${tool}: a read's stages are SQL over rows`);
+  assert.deepEqual(groups(all.build_retentioneering_model), [SQL, RUNTIME]);
+  // the ref is grouped by what it names: the catalog, the semantic layer — a tool's holding what its places take
+  const refGroups = (schema) => deref(schema, schema.$defs.ref).anyOf.map((g) => deref(schema, g).title.split(':')[0]);
+  assert.deepEqual(refGroups(all.query_semantic_model), ['the catalog', 'the semantic layer'], 'a metric query groups by a column, a property and the semantic layer\'s names');
+  for (const tool of ['semantic_index', 'memory']) assert.deepEqual(refGroups(all[tool]), ['the catalog'], `${tool}: a view and a note's about name things of the catalog`);
+});
+
+// …and each of them holds what the tool's PLACES take, and nothing else (src/schema.js TOOL_PLACES:
+// where its expressions stand, where its steps run, where it names a thing). A form no place of the tool
+// takes would be shown to the model only to be refused when the value is built — and carried in every
+// request. Each form is read for what it is — a leaf by the fields it requires, a function by the `fn` it
+// pins, a window by its `over` (and its partition by a relationship, by `entity`), a step by its `stage`, a
+// ref by its fields — and held to the tables the
+// build-time checks read (PLACES, STAGE_PLACES, REF_PLACES). The retentioneering tool's places are its
+// own: its start's steps and filter_events' where (a place of a read's shape), its library's ops its
+// runtime group.
+for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) {
+  test(`each tool's $defs.expr, $defs.stage and $defs.ref offer no form none of its places take (${label} catalog)`, () => {
+    const c = loadCatalog(path, {});
+    const tools = [
+      ...listed(path).map((t) => [t.name, t.inputSchema, TOOL_PLACES[t.name] || {}]),
+      ['build_pipeline_model.pipeline', transportSchema(buildSchemas(c)['build_pipeline_model.pipeline']), TOOL_PLACES.build_pipeline_model],
+      ['build_retentioneering_model', transportSchema(eventstreamSchema(c)), { expr: ['source_rows', PLACES.stored_rows], stage: [startPlace(c)] }],
+    ];
+    const placesIn = (table, names = []) => names.map((p) => (typeof p === 'string' ? table[p] : p));
+    // what a form names, by the fields it requires: a ref ({ source, column } is no { column }), or a row's leaf
+    const kindOf = (f) => refKind(Object.fromEntries((f.required || []).map((k) => [k, true]))) || f.required?.[0];
+    for (const [name, doc, places] of tools) {
+      const defs = doc.$defs || {};
+      const expr = placesIn(PLACES, places.expr);
+      const stage = placesIn(STAGE_PLACES, places.stage);
+      const ref = placesIn(REF_PLACES, places.ref);
+      // a definition is there where the tool has a place for it, and only there
+      for (const [concept, ps] of [['expr', expr], ['stage', stage], ['ref', ref]]) {
+        assert.equal(concept in defs, ps.length > 0, `${name}: $defs.${concept} ${ps.length ? 'missing' : 'with no place of the tool to take it'}`);
+      }
+      for (const f of defs.expr ? forms(doc, defs.expr) : []) {
+        const fns = pinned(doc, f, 'fn');
+        if (!fns.length) assert.ok(expr.some((p) => p.leaves.includes(kindOf(f))), `${name}: the leaf ${f.title} — no place of the tool takes it`);
+        for (const fn of fns) assert.ok(expr.some((p) => p.fns.includes(fn)), `${name}: ${fn} (${f.title}) — no place of the tool takes it`);
+        if (f.properties?.over) {
+          assert.ok(expr.some((p) => p.windows), `${name}: a window (${f.title}) — no place of the tool takes one`);
+          // a window restarts per a declared relationship { entity } only over a source's rows
+          const partition = deref(doc, deref(doc, f.properties.over).properties?.partition_by);
+          const byEntity = forms(doc, partition?.items).some((item) => item?.properties?.entity);
+          if (byEntity) assert.ok(expr.some((p) => p.entities), `${name}: a window partitioned by { entity } (${f.title}) — no place of the tool reads a source's rows`);
+        }
+      }
+      for (const f of defs.stage ? forms(doc, defs.stage) : []) {
+        const [s] = pinned(doc, f, 'stage');
+        // a step tagged by no stage is a feature's runtime group (its library's ops, tagged by `type`), in its own tool alone
+        if (s === undefined) {
+          assert.ok(name === 'build_retentioneering_model' && pinned(doc, f, 'type').length, `${name}: a step tagged by no stage (${f.title})`);
+          continue;
+        }
+        assert.ok(stage.some((p) => !p.stages || p.stages.includes(s)), `${name}: the ${s} stage — no place of the tool takes it`);
+      }
+      for (const f of defs.ref ? forms(doc, defs.ref) : []) {
+        assert.ok(ref.some((p) => p.takes.includes(kindOf(f))), `${name}: the ref ${f.title} — no place of the tool takes it`);
+        if (f.properties?.via) assert.ok(ref.some((p) => p.via), `${name}: via on ${f.title} — no place of the tool reads a relationship`);
+      }
+    }
+  });
+}
 
 // The point of the fold is SIZE — what every request carries before a word of the conversation: the
 // tool list a client is handed (the tools callable by name only are never in it). The ceiling is

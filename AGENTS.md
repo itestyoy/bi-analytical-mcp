@@ -160,7 +160,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
      properties, its `meta.mcp.primary_entity` and its own space in the value
      index (keyed by `(source, property)`), and they are never mixed. No source is
      privileged: the SOURCE is always a separate argument — `semantic_index({
-     source, event })`, `build_pipeline_model({ source })`, `semantic_models[].from`
+     source, event })`, `build_pipeline_model({ source })`, `semantic_models[].source`
      — never glued into a name. Within a source, names are used as-is. A source is
      named ALWAYS, in every catalog, including one that declares a single source:
      one address for one thing, so no name ever has a second, owner-less spelling
@@ -216,8 +216,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the relationship name and the NUMBER of key parts have to agree.
   `primary`/`unique` makes the model the join TARGET
   (exactly one owner, unique per row there); `foreign` points at the owner. Both
-  paths consume the SAME declaration — `<relationship>__<attribute>` in a metric
-  query, `join { with, via }` in a pipeline. A side may declare `variants` when the
+  paths consume the SAME declaration — `{ source, column, via? }` in a metric
+  query (MetricFlow's `<relationship>__<column>` underneath), `join { with, via }` in a pipeline. A side may declare `variants` when the
   same relationship is carried by SEVERAL alternative key columns (one tracking id
   per ad format): each expands to `<relationship>_<variant>` and the CALLER picks
   which to use, while the side with one such column declares it plainly once. Do NOT
@@ -311,11 +311,34 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   library steps — each item tagged by what it is (a SQL stage by `stage`, a library op by `type`),
   tasks are read with `task_ids` and paged by `offset` / `limit` in every query tool, and a condition,
   a measure and a computed value are ONE EXPRESSION GRAMMAR — `{ fn, args: [expressions], …its parameters }` over
-  leaves, nested to any depth. Every level's schema comes from ONE builder (`exprSchema`,
-  src/pipeline/compute.js: one closed form per leaf the level takes, one per function shape, `args`
-  recursive through the level's own def — the pipeline's, a read's and the semantic tool's
-  `$defs.expr`, and beside the last its steps' `$defs.read_expr`, a read's level: `readStageDefs`)
-  and its SQL from ONE writer (`exprSql`, and `conditionListSql` for a slot); the
+  leaves, nested to any depth. A CONCEPT HAS ONE DEFINITION — built by ONE builder, under ONE name in
+  `$defs`, its groups titled alike in every tool — its forms grouped by what they need to work: `$defs.expr`
+  (`exprSchema`, src/pipeline/compute.js — one closed form per
+  leaf, the rows' and the refs that name a value, one per function shape, `args` recursive through the
+  one def), `$defs.stage` (`stageDefs`, src/pipeline/stages.js — titled groups, `STAGE_GROUPS`: SQL over
+  rows, over a source's events (match_recognize), on a runtime (python; in the retentioneering tool also
+  the library's ops, the feature's own runtime group)), `$defs.ref` (`refSchema`, src/schema/refs.js —
+  the catalog: `{ source }`, `{ source, event }`, `{ source, column, via? }` a model's column (`via`
+  where a place reads one), `{ source, property }` an event property; the semantic layer:
+  `{ semantic_model, dimension, grain? }`,
+  `{ entity }`, `{ metric }`, `{ time: "metric_time", grain? }`) and `include: [...]` (what an answer
+  adds — `columns`, `steps`, `yaml`, `plan`, `coverage`, `details`, an enum per tool). What a PLACE
+  takes of it is one table each — `PLACES` (src/pipeline/compute.js), `STAGE_PLACES`
+  (src/pipeline/stages.js), `REF_PLACES` (src/schema/refs.js), a feature passing a place of the same
+  shape. IN EACH TOOL'S SCHEMA THE DEFINITION HOLDS WHAT THAT TOOL'S PLACES TAKE — the union of its
+  places (`TOOL_PLACES`, src/schema.js; a feature passes its own), nothing else, a group none of them
+  takes left out: a read's has no join, unnest, funnel or python stage, no event property and no `raw`,
+  a semantic declaration's no window, semantic_index's and memory's ref no form of the semantic layer.
+  So what a tool cannot take is refused by its own schema, and its listing carries no form it has no use
+  for (every request carries the tool list: test/unit/schema-portability.test.js holds its size). It is
+  NEVER SPLIT PER PLACE inside a tool (no second definition beside it): where the places of
+  one tool take different parts (a metric query's where and its steps; an eventstream's start,
+  filter_events and its library steps), each is checked when the value is built, as a function's
+  placement is, and the refusal names the place and what it takes. A list of
+  a table's OWN columns stays a list of names (an aggregate's `group_by`,
+  project, unpivot, an eventstream's segments and path); anything else names a thing through a ref or
+  an expression leaf. Its SQL comes from ONE writer (`exprSql`, and `conditionListSql` for a slot, each
+  told the place); the
   functions are one table (`FNS`, src/pipeline/compute.js — scalar, condition, logic, aggregate,
   window; a function is added there once, its schema form and its SQL beside each other). A CONDITION
   is an expression with a boolean value: a comparison (`eq neq gt gte lt lte`, `in not_in` with each
@@ -326,14 +349,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   retentioneering stages' and filter_events' — is a LIST of them that all hold (`conditionSlot`,
   src/schema-kit.js). A missing value is two-valued everywhere: a comparison with one does not hold
   (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, and a
-  boolean a compute stage stores is never NULL. Only the LEAVES differ by LEVEL: over a pipeline's rows
-  `{ column }`, `{ property, field?, type? }` (an event property read where it is stored, while the
-  rows are that source's events), `{ value }` (a scalar, never a list) and `{ now: true }`; over a
-  stored table or a metric result (a read, the steps after a metric query) the same without
-  `{ property }`; on a semantic model `{ column }` (a column, an
-  entity key, a declared amount), `{ property }` on an events source and `{ value }`; in a derived
-  metric `{ metric }` and numbers; in a metric query's `where` the dimension references as its
-  group_by names them and `{ value }`; in filter_events the eventstream's `{ column }` and `{ value }`.
+  boolean a compute stage stores is never NULL. What each place takes (`PLACES`): a step over a
+  source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field?, type? }`
+  (an event property read where it is stored, while the rows are that source's events), `{ value }` (a
+  scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_pipeline_model,
+  the steps after a metric query, a drill — and filter_events, the eventstream's columns) the same
+  without `{ property }` and `raw`; a semantic model's where, dimensions and measures `{ column }` (a
+  column, an entity key, a declared amount), `{ property }` on an events source, `{ value }` and
+  `{ now: true }`, no window and no `raw`; a metric query's `where` the refs its group_by takes and
+  `{ value }`, with conditions, logic and scalar functions; a derived metric's `expr` `{ metric }` and
+  `{ value }`, with add sub mul div round floor ceil abs coalesce least greatest.
   Where a function may stand is checked when the value is built, and the refusal names the rule: no
   aggregate in a row place without `over`, a window only in a compute stage, a column outside every
   aggregate of a measure only when it is grouped by. A MEASURE is ONE form wherever rows are
@@ -345,20 +370,29 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   condition (`on` = the value) added to the `where` of every aggregate in it. What a semantic metric
   reads is named by a string — a simple or cumulative metric's `measure` — or by `{ metric }` leaves:
   a derived metric's `expr` (its inputs read off the leaves; a ratio is `div` of two metrics) — and a
-  model is loaded into a task by an item of `semantic_models` (`{ from }` alone loads it for its
-  attributes), in a declaration and an update alike. A SORT KEY over a table's rows (the
+  model is loaded into a task by an item of `semantic_models` (`{ source }` alone loads it for its
+  columns), in a declaration and an update alike (an update names its task by `name`). A SORT KEY over a table's rows (the
   order_by stage — a build's, a read's, the steps after a metric query — and a window's order) is ONE
   item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
-  funnel's) is a column or `{ entity }`; a share kept is a fraction (`share`, 0–1); a time window is
+  funnel's) is a column, or `{ entity }` where the rows are a source's (a build, an eventstream's start
+  — `entities` in `PLACES`); a share kept is a fraction (`share`, 0–1); a time window is
   `time_range` `{ start, end, timezone }` (ONE builder, `timeRange` in src/schema-kit.js, read by
-  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a catalog
-  entity is addressed `{ source }`, `{ source, property }` or `{ source, event }` — semantic_index's views
-  and what a memory note is `about` alike; a variant of a build is a `fork` under a `name` of its own;
+  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a thing
+  of the catalog or the semantic layer is named by the one ref (`REF_PLACES`) — semantic_index's views
+  and what a memory note is `about` take `{ source }`, `{ source, event }`, `{ source, column }`,
+  `{ source, property }`, a metric query's group_by `{ source, column }`, `{ source, property }`,
+  `{ semantic_model, dimension }`, `{ entity }`, `{ time }` — and their answers speak it alike (a
+  model's column is `column`, an event's payload property `property`; `via` only where several
+  relationships lead to the model); a variant of a build is a `fork` under a `name` of its own;
   both builders answer a step with what it changed (the columns, the eventstream's shape: added and
-  removed) and `steps_count` — `include_columns` / `include_steps` for all of them; a query's
-  `dry_run` is its SQL after the steps with its `output_columns`, reading no data (a pipeline read's
-  SQL is written over `{{ ref('<model>') }}`, as a preview's `model_sql`); a week is the ISO
+  removed) and `steps_count` — `include: ["columns", "steps"]` for all of them; the checks are two
+  words by what they need, said in one wording (`DRY_RUN` / `VALIDATE`, src/schema/fields.js):
+  `dry_run` compiles and shows, reading nothing and building nothing (a declaration; a query, after
+  the context's build — its SQL after the steps with its `output_columns`, a pipeline read's written
+  over `{{ ref('<model>') }}`, as a preview's `model_sql`), `validate` checks on the warehouse, a task
+  (the pipeline preview: dbt run --empty; preview_semantic_model: MetricFlow, over a time_range the
+  warehouse); a week is the ISO
   week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE
   expression of that grammar (a compute stage's `expr`; one that is a condition is stored as a boolean); a
   window function takes `over` (`sum average min max count` with it are windows), and
@@ -367,15 +401,17 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   column of the step is refused, with no list of words beside it; the rest goes as written, except a
   Jinja opener (`{{`, `{%`, `{#` — dbt would run it; a text holding one is a constant in `args`). It is a
   build's escape hatch: a read (query_pipeline_model, the steps after a metric query, a drill) takes
-  no raw (`READ_FNS`). A constant
+  no raw (`PLACES.stored_rows`), and neither query tool's schema holds it. A constant
   is written in the type of the first argument that is not a constant, one rule for every comparison.
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
   every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is
   told this server's (src/validate.js); a whole value in an EARLIER spelling of this server — a condition
   `{ column, op, value }` or a group `{ or: [...] }`, a measure `{ name, agg, column }`, a read's
-  `transform`, a metric query's `order_by` (an order_by step now) — is refused with the value
-  converted, never accepted (a field only renamed — `stages`, `stage` — is told its name: `steps`,
-  `step`), and what a store kept in one is carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
+  `transform`, a metric query's `order_by` (an order_by step now), a `{ model, attribute }` (a ref
+  now), the `include_*` flags and explore_errors' `detail` (`include`), a semantic model item's `from`
+  (`source`), an update's `task` (`name`) — is refused with the value converted, never accepted (a
+  field only renamed — `stages`, `stage`, a model column written `property` — is told its name:
+  `steps`, `step`, `column`), and what a store kept in one is carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
   retentioneering steps keep the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
@@ -434,7 +470,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
   each semantic model's dimensions, one by one where all at once fails, to name what fails.
   NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
-  ({ model, attribute }, { semantic_model, dimension }, { entity }, metric_time) and the server resolves it; result
+  ({ source, column }, { source, property }, { semantic_model, dimension }, { entity },
+  { time: "metric_time" } — the one ref, checked by `REF_PLACES.group_by`; in a task's context
+  { semantic_model: [<its source>], dimension } names a dimension the task computed, { source, property }
+  an event property it declared a dimension, { entity } a key its measure sources carry) and the server
+  resolves it; result
   columns are the caller's names, and an explained query's SQL and plan and every failure message go
   through `Engine._callerSpelling`, which rewrites EXACT tokens only — each MetricFlow item's token
   for the query's metrics, the query's own references, `__<metric>` aliases, metric_time grains, the
@@ -476,18 +516,22 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   guide name, no routing trigger, no skill, no line of the instructions — the surface is exactly what
   it is without it. The core never names a feature: engine, surface, apps, guide, skills and
   overview each walk `engine.features` at ONE point (its tools become definitions in the same registry
-  as the core's, a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
+  as the core's, a guide name + triggers, a skill, an instructions line, an overview entry, a form of
+  delete_context — `deletes`, collected by `featureDeletes`). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
 - RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
   PIPELINE — `start` declares the eventstream: an events source (or a task's table) prepared by its
-  `steps`, the pipeline's own stages that keep the rows events (where, compute, join — a join of a slowly-changing
+  `steps`, the pipeline's own stages that keep the rows events (where, compute, join — the one
+  `$defs.stage`, the core's with the library's ops as this tool's runtime group; a start's steps take
+  where / compute / join and add_steps / edit_step / insert_step the library's ops, each refused at its
+  place naming what it takes; a join of a slowly-changing
   model states its `between`, refused without one), then the columns it names (`columns.event` / `time`,
   `path`, `segments` — column names of the prepared rows), rendered in SQL, materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
   (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
   (below) and answered at once with what it changed and `steps_count`, as the pipeline builder answers
-  (`include_columns` / `include_steps` for the whole shape / every step); `materialize` runs the steps not yet materialized
+  (`include: ["columns", "steps"]` for the whole shape / every step); `materialize` runs the steps not yet materialized
   in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
   order carried in the table), a checkpoint an edit at or before it retires. Every start builds a table
   of its own (a fork of an earlier one keeps reading its rows), one build action at a time runs on a
@@ -500,7 +544,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   holds is read from the stored table), the card that draws it reading every row, and its card's
   scope from the table it read, in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
   inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
-  retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
+  retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/) —
+  display_retentioneering_result takes `{ task_id, display: { analysis, title?, edge_weight? } }`, as
+  display_model_result takes `{ task_id, display }`; delete_context removes one eventstream in the
+  feature's own form `{ what: "eventstream", context_id, eventstream }`, its tables kept until the
+  context is dropped. It is
   deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds and a fixed
   one for a draw the caller left unseeded, ties in code-point order — never the locale's), and
   every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
@@ -516,8 +564,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
   What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
   src/retentioneering/schema.js — today `filter_events.where`, a condition slot of the one expression
-  grammar at its own level (`$defs.eventstream_expr`: a column of the eventstream or a constant,
-  conditions, `and` / `or` / `not`, the scalar functions — no raw, no window), written into the library's
+  grammar at its own place (the one `$defs.expr`, at filter_events' place — `PLACES.stored_rows`: a
+  column of the eventstream, a constant or the current time, conditions, `and` / `or` / `not`, the
+  scalar functions — no raw, no event property, no window), written into the library's
   `sql` by the one writer for DuckDB with every name and constant quoted, a column compared as its
   constants' kind, and a comparison with a missing value not holding (neq / not_in / not_like mean
   present and different; `not(…)` keeps one, as the library's drop does; a kept step's negation is
@@ -540,7 +589,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
   eventstream's shape rules out. The build reaches the source's OWN columns and event properties, a
-  related model's attributes, and events renamed, merged or split by a parameter, through the
+  related model's columns, and events renamed, merged or split by a parameter, through the
   pipeline's own stages (where, compute, join) — all in SQL; a kept start in an earlier spelling is
   carried over on read (src/retentioneering/earlier.js), and a new call in one is refused with the
   converted value. The analyses with a card are CARD_KINDS (the charted ones and a

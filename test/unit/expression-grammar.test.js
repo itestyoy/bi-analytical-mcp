@@ -1,10 +1,13 @@
 // ONE EXPRESSION GRAMMAR (src/pipeline/compute.js): a condition, a measure and a computed value are one
-// structure — a leaf, or a function { fn, args, …its parameters } over expressions — at every level of
-// every tool. Each level offers the leaves and functions it reads, under a `$defs` entry of its own that
-// its arguments refer back to; the one writer holds the rules of WHERE each kind may stand — an
-// aggregate only where a measure is written, a window only in a compute stage, a condition slot only
-// booleans, a missing value only through is_null. What a store holds in an earlier spelling is carried
-// over by one table of converters (src/earlier-spelling.js), each leaving today's spelling as it is.
+// structure — a leaf, or a function { fn, args, …its parameters } over expressions — in ONE definition,
+// `$defs.expr`, in every tool that takes one, built by one builder for that tool's places: the leaves
+// (the rows' and the refs that name a value) and the functions they take, its arguments referring back to
+// it. What a PLACE takes of it is one table (PLACES), read for a tool's definition and checked as the
+// value is built, and the refusal names the place and what it takes; the one writer holds
+// the rules of WHERE each kind may stand too — an aggregate only where a measure is written, a window
+// only in a compute stage, a condition slot only booleans, a missing value only through is_null. What a
+// store holds in an earlier spelling is carried over by one table of converters
+// (src/earlier-spelling.js), each leaving today's spelling as it is.
 //
 // Schema, input-validation and conversion checks — no generated SQL is read; the numbers each
 // function computes are proven against the warehouse in test/integration/.
@@ -13,13 +16,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
-import { buildSchemas } from '../../src/schema.js';
+import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { renderPipeline } from '../../src/pipeline.js';
-import { DERIVED_FNS } from '../../src/compile.js';
+import { FNS, PLACES, exprSchema, exprSql, conditionListSql } from '../../src/pipeline/compute.js';
+import { getDialect } from '../../src/dialects/index.js';
 import {
   currentCondition, currentConditions, currentExpression, currentMeasure, currentDimension, currentUnnest,
   transformStages, currentOf, currentQueryInput, isEarlierCondition, isEarlierMeasure,
+  isEarlierRef, currentRef, isEarlierInclude, currentInclude,
 } from '../../src/earlier-spelling.js';
 import { beside, forms, pinned } from '../helpers/schema-nav.js';
 
@@ -35,59 +40,105 @@ const val = (value) => ({ value });
 const where = (...conditions) => ({ stage: 'where', conditions });
 const measure = (expr, groupBy = []) => ({ stage: 'aggregate', group_by: groupBy, measures: [{ name: 'm', expr }] });
 
-/** A level's expression definition: its leaves (the forms with no `fn`) and the functions it offers. */
-function level(tool, def) {
-  const doc = schemas[tool];
-  const node = doc.$defs[def];
+/** The expression definition a schema carries: its leaves (the forms with no `fn`), the functions it
+ *  offers, and what its arguments and a conditional aggregate's where are. */
+function exprDef(doc, node = doc.$defs?.expr) {
   const all = forms(doc, node);
   return {
-    node,
     leaves: all.filter((f) => !f.properties?.fn).map((f) => f.title),
     fns: new Set(all.flatMap((f) => pinned(doc, f, 'fn'))),
     // what an argument of it is: the same definition, said beside its forms
     argsRef: beside(doc, node, 'args')?.items?.$ref,
-    // …and a conditional aggregate's where, where the level folds rows
+    // …and a conditional aggregate's where
     whereRef: beside(doc, node, 'where')?.items?.$ref,
   };
 }
 
-test('each level offers its own leaves and functions under a $defs entry its arguments refer back to', () => {
-  const pipeline = level('build_pipeline_model', 'expr');
-  assert.deepEqual(pipeline.leaves, ['a column — { column }', 'an event property — { property }', 'a constant — { value }', 'the current time — { now: true }']);
-  for (const fn of ['add', 'case', 'raw', 'eq', 'in', 'and', 'not', 'sum', 'count', 'percentile', 'row_number', 'lag']) assert.ok(pipeline.fns.has(fn), `a pipeline computes ${fn}`);
-  // a read runs over a stored table: no event property to read
-  const read = level('query_pipeline_model', 'expr');
-  assert.deepEqual(read.leaves, ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
-  // a semantic model: its columns and event properties, conditions, scalars and the task's aggregates — no raw SQL, no window
-  const model = level('build_semantic_model', 'expr');
-  assert.deepEqual(model.leaves, ['a column — { column }', 'an event property — { property }', 'a constant — { value }']);
-  for (const fn of ['eq', 'and', 'case', 'sum', 'count', 'percentile']) assert.ok(model.fns.has(fn), fn);
-  for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) assert.ok(!model.fns.has(fn), `a semantic model offers no ${fn}`);
-  // a derived metric: the metrics it reads, numbers, and the arithmetic over them
-  const derived = level('build_semantic_model', 'metric_expr');
-  assert.deepEqual(derived.leaves, ['a metric — { metric }', 'a number — { value }']);
-  assert.deepEqual([...derived.fns].sort(), [...DERIVED_FNS].sort());
-  // a metric query's where: the references group_by takes and constants — conditions, logic, scalars; no column, no fold
-  const query = level('query_semantic_model', 'expr');
-  assert.ok(query.leaves.includes('the metric time axis') && query.leaves.includes('an attribute of users') && query.leaves.includes('a constant — { value }'), JSON.stringify(query.leaves));
-  assert.ok(!query.leaves.some((t) => /\{ column \}|\{ property \}/.test(t)));
-  for (const fn of ['eq', 'or', 'not', 'date_part']) assert.ok(query.fns.has(fn), fn);
-  for (const fn of ['sum', 'count', 'row_number', 'raw']) assert.ok(!query.fns.has(fn), `a metric query's where offers no ${fn}`);
-  // the steps after a metric query read its result as a read reads a stored table — in an expression
-  // of their own beside the where's: its columns, constants and the time; a read's functions, no raw
-  const tail = level('query_semantic_model', 'read_expr');
-  assert.deepEqual(tail.leaves, read.leaves);
-  assert.deepEqual([...tail.fns].sort(), [...read.fns].sort());
-  for (const fn of ['sum', 'count', 'gt', 'row_number']) assert.ok(tail.fns.has(fn), `a step after a metric query computes ${fn}`);
-  assert.ok(!tail.fns.has('raw'), 'a read takes no raw SQL');
-  // every level recursive through its own definition; the event_property function is gone everywhere
-  for (const [tool, def] of [['build_pipeline_model', 'expr'], ['query_pipeline_model', 'expr'], ['build_semantic_model', 'expr'], ['build_semantic_model', 'metric_expr'], ['query_semantic_model', 'expr'], ['query_semantic_model', 'read_expr']]) {
-    const l = level(tool, def);
-    assert.equal(l.argsRef, `#/$defs/${def}`, `${tool}.${def}: its arguments are its own expressions`);
-    assert.ok(!l.fns.has('event_property'), `${tool}.${def}: an event property is a leaf`);
-    // a level that folds rows takes a conditional aggregate's where, in its own grammar; one that does not, none
-    assert.equal(l.whereRef, l.fns.has('count') ? `#/$defs/${def}` : undefined, `${tool}.${def}: an aggregate's where`);
+test('every tool that takes an expression carries the one definition, $defs.expr, built for its places, its arguments referring back to it', () => {
+  // the definition with no place named (an internal caller's): every leaf of the rows, every ref that
+  // names a value, every function
+  const one = exprDef({}, exprSchema(catalog));
+  assert.deepEqual(one.leaves.slice(0, 4), ['a column — { column }', 'an event property — { property }', 'a constant — { value }', 'the current time — { now: true }']);
+  for (const ref of ['{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ metric }', '{ time: "metric_time" }']) assert.ok(one.leaves.includes(ref), `${ref} is a leaf: ${JSON.stringify(one.leaves)}`);
+  assert.ok(!one.leaves.some((t) => /^\{ source \}$|event \}$/.test(t)), 'a ref that names no value (a source, an event) is no leaf');
+  assert.deepEqual([...one.fns].sort(), Object.keys(FNS).sort(), 'every function, windows and raw included');
+  // a tool's is the one builder's for ITS places (TOOL_PLACES): what they take together and nothing else,
+  // under the one name, never a level of its own beside it
+  for (const tool of ['build_pipeline_model', 'query_pipeline_model', 'build_semantic_model', 'query_semantic_model', 'build_pipeline_model.pipeline']) {
+    const doc = schemas[tool];
+    const places = TOOL_PLACES[tool.split('.')[0]].expr;
+    const l = exprDef(doc);
+    assert.deepEqual(l.leaves, exprDef({}, exprSchema(catalog, { places })).leaves, `${tool}: the leaves its places take`);
+    assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn))).sort(), `${tool}: the functions its places take`);
+    assert.equal(forms(doc, doc.$defs.expr).some((f) => f.properties?.over), places.some((p) => PLACES[p].windows), `${tool}: a window's form only where a place takes one`);
+    assert.equal(l.argsRef, '#/$defs/expr', `${tool}: its arguments are the one expression`);
+    assert.equal(l.whereRef, '#/$defs/expr', `${tool}: and so is an aggregate's where`);
+    assert.ok(!l.fns.has('event_property'), `${tool}: an event property is a leaf`);
+    for (const gone of ['read_expr', 'metric_expr', 'eventstream_expr']) assert.equal(doc.$defs[gone], undefined, `${tool}: no ${gone}`);
   }
+  const of = (tool) => exprDef(schemas[tool]);
+  // a pipeline build: the rows' leaves, every function — no ref (a metric, another model's column)
+  assert.deepEqual(of('build_pipeline_model').leaves, one.leaves.slice(0, 4));
+  assert.deepEqual([...of('build_pipeline_model').fns].sort(), Object.keys(FNS).sort());
+  // a read of stored rows: no event property and no raw — a build's
+  assert.deepEqual(of('query_pipeline_model').leaves, ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
+  assert.ok(!of('query_pipeline_model').fns.has('raw'));
+  // a semantic declaration: its rows' leaves and { metric } (a derived metric's), no raw, no window, no sketch
+  assert.deepEqual(of('build_semantic_model').leaves, [...one.leaves.slice(0, 4), '{ metric }']);
+  for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) assert.ok(!of('build_semantic_model').fns.has(fn), `a semantic declaration takes no ${fn}`);
+  // a metric query: what its where names (group_by's refs) and the steps' rows — no metric, no event property, no raw
+  const sq = of('query_semantic_model').leaves;
+  for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_semantic_model: ${leaf}`);
+  for (const leaf of ['{ metric }', 'an event property — { property }']) assert.ok(!sq.includes(leaf), `query_semantic_model: no ${leaf}`);
+  assert.ok(!of('query_semantic_model').fns.has('raw'));
+});
+
+// What a place takes of the one expression is ONE table (PLACES), read by the writer as it builds a value:
+// a leaf, a function or a window the place does not take is refused there, naming the place and what it
+// takes — a pipeline step over a source's rows, a read of stored rows (a read, the steps after a metric
+// query, a card's drill), a semantic model, a metric query's where, a derived metric.
+test('each place takes what its row in PLACES says, and a refusal names the place and what it takes', () => {
+  const d = getDialect('duckdb');
+  const cols = new Map([['a', { type: 'numeric' }], ['s', { type: 'string' }], ['t', { type: 'time' }]]);
+  // a place's own leaves (a metric, what group_by names) are the level's to resolve: a stand-in here
+  const refs = (e) => (e.metric !== undefined || e.source !== undefined ? { sql: '"r"', type: 'numeric', name: 'r' } : null);
+  const sql = (place, e) => exprSql(d, cols, e, 'x', { place, leaf: refs, catalog, source: 'events' });
+  const refused = (place, e, said) => assert.throws(() => sql(place, e), (err) => err.message.startsWith(`x: ${said} is not what ${PLACES[place].what} takes — it takes `), `${place}: ${JSON.stringify(e)}`);
+  const OVER_S = { partition_by: ['s'], order_by: [{ key: 't' }] };
+  const raw = { fn: 'raw', sql: 'upper({1})', args: [{ column: 's' }] };
+  assert.deepEqual(Object.keys(PLACES).sort(), ['derived_metric', 'metric_where', 'semantic_model', 'source_rows', 'stored_rows']);
+  // a step over a source's rows: the rows' leaves and every function — a metric, a ref of another model are elsewhere
+  assert.ok(sql('source_rows', raw).sql);
+  refused('source_rows', { metric: 'revenue' }, '{ metric }');
+  refused('source_rows', { source: 'users', column: 'country' }, '{ source, column }');
+  assert.throws(() => sql('source_rows', { metric: 'revenue' }), /a metric is query_semantic_model's/, 'and says where it is');
+  // a read of stored rows: no source, so no event property; no raw SQL — both a build's, from the task
+  assert.ok(sql('stored_rows', { fn: 'row_number', over: OVER_S }).sql);
+  assert.ok(sql('stored_rows', { now: true }).sql);
+  refused('stored_rows', raw, 'raw');
+  refused('stored_rows', { property: 'result_of_event_data' }, '{ property }');
+  assert.throws(() => sql('stored_rows', raw), /build from the task — build_pipeline_model\(\{ request: \{ action: "start", name, from_task \} \}\)/);
+  // a semantic model: no raw SQL, no window
+  assert.ok(sql('semantic_model', { now: true }).sql);
+  refused('semantic_model', { fn: 'raw', sql: '1' }, 'raw');
+  refused('semantic_model', { fn: 'row_number', over: OVER_S }, 'row_number');
+  refused('semantic_model', { fn: 'sum', args: [{ column: 'a' }], over: OVER_S }, 'a window (sum with over)');
+  // a metric query's where: what group_by names and constants — conditions, logic, scalars; no column, no fold
+  assert.ok(sql('metric_where', { fn: 'gt', args: [{ source: 'users', column: 'country' }, { value: 1 }] }).sql);
+  refused('metric_where', { column: 'a' }, '{ column }');
+  refused('metric_where', { metric: 'revenue' }, '{ metric }');
+  refused('metric_where', { fn: 'count' }, 'count');
+  refused('metric_where', { fn: 'json_field', args: [{ source: 'users', column: 'country' }], field: 'x' }, 'json_field');
+  // a derived metric: other metrics and constants, in arithmetic
+  assert.ok(sql('derived_metric', { fn: 'div', args: [{ metric: 'a' }, { metric: 'b' }] }).sql);
+  refused('derived_metric', { column: 'a' }, '{ column }');
+  refused('derived_metric', { fn: 'sum', args: [{ metric: 'a' }] }, 'sum');
+  refused('derived_metric', { fn: 'eq', args: [{ metric: 'a' }, { value: 1 }] }, 'eq');
+  assert.deepEqual(PLACES.derived_metric.fns, ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest']);
+  // a condition list at a place is checked alike, item by item
+  assert.throws(() => conditionListSql(d, cols, [{ fn: 'eq', args: [{ column: 's' }, { value: 'x' }] }, { fn: 'eq', args: [{ metric: 'm' }, { value: 1 }] }], 'where', { place: 'stored_rows' }), /\{ metric \} is not what a read of stored rows takes/);
+  // a feature passes a place of its own, in the same shape: the refusal names it
+  assert.throws(() => exprSql(d, cols, raw, 'x', { place: { ...PLACES.stored_rows, what: 'a feature\'s where', hint: null } }), (err) => err.message === 'x: raw is not what a feature\'s where takes — it takes { column }, { value }, { now: true }, and every function but raw');
 });
 
 test('a function takes its own arguments and parameters, and nothing else', () => {
@@ -176,7 +227,7 @@ test('a missing value is tested with is_null / is_not_null: a comparison with a 
 });
 
 test('every earlier spelling converts to the one grammar — and a value in today\'s spelling is left as it is', () => {
-  const country = { model: 'users', attribute: 'country' };
+  const country = { source: 'users', column: 'country' };
   // a condition, in each subject it had, and its groups
   for (const [earlier, today, opts] of [
     [{ column: 'a', op: 'gt', value: 1 }, { fn: 'gt', args: [col('a'), val(1)] }],
@@ -186,6 +237,7 @@ test('every earlier spelling converts to the one grammar — and a value in toda
     [{ left: { fn: 'length', args: [col('a')] }, op: 'gt', right: col('b') }, { fn: 'gt', args: [{ fn: 'length', args: [col('a')] }, col('b')] }],
     [{ field: 'p', op: 'eq', value: 'x' }, { fn: 'eq', args: [{ property: 'p' }, val('x')] }, { subject: () => 'property' }],
     [{ field: 'p', op: 'eq', value: 'x' }, { fn: 'eq', args: [col('p'), val('x')] }, { subject: () => 'column' }],
+    [{ field: { model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'DE'] }, { fn: 'in', args: [country, val('US'), val('DE')] }],
     [{ field: country, op: 'in', value: ['US', 'DE'] }, { fn: 'in', args: [country, val('US'), val('DE')] }],
     [{ or: [{ column: 'a', op: 'gt', value: 1 }, { and: [{ column: 'b', op: 'is_null' }, { column: 'c', op: 'eq', value: true }] }] }, { fn: 'or', args: [{ fn: 'gt', args: [col('a'), val(1)] }, { fn: 'and', args: [{ fn: 'is_null', args: [col('b')] }, { fn: 'eq', args: [col('c'), val(true)] }] }] }],
     [{ and: [{ column: 'a', op: 'gt', value: 1 }] }, { fn: 'gt', args: [col('a'), val(1)] }],
@@ -222,9 +274,9 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   const measureToday = { name: 'r', expr: { fn: 'sum', args: [col('price')] } };
   assert.deepEqual(currentMeasure(measureToday), measureToday);
   assert.equal(isEarlierMeasure(measureToday), false);
-  // a semantic model's dimension, as declared and as an update removes it
+  // a semantic model's dimension, as declared and as an update removes it (its model, `from` then, is its `source`)
   assert.deepEqual(currentDimension({ field: 'install_date', grain: 'week', label: 'W' }), { column: 'install_date', grain: 'week', label: 'W' });
-  assert.deepEqual(currentDimension({ from: 'users', field: 'country' }), { from: 'users', column: 'country' });
+  assert.deepEqual(currentDimension({ from: 'users', field: 'country' }), { source: 'users', column: 'country' });
   assert.deepEqual(currentDimension({ field: 'p' }, { subject: () => 'property' }), { property: 'p' });
   const dimensionToday = { column: 'country', label: 'Country' };
   assert.equal(currentDimension(dimensionToday), dimensionToday);
@@ -242,6 +294,61 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   // a field only renamed is the refusal's hint (here that field is called 'steps'), not a conversion
   const named = { context_id: 'abcdef123456', stages: [{ stage: 'limit', limit: 5 }] };
   assert.equal(currentOf(named), named);
+});
+
+// THE ONE REF, THE ONE INCLUDE, A SOURCE'S NAME (src/earlier-spelling.js): what a metric query named
+// { model, attribute, via? } is the ref it names now — a model's column, an event property the task
+// declared a dimension, or a dimension it computed, which reading the caller that knows says
+// (opts.subject); a semantic model item's and a removed dimension's `from` is `source`, an update's `task`
+// its `name`; each "show me more" flag is an item of the one list `include`. Each converter leaves a
+// value in today's spelling as it is.
+test('a { model, attribute } ref, a `from`, an update\'s `task` and the include flags convert to today\'s spelling', () => {
+  const old = { model: 'users', attribute: 'country' };
+  assert.ok(isEarlierRef(old));
+  assert.deepEqual(currentRef(old), { source: 'users', column: 'country' }, 'a column without a subject to ask');
+  assert.deepEqual(currentRef({ ...old, via: 'user' }), { source: 'users', column: 'country', via: 'user' }, 'via stays with the column');
+  assert.deepEqual(currentRef({ model: 'events', attribute: 'level_id_of_event_data' }, { subject: () => 'property' }), { source: 'events', property: 'level_id_of_event_data' });
+  assert.deepEqual(currentRef({ model: 'users', attribute: 'is_us' }, { subject: () => 'dimension' }), { semantic_model: ['users'], dimension: 'is_us' });
+  // the subject is asked with the name and its model
+  const asked = [];
+  currentRef(old, { subject: (attribute, model) => { asked.push([attribute, model]); return 'column'; } });
+  assert.deepEqual(asked, [['country', 'users']]);
+  for (const today of [{ source: 'users', column: 'country' }, { source: 'events', property: 'p' }, { semantic_model: ['users'], dimension: 'd' }, { entity: 'user' }, { time: 'metric_time', grain: 'day' }]) {
+    assert.equal(isEarlierRef(today), false);
+    assert.equal(currentRef(today), today, JSON.stringify(today));
+    assert.equal(currentOf(today), today, JSON.stringify(today));
+  }
+  // …wherever it stands: an argument of an expression, an earlier condition's field
+  assert.deepEqual(currentExpression({ fn: 'eq', args: [old, val('US')] }), { fn: 'eq', args: [{ source: 'users', column: 'country' }, val('US')] });
+  assert.deepEqual(currentOf([{ fn: 'not', args: [{ fn: 'eq', args: [old, val('US')] }] }]), [{ fn: 'not', args: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, val('US')] }] }]);
+  // a semantic model item, a dimension an update removes, an update's task
+  const COUNT = { name: 'n', expr: { fn: 'count' } };
+  assert.deepEqual(currentOf({ from: 'events', measures: [COUNT] }), { source: 'events', measures: [COUNT] });
+  assert.deepEqual(currentOf({ from: 'users', column: 'country' }), { source: 'users', column: 'country' });
+  assert.deepEqual(currentOf({ action: 'update', context_id: 'abcdef123456', task: 't1', semantic_models: [{ from: 'users' }] }), { action: 'update', context_id: 'abcdef123456', name: 't1', semantic_models: [{ source: 'users' }] });
+  const item = { source: 'events', measures: [COUNT] };
+  assert.equal(currentOf(item), item);
+  // a join stage's between and a funnel metric's from are no source (no model named `from` there)
+  const between = { stage: 'join', with: 'users', via: 'user', attrs: [col('country')], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } };
+  assert.equal(currentOf(between), between);
+  // the flags: each true one an item of `include`, after what the list already holds; a false one asks for nothing
+  for (const [flags, include] of [
+    [{ include_columns: true }, ['columns']],
+    [{ include_steps: true, include_columns: true }, ['steps', 'columns']],
+    [{ include_yaml: true }, ['yaml']],
+    [{ include_plan: true }, ['plan']],
+    [{ include_coverage: true }, ['coverage']],
+    [{ detail: 'full' }, ['details']],
+    [{ include: ['steps'], include_columns: true }, ['steps', 'columns']],
+  ]) {
+    assert.ok(isEarlierInclude({ a: 1, ...flags }), JSON.stringify(flags));
+    assert.deepEqual(currentInclude({ a: 1, ...flags }), { a: 1, include }, JSON.stringify(flags));
+  }
+  assert.deepEqual(currentInclude({ a: 1, include_columns: false }), { a: 1 });
+  assert.deepEqual(currentInclude({ a: 1, detail: 'summary' }), { a: 1 }, 'a summary was the default: nothing more');
+  for (const today of [{ a: 1 }, { a: 1, include: ['columns'] }]) assert.equal(currentInclude(today), today);
+  // a value that only looks like one is no flag
+  assert.equal(isEarlierInclude({ detail: true }), false);
 });
 
 // A QUERY'S INPUT KEPT WITH ITS TASK is read back in today's spelling (src/earlier-spelling.js
@@ -263,8 +370,15 @@ test('a stored query input is carried over as steps: stages, transform and a met
   const batch = currentQueryInput({ context_id: 'abcdef123456', queries: [today, { metrics: ['dau'], order_by: keys }, { stages: [limit] }] });
   assert.equal(batch.queries[0], today);
   assert.deepEqual(batch.queries.slice(1), [{ metrics: ['dau'], steps: [{ stage: 'order_by', keys }] }, { steps: [limit] }]);
+  // what it grouped and filtered by, as { model, attribute }, is the ref it names; its plan, `include`
+  const country = { model: 'users', attribute: 'country' };
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], group_by: [country, { time: 'metric_time', grain: 'day' }], where: [{ fn: 'eq', args: [country, val('US')] }], dry_run: true, include_plan: true }), {
+    metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'day' }], where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, val('US')] }], dry_run: true, include: ['plan'],
+  });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], group_by: [{ model: 'events', attribute: 'p' }] }, { subject: () => 'property' }), { metrics: ['dau'], group_by: [{ source: 'events', property: 'p' }] });
+  assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', queries: [{ metrics: ['dau'], group_by: [country] }] }).queries, [{ metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }] }]);
   // today's spelling is the same object
-  for (const v of [today, { context_id: 'abcdef123456' }, { task_ids: ['abcdef123456'], offset: 0, limit: 10 }, { context_id: 'abcdef123456', queries: [today] }]) assert.equal(currentQueryInput(v), v, JSON.stringify(v));
+  for (const v of [today, { context_id: 'abcdef123456' }, { task_ids: ['abcdef123456'], offset: 0, limit: 10 }, { context_id: 'abcdef123456', queries: [today] }, { metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }], include: ['plan'] }]) assert.equal(currentQueryInput(v), v, JSON.stringify(v));
   // a window's order_by is not a metric query's (no metrics beside it)
   assert.equal(currentQueryInput(OVER), OVER);
   const windowed = { stage: 'compute', name: 'n', expr: { fn: 'row_number', over: OVER } };

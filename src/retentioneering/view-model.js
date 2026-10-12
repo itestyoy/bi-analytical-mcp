@@ -98,7 +98,7 @@ export const DEFAULT_EDGES_PER_EVENT = 3;
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const none = (reason) => ({ kind: 'none', reason });
 
-export function retentioneeringViewModel(drawn, args = {}) {
+export function retentioneeringViewModel(drawn) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
@@ -113,7 +113,7 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!hasCard(r.kind, diffForm(r))) return none('no_card');
   const kind = KINDS[r.kind];
   if (r.diff) return kind.diff(head, r);
-  return kind.card(head, r, { weight: args.edge_weight || drawn.edge_weight, synthetic });
+  return kind.card(head, r, { weight: drawn.edge_weight, synthetic });
 }
 
 /** A library name as a reader reads it: "paths_with_start" → "Paths with start", "path_stats.user_id"

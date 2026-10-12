@@ -1,7 +1,8 @@
 // AN EVENTSTREAM SHAPED STEP BY STEP — its summary and the shape it has at each step (events, path
 // columns, segments with their levels, custom columns); the library's steps, each checked by the
 // library itself on stand-ins of that shape as it is added, edited, inserted or deleted; preview and
-// fork; and materialize, which runs the steps not yet run in one dbt Python model.
+// fork; materialize, which runs the steps not yet run in one dbt Python model; and an eventstream
+// removed (delete_context, in the feature's form).
 
 import yaml from 'js-yaml';
 import { dbtFailure } from '../dbt/index.js';
@@ -12,7 +13,7 @@ import { getDialect } from '../dialects/index.js';
 import { compileStepsModel, analysisModelConfig } from './python.js';
 import { byText } from './view-model.js';
 import { BUILD, QUERY, ES_COLUMNS } from './names.js';
-import { serially, basePaths } from './contexts.js';
+import { serially, basePaths, pathContext } from './contexts.js';
 import { pathKey, sampleOf, eventstreamOf, opParams } from './query.js';
 import { currentStep } from './earlier.js';
 
@@ -168,7 +169,7 @@ export async function checkSteps(feature, view, from, fieldOf) {
 
 /** A shape as a listing shows it (preview, a context's description): the event names (the first 200),
  *  the path columns, each segment's levels (the first 30) and the custom columns — or, `whole` (a step
- *  action's include_columns), every event and every level the shape knows. */
+ *  action's include: ["columns"]), every event and every level the shape knows. */
 export function describeShape(shape, { whole = false } = {}) {
   if (!shape) return null;
   const events = whole ? Infinity : 200;
@@ -192,6 +193,9 @@ export function shapeChange(before, after) {
   };
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v.length));
 }
+
+/** Whether a step action's `include` asks for more of the answer: 'columns' (the whole shape), 'steps'. */
+const includes = (input, what) => Array.isArray(input.include) && input.include.includes(what);
 
 export async function editSteps(engine, feature, ctx, name, es, action, input) {
   await builtShape(engine, name, es, ctx);
@@ -241,14 +245,14 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
   engine.ctxs.touch(ctx.id);
   // ANSWERED AS THE PIPELINE BUILDER ANSWERS: what the call changed, the steps it added (or the one an
   // edit or an insert put in place) each with what it changed and why one was not checked, and
-  // steps_count — every step with include_steps, the whole shape after them with include_columns
+  // steps_count — every step with include: ["steps"], the whole shape after them with ["columns"]
   const at = action === 'edit_step' || action === 'insert_step' ? from : null;
   const net = action === 'add_steps' ? null : shapeChange(endBefore, shapeAtEnd(es));
   const pending = es.steps.length - (es.checkpoint?.upto || 0);
   const unchecked = es.steps.map((s, i) => (s.checked ? null : i + 1)).filter(Boolean);
   return {
     ok: true, context_id: ctx.id, eventstream: name, action,
-    ...(input.include_steps
+    ...(includes(input, 'steps')
       ? { steps: listSteps(es) }
       : {
         ...(action === 'add_steps' ? { steps_added: checked.map((_, j) => stepEntry(es, from + j)) } : {}),
@@ -256,12 +260,12 @@ export async function commitSteps(engine, feature, ctx, name, es, action, input)
         steps_count: es.steps.length,
       }),
     ...(net && Object.keys(net).length ? { changed: net } : {}),
-    ...(input.include_columns ? { shape: describeShape(shapeAtEnd(es), { whole: true }) } : {}),
+    ...(includes(input, 'columns') ? { shape: describeShape(shapeAtEnd(es), { whole: true }) } : {}),
     ...(unchecked.length ? { unchecked_steps: unchecked } : {}),
     materialized_through: es.checkpoint?.upto || 0,
     ...(dropped ? { checkpoint_dropped: `the table of steps 1..${upto} no longer stands for them — the next materialize builds from the eventstream's start` } : {}),
     next: pending
-      ? `add more steps, or materialize them: ${BUILD}({ request: { action: 'materialize', context_id: '${ctx.id}', eventstream: '${name}' } }) — the analyses read what is materialized (include_columns: true or preview gives the eventstream's whole shape)`
+      ? `add more steps, or materialize them: ${BUILD}({ request: { action: 'materialize', context_id: '${ctx.id}', eventstream: '${name}' } }) — the analyses read what is materialized (include: ["columns"] or preview gives the eventstream's whole shape)`
       : `nothing to materialize: ${QUERY}({ request: { context_id: '${ctx.id}', eventstream: '${name}', analyses: [...] } }) reads it as it is`,
   };
 }
@@ -312,11 +316,32 @@ export function fork(engine, ctx, input) {
   engine.ctxs.touch(ctx.id);
   return {
     ok: true, context_id: ctx.id, eventstream: input.name, action: 'fork', forked_from: child.forked_from,
-    ...(input.include_steps ? { steps: listSteps(child) } : { steps_count: after }),
+    ...(includes(input, 'steps') ? { steps: listSteps(child) } : { steps_count: after }),
     materialized_through: child.checkpoint?.upto || 0,
-    ...(input.include_columns ? { shape: describeShape(shapeAtEnd(child), { whole: true }) } : {}),
+    ...(includes(input, 'columns') ? { shape: describeShape(shapeAtEnd(child), { whole: true }) } : {}),
     next: `shape '${input.name}' with its own steps (add_steps, edit_step, …) — '${parentName}' is not touched`,
   };
+}
+
+/**
+ * An eventstream removed from its context — delete_context({ what: "eventstream", context_id, eventstream })
+ * — the context and its other eventstreams kept. Only its name goes: its tables stay in the context (a
+ * fork made from it reads the same base table, and the tasks that built and read it still read back)
+ * until the context is dropped, and a build of it still in flight finishes into no eventstream. Done with
+ * the draft held, so a step being added to it right now is not lost in between.
+ */
+export function deleteEventstream(engine, feature, input) {
+  const ctx = pathContext(engine, input.context_id);
+  return serially(feature, ctx.id, () => {
+    const { name } = eventstreamOf(ctx, input.eventstream);
+    delete ctx.state.retentioneering.eventstreams[name];
+    engine.ctxs.touch(ctx.id);
+    const left = Object.keys(ctx.state.retentioneering.eventstreams);
+    return {
+      removed: true, context_id: ctx.id, eventstream: name,
+      note: `eventstream '${name}' is removed; its tables stay until the context is dropped (delete_context({ request: { context_id: '${ctx.id}' } })), so the tasks that built and read it still read back. ${left.length ? `The context holds ${left.join(', ')}.` : `The context holds no eventstream now: ${BUILD}({ request: { context_id: '${ctx.id}', name, source, … } }) starts one.`}`,
+    };
+  });
 }
 
 export const ORDER_COL = 'event_order';

@@ -27,7 +27,7 @@
  * server runs too; this file only draws it, with the result view's shadcn pieces and theme.
  */
 import { App } from '@modelcontextprotocol/ext-apps';
-import { applyHostContext, toolInputOf } from '../../shared/host.js';
+import { applyHostContext } from '../../shared/host.js';
 import { retentioneeringViewModel, byText } from '../../../retentioneering/view-model.js';
 import { el, badge, card, stat, formatNumber, formatShare } from '../../shared/ui.js';
 import { icon } from '../../shared/icons.js';
@@ -71,7 +71,7 @@ const formatDate = (v) => {
 /** "33.3% · 4 paths" — a share with the count it stands for, when the number of paths is known. */
 const shareWithCount = (share, paths) => (paths ? `${formatShare(share)} · ${formatNumber(Math.round(share * paths))} paths` : formatShare(share));
 
-const state = { toolInput: null, displayMode: 'inline' };
+const state = { displayMode: 'inline' };
 
 function payloadOf(result) {
   if (!result) return null;
@@ -103,7 +103,7 @@ function scopeBadges(model) {
 
 function render(result) {
   loadingEl.hidden = true;
-  const model = retentioneeringViewModel(payloadOf(result), state.toolInput || {});
+  const model = retentioneeringViewModel(payloadOf(result));
   if (model.kind === 'none') { showStatus(model.reason === 'error' ? 'The analysis could not be drawn.' : 'Nothing to draw for this analysis.'); return; }
   statusEl.hidden = true;
   mainEl.hidden = false;
@@ -776,7 +776,6 @@ function handleHostContextChanged(ctx) {
 }
 
 const app = new App({ name: 'Path Analysis', version: '1.0.0' });
-app.ontoolinput = (params) => { state.toolInput = toolInputOf(params); };
 app.ontoolresult = (result) => render(result);
 app.ontoolcancelled = () => showStatus('The call was cancelled.');
 app.onhostcontextchanged = handleHostContextChanged;

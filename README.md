@@ -93,7 +93,7 @@ AI ──► query_semantic_model (enum-constrained)
   with dbt/MetricFlow output cleaned (ANSI + log timestamps stripped, the
   meaningful Error/Database Error/Parsing Error portion surfaced). Path/metric
   validation errors are actionable (e.g. a group_by on a model the context does not read names
-  the update that loads it: `semantic_models: [{ from: 'users' }]`).
+  the update that loads it: `semantic_models: [{ source: 'users' }]`).
 
 ## Recipes
 
@@ -104,7 +104,7 @@ The recipes shipped with the server are per TECHNIQUE, not per business task: a
 business shape differs per product, the technique does not. Five technical
 families — `metric_types` (a ratio and other derived formulas, cumulative, conversion window,
 boolean measure, the aggregation chosen per question, a governed measure),
-`joins` (an attribute of another model, a cohort grid on two time axes, two
+`joins` (a column of another model, a cohort grid on two time axes, two
 independent sources, a pipeline join by relationship name, a point-in-time
 join), `pipeline` (window lag, episodes by gap, an age axis, an ordered
 sequence, unnest, reshape, a volume/coverage check), `experiment` (A/B: proportion,

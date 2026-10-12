@@ -8,7 +8,7 @@ import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
 import { rankFuzzy } from './fuzzy.js';
-import { currentOf } from './earlier-spelling.js';
+import { currentOf, isEarlierInclude, isEarlierRef } from './earlier-spelling.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -56,6 +56,9 @@ export const CROSS_PATH_SPELLING = {
   since: 'time_range',
   until: 'time_range',
   model: 'source',
+  // a model's column, which semantic_index's views and what a note is about once named a property as an
+  // event's payload is named (hinted only where `column` takes the name: HINT_WHERE_VALUE_TAKEN)
+  property: 'column',
   // the list a tool runs in order, and one of its items — hinted only where the field it became is
   // taken, so a stage's own `stage` tag (its kind, in a form with no `step`) is never touched
   stages: 'steps',
@@ -74,9 +77,11 @@ export const CROSS_PATH_SPELLING = {
  * thing in another tool: `source` is a catalog model where a view, a pipeline or a note is about one,
  * and where an error came from (tool | task | startup) in explore_errors. A spelling listed here is
  * hinted only where the field it names takes the value written under it — `model: 'events'` is called
- * `source` where `source` takes 'events' — and, having no value to test, never as a value of an enum.
+ * `source` where `source` takes 'events', `property: 'country'` is called `column` where `column` takes
+ * 'country' (an event property is `property` wherever it is one) — and, having no value to test, never
+ * as a value of an enum.
  */
-const HINT_WHERE_VALUE_TAKEN = new Set(['model']);
+const HINT_WHERE_VALUE_TAKEN = new Set(['model', 'property']);
 
 /**
  * What this path calls `used`, when it has a name for it at all. `takes(alt)` says whether the field
@@ -90,11 +95,13 @@ function otherSpelling(used, allowed, takes = null) {
   return alt;
 }
 
-/** `takes` for otherSpelling over a form's fields: whether the field `alt` of `node` takes `value`. */
+/** `takes` for otherSpelling over a form's fields: whether the field `alt` of `node` names `value` among
+ *  its own (an enum or a const) — a free name (an expression's `{ column }`) takes any, so a misspelt
+ *  event property is not told it is a column. */
 function fieldTakes(root, node, value) {
   return (alt) => {
     const field = deref(root, node?.properties?.[alt]);
-    return isPlainObject(field) && nodeValidator(root, field)(value);
+    return isPlainObject(field) && (Array.isArray(field.enum) || field.const !== undefined) && nodeValidator(root, field)(value);
   };
 }
 
@@ -373,8 +380,11 @@ function explainNode(root, n, value, memo) {
   const siblings = unionSiblings(n);
   const own = siblings ? explain(root, siblings, value, memo) : [];
   const branches = n.anyOf.map((b) => deref(root, b));
-  // a value one branch takes fails only on the siblings
-  if (branches.some((b) => nodeValidator(root, b)(value))) return own;
+  // a value one branch takes fails only on the siblings. The union's own validation said already whether
+  // a branch takes it (its anyOf refused, or not): the branches are asked again only where one does —
+  // over a deep value (an and / or tree) every branch asked validates all of it
+  const noneTakes = errors.some((e) => e.keyword === 'anyOf' && e.instancePath === '' && e.schemaPath === '#/anyOf');
+  if (!noneTakes && branches.some((b) => nodeValidator(root, b)(value))) return own;
   // a union of constraints rather than of forms is said as what it asks for, in one sentence
   if (branches.every((b) => Object.keys(b).length === 1 && Array.isArray(b.required))) {
     return dedupe([...own, { keyword: 'requiresOneOf', instancePath: '', params: { keys: branches.flatMap((b) => b.required) } }]);
@@ -390,6 +400,19 @@ function explainNode(root, n, value, memo) {
   let candidates = branches.map((_, i) => i);
   let named = false;
   let defaults = null;
+  // A field the value spells as another path does (CROSS_PATH_SPELLING — `model` where this form says
+  // `source`) stands for the field it names here: it is no unknown field of the form, and the field it
+  // stands for is not missing from it — the refusal says the name instead (describe, additionalProperties).
+  // (once per branch: it is asked for every field given of every candidate, and a field it tests validates)
+  const respelledOf = new Map();
+  const respelled = (b) => {
+    if (respelledOf.has(b)) return respelledOf.get(b);
+    const fields = Object.keys(b?.properties || {});
+    const out = new Map();
+    if (isPlainObject(value)) for (const k of Object.keys(value)) { const alt = !fields.includes(k) && otherSpelling(k, fields, fieldTakes(root, b, value[k])); if (alt) out.set(k, alt); }
+    respelledOf.set(b, out);
+    return out;
+  };
   // the fields that tell the branches apart — pinned in every one, to different values — narrow them in
   // turn (an `action`, then a `metric`): the value given picks; left out, the forms that may leave it
   // out are the default ones, preferred on a tie but not assumed — the caller may have forgotten it
@@ -413,10 +436,12 @@ function explainNode(root, n, value, memo) {
     }
     // then a field pinned in SOME branches, the others closed without it (an expression's `fn`: the
     // function forms pin it, a column or a constant has no such field): the value given picks too — and
-    // a value none of them takes is refused as that, with the values there are (an unknown function)
+    // a value none of them takes is refused as that, with the values there are (an unknown function). A
+    // form that takes the field under its own name (respelled: a users `column` for a `property`) is not
+    // closed without it.
     for (const key of Object.keys(value)) {
       const taking = candidates.filter((i) => pins[i].has(key) && pins[i].get(key).includes(value[key]));
-      const closedWithout = (b) => b.additionalProperties === false && !(b.properties && key in b.properties);
+      const closedWithout = (b) => b.additionalProperties === false && !(b.properties && key in b.properties) && !respelled(b).has(key);
       // (of the forms that take every OTHER pinned value given: a { source: 'users', property } names
       // the users form, whose properties are the ones to list — not every source's)
       const pinning = candidates.filter((i) => pins[i].has(key) && Object.keys(value).every((k) => k === key || !pins[i].has(k) || pins[i].get(k).includes(value[k])));
@@ -437,16 +462,10 @@ function explainNode(root, n, value, memo) {
   // did not mean this mode at all; `type` is nearly as strong (not even shaped like it); a missing
   // required field means they meant it and left something out; a bad enum/const value means they DID
   // name it and got the value wrong — that is the message worth showing, so it costs least.
+  // A field this form takes under another name, with a value the field takes, is the nearest miss of
+  // all: the caller named this form's field as another path spells it (respelled, above).
   const weight = (e) => ({ additionalProperties: 10, type: 8, required: 6, pinnedNone: 3 }[e.keyword] ?? 1);
-  // A field the value spells as another path does (CROSS_PATH_SPELLING — `model` where this form says
-  // `source`) stands for the field it names here: it is no unknown field of the form, and the field it
-  // stands for is not missing from it — the refusal says the name instead (describe, additionalProperties).
-  const respelled = (b) => {
-    const fields = Object.keys(b?.properties || {});
-    const out = new Map();
-    if (isPlainObject(value)) for (const k of Object.keys(value)) { const alt = !fields.includes(k) && otherSpelling(k, fields, fieldTakes(root, b, value[k])); if (alt) out.set(k, alt); }
-    return out;
-  };
+  const weighed = (alts) => (e) => (e.keyword === 'additionalProperties' && e.instancePath === '' && alts.has(e.params.additionalProperty) ? 0.5 : weight(e));
   // How far a form is from the value, field by field, in three steps. Furthest: a field it lacks that
   // another form REQUIRES — the field that names another mode (an `event`, a `bundle`), so the value
   // meant that mode. Then: a field it pins to ONE value (its tag — the source a { source, property }
@@ -460,28 +479,51 @@ function explainNode(root, n, value, memo) {
   // These, the value's own fields, decide before whatever lies deeper inside the fields a form knows — a
   // list of views with one bad item is still the { views } form, not the empty one that knows no
   // `views` (errors under a field would otherwise outweigh the field).
-  const scored = candidates.map((i) => {
+  const read = (i, strays) => ({ i, lacksMode: strays.filter((k) => identifying.has(k)).length, mismatched: mismatched(i), unknown: strays.length });
+  const scoreOf = (i) => {
     const alts = respelled(branches[i]);
     const standsFor = new Set(alts.values());
     const es = explain(root, branches[i], value, memo).filter((e) => !(e.keyword === 'required' && e.instancePath === '' && standsFor.has(e.params.missingProperty)));
     const strays = es.filter((e) => e.keyword === 'additionalProperties' && e.instancePath === '' && !alts.has(e.params.additionalProperty)).map((e) => e.params.additionalProperty);
-    return { i, es, lacksMode: strays.filter((k) => identifying.has(k)).length, mismatched: mismatched(i), unknown: strays.length, score: es.reduce((s, e) => s + weight(e), 0) };
-  });
+    return { ...read(i, strays), es, score: es.reduce((s, e) => s + weighed(alts)(e), 0) };
+  };
+  // A closed form's strays are its own fields' business — the fields given it does not know — so those
+  // three are read off the form, and only the forms that tie on them are validated for their score (of
+  // a long union, a leaf with a stray field at every level of a deep tree would otherwise validate every
+  // form at each); a form that is a union of its own says its strays through its own reading.
+  const strayOf = (i) => {
+    const b = branches[i];
+    if (Array.isArray(b.anyOf)) return null;
+    if (!isPlainObject(value) || b.additionalProperties !== false) return [];
+    const alts = respelled(b);
+    return Object.keys(value).filter((k) => !(b.properties && k in b.properties) && !alts.has(k));
+  };
+  const byShape = (a, b) => a.lacksMode - b.lacksMode || a.mismatched - b.mismatched || a.unknown - b.unknown;
+  const shaped = candidates.map((i) => { const strays = strayOf(i); return strays ? read(i, strays) : scoreOf(i); });
+  const closest = shaped.reduce((m, x) => (byShape(x, m) < 0 ? x : m));
+  const scored = shaped.filter((x) => byShape(x, closest) === 0).map((x) => (x.es ? x : scoreOf(x.i)));
   const best = scored.sort((a, b) => a.lacksMode - b.lacksMode || a.mismatched - b.mismatched || a.unknown - b.unknown || a.score - b.score || (defaults ? (defaults.has(b.i) ? 1 : 0) - (defaults.has(a.i) ? 1 : 0) : 0))[0];
   // the modes are named unless the value named its own — or meant the default one, which it need not name;
   // a value that gives a pinned field (an expression's `fn`) is told the forms that take what it gave
   // — or, where nothing given is pinned, the forms that know every field it gave; and of a long union
   // (an expression's dozens of forms) the ones it came as close to as the closest. A field given that
   // none of those knows names a form too (a `guide` beside a `source`), so the forms that take it are
-  // said with them: the caller mixed two forms, and both are what it may have meant.
+  // said with them: the caller mixed two forms, and both are what it may have meant. Where no form takes
+  // every pinned value given, the forms whose TAGS take it (a field pinned to one value: the source a
+  // { source, column } form is of) are the ones meant — a name its vocabulary lacks is a misspelling there.
   const knows = (i, k) => !!branches[i].properties && k in branches[i].properties;
-  const agreeing = isPlainObject(value) ? candidates.filter((i) => Object.keys(value).some((k) => pins[i].has(k)) && Object.keys(value).every((k) => !pins[i].has(k) || pins[i].get(k).includes(value[k]))) : [];
+  const agree = (pinned) => (isPlainObject(value) ? candidates.filter((i) => Object.keys(value).some((k) => pinned(i, k)) && Object.keys(value).every((k) => !pinned(i, k) || pins[i].get(k).includes(value[k]))) : []);
+  const agreeingAll = agree((i, k) => pins[i].has(k));
+  const agreeing = agreeingAll.length ? agreeingAll : agree((i, k) => pins[i].has(k) && new Set(pins[i].get(k)).size === 1);
   const knowing = isPlainObject(value) && Object.keys(value).length ? candidates.filter((i) => Object.keys(value).every((k) => knows(i, k))) : [];
   const tied = scored.filter((x) => x.lacksMode === best.lacksMode && x.mismatched === best.mismatched && x.unknown === best.unknown && x.score === best.score).map((x) => x.i);
   const narrowed = agreeing.length ? agreeing : knowing.length ? knowing : candidates.length > LONG_UNION ? tied : candidates;
   const unheard = isPlainObject(value) ? Object.keys(value).filter((k) => !narrowed.some((i) => knows(i, k))) : [];
   const meant = [...narrowed, ...candidates.filter((i) => !narrowed.includes(i) && unheard.some((k) => knows(i, k)))];
-  const label = (named && candidates.length === 1) || defaults?.has(best.i) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(meant.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
+  // (a union of one form — a group of one, where a deployment offers one — names no choice; nor does a
+  // union whose closest branch is a union of its own — a group of forms, the ref inside what a note is
+  // about: the innermost union names the forms, and a group's title is no form to write)
+  const label = (named && candidates.length === 1) || defaults?.has(best.i) || branches.length === 1 || Array.isArray(branches[best.i].anyOf) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(meant.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);
 }
 
@@ -493,6 +535,16 @@ function dedupe(errors) {
 /** How many raw errors the validator finds in `value` (0: it validates). */
 function errorCount(validator, value) {
   return validator(value) ? 0 : (validator.errors || []).length;
+}
+
+/** Whether `input` is refused at `at` only for a name the field's values come near — a misspelt one. */
+function misspeltName(validator, input, at) {
+  const es = explain(validator.schema, validator.schema, input, new Map()).filter((e) => within(e.instancePath, at) && e.keyword !== 'oneOfNamed');
+  return es.length > 0 && es.every((e) => {
+    const vals = e.keyword === 'enum' ? e.params.allowedValues : e.keyword === 'pinnedNone' ? e.params.values : null;
+    const used = valueAt(input, e.instancePath);
+    return Array.isArray(vals) && typeof used === 'string' && rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 1 }).length > 0;
+  });
 }
 
 /** `value` with the node at `segs` replaced by `node` — copied along the path, the rest shared. */
@@ -512,8 +564,13 @@ function replacedAt(value, segs, node) {
  * that converts (src/earlier-spelling.js, the converters a kept value is carried over by) is refused as
  * a whole, with its conversion: "write { fn: "eq", args: [ … ] }". A conversion is said only where the
  * input with it in place has fewer errors — a value that merely looks like an earlier one is left to the
- * forms — and where a name could be a column or an event property, the reading the schema takes is
- * said. Never an alias: the value is refused all the same. → Map(path → the value as it is now)
+ * forms — and where a name could be a column or an event property (or, of a { model, attribute }, a
+ * dimension a task computed), the reading the schema takes is said, the first of them on a tie. A
+ * relationship (`via`) the column is not reached through, and a flag asked of a form that shows nothing
+ * more, are readings too — without them. A dimension a task computed is a name the schema cannot know,
+ * so that reading is said only where the column reading misses on more than a misspelt name (one the
+ * column's values come near: that column is meant). Never an alias: the value is refused all the same.
+ * → Map(path → the value as it is now)
  */
 function earlierSpellings(validator, input, errors) {
   const found = new Map();
@@ -531,12 +588,20 @@ function earlierSpellings(validator, input, errors) {
       const value = valueAt(working, at);
       if (!value || typeof value !== 'object') continue;
       const seen = new Set();
-      const candidates = [currentOf(value, { subject: () => 'property' }), currentOf(value)]
-        .filter((c) => c !== value && !seen.has(JSON.stringify(c)) && seen.add(JSON.stringify(c)));
+      const column = currentOf(value);
+      const dimension = currentOf(value, { subject: () => 'dimension' });
+      const readings = [currentOf(value, { subject: () => 'property' }), column, dimension];
+      if (isEarlierRef(value) && value.via !== undefined) { const { via: _via, ...bare } = value; readings.push(currentOf(bare)); }
+      if (isEarlierInclude(value) && value.include === undefined) { const { include: _include, ...rest } = column; readings.push(rest); }
+      const candidates = readings.filter((c) => c !== value && !seen.has(JSON.stringify(c)) && seen.add(JSON.stringify(c)));
       if (!candidates.length) continue;
       const before = errorCount(validator, working);
       const scored = candidates.map((c) => ({ c, input: replacedAt(working, segs.slice(0, n), c) })).map((x) => ({ ...x, count: errorCount(validator, x.input) }));
-      const best = scored.reduce((a, b) => (b.count < a.count ? b : a));
+      let best = scored.reduce((a, b) => (b.count < a.count ? b : a));
+      if (best.c === dimension && dimension !== column) {
+        const asColumn = scored.find((x) => x.c === column);
+        if (asColumn && misspeltName(validator, asColumn.input, at)) best = asColumn;
+      }
       if (best.count < before) { found.set(at, best.c); working = best.input; break; }
     }
   }
@@ -551,15 +616,19 @@ export function validateInput(validator, input) {
   const errors = [];
   const ctx = { input, schema: validator.schema };
   const explained = explain(validator.schema, validator.schema, input, new Map());
-  // a value of an earlier spelling is refused as that, with its conversion, instead of field by field
+  // a value of an earlier spelling is refused as that, with its conversion, instead of field by field —
+  // and what the input still lacks is read off it as it is now: a misspelt name inside the converted
+  // value is said (the earlier spelling's own complaints are not)
   const earlier = earlierSpellings(validator, input, explained);
   for (const [path, now] of earlier) {
     const msg = `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(now)}`;
     seen.add(msg); errors.push(msg);
   }
-  for (const e of explained) {
-    if ([...earlier.keys()].some((p) => within(e.instancePath, p))) continue;
-    const msg = describe(e, ctx);
+  const segsOf = (path) => path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
+  const now = [...earlier].reduce((w, [path, v]) => replacedAt(w, segsOf(path), v), input);
+  const rest = earlier.size ? explain(validator.schema, validator.schema, now, new Map()) : explained;
+  for (const e of rest) {
+    const msg = describe(e, earlier.size ? { ...ctx, input: now } : ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
   }
   if (errors.length === 0) errors.push('input did not match the expected shape');

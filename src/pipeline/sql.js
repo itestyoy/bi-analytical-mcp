@@ -62,7 +62,8 @@ function relationshipNames(catalog) {
  * ONE PARTITION ITEM — what a funnel's sequence and a window's rows restart per: a column available
  * here, or { entity }, a relationship the source declares, whose key column is used. A catalog whose
  * sources declare no relationship offers the column alone, and so does a place that reads no source
- * (`entities: false` — a read over a stored table).
+ * (`entities: false` — a read over a stored table; such rows refuse an { entity } as the step is built
+ * too: partitionColumn).
  */
 export function partitionItem(catalog, { entities = true } = {}) {
   const rel = entities ? relationshipNames(catalog) : [];
@@ -99,12 +100,6 @@ export function partitionColumn({ catalog, source, cols }, p, where) {
   if (!cols?.has(s) && declared.includes(s)) throw new Error(`${where}: '${s}' is a RELATIONSHIP of '${source}', not a column — write { entity: '${s}' } to partition by its key column`);
   return s;
 }
-
-// A string constrained to event-property `values`, but never an empty enum (ajv
-// rejects `enum: []` at compile time). When the catalog has no such properties
-// (e.g. a fully flattened payload with no array/struct fields) the field stays an
-// open string — there is nothing valid to pick anyway.
-export const propEnum = (values, description) => (values.length ? { type: 'string', enum: values, description } : { type: 'string', description });
 
 /** An event property as seen from the pipeline's SOURCE fact (Catalog.propertyFor owns the
  *  bare-vs-qualified rules); a property of another fact is rejected with the fix. */

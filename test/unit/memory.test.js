@@ -55,14 +55,14 @@ test('memory tool is advertised with a real description', () => {
 // record RESOLVES what each note is about to a catalog entity and answers it in the form it was written in.
 test('memory record resolves what a note is about to catalog entities (property/attr/event/model/term)', async () => {
   const e = engine();
-  const about = [{ source: 'events', property: 'ad_type_of_event_data' }, { source: 'users', property: 'country' }, { source: 'events', event: 'ad_finished' }, { source: 'users' }, { term: 'ad format' }];
+  const about = [{ source: 'events', property: 'ad_type_of_event_data' }, { source: 'users', column: 'country' }, { source: 'events', event: 'ad_finished' }, { source: 'users' }, { term: 'ad format' }];
   const out = (await e.memory({ action: 'record', notes: [{ note: "'ad format' = the event_data property ad_type_of_event_data, only on ad_started/ad_finished; values rewarded/interstitial/banner.", about, aliases: ['ad format', 'ad type'], links: [{ url: 'https://confluence/ads' }, { url: 'https://dash/ads', title: 'Ads dashboard' }] }] })).notes[0];
   assert.ok(out.id, 'returns a note id');
   // answered as written — each item is what a { notes, about } filter takes — with the view each surfaces in
   assert.deepEqual(out.about, about);
   assert.deepEqual(out.surfaces_in, [
     "semantic_index({ request: { source: 'events', property: 'ad_type_of_event_data' } })",
-    "semantic_index({ request: { source: 'users', property: 'country' } })",
+    "semantic_index({ request: { source: 'users', column: 'country' } })",
     "semantic_index({ request: { source: 'events', event: 'ad_finished' } })",
     "semantic_index({ request: { source: 'users' } })",
     'semantic_index({ request: { search: "ad format" } })',
@@ -115,19 +115,19 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
   assert.equal(other.memory, undefined, 'unrelated property has no memory');
 });
 
-// A { source, property } attribute finding surfaces on that attribute's view.
-test('memory linked to a users attribute surfaces on its property view', async () => {
+// A { source, column } finding surfaces on that column's view.
+test('memory linked to a users column surfaces on its column view', async () => {
   const e = engine();
-  const rec = (await e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166 alpha-2 on dim_users.', about: [{ source: 'users', property: 'country' }] }] })).notes[0];
-  const attr = await e.semantic_index({ source: 'users', property: 'country' });
-  assert.ok(attr.memory?.some((m) => m.id === rec.id), 'attribute view carries the note');
+  const rec = (await e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166 alpha-2 on dim_users.', about: [{ source: 'users', column: 'country' }] }] })).notes[0];
+  const attr = await e.semantic_index({ source: 'users', column: 'country' });
+  assert.ok(attr.memory?.some((m) => m.id === rec.id), 'the column view carries the note');
 });
 
 // read (all + about one entity, search) through semantic_index, forget through memory — the lifecycle round-trips the stored data.
 test('memory notes / search / forget round-trip', async () => {
   const e = engine();
   const a = (await e.memory({ action: 'record', notes: [{ note: 'finding A about ads', about: [{ source: 'events', property: 'ad_type_of_event_data' }], aliases: ['ad format'] }] })).notes[0];
-  const b = (await e.memory({ action: 'record', notes: [{ note: 'finding B about country', about: [{ source: 'users', property: 'country' }] }] })).notes[0];
+  const b = (await e.memory({ action: 'record', notes: [{ note: 'finding B about country', about: [{ source: 'users', column: 'country' }] }] })).notes[0];
 
   const all = await listNotes(e);
   assert.equal(all.total, 2);
@@ -202,7 +202,7 @@ test('search finds a multi-word phrase from the note body (interleaved words)', 
 test('a failing embedder reports semantic:false + semantic_error (not a silent true)', async () => {
   const boom = { model: 'boom', embed: async () => { throw new Error('provider unreachable'); } };
   const e = engineWith(boom);
-  const rec = (await e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166 alpha-2', about: [{ source: 'users', property: 'country' }], aliases: ['geo'] }] })).notes[0];
+  const rec = (await e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166 alpha-2', about: [{ source: 'users', column: 'country' }], aliases: ['geo'] }] })).notes[0];
   const r = await searchNotes(e, 'geo');
   assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
   assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');
@@ -246,12 +246,12 @@ test('memory strict input validation', async () => {
 test('memory record of several notes saves them all, or none when one is wrong', async () => {
   const e = engine();
   await assert.rejects(
-    () => e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166', about: [{ source: 'users', property: 'country' }] }, { note: 'bad', about: [{ source: 'nope' }] }] }),
+    () => e.memory({ action: 'record', notes: [{ note: 'country is ISO-3166', about: [{ source: 'users', column: 'country' }] }, { note: 'bad', about: [{ source: 'nope' }] }] }),
     /invalid input|notes\[1\]/,
   );
   assert.equal((await e.semantic_index({ notes: true })).total, 0, 'nothing was saved from the refused batch');
   const two = await e.memory({ action: 'record', notes: [
-    { note: 'country is ISO-3166 alpha-2', about: [{ source: 'users', property: 'country' }] },
+    { note: 'country is ISO-3166 alpha-2', about: [{ source: 'users', column: 'country' }] },
     { note: 'ad_type carries the ad format', about: [{ source: 'events', property: 'ad_type_of_event_data' }], aliases: ['ad format'] },
   ] });
   assert.equal(two.notes.length, 2);
@@ -261,19 +261,27 @@ test('memory record of several notes saves them all, or none when one is wrong',
   await assert.rejects(() => e.memory({ action: 'record', note: 'x', notes: [{ note: 'y' }, { note: 'z' }] }), /invalid input/, 'one note or several, not both');
 });
 
-// An entity is ALWAYS its source and what it is — { source, property }, { source, event }, { source }
-// — and a phrase is { term }. Neither a bare name nor the glued '<source>.<name>' spelling exists, and
-// a property and an event are told apart by their key, never by looking the name up.
-test('memory about: an entity is { source, property | event }, a phrase is { term }, and a bare string is neither', async () => {
+// An entity is ALWAYS its source and what it is — the one ref: { source, property }, { source, column },
+// { source, event }, { source } — and a phrase is { term }. Neither a bare name nor the glued
+// '<source>.<name>' spelling exists, and a property, a column and an event are told apart by their key,
+// never by looking the name up.
+test('memory about: an entity is { source, property | column | event }, a phrase is { term }, and a bare string is neither', async () => {
   const e = engine();
-  await assert.rejects(
-    () => e.memory({ action: 'record', notes: [{ note: 'x', about: ['users.country'] }] }),
-    /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/,
-  );
-  await assert.rejects(
-    () => e.memory({ action: 'record', notes: [{ note: 'x', about: ['country'] }] }),
-    /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/,
-  );
+  for (const bare of ['users.country', 'country']) {
+    await assert.rejects(
+      () => e.memory({ action: 'record', notes: [{ note: 'x', about: [bare] }] }),
+      /`notes\.0\.about\.0` must be exactly one of: .*\| \{ term \}; `notes\.0\.about\.0` must be object/,
+    );
+  }
+  // a model's column is `column` (an event's payload is `property`): the earlier spelling is told its name
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'users', property: 'country' }] }] }), /unexpected property 'property' — here that field is called 'column'/);
+  // what a note is about is the one ref, built for the place (REF_PLACES.about): the catalog's things
+  // alone — a name of the semantic layer is no form of it, refused by the schema
+  for (const ref of [{ metric: 'revenue' }, { semantic_model: ['events'], dimension: 'x' }, { time: 'metric_time' }]) {
+    await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [ref] }] }), /invalid input: `notes\.0\.about\.0` must be exactly one of: A thing of the catalog, named by where it lives \| \{ term \}/, JSON.stringify(ref));
+  }
+  // a column is read where it is, through no relationship
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'users', column: 'country', via: 'user' }] }] }), /unexpected property 'via'/);
   // an event is not a property, nor a property an event: each is refused in the form that names it
   await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'events', property: 'ad_finished' }] }] }), /property` must be one of/);
   await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'events', event: 'ad_type_of_event_data' }] }] }), /event` must be one of/);
@@ -281,7 +289,7 @@ test('memory about: an entity is { source, property | event }, a phrase is { ter
   await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'users', event: 'ad_finished' }] }] }), /invalid input/);
   // the earlier { source, name } spelling is no form of it, and `targets` is told its name
   await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: [{ source: 'users', name: 'country' }] }] }), /unexpected property 'name'/);
-  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', targets: [{ source: 'users', property: 'country' }] }] }), /here that field is called 'about'/);
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', targets: [{ source: 'users', column: 'country' }] }] }), /here that field is called 'about'/);
   // …and a phrase says it is one
   const ok = (await e.memory({ action: 'record', notes: [{ note: 'crashes spiked in 2.4.0', about: [{ term: 'v2.4 rollout' }] }] })).notes[0];
   assert.deepEqual(ok.about, [{ term: 'v2.4 rollout' }]);
@@ -294,7 +302,7 @@ test('semantic_index({ notes }) pages the notes, every one or those about one en
   const e = engine();
   const linked = new Set();
   for (let i = 0; i < 5; i += 1) {
-    const { id } = (await e.memory({ action: 'record', notes: [{ note: `finding ${i}`, about: i < 3 ? [{ source: 'users', property: 'country' }] : [] }] })).notes[0];
+    const { id } = (await e.memory({ action: 'record', notes: [{ note: `finding ${i}`, about: i < 3 ? [{ source: 'users', column: 'country' }] : [] }] })).notes[0];
     if (i < 3) linked.add(id);
   }
   // the order every page reads (newest first; notes kept in the same millisecond in one fixed order)
@@ -304,13 +312,18 @@ test('semantic_index({ notes }) pages the notes, every one or those about one en
   assert.deepEqual([first.total, first.notes.map((n) => n.id), first.next_offset], [5, all.slice(0, 2), 2]);
   const last = await e.semantic_index({ notes: true, limit: 2, offset: 4 });
   assert.deepEqual([last.notes.map((n) => n.id), last.next_offset], [all.slice(4), undefined]);
-  const about = { source: 'users', property: 'country' };
+  const about = { source: 'users', column: 'country' };
   const mine = all.filter((id) => linked.has(id));
   const page = await e.semantic_index({ notes: true, about, limit: 2, offset: 1 });
   assert.deepEqual(page.about, about);
   assert.deepEqual([page.total, page.notes.map((n) => n.id), page.next_offset], [3, mine.slice(1, 3), undefined]);
   const top = await e.semantic_index({ notes: true, about, limit: 1 });
   assert.deepEqual([top.notes.map((n) => n.id), top.next_offset], [mine.slice(0, 1), 1]);
+  // the filter is what a note can be about — the one ref, built for semantic_index's places (a view, a
+  // note's about): a name of the semantic layer is no form of it, refused by the schema
+  for (const ref of [{ metric: 'revenue' }, { semantic_model: ['users'], dimension: 'is_us' }, { entity: 'user' }]) {
+    await assert.rejects(() => e.semantic_index({ notes: true, about: ref }), /invalid input: .*`about` must be exactly one of: A thing of the catalog, named by where it lives \| \{ term \}/, JSON.stringify(ref));
+  }
 });
 
 // A target is STORED as what it names, not as a key that has to be taken apart to read it back.
@@ -344,4 +357,22 @@ test('a note an earlier server stored with bare-string targets is read with each
   assert.deepEqual(mem.get('old1').targets, [{ kind: 'term', term: 'property:events.ad_type' }, { kind: 'term', term: 'model:users' }]);
   assert.deepEqual(mem.forTargets(['term:model:users']).map((n) => n.id), ['old1']);
   assert.deepEqual((await mem.search('ad_type', { fuzzy: false })).notes.map((n) => n.id), ['old1']);
+});
+
+// An earlier version kept a model's column as a property of its source. Read back, it is the column it
+// names (the catalog says which), found where the column is looked at and spoken as { source, column } —
+// while the stored row is left as it was, and an event property stays a property.
+test('a note an earlier server kept about a model column as a property is read as that column', async () => {
+  const { MemoryStore } = await import('../../src/memory.js');
+  const store = openStore({});
+  const targets = [{ kind: 'property', source: 'users', name: 'country' }, { kind: 'property', source: 'events', name: 'ad_type_of_event_data' }];
+  store.memory.add({ id: 'old2', note: 'country is ISO-3166 alpha-2', targets, created_at: 1 });
+  const catalog = loadCatalog(CATALOG, {});
+  assert.deepEqual(new MemoryStore({ store, catalog }).get('old2').targets, [{ kind: 'column', source: 'users', name: 'country' }, targets[1]]);
+  const e = engineWithStore(store);
+  const listed = await listNotes(e, { source: 'users', column: 'country' });
+  assert.deepEqual(listed.notes.map((n) => n.id), ['old2']);
+  assert.deepEqual(listed.notes[0].about, [{ source: 'users', column: 'country' }, { source: 'events', property: 'ad_type_of_event_data' }]);
+  assert.ok((await e.semantic_index({ source: 'users', column: 'country' })).memory?.some((m) => m.id === 'old2'), 'the column view carries it');
+  assert.deepEqual(store.memory.get('old2').targets, targets, 'the stored row is not rewritten');
 });

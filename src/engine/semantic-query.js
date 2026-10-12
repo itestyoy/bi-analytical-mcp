@@ -1,5 +1,6 @@
-// QUERY_SEMANTIC_MODEL — a metric query addressed by what and where ({ model, attribute },
-// { semantic_model, dimension }, { entity }, metric_time), resolved to MetricFlow's items and run by
+// QUERY_SEMANTIC_MODEL — a metric query addressed by what and where — the refs a metric query's group_by
+// takes (src/schema/refs.js REF_PLACES.group_by): { source, column, via? }, { source, property },
+// { semantic_model, dimension }, { entity }, metric_time — resolved to MetricFlow's items and run by
 // `mf` — with the read steps after it run over the SQL MetricFlow compiles for it; its SQL, plan and
 // failures handed back in the caller's own spelling. A task's layer and the project's own share one
 // shell (the steps, window, paging, the early answer, the task). Methods of the Engine
@@ -10,6 +11,7 @@ import { rankFuzzy } from '../fuzzy.js';
 import { measureRefs } from '../compile.js';
 import { PARTITION_DIM, renderContext } from '../yaml-render.js';
 import { whereSql, referenceComparisons } from '../predicate.js';
+import { REFS, refAt } from '../schema/refs.js';
 import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../group-by-items.js';
 import { formatDbtError } from '../dbt/index.js';
 import { getDialect } from '../dialects/index.js';
@@ -17,6 +19,15 @@ import { renderRead } from '../pipeline.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, pageBlock, samplingNote } from './helpers.js';
 import { KEPT_ROWS } from '../schema/fields.js';
+
+/** Whether a request asks its answer to show `what` beyond the default (its `include` list). */
+export const wants = (input, what) => Array.isArray(input?.include) && input.include.includes(what);
+
+/** A ref as a call writes it — { source: 'users', column: 'country' } — for a hint or an example. */
+export const refText = (ref) => `{ ${Object.entries(ref).map(([k, v]) => `${k}: ${JSON.stringify(v).replace(/"/g, '\'')}`).join(', ')} }`;
+
+/** How a ref of `groupable` is shown in a sentence: users.country (via …), events.tier. */
+const refShown = (r) => (r.source !== undefined ? `${r.source}.${r.column ?? r.property}${r.via ? ` (via ${r.via})` : ''}` : `${r.semantic_model.join(' → ')}.${r.dimension}`);
 
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -30,11 +41,27 @@ export const semanticQueryMethods = {
   },
 
   /**
-   * What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }]
-   * — the catalog's reachable attributes plus the dimensions the task declared.
+   * How a query names a dimension the task declared on `model` — a column of the model { source,
+   * column }, an event property of its events { source, property }, or one the task computed
+   * { semantic_model: [model], dimension } — told apart by what the declared name is on the model (a
+   * computed dimension takes a name no column or scalar property has — the set compileDimension refuses
+   * it, src/compile.js, a declared property being scalar: a complex property's name stays free for one).
+   */
+  _taskDimRef(model, d) {
+    const c = this.catalog;
+    const name = d._attribute;
+    if (c.modelDimensionColumns(model).includes(name)) return { source: model, column: name };
+    if (c.isFact(model) && c.scalarEventProps(model).includes(name)) return { source: model, property: name };
+    return { semantic_model: [model], dimension: name };
+  },
+
+  /**
+   * What a context can group / filter by, in the form the tools accept — the refs of a metric query's
+   * group_by: the catalog's reachable columns ({ source, column, via? }) plus the dimensions the task
+   * declared (a column, { source, property }, { semantic_model: [model], dimension }).
    *
    * Split by whether the ref works RIGHT NOW: a query may only name a model the context has
-   * loaded, so an attribute of a model it has not is offered separately, with what to do about it.
+   * loaded, so a column of a model it has not is offered separately, with what to do about it.
    * Publishing the whole catalog as `groupable` (and picking the example from it) produced calls
    * the query path then refused — "needs model 'users', which is not loaded in this context".
    */
@@ -42,64 +69,104 @@ export const semanticQueryMethods = {
     const all = [...this.catalog.reachableAttributes()];
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
-        const attribute = d._attribute;
-        if (!all.some((r) => r.model === model && r.attribute === attribute && !r.via)) all.push({ model, attribute });
+        const ref = this._taskDimRef(model, d);
+        if (!all.some((r) => JSON.stringify(r) === JSON.stringify(ref))) all.push(ref);
       }
     }
     const loaded = new Set(ctx.state.usedModels || []);
-    return { now: all.filter((r) => loaded.has(r.model)), afterLoading: all.filter((r) => !loaded.has(r.model)) };
+    const modelOf = (r) => r.source ?? r.semantic_model[0];
+    return { now: all.filter((r) => loaded.has(modelOf(r))), afterLoading: all.filter((r) => !loaded.has(modelOf(r))) };
   },
 
   /** One wording for "here is what you CAN name, and how to reach the rest", shared by every
    *  not-reachable refusal so they never disagree about what is available. */
   _reachableHint(ctx) {
     const { now, afterLoading } = this._groupableSplit(ctx);
-    const show = (rs) => rs.slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ');
-    const models = [...new Set(afterLoading.map((r) => r.model))];
-    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once the context reads their model (a semantic_models item { from: <model> }): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
+    const show = (rs) => rs.slice(0, 20).map(refShown).join(', ');
+    const models = [...new Set(afterLoading.map((r) => r.source ?? r.semantic_model[0]))];
+    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once the context reads their model (a semantic_models item { source: <model> }): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   },
 
   /**
-   * An attribute may be addressed WITHOUT knowing MetricFlow's `<entity>__<attribute>` spelling:
-   * { model, attribute, via? } names the model that carries the attribute and the attribute
-   * itself, and this resolves the path — the relationship the task's source declares towards
-   * that model, or the model's own identity when the attribute is the source's own. `via` picks
-   * the relationship when the source carries several to the same model (key variants).
+   * WHAT A REF NAMES IN A TASK'S CONTEXT — the one judgement of group_by and where alike, which
+   * resolves it or refuses it (`at` names it; `field` is the input field a refusal reports): the
+   * kinds a metric query's group_by takes (refAt), each resolved WITHOUT the caller knowing
+   * MetricFlow's `<entity>__<dimension>` spelling. → { kind: 'time' | 'dimension' | 'entity', path (the
+   * dimension's or the entity's MetricFlow name), grain (a time's), column (the result column), label
+   * (users.country), type (the result column's, as the steps after the query read it) }.
    */
-  _normalizeRef(ctx, ref, where = 'group_by') {
-    if (ref && typeof ref === 'object' && 'entity' in ref && !('attribute' in ref)) {
-      throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index({ request: {} }) lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+  _taskRef(ctx, ref, at = 'group_by', field = 'group_by') {
+    let kind;
+    try { kind = refAt('group_by', ref, at); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field }); }
+    if (kind === 'time') {
+      const grain = ref.grain || 'day';
+      return { kind: 'time', path: 'metric_time', grain, column: `metric_time_${grain}`, label: 'metric_time', type: 'time' };
     }
-    if (ref && typeof ref === 'object' && 'dimension' in ref && !('attribute' in ref)) {
-      throw new ToolError(`${where}: '${[].concat(ref.semantic_model || []).join(' → ')}${ref.semantic_model ? '.' : ''}${ref.dimension}' is named as a dimension of the dbt project's own semantic layer — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index({ request: {} }) lists them); here attributes are { model, attribute }.`, { stage: 'validate', field: where });
-    }
-    if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
+    if (kind === 'entity') return this._taskEntity(ctx, ref.entity, at, field);
+    if (kind === 'dimension') return this._taskComputed(ctx, ref, at, field);
+    return this._taskColumn(ctx, kind, ref, at, field);
+  },
+
+  /** That the dbt project's own semantic layer is queried in its own contexts — the refusal of one of
+   *  its names in a task's context. */
+  _projectNameHere(said, at, field) {
+    return new ToolError(`${at}: ${said} is named as the dbt project's own semantic layer names it — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index({ request: {} }) lists them); here a column is { source, column }, a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension }.`, { stage: 'validate', field });
+  },
+
+  /**
+   * A column of a model ({ source, column, via? }) or an event property the task declared a dimension
+   * ({ source, property }). A column resolves to the path the relationship the task's source declares
+   * towards the model gives — or the model's own identity when it is the source's own; `via` picks the
+   * relationship when the source carries several to the same model (key variants). A dimension the task
+   * declared on it (a copy at another grain) is the one it names first.
+   */
+  _taskColumn(ctx, kind, ref, at, field) {
     const c = this.catalog;
-    const { model, attribute, via } = ref;
-    if (!c.models[model]) throw new ToolError(`${where}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}${c.unavailableHint(model)}`, { stage: 'validate', field: 'model' });
-    // A model the context never loaded is answered with the fix (load it: semantic_models [{ from }]),
+    const { source: model, via } = ref;
+    const name = kind === 'source_column' ? ref.column : ref.property;
+    const label = `${model}.${name}`;
+    if (!c.models[model]) throw new ToolError(`${at}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}${c.unavailableHint(model)}`, { stage: 'validate', field });
+    // A model the context never loaded is answered with the fix (load it: semantic_models [{ source }]),
     // not with the relationship refusal below: "not loaded" is the actual problem, and it is actionable.
-    this._checkModelLoaded(ctx, ref);
-    const target = c.getModel(model);
-    // 1. a dimension the TASK declared on this model (a payload property or a model column named
-    //    in create/update) → its task-namespaced name
-    const declared = this._taskDimOf(ctx, model, attribute);
-    if (declared) return this._taskDimMap(ctx).get(declared.name) || declared.name;
-    // the model's own attributes: its dimensions and, on an events source, the event name (one set with
-    // the schema's — modelDimensionColumns)
-    if (!(target.dimensions || {})[attribute] && !c.modelDimensionColumns(model).includes(attribute)) {
-      // what this context can name on the model: its attributes, and the dimensions its tasks declared there
-      const known = [...new Set([...c.modelDimensionColumns(model), ...(ctx.state.additions?.[model]?.dimensions || []).map((d) => d._attribute)])];
-      const near = rankFuzzy(String(attribute), known, { fields: (x) => [x], limit: 3 }).map((x) => x.item);
-      throw new ToolError(`${where}: '${attribute}' is not an attribute of '${model}'${near.length ? ` — did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : '.'} Its attributes: ${known.slice(0, 20).join(', ') || '(none)'}. A payload property, or a value computed from the row ({ name, expr }), is declared as a task dimension first.`, { stage: 'validate', field: 'attribute' });
+    this._checkModelLoaded(ctx, model, label, field);
+    const declared = this._taskDimOf(ctx, model, name);
+    const declaredRef = declared ? this._taskDimRef(model, declared) : null;
+    if (kind === 'source_property') {
+      // an event property is grouped by once the task declares it a dimension of its source
+      if (declaredRef?.dimension !== undefined) throw new ToolError(`${at}: '${label}' is a dimension this task computed, not an event property — write ${refText(declaredRef)}`, { stage: 'validate', field });
+      if (declaredRef?.property === undefined) {
+        throw new ToolError(`${at}: the event property '${label}' is not a dimension of this context — declare it one: build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [{ source: '${model}', dimensions: [{ property: '${name}' }] }] } }), then name it { source: '${model}', property: '${name}' }.`, { stage: 'validate', field });
+      }
+      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${name}`, label, type: 'unknown' };
     }
+    // 1. a column the TASK declared on this model → its task-namespaced copy (a time column at the grain
+    //    it was declared with)
+    if (declaredRef?.column !== undefined) {
+      const grain = declared.type === 'time' ? declared.type_params?.time_granularity || 'day' : null;
+      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}`, label, type: grain ? 'time' : 'unknown' };
+    }
+    const target = c.getModel(model);
+    // the model's own columns: its dimensions and, on an events source, the event name (one set with
+    // the schema's — refColumns)
+    if (!(target.dimensions || {})[name] && !c.modelDimensionColumns(model).includes(name)) {
+      if (declaredRef) throw new ToolError(`${at}: '${label}' is ${declaredRef.property !== undefined ? 'an event property this task declared a dimension' : 'a dimension this task computed'}, not a column — write ${refText(declaredRef)}`, { stage: 'validate', field });
+      if (c.isFact(model) && c.eventProps(model).includes(name)) throw new ToolError(`${at}: '${name}' is an event property of '${model}', not a column — { source: '${model}', property: '${name}' }, once the task declares it a dimension.`, { stage: 'validate', field });
+      const known = c.modelDimensionColumns(model);
+      const near = rankFuzzy(String(name), known, { fields: (x) => [x], limit: 3 }).map((x) => x.item);
+      throw new ToolError(`${at}: '${name}' is not a column of '${model}'${near.length ? ` — did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : '.'} Its columns: ${known.slice(0, 20).join(', ') || '(none)'}. An event property is { source, property } and a value computed from the row { semantic_model: [<its source>], dimension }, each declared a task dimension first.`, { stage: 'validate', field });
+    }
+    // a time column is read at the catalog's granularity for it: MetricFlow names a time dimension's
+    // column with its grain (`<path>__<grain>`), and the column comes back under the caller's name
+    const dim = (target.dimensions || {})[name];
+    const grain = dim?.type === 'time' ? dim.granularity || 'day' : null;
+    const out = (path) => ({ kind: 'dimension', path, grain, column: `${model}_${name}`, label, type: grain ? 'time' : c.modelColumns(model).find((x) => x.name === name)?.type || 'unknown' });
     // The sources whose MEASURES this task reads: a path starts from one of them. A model loaded
-    // only to be joined to (an item with only `from`) — even another events source — is a join TARGET
-    // here, reached through the relationship a measure source declares towards it.
+    // only to be joined to (an item with only `source`) — even another events source — is a join
+    // TARGET here, reached through the relationship a measure source declares towards it.
     const own = c.primaryEntityName(model);
     const sources = this._measureSources(ctx);
-    // 2. the attribute of a model whose measures this task reads → under that model's identity
-    if (sources.includes(model) && own) return `${own}__${attribute}`;
+    // 2. a column of a model whose measures this task reads → under that model's identity
+    if (sources.includes(model) && own) return out(`${own}__${name}`);
     // 3. a relationship from a measure source to the model that owns it
     const candidates = new Set();
     for (const src of sources) {
@@ -110,31 +177,65 @@ export const semanticQueryMethods = {
     // it; the question is whether any source in this context points at it.)
     if (!candidates.size && own && sources.some((src) => c.entitiesOf(src)[own])) candidates.add(own);
     if (via) {
-      if (!candidates.has(via)) throw new ToolError(`${where}: '${via}' is not a relationship from this task's source(s) to '${model}'. Available: ${[...candidates].join(', ') || '(none)'}`, { stage: 'validate', field: 'via' });
-      return `${via}__${attribute}`;
+      if (!candidates.has(via)) throw new ToolError(`${at}: '${via}' is not a relationship from this task's source(s) to '${model}'. Available: ${[...candidates].join(', ') || '(none)'}`, { stage: 'validate', field });
+      return out(`${via}__${name}`);
     }
-    if (candidates.size === 1) return `${[...candidates][0]}__${attribute}`;
-    if (candidates.size > 1) throw new ToolError(`${where}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field: 'via' });
-    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it (semantic_models: [{ from: '${model}' }]) and check semantic_index({ request: { source: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
+    if (candidates.size === 1) return out(`${[...candidates][0]}__${name}`);
+    if (candidates.size > 1) throw new ToolError(`${at}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field });
+    throw new ToolError(`${at}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it (semantic_models: [{ source: '${model}' }]) and check semantic_index({ request: { source: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field });
+  },
+
+  /**
+   * A dimension the task COMPUTED ({ name, expr } on a model), named { semantic_model: [<the model>],
+   * dimension: <its name> } — in a task's context the join comes from the schema, so the chain is the
+   * model that carries it alone. A column or an event property is named where it lives in the catalog
+   * ({ source, column } / { source, property }), so naming one here is refused with that spelling.
+   */
+  _taskComputed(ctx, ref, at, field) {
+    const c = this.catalog;
+    const chain = ref.semantic_model;
+    const model = chain[chain.length - 1];
+    const label = `${chain.join(' → ')}.${ref.dimension}`;
+    if (!c.semanticModelKeys().includes(model)) throw this._projectNameHere(`'${label}'`, at, field);
+    if (chain.length > 1) throw new ToolError(`${at}: in a task's context the join comes from the schema — name the model that carries the dimension alone: { semantic_model: ['${model}'], dimension: '${ref.dimension}' }`, { stage: 'validate', field });
+    this._checkModelLoaded(ctx, model, label, field);
+    const declared = this._taskDimOf(ctx, model, ref.dimension);
+    const declaredRef = declared ? this._taskDimRef(model, declared) : null;
+    if (declaredRef?.dimension === undefined) {
+      const as = declaredRef || (c.modelDimensionColumns(model).includes(ref.dimension) ? { source: model, column: ref.dimension } : null);
+      if (as) throw new ToolError(`${at}: '${label}' is ${as.column !== undefined ? 'a column' : 'an event property'} of '${model}', named where it lives in the catalog — write ${refText(as)}`, { stage: 'validate', field });
+      const computed = (ctx.state.additions?.[model]?.dimensions || []).map((d) => this._taskDimRef(model, d)).filter((r) => r.dimension !== undefined).map((r) => r.dimension);
+      throw new ToolError(`${at}: '${label}' is not a dimension this context computed on '${model}'. ${computed.length ? `It computed: ${computed.join(', ')}.` : 'It computed none there.'} A dimension computed from the row is declared { name, expr } in a semantic_models item.`, { stage: 'validate', field });
+    }
+    if (ref.grain !== undefined) throw new ToolError(`${at}: '${label}' is a computed dimension, which is categorical — it takes no grain`, { stage: 'validate', field });
+    return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${ref.dimension}`, label, type: 'unknown' };
+  },
+
+  /**
+   * The entities a task's metrics can be grouped by: the keys the sources whose measures it reads carry
+   * as entities of their semantic models (src/yaml-render.js). An events source's own primary entity is
+   * no key — only the name its dimensions are reached under (MetricFlow's primary_entity) — so it groups
+   * nothing.
+   */
+  _taskEntities(ctx) {
+    const c = this.catalog;
+    return [...new Set(this._measureSources(ctx).flatMap((s) => Object.keys(c.isFact(s) ? c.getModel(s).entities || {} : c.entitiesOf(s))))];
+  },
+
+  /** An entity — a key a source whose measures the task reads carries (_taskEntities) — grouped by as
+   *  it is: one row per key value, its result column the entity's name. */
+  _taskEntity(ctx, entity, at, field) {
+    const c = this.catalog;
+    const sources = this._measureSources(ctx);
+    const declared = new Set(this._taskEntities(ctx));
+    if (declared.has(entity)) return { kind: 'entity', path: entity, grain: null, column: entity, label: entity, type: 'unknown' };
+    if (!c.modelKeys().some((k) => Object.hasOwn(c.entitiesOf(k), entity))) throw this._projectNameHere(`the entity '${entity}'`, at, field);
+    throw new ToolError(`${at}: the entity '${entity}' is not one this context's metrics can be grouped by — the sources they read (${sources.join(', ') || 'none'}) declare ${[...declared].join(', ') || 'none'}`, { stage: 'validate', field });
   },
 
   /** The dimension a task declared on `model` for `attribute` — the one a reference resolves to first. */
   _taskDimOf(ctx, model, attribute) {
     return (ctx.state.additions?.[model]?.dimensions || []).find((d) => d._attribute === attribute) || null;
-  },
-
-  /**
-   * The grain a { model, attribute } reference is read at when it is a TIME dimension — the task's
-   * own copy at the grain it was declared with, else the model's at the catalog's granularity — or
-   * null for a categorical one. MetricFlow names a time dimension's column with its grain
-   * (`<path>__<grain>`), so the query asks for it at that grain, and the column comes back under
-   * the caller's name like every other.
-   */
-  _timeGrainOf(ctx, { model, attribute }) {
-    const declared = this._taskDimOf(ctx, model, attribute);
-    if (declared) return declared.type === 'time' ? declared.type_params?.time_granularity || 'day' : null;
-    const d = (this.catalog.getModel(model).dimensions || {})[attribute];
-    return d?.type === 'time' ? d.granularity || 'day' : null;
   },
 
   async query_semantic_model(input) {
@@ -204,9 +305,10 @@ export const semanticQueryMethods = {
   },
 
   /**
-   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
-   * attribute }, { semantic_model, dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
-   * `entity__dimension__grain` tokens. `names` maps each token the query used to the name the caller
+   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { source,
+   * column }, { source, property }, { semantic_model, dimension }, { entity }, metric_time — and the
+   * server resolves that to MetricFlow's `entity__dimension__grain` tokens. `names` maps each token the
+   * query used to the name the caller
    * sees (its result column), longest first — and ONLY those: a text is never rewritten by a pattern,
    * since a project's own columns may carry `__` in their names (measure__…), and SQL that renamed them
    * would not run. Applied to an explained query's SQL and plan and to every failure message; it
@@ -290,34 +392,43 @@ export const semanticQueryMethods = {
     // what EVERY requested metric can be grouped by, as MetricFlow listed it (src/group-by-items.js):
     // a reference names one of these items exactly — nothing here chooses a join, a path or a grain
     const items = commonItems(layer.groupBys, input.metrics);
-    const pick = (ref, field) => {
-      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ request: { context_id: '${ctx.id}', metric } }) lists each exactly.`, { stage: 'validate', field });
+    // a ref of the kinds group_by takes (refAt); the catalog's own names a task's context takes are
+    // refused here with the project's spelling
+    const kindOf = (ref, at, field) => {
+      let kind;
+      try { kind = refAt('group_by', ref, at); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field }); }
+      if (kind === 'source_column' || kind === 'source_property') throw new ToolError(`${at}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's ${REFS[kind].says}. preview_semantic_model({ request: { context_id: '${ctx.id}', metric } }) lists each exactly.`, { stage: 'validate', field });
+      return kind;
+    };
+    const pick = (ref, at, field) => {
       const r = resolveRef(items, ref, input.metrics.join(' and '), layer.blocked || []);
-      if (r.error) throw new ToolError(`${field}: ${r.error}`, { stage: 'validate', field });
+      if (r.error) throw new ToolError(`${at}: ${r.error}`, { stage: 'validate', field });
       return r.item;
     };
     const groupBy = [];
     const rename = new Map();
     const groupByResolved = {};
     const columns = []; // the result's group_by columns, as the steps after the query name them
-    for (const g of input.group_by || []) {
-      const item = g && g.time === 'metric_time' ? items.find((i) => i.name === 'metric_time' && !i.semantic_model) : pick(g, 'group_by');
-      if (!item) throw new ToolError(`group_by: ${input.metrics.join(', ')} ${input.metrics.length > 1 ? 'share' : 'has'} no time axis to group by`, { stage: 'validate', field: 'group_by' });
+    for (const [i, g] of (input.group_by || []).entries()) {
+      const at = `group_by[${i}]`;
+      const time = kindOf(g, at, 'group_by') === 'time';
+      const item = time ? items.find((x) => x.name === 'metric_time' && !x.semantic_model) : pick(g, at, 'group_by');
+      if (!item) throw new ToolError(`${at}: ${input.metrics.join(', ')} ${input.metrics.length > 1 ? 'share' : 'has'} no time axis to group by`, { stage: 'validate', field: 'group_by' });
       const grain = item.type === 'time' ? g.grain || item.grain || 'day' : null;
       const tok = tokenOf(item, grain);
       const column = columnOf(item, grain);
-      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`${at}: ${labelOf(item)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
       groupBy.push(tok); rename.set(tok, column);
       // (the manifest says which dimension is a time; of the others it gives no type)
       columns.push({ name: column, type: grain ? 'time' : 'unknown' });
-      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item)] = column;
+      if (!time) groupByResolved[labelOf(item)] = column;
     }
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     // each reference of the where names one item MetricFlow listed, as group_by's do
     const where = input.where ? this._whereClauses(input.where, (ref, at) => {
-      if (ref.time !== undefined) return { kind: 'metric_time', grain: ref.grain };
-      const item = pick(ref, at);
+      if (kindOf(ref, at, 'where') === 'time') return { kind: 'metric_time', grain: ref.grain };
+      const item = pick(ref, at, 'where');
       whereNames.set(tokenOf(item), columnOf(item));
       if (item.kind === 'entity') return { kind: 'entity', name: tokenOf(item) };
       if (item.type === 'time') {
@@ -366,8 +477,8 @@ export const semanticQueryMethods = {
   // besides its rows.
 
   /**
-   * THE STEPS AFTER A METRIC QUERY — the read steps query_pipeline_model takes (READ_STAGES), over the
-   * result's columns as the caller names them: `columns` [{ name, type }], the group_by items' result
+   * THE STEPS AFTER A METRIC QUERY — the read steps query_pipeline_model takes (STAGE_PLACES.read), over
+   * the result's columns as the caller names them: `columns` [{ name, type }], the group_by items' result
    * columns and then the metrics, each typed where it is known ('unknown' — a constant is written as it
    * is — otherwise). Checked here, before anything runs, by the read compiler they run through: a step
    * naming a column the result does not have is refused with the columns there are at that step. The
@@ -416,7 +527,7 @@ export const semanticQueryMethods = {
   async _metricRead(ctx, { qopts, input, rename, explain, tail }) {
     const dir = this.ctxs.dir(ctx.id);
     const { limit, orderBy: _order, ...query } = qopts;
-    const compiled = await this.runner.query(dir, { ...query, explain: true, plan: explain && !!input.include_plan });
+    const compiled = await this.runner.query(dir, { ...query, explain: true, plan: explain && wants(input, 'plan') });
     if (!compiled.ok) return compiled;
     const steps = explain && input.limit ? [...tail.steps, { stage: 'limit', limit: input.limit }] : tail.steps;
     const read = renderRead(this.catalog, `(\n${this._metricRelation(compiled.sql, query, rename)}\n) AS _metrics`, tail.columns, steps);
@@ -493,7 +604,7 @@ export const semanticQueryMethods = {
    *  stored only by a query that runs. */
   _compileOnly(input) {
     const only = !!input.dry_run;
-    if (input.include_plan && !only) throw new ToolError('include_plan goes with dry_run: the dataflow plan is how a query compiles, and a query that runs returns its rows instead', { stage: 'validate', field: 'include_plan' });
+    if (wants(input, 'plan') && !only) throw new ToolError('include: ["plan"] goes with dry_run: the dataflow plan is how a query compiles, and a query that runs returns its rows instead', { stage: 'validate', field: 'include' });
     if (input.materialize && only) throw new ToolError('materialize goes with a query that runs: dry_run only compiles it, so there is no result to store — drop one of the two', { stage: 'validate', field: 'materialize' });
     return only;
   },
@@ -508,7 +619,7 @@ export const semanticQueryMethods = {
   _metricEarlyAnswer(res, { explain, input, speak, extra = {} }) {
     if (!res.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
     if (!explain) return null;
-    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.include_plan ? { plan: speak(res.plan) } : {}) };
+    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(wants(input, 'plan') ? { plan: speak(res.plan) } : {}) };
   },
 
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
@@ -524,7 +635,7 @@ export const semanticQueryMethods = {
         ? await this._materialize(ctx, tail.steps.length ? { ...qopts, orderBy: [] } : qopts, input, rename, id, speak, { columns: tail.columns })
         : await respond(oneForm(tail.viaSql
           ? await this._metricRead(ctx, { qopts, input, rename, explain, tail })
-          : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.include_plan }), rename), tail.outputColumns));
+          : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: wants(input, 'plan') }), rename), tail.outputColumns));
       // a result read through a sample of its rows is approximate, and says so (as a sampled read does)
       return tail.sample && !explain && out?.ok !== false ? { ...out, sampled: true, sampling: samplingNote(tail.sample.share) } : out;
     };
@@ -545,50 +656,44 @@ export const semanticQueryMethods = {
     const dropped = input.metrics.filter((m) => !emitted.has(m));
     if (dropped.length) throw new ToolError(`metric${dropped.length > 1 ? 's' : ''} ${dropped.map((m) => `'${m}'`).join(', ')} ${dropped.length > 1 ? 'are' : 'is'} declared in this context but not in its semantic layer: ${dropped.length > 1 ? 'they read' : 'it reads'} a measure on a slowly-changing model, where MetricFlow allows no measure (it is a join target only). Count on an events source instead (count_distinct of the user key), and group by that model's attributes. Queryable here: ${[...emitted].join(', ') || '(none)'}`, { stage: 'validate', field: 'metrics' });
 
-    // what a reference reaches is _normalizeRef's one judgement: it resolves the reference or
-    // refuses it, saying what is reachable (_reachableHint)
+    // what a reference reaches is _taskRef's one judgement: it resolves the reference or refuses it,
+    // saying what is reachable (_reachableHint)
     const groupBy = [];
-    // Result columns are named after the reference the caller made — `<model>_<attribute>` and
-    // `metric_time_<grain>` — so nothing the caller reads back or addresses later (a step, a card, a
-    // pipeline started from the stored result) ever carries MetricFlow's internal `__` spelling.
+    // Result columns are named after the reference the caller made — `<source>_<column>` (or
+    // `_<property>`), `<semantic model>_<dimension>`, the entity's name and `metric_time_<grain>` — so
+    // nothing the caller reads back or addresses later (a step, a card, a pipeline started from the
+    // stored result) ever carries MetricFlow's internal `__` spelling.
     const rename = new Map(); // MetricFlow output name → the column name the caller sees
-    const groupByResolved = {}; // "<model>.<attribute>" → the result column
+    const groupByResolved = {}; // "<source>.<column>" → the result column
     const columns = []; // the result's group_by columns, as the steps after the query name them
-    for (const gRaw of input.group_by || []) {
-      const g = this._normalizeRef(ctx, gRaw, 'group_by'); // a string is refused here with the fix
-      if (typeof g === 'object' && g.time === 'metric_time') {
-        const tok = `metric_time__${g.grain || 'day'}`;
-        groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); columns.push({ name: rename.get(tok), type: 'time' }); continue;
-      }
-      const friendly = `${gRaw.model}_${gRaw.attribute}`;
-      if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
+    for (const [i, g] of (input.group_by || []).entries()) {
+      const r = this._taskRef(ctx, g, `group_by[${i}]`, 'group_by');
+      if (input.metrics.includes(r.column) || [...rename.values()].includes(r.column)) throw new ToolError(`group_by[${i}]: '${r.label}' would produce a result column '${r.column}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
       // a time dimension is asked for at its grain — the column MetricFlow names with it
-      const grain = this._timeGrainOf(ctx, gRaw);
-      const tok = grain ? `${g}__${grain}` : g;
-      groupBy.push(tok); rename.set(tok, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
-      columns.push({ name: friendly, type: grain ? 'time' : this._attributeType(ctx, gRaw) });
+      const tok = r.kind === 'time' ? `metric_time__${r.grain}` : r.grain ? `${r.path}__${r.grain}` : r.path;
+      groupBy.push(tok); rename.set(tok, r.column);
+      if (r.kind !== 'time') groupByResolved[r.label] = r.column;
+      columns.push({ name: r.column, type: r.type });
     }
     let where = [];
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     if (input.where) {
-      where = this._whereClauses(input.where, (ref) => {
-        if (ref.time !== undefined) return { kind: 'metric_time', grain: ref.grain };
-        // a reference named the way a project semantic model's context names it is refused with that
-        // context's name, as group_by refuses it (the schema takes both shapes in every context)
-        if (ref.model === undefined) this._normalizeRef(ctx, ref, 'where');
-        const path = this._normalizeRef(ctx, { model: ref.model, attribute: ref.attribute, via: ref.via }, 'where');
-        whereNames.set(path, `${ref.model}_${ref.attribute}`);
-        return { kind: 'dimension', path };
+      where = this._whereClauses(input.where, (ref, at) => {
+        const r = this._taskRef(ctx, ref, at, 'where');
+        if (r.kind === 'time') return { kind: 'metric_time', grain: ref.grain };
+        whereNames.set(r.path, r.column);
+        return r.kind === 'entity' ? { kind: 'entity', name: r.path } : { kind: 'dimension', path: r.path };
       });
-      // Verify each constant compared with an attribute against the column's REAL values
+      // Verify each constant compared with a column or an event property against its REAL values
       // (source-scoped): reject a wrong-cased/non-existent value instead of filtering to nothing. The
-      // value-index key comes from the model the caller NAMED: a path carries no source, so recovering
+      // value-index key comes from the source the caller NAMED: a path carries no source, so recovering
       // it from the path would lose the guard on any name two sources happen to share.
-      const specs = referenceComparisons(input.where).filter((c) => c.ref.model !== undefined).map((c) => ({
-        at: this.advisor.valueKeyForColumn(c.ref.model, c.ref.attribute), op: c.op, value: c.values, where: `where ${c.ref.model}.${c.ref.attribute}`,
-      }));
+      const specs = referenceComparisons(input.where).filter((c) => c.ref.source !== undefined).map((c) => {
+        const name = c.ref.column ?? c.ref.property;
+        return { at: this.advisor.valueKeyForColumn(c.ref.source, name), op: c.op, value: c.values, where: `where ${c.ref.source}.${name}` };
+      });
       filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
     }
     // the steps after the query, over its result's columns: checked here, before anything runs
@@ -677,19 +782,12 @@ export const semanticQueryMethods = {
     return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond, tail });
   },
 
-  /** The type a { model, attribute } group_by column comes back in, as the steps after the query read it:
-   *  the catalog's for a column of the model; 'unknown' for a dimension the task computed (a constant
-   *  compared with it is written as it is). A time dimension is a time (_timeGrainOf). */
-  _attributeType(ctx, { model, attribute }) {
-    if (this._taskDimOf(ctx, model, attribute)) return 'unknown';
-    return this.catalog.modelColumns(model).find((c) => c.name === attribute)?.type || 'unknown';
-  },
-
   /**
    * A metric query's where → MetricFlow's `--where` clauses (src/predicate.js), each reference resolved
    * by `resolve(ref, at)` — a context's own rule for what a name reaches. Refused here, before anything
-   * runs: a reference that reaches nothing (resolve's refusal), and a where the one writer refuses — a
-   * constant of the wrong kind, a null compared, a condition that is not a boolean.
+   * runs: a reference that reaches nothing (resolve's refusal), and a where the one writer refuses at its
+   * place (PLACES.metric_where) — a column of the rows, a metric, an aggregate, a constant of the wrong
+   * kind, a null compared, a condition that is not a boolean.
    */
   _whereClauses(list, resolve) {
     try {

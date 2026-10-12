@@ -35,9 +35,9 @@ test('a refused call is kept with its arguments, and explore_errors reads it bac
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'no_such_tool' } })).total, 1);
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { search: 'CTX_NOPE' } })).total, 1);
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { time_range: { end: '2000-01-01' } } })).total, 0);
-  // a summary page names each by its message; detail: "full" carries the arguments too
+  // a summary page names each by its message; include: ["details"] carries the arguments too
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model' } })).errors[0].args, undefined);
-  assert.deepEqual(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', detail: 'full' } })).errors[0].args, { request: bad });
+  assert.deepEqual(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', include: ['details'] } })).errors[0].args, { request: bad });
   // paged
   const first = payload(await runTool(engine, 'explore_errors', { request: { limit: 1 } }));
   assert.equal(first.next_offset, 1);
@@ -55,7 +55,11 @@ test('bad input to explore_errors is refused, and that refusal is kept too', asy
   assert.equal((await runTool(engine, 'explore_errors', { request: { id: 1, limit: 3 } })).result.isError, true);
   // the earlier spellings are no fields of this tool
   for (const request of [{ since: '2026-01-01' }, { text: 'x' }, { detail: true }]) assert.equal((await runTool(engine, 'explore_errors', { request })).result.isError, true, JSON.stringify(request));
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 7);
+  // the earlier level of detail is the one list `include` now: refused with the request it is, never served
+  const detail = await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', detail: 'full' } });
+  assert.equal(detail.result.isError, true);
+  assert.ok(payload(detail).error.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ tool: 'query_semantic_model', include: ['details'] })}`), payload(detail).error.message);
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 8);
 });
 
 test('explore_errors reads a time window as every time_range is read: a date-only end is its whole day, a timezone shifts both bounds', () => {
@@ -105,7 +109,7 @@ test('a task that ends in an error is kept once, with its input — its reads ar
   await engine._awaitTasks([id, thrown], 5);
   const tasks = engine.explore_errors({ source: 'task' });
   assert.deepEqual(tasks.errors.map((e) => e.task_id).sort(), [id, thrown].sort());
-  assert.deepEqual(engine.explore_errors({ task_id: id, detail: 'full' }).errors[0].args, { steps: [{ stage: 'limit', limit: 1 }] });
+  assert.deepEqual(engine.explore_errors({ task_id: id, include: ['details'] }).errors[0].args, { steps: [{ stage: 'limit', limit: 1 }] });
   await runTool(engine, 'query_pipeline_model', { request: { task_ids: [id] } });
   assert.equal(engine.explore_errors({}).total, 2);
 });

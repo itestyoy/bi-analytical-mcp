@@ -139,10 +139,10 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // version valid on the spend day.
   const ctx = await mcpTask({
     name: 'e2e_ua',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'users' }],
+    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
+  const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: [{ source: 'users', column: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'e2e_ua_cost'), 'e2e_ua_cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -307,7 +307,7 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
   if (skip(t)) return;
   const ctx = await mcpTask({
     name: 'e2e_mix',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'crashlytics', measures: [{ name: 'crashes', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'crashlytics', measures: [{ name: 'crashes', expr: { fn: 'count' } }] }],
     metrics: [
       { name: 'cost', type: 'simple', measure: 'cost' },
       { name: 'evts', type: 'simple', measure: 'evts' },
@@ -419,7 +419,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   if (skip(t)) return;
   const ctx = await mcpTask({
     name: 'e2e_grow',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
+    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const before = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
@@ -430,13 +430,13 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const tooEarly = await callErr('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_clicks'] });
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
-  // add a second amount from the SAME source, choosing its aggregation here and now.
-  const grown = await call('build_semantic_model', {
-    action: 'update',
-    context_id: ctx,
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }],
-    metrics: [{ name: 'clicks', type: 'simple', measure: 'clicks' }],
-  });
+  // add a second amount from the SAME source, choosing its aggregation here and now — to the task
+  // named as a declaration names it (`name`; `task`, and an item's `from`, are an earlier spelling,
+  // refused at the boundary with the value converted)
+  const addClicks = { semantic_models: [{ source: 'acquisition', measures: [{ name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }], metrics: [{ name: 'clicks', type: 'simple', measure: 'clicks' }] };
+  const earlier = await callErr('build_semantic_model', { action: 'update', context_id: ctx, task: 'e2e_grow', ...addClicks });
+  assert.match(earlier.error.message, /earlier spelling — write .*"name":"e2e_grow"/s, JSON.stringify(earlier));
+  const grown = await call('build_semantic_model', { action: 'update', context_id: ctx, name: 'e2e_grow', ...addClicks });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 
   const after = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] });

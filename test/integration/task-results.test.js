@@ -29,7 +29,7 @@ before(async () => {
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.build_semantic_model({
     name: 'mon',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
@@ -40,8 +40,8 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], ...input });
-const byCountry = [{ model: 'users', attribute: 'country' }];
-const paying = [{ fn: 'in', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }, { value: 'GB' }, { value: 'BR' }] }];
+const byCountry = [{ source: 'users', column: 'country' }];
+const paying = [{ fn: 'in', args: [{ source: 'users', column: 'country' }, { value: 'US' }, { value: 'GB' }, { value: 'BR' }] }];
 
 // ONE UNGROUPED TASK carries what a single-row result is asked: started at once and read back; the
 // declarations a single row cannot take refused (refused is not drawn); then drawn, once, as a KPI.
@@ -179,7 +179,7 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
 test('a pivot shows the top level from the warehouse, and a row opens into its children, which add up to it', opts, async (t) => {
   if (skip(t)) return;
   const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', fn: 'sum', label: 'Revenue' }] };
-  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
   // a drill-down reads a stored result: a result held in memory is refused
   const inMemory = await q({ group_by: groupBy });
   await assert.rejects(engine.display_model_result({ task_id: inMemory.task_id, display }), /materialize/);
@@ -206,7 +206,7 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
 // the stored rows under it — checked against the same rows read back and folded here.
 test('a pivot value folds its level with a median: each country is the median of its stored rows', opts, async (t) => {
   if (skip(t)) return;
-  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
   const stored = await q({ group_by: groupBy, materialize: true });
   const rows = (await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 1000 }))).rows;
   const median = (xs) => { const v = xs.filter((x) => x !== null && x !== undefined).map(Number).sort((a, b) => a - b); const h = Math.floor(v.length / 2); return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
@@ -226,7 +226,7 @@ test('a pivot value folds its level with a median: each country is the median of
 test('a drillable bar is drawn folded over its drill level, and a bar drills into its breakdown, which adds up to it', opts, async (t) => {
   if (skip(t)) return;
   const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }] } };
-  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
   const stored = await q({ group_by: groupBy, materialize: true });
   // a drill level the chart already draws is refused (and nothing is drawn)
   await assert.rejects(engine.display_model_result({ task_id: stored.task_id, display: { ...display, drill: { levels: [{ column: 'users_country' }] } } }), (e) => e.field === 'display');

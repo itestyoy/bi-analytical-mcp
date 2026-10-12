@@ -1,6 +1,6 @@
 ---
 title: One expr, one stage, one ref, one include — a definition per concept, the place checks
-status: in-progress
+status: done
 last_reviewed: 2026-10-12
 last_used: 2026-10-12
 tags: [schema, grammar, pipeline, semantic, retentioneering, index]
@@ -11,7 +11,7 @@ source_of_truth: [src/pipeline/compute.js, src/pipeline/stages.js, src/schema.js
 
 ## Status
 
-in-progress
+done
 
 ## Last Reviewed
 
@@ -38,11 +38,12 @@ the place takes.
 
 ### The rule (AGENTS.md, ONE VOCABULARY)
 
-A concept has ONE definition in every tool's schema, its forms grouped by what they need to work. A
-place that takes the concept accepts a subset; the subset is checked when the value is built (the
-same way function placement already is), and a refusal names the place and what it takes. A schema
-definition is never split per place — `raw` included: a read refuses it at build, before any SQL runs
-(a read is read-only and runs nothing before its check). A list of
+A concept has ONE definition — one builder, one name, the same groups — its forms grouped by what they
+need to work. A place that takes the concept accepts a subset. In each tool's schema the definition
+holds what THAT tool's places take — their union, nothing else (§9) — so a read's schema has no `raw`
+again; it is never split per place inside a tool, and where the places of one tool take different
+parts, each subset is checked when the value is built (the same way function placement already is),
+and a refusal names the place and what it takes. A list of
 a table's OWN columns stays a list of names (group_by of an aggregate, project, unpivot, segments,
 path); anything else names a thing through `ref` / an `expr` leaf.
 
@@ -52,7 +53,8 @@ path); anything else names a thing through `ref` / an `expr` leaf.
   - rows: `{ column }`, `{ property, field?, type? }`, `{ value }`, `{ now: true }`;
   - the `ref` forms that name a VALUE (§3): `{ source, column, via? }`, `{ source, property }`,
     `{ semantic_model, dimension, grain? }`, `{ entity }`, `{ time: "metric_time", grain? }`, `{ metric }`.
-- Functions: every `FNS` entry (scalar, condition, logic, aggregate, window, raw).
+- Functions: every `FNS` entry (scalar, condition, logic, aggregate, window, raw). A tool's
+  `$defs.expr` holds the leaves and functions its places take (§9).
 - What each PLACE takes (checked at build; the refusal lists the leaves / functions the place takes):
 
 | place | leaves | functions |
@@ -74,9 +76,9 @@ path); anything else names a thing through `ref` / an `expr` leaf.
 | over a source's events | match_recognize | the rows still a source's events |
 | on a runtime, not SQL | python (`{ stage: "python" }`); in the retentioneering tool's schema also the library's ops (`{ type, … }`) | a Python runtime after SQL preparation |
 
-- Each tool's `$defs.stage` holds the groups that exist in it: the core tools the core groups; the
-  retentioneering tool (a feature: nothing of it in a core schema, on or off) the core groups + its
-  library ops as a runtime group.
+- Each tool's `$defs.stage` holds the stages its places take, under the same group titles (§9): the
+  core tools the core stages; the retentioneering tool (a feature: nothing of it in a core schema, on or
+  off) its start's stages + its library ops as a runtime group.
 - What each place takes (checked at build, refusal names the place and what it takes): the pipeline
   build — every core group; a read and the steps after a metric query — SQL minus join / unnest (a
   build from the task, from_task, for those); the retentioneering start — where, compute, join;
@@ -130,6 +132,29 @@ through the feature registry (the core never names a feature; off, the form does
 display_retentioneering_result takes `{ task_id, display: { analysis, title?, edge_weight? } }`, as
 display_model_result takes `{ task_id, display }`.
 
+### 9. A tool's definition holds what its places take (decided 2026-10-12, after the first full run)
+
+The first build put EVERY leaf, function and stage in every tool's def: the production tool list
+grew from 244 KB to 316 KB (+29 %), and the size budget test was raised to pass — a regression the
+user was shown before any commit. Decision ("давай твою рекомендацию"): ONE builder, ONE name and
+the SAME groups per concept stay, but a tool's `$defs.expr` / `$defs.stage` / `$defs.ref` holds only
+the forms that at least one PLACE OF THAT TOOL takes — the union of its places (`PLACES`,
+`STAGE_PLACES`, `REF_PLACES`), never split per place inside a tool. Places that differ inside one
+tool (a metric query's where vs its steps; the retentioneering start vs filter_events vs add_steps)
+are still checked when the value is built. So a read's schema shows no join / unnest /
+match_recognize / python stage, no `{ property }` and no `raw` (refused by the schema itself again),
+a semantic declaration no window, and so on. The size budget goes back to its earlier ceiling.
+
+| tool | expr places | stage places | ref places |
+|---|---|---|---|
+| build_pipeline_model | source_rows | build | — |
+| query_pipeline_model | stored_rows | read | — |
+| build_semantic_model | semantic_model, derived_metric | — | — |
+| query_semantic_model | metric_where, stored_rows | read | group_by |
+| semantic_index | — | — | index_view, about (the notes view's filter) |
+| memory | — | — | about |
+| build_retentioneering_model | source_rows (start), stored_rows (filter_events) | its start + its library ops | — |
+
 ### Earlier spellings
 
 Every renamed field or reshaped value is refused with its hint or converted value
@@ -152,3 +177,7 @@ The join stage's `with` (not proposed); renaming a where stage's `conditions` / 
 
 All edits first; then ONE run: `npm run lint:names`, `npm test`, `npm run test:integration`,
 `npm run eval:check`; fix; commit; push. Tests assert on data.
+
+Result (2026-10-12, dbt-v2, after §9): lint:names clean; unit 795/795; integration 312/312;
+eval:check — all 14 cases hold. Tool list on the production catalog: 248,944 characters (244,014 at
+the commit before this change; 315,688 with every form in every tool; budget < 260,000).

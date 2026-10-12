@@ -85,7 +85,7 @@ function variant(mutate, extra = {}) {
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
 const evtsTask = (eng, name, load = []) => eng.build_semantic_model({
-  name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, ...load.map((from) => ({ from }))],
+  name, semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, ...load.map((source) => ({ source }))],
   metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
 });
 /** Run a pipeline of steps and return its rows. */
@@ -126,14 +126,14 @@ before(async () => {
   // events x users, ad_type declared as a task dimension: S1 reads every split of one query
   const eu = await engine.build_semantic_model({
     name: 'aeu',
-    semantic_models: [{ from: 'events', dimensions: [{ property: 'ad_type_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { from: 'users' }],
+    semantic_models: [{ source: 'events', dimensions: [{ property: 'ad_type_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(eu.parse.ok, true, `40: a task declaring ad_type as a dimension parses: ${JSON.stringify(eu.parse)}`);
   evUsersCtx = eu.context_id;
   const both = await engine.build_semantic_model({
     name: 'aboth',
-    semantic_models: [{ from: 'events', measures: [{ name: 'launches', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }, { from: 'crashlytics', measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'launches', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }, { source: 'crashlytics', measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'launches', type: 'simple', measure: 'launches' }, { name: 'reports', type: 'simple', measure: 'reports' }],
   });
   evCrashCtx = both.context_id;
@@ -151,7 +151,7 @@ before(async () => {
   }));
   const bt = await bothEngine.build_semantic_model({
     name: 'aclk',
-    semantic_models: [{ from: 'acquisition', dimensions: [{ column: 'clicks' }], measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'click_total', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }, { from: 'users' }],
+    semantic_models: [{ source: 'acquisition', dimensions: [{ column: 'clicks' }], measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'click_total', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }, { source: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'click_total', type: 'simple', measure: 'click_total' }],
   });
   assert.equal(bt.parse.ok, true, JSON.stringify(bt.parse));
@@ -167,9 +167,9 @@ test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / mon
   const r = await q(evUsersCtx, {
     metrics: ['aeu_evts'],
     group_by: [
-      { model: 'users', attribute: 'country' },
-      { model: 'events', attribute: 'bundle_id' },
-      { model: 'events', attribute: 'ad_type_of_event_data' },
+      { source: 'users', column: 'country' },
+      { source: 'events', column: 'bundle_id' },
+      { source: 'events', property: 'ad_type_of_event_data' },
       { time: 'metric_time', grain: 'month' },
     ],
   });
@@ -179,7 +179,7 @@ test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / mon
   assert.deepEqual(res, { 'users.country': 'users_country', 'events.bundle_id': 'events_bundle_id', 'events.ad_type_of_event_data': 'events_ad_type_of_event_data' },
     `2: the response echoes the path each structured reference resolved to: ${JSON.stringify(res)}`);
   assert.ok(r.columns.some((c) => c.name.includes('country')), '2: the result column carries the resolved name');
-  // 1/17. { model: users, attribute: country } returns what users.country holds — the governed path the users model promises
+  // 1/17. { source: users, column: country } returns what users.country holds — the governed path the users model promises
   assert.deepEqual(marginal(r.rows, res['users.country'], 'aeu_evts'), { US: 67, GB: 57, DE: 31, BR: 29 }, '1/17: events per users.country');
   // 10/17. a structured attribute and a time grain together: one month, four countries, 184 events
   assert.equal(sumCol(r.rows, 'aeu_evts'), 184, '10/17: every event counted once across the splits');
@@ -203,8 +203,8 @@ test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / mon
 
 test('S2 (B). the value guard over the real index: five refusals, and the correct values answer 57 / 124 / 31 / 53', opts, async (t) => {
   if (skip(t)) return;
-  const country = { model: 'users', attribute: 'country' };
-  const bundle = { model: 'events', attribute: 'bundle_id' };
+  const country = { source: 'users', column: 'country' };
+  const bundle = { source: 'events', column: 'bundle_id' };
   // a comparison of the reference with its constants, each its own argument (an in lists several)
   const filtered = (ref, op, values) => ({ metrics: ['aeu_evts'], where: [{ fn: op, args: [ref, ...[].concat(values).map((value) => ({ value }))] }] });
   // the guard reads the keys the REAL indexer wrote: (users, country) and (events, bundle_id)
@@ -217,7 +217,7 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   const r = await q(evUsersCtx, { ...filtered(country, 'in', ['GB', 'US', 'DE']), group_by: [country] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, r.group_by_resolved['users.country'], 'aeu_evts');
-  assert.equal(by.GB, 57, `3/12: a where addressed by model + attribute keeps GB's 57 events (${JSON.stringify(by)})`);
+  assert.equal(by.GB, 57, `3/12: a where addressed by source + column keeps GB's 57 events (${JSON.stringify(by)})`);
   assert.equal(by.GB + by.US, 124, '13: the IN list GB + US = 124');
   assert.equal(by.DE, 31, '15: the correctly cased DE returns 31');
   assert.ok(!('BR' in by), `3: the where keeps only the listed countries (${JSON.stringify(by)})`);
@@ -232,7 +232,7 @@ test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labell
   if (skip(t)) return;
   const r = await q(ownerCtx, {
     metrics: ['aown_evts'],
-    group_by: [{ model: 'crashlytics', attribute: 'app_version' }, { model: 'crashlytics', attribute: 'device_model', via: 'ad_funnel' }],
+    group_by: [{ source: 'crashlytics', column: 'app_version' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }],
   }, ownerEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 7. an attribute of an owned FACT is reached through the relationship the source declares
@@ -284,12 +284,12 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   assert.ok(pruned.experiments.includes('(time axis)'), `27: the time axis over a missing column is pruned: ${JSON.stringify(pruned)}`);
   assert.equal(cat.getModel('experiments').time, undefined, '27: the model has no time axis left');
   // 25. a measure over the pruned amount is refused at validation, not in the warehouse
-  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
+  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ source: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
     /bonus_spend|invalid input/, '25: a measure over the pruned amount is refused at validation');
   // what survives builds and answers: the real amount, the surviving governed measure, the renamed source's count
   const c = await eng.build_semantic_model({
     name: 'agr',
-    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { from: 'analytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'analytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],
   });
   assert.equal(c.parse.ok, true, `26/33: the surviving measures and the renamed source parse: ${JSON.stringify(c.parse)}`);
@@ -310,7 +310,7 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
 
 test('S6 (F/N). clicks is both an amount and an attribute; a spend task joined to installs is as fresh as spend', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ model: 'acquisition', attribute: 'clicks' }] }, bothEngine);
+  const r = await q(bothCtx, { metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ source: 'acquisition', column: 'clicks' }] }, bothEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 28. cost grouped by the clicks VALUE: 9 clicks cost 5.25, 8 clicks 4.25, 0 clicks 0
   const by = mapCol(r.rows, r.group_by_resolved['acquisition.clicks'], 'aclk_cost');
@@ -348,11 +348,11 @@ test('S9 (J/N). the crash source in a two-source task: device_model and event_na
   if (skip(t)) return;
   // 39. search finds device_model on users AND on crashlytics
   const s = await engine.semantic_index({ search: 'device_model' });
-  assert.deepEqual([...new Set(s.dimension_matches.filter((d) => d.property === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users'], '39: device_model is found on users and on crashlytics');
+  assert.deepEqual([...new Set(s.column_matches.filter((d) => d.column === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users'], '39: device_model is found on users and on crashlytics');
   const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((row) => [row.event_name, Number(row.n)]));
   const r = await q(evCrashCtx, {
     metrics: ['aboth_reports'],
-    group_by: [{ model: 'crashlytics', attribute: 'device_model' }, { model: 'crashlytics', attribute: 'event_name' }],
+    group_by: [{ source: 'crashlytics', column: 'device_model' }, { source: 'crashlytics', column: 'event_name' }],
     time_range: { start: '2020-01-01', end: '2030-12-31' },
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -406,7 +406,8 @@ test('S7 (G/L/O/P/Q). the index before() built over a reset store: wiped, then f
   // 44/60. the run rows carry their source
   const st = await engine.semantic_index({ status: true });
   const run = await engine.semantic_index({ run: st.value_index.last_run.id });
-  const appVersion = run.properties.filter((p) => p.property === 'app_version');
+  // (a model's column, named as its view takes it: { source, column })
+  const appVersion = run.properties.filter((p) => p.column === 'app_version');
   assert.deepEqual(appVersion.map((p) => p.source).sort(), ['crashlytics', 'users'], '44: app_version has a run row per source');
   assert.equal(appVersion.find((p) => p.source === 'users').distinct_count, 1, '44: users.app_version has 1 distinct value');
   assert.equal(appVersion.find((p) => p.source === 'crashlytics').distinct_count, 2, '44: crashlytics.app_version has 2 distinct values');
@@ -416,12 +417,12 @@ test('S7 (G/L/O/P/Q). the index before() built over a reset store: wiped, then f
   assert.ok(bySource.crashlytics?.length >= 7, `60: crash rows: ${bySource.crashlytics?.length}`);
   assert.ok(bySource.users?.length >= 10, `60: users rows: ${bySource.users?.length}`);
   assert.deepEqual([...new Set(run.properties.map((p) => p.status))], ['ok'], '60: every row of the run is ok');
-  // 45. the property view always takes the source, and answers per source
-  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /must be exactly one of: .*\{ source, property \}/, '45: the property view always takes the source');
-  const u = await engine.semantic_index({ source: 'users', property: 'app_version' });
+  // 45. the column view always takes the source, and answers per source
+  await assert.rejects(() => engine.semantic_index({ column: 'app_version' }), /must be exactly one of: .*\{ source, column \}/, '45: the column view always takes the source');
+  const u = await engine.semantic_index({ source: 'users', column: 'app_version' });
   // the seed writes '1.0'; dbt seed types the column numeric, so the warehouse value is 1
   assert.deepEqual(u.sample_values.map((v) => [String(v.value), v.freq]), [['1', 13]], '45: users.app_version answers for users');
-  const c = await engine.semantic_index({ source: 'crashlytics', property: 'app_version' });
+  const c = await engine.semantic_index({ source: 'crashlytics', column: 'app_version' });
   assert.deepEqual(Object.fromEntries(c.sample_values.map((v) => [v.value, v.freq])), { '1.0.0': 7, '1.1.0': 6 }, '45: crashlytics.app_version answers for crashlytics');
   // 50. apps are listed per source: two on events (131 / 53), none on the crash source
   assert.deepEqual(index.bundles().map((b) => [b.source, b.bundle, b.row_count]), [['events', 'com.omg.wordsearch', 131], ['events', 'com.omg.colorfit', 53]], '50: two apps, both on events');

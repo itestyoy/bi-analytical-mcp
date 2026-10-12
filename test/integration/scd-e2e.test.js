@@ -65,7 +65,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_rev',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users', dimensions: [{ column: 'country' }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
@@ -73,7 +73,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
 
   // 'governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)'
   // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
-  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { time: 'metric_time', grain: 'month' }] });
+  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] });
   assert.equal(seg.status, 'done', JSON.stringify(seg));
   const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.scd_rev_revenue)) ? num(x.scd_rev_revenue) : 0), 0);
   assert.equal(total, 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
@@ -92,7 +92,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'scd_drop',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users', measures: [{ name: 'player_count', expr: { fn: 'count_distinct', args: [{ column: 'internal_player_id' }] } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users', measures: [{ name: 'player_count', expr: { fn: 'count_distinct', args: [{ column: 'internal_player_id' }] } }] }],
     metrics: [
       { name: 'revenue', type: 'simple', measure: 'revenue' },
       { name: 'players', type: 'simple', measure: 'player_count' },

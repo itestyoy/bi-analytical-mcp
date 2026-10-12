@@ -47,6 +47,7 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 
 - A call that starts warehouse work returns `{ task_id }` at once; the same side's query tool reads it with `{ task_ids }`.
 - Every tool writes conditions, measures and computed values in one expression grammar — `{ fn, args, …params }` over leaves (`src/pipeline/compute.js`); a value in an earlier spelling is refused with the converted value (`src/earlier-spelling.js`).
+- One definition per concept, one builder and one name each — `$defs.expr`, `$defs.stage`, `$defs.ref` (a model's column `{ source, column }`, an event property `{ source, property }`, …) and `include: [...]`; in each tool's schema it holds the union of what that tool's places take (`TOOL_PLACES` in `src/schema.js`; a read's has no join stage, event property or `raw`), and where the places of one tool differ, each is checked when the value is built (`PLACES`, `STAGE_PLACES`, `REF_PLACES`).
 - `structuredContent` rides on a drawn card and on the answers of tools with an `outputSchema`; everything else is text.
 
 ## Source Of Truth

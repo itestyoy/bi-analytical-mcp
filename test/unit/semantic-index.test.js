@@ -125,15 +125,36 @@ test('semantic_index({ source, property }): order_by is a list of { key, directi
   }
 });
 
-// include_coverage switches on the per-event and per-app split, which only an events source has.
-test('semantic_index({ source, property }): include_coverage is offered on an events source alone', async () => {
+// include: ['coverage'] switches on the per-event and per-app split, which only an event property has:
+// a model's column is the { source, column } view, which takes no include.
+test('semantic_index: include coverage is offered on an event property alone', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country', include_coverage: true }), (err) => {
-    assert.match(err.message, /unexpected property 'include_coverage' — \{ source, property \} takes source, property, limit, offset, order_by, recent/);
+  await assert.rejects(() => e.semantic_index({ source: 'users', column: 'country', include: ['coverage'] }), (err) => {
+    assert.match(err.message, /unexpected property 'include' — \{ source, column \} takes source, column, limit, offset, order_by, recent/);
     assert.doesNotMatch(err.message, /`source` must be "events"/);
     return true;
   });
-  assert.equal((await e.semantic_index({ source: 'events', property: 'result_of_event_data', include_coverage: true })).property, 'result_of_event_data');
+  assert.equal((await e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['coverage'] })).property, 'result_of_event_data');
+  // what the list holds is the view's enum, each item once
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['yaml'] }), /invalid input/);
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'result_of_event_data', include: ['coverage', 'coverage'] }), /invalid input/);
+});
+
+// A model's column and an event property are two views, each named as the expression's leaves name
+// them: users.country is { source: 'users', column: 'country' }, an event's payload a { property }. The
+// events source's event column is a column too, answered with the events it declares.
+test('semantic_index({ source, column }): a model column is `column`, an event property `property`', async () => {
+  const e = engine();
+  const country = await e.semantic_index({ source: 'users', column: 'country' });
+  assert.equal(country.column, 'country');
+  assert.equal(country.source, 'users');
+  assert.equal(country.property, undefined, 'the answer speaks the view\'s spelling');
+  const events = await e.semantic_index({ source: 'events', column: 'event_name' });
+  assert.ok(events.values.includes('ad_finished'), JSON.stringify(events.values));
+  // the earlier { source, property } for a model's column is told the field's name here
+  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country' }), /here that field is called 'column'/);
+  // and the overview lists the column view among the views
+  assert.ok((await e.semantic_index()).views.some((v) => v.view === 'column'));
 });
 
 // The SOURCE is ALWAYS a separate, named argument — in every catalog, however many sources it
@@ -193,8 +214,9 @@ test('semantic_index: an event or a column is never asked for without its source
   await assert.rejects(() => two.semantic_index({ source: 'events', event: 'boom' }), /`event` must be one of: login, purchase/);
 
   // A COLUMN is addressed the same way: a bare name has no spelling in either catalog.
-  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
-  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
+  await assert.rejects(() => one.semantic_index({ column: 'event_name' }), /\{ source, column \}.*missing required property 'source'/);
+  await assert.rejects(() => two.semantic_index({ column: 'event_name' }), /\{ source, column \}.*missing required property 'source'/);
+  assert.equal((await two.semantic_index({ source: 'crashlytics', column: 'event_name' })).column, 'event_name');
 });
 
 test('semantic_index({ views }): several drill-ins in one call, each as it answers alone', async () => {

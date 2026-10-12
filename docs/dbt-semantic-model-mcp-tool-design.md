@@ -1,7 +1,7 @@
 # MCP-тул: декларативное создание dbt semantic model «на лету» + запрос
 
 > **Исторический дизайн.** Документ фиксирует исходный замысел; поля, которые он показывает
-> (`use_base_models`, `as_type`, `event_scope`, `measure: { name }`, …), — его собственные, не
+> (`use_base_models`, `as_type`, `event_scope`, `measure: { name }`, `semantic_models[].from`, …), — его собственные, не
 > сервера. Текущий вход инструментов — их схемы (`src/schema.js`, `src/schema/`), какими сервер
 > отдаёт их клиенту; правила словаря — `AGENTS.md`.
 

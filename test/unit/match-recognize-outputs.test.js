@@ -42,7 +42,7 @@ const funnel = (extra = {}) => ({
 
 async function columnsAfter(e, stage) {
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'mro', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [stage], include_columns: true });
+  const added = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [stage], include: ['columns'] });
   return { context_id, types: new Map(added.available_columns.map((c) => [c.name, c.type])) };
 }
 

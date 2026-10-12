@@ -7,12 +7,13 @@
 // (see store.js) — this class holds the domain operations + the small in-JS filtering
 // (the note set is tiny), and no SQL.
 //
-// A TARGET is stored as what it IS — { kind, source, name } for a property/attribute/event,
-// { kind, source } for a model, { kind, term } for a free phrase the user used — and spoken by the
-// tools as `aboutOf` writes it ({ source, property } / { source, event } / { source } / { term }).
-// `targetKey` folds one into a single string ONLY to look it up; nothing ever takes a key apart
-// again. That is the whole rule: a name may be assembled for an index, never dismantled to recover
-// what it names.
+// A TARGET is stored as what it IS — { kind, source, name } for an event property, a model's column
+// or an event, { kind, source } for a model, { kind, term } for a free phrase the user used — and
+// spoken by the tools as `aboutOf` writes it, the ref's own spelling ({ source, property } /
+// { source, column } / { source, event } / { source } / { term }). `targetKey` folds one into a single
+// string ONLY to look it up; nothing ever takes a key apart again. That is the whole rule: a name may
+// be assembled for an index, never dismantled to recover what it names. A note an earlier version
+// kept named a model's column as a property; it is read as the column it is (currentTarget).
 
 import { randomUUID } from 'node:crypto';
 import { rankFuzzy } from './fuzzy.js';
@@ -26,14 +27,27 @@ export function targetKey(t) {
 
 /**
  * A stored target as the tools write it — what memory records under `about` and semantic_index's
- * { notes, about } filters by: { source, property }, { source, event }, { source } for the model,
- * { term }. The stored kind maps one-to-one to the key, so nothing stored has to change.
+ * { notes, about } filters by, the ref's spelling: { source, property }, { source, column },
+ * { source, event }, { source } for the model, { term }. The stored kind maps one-to-one to the key.
  */
 export function aboutOf(t) {
   if (t.kind === 'term') return { term: t.term };
   if (t.kind === 'model') return { source: t.source };
   if (t.kind === 'event') return { source: t.source, event: t.name };
+  if (t.kind === 'column') return { source: t.source, column: t.name };
   return { source: t.source, property: t.name };
+}
+
+/**
+ * A stored target as this version keeps it. An earlier version kept a model's column as a property of
+ * its source (one kind for both, `property`); one the catalog knows as a column — not an event property
+ * of that source — is that column now, so it is found under the column's key and spoken as the column.
+ * The same target otherwise (and without a catalog to ask).
+ */
+export function currentTarget(t, catalog) {
+  if (!catalog || t?.kind !== 'property') return t;
+  const kind = catalog.attributeKind(t.source, t.name);
+  return kind && kind !== 'property' ? { ...t, kind: 'column' } : t;
 }
 
 /** The words of a target, for search and embedding — the parts, not the assembled key. */
@@ -42,20 +56,23 @@ export function targetWords(t) {
 }
 
 /**
- * A note as read: every target a structure. A bare string an earlier server stored names nothing
- * this catalog can address, so it is read as the phrase it is — searchable, never taken apart.
+ * A note as read: every target a structure, as this version keeps it (currentTarget). A bare string an
+ * earlier server stored names nothing this catalog can address, so it is read as the phrase it is —
+ * searchable, never taken apart.
  */
-const asRead = (e) => e && { ...e, targets: (e.targets || []).map((t) => (t && typeof t === 'object' ? t : { kind: 'term', term: String(t) })) };
+const asRead = (e, catalog) => e && { ...e, targets: (e.targets || []).map((t) => (t && typeof t === 'object' ? currentTarget(t, catalog) : { kind: 'term', term: String(t) })) };
 
 // Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
 // genuinely related-but-differently-worded texts well above this; noise stays below).
 const SEMANTIC_FLOOR = 0.3;
 
 export class MemoryStore {
-  constructor({ store, embedder } = {}) {
+  constructor({ store, embedder, catalog = null } = {}) {
     this.store = store;
     // Optional embedder ({ model, embed(texts) }) → semantic search. None → fuzzy only.
     this.embedder = embedder || null;
+    // what a kept target names — a column or an event property — for a note an earlier version kept (currentTarget)
+    this.catalog = catalog;
   }
 
   /** Whether semantic (vector) search is active. */
@@ -83,13 +100,13 @@ export class MemoryStore {
     return entry;
   }
 
-  get(id) { return asRead(this.store.memory.get(id)); }
+  get(id) { return asRead(this.store.memory.get(id), this.catalog); }
 
   /** Delete one note by id. Returns whether a row existed. */
   forget(id) { return this.store.memory.remove(id); }
 
   /** All notes, most recent first. */
-  all(opts = {}) { return this.store.memory.all(opts).map(asRead); }
+  all(opts = {}) { return this.store.memory.all(opts).map((e) => asRead(e, this.catalog)); }
 
   /** { notes } — coverage counts. */
   counts() { return this.store.memory.counts(); }

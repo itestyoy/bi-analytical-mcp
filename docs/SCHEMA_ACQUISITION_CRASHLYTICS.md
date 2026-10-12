@@ -33,7 +33,7 @@
 место в индексе значений по ключу `(source, property)`. Ни один не «главный». Поэтому
 источник всегда идёт **отдельным аргументом**:
 `semantic_index({ source, event })`, `build_pipeline_model({ source })`,
-`semantic_models[].from` — и никогда не приклеивается к имени.
+`semantic_models[].source` — и никогда не приклеивается к имени.
 
 ---
 
@@ -469,7 +469,7 @@ acquisition × events: строки расходов размножаются п
 — то на игрока приходится **несколько версий**, и соединение по одному ключу совпадёт с
 каждой исторической версией и раздует любой счёт.
 
-- **governed** — MetricFlow применяет окно сам: просто группируйте по `{ model: 'users', attribute: 'country' }`.
+- **governed** — MetricFlow применяет окно сам: просто группируйте по `{ source: 'users', column: 'country' }`.
 - **pipeline** — окно указывается явно, в стадии соединения. Намеренно явно: время, о
   котором спрашивают, видно прямо в месте вызова.
 
@@ -522,8 +522,8 @@ entities:
   ad_funnel: { type: foreign, key: [tracking_id_of_event_data, internal_player_id] }
 ```
 
-Так появляется управляемый путь: мера на событиях группируется по **атрибутам** источника
-падений — `{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }`. Работает и составной ключ, и
+Так появляется управляемый путь: мера на событиях группируется по **колонкам** источника
+падений — `{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }`. Работает и составной ключ, и
 разные имена колонок на сторонах.
 
 > **`unique` — это утверждение о ДАННЫХ, и никто его не проверяет.** Если ключ на стороне
@@ -584,7 +584,7 @@ MetricFlow умеет соединять только по уникальном�
 
 ```json
 { "name": "ua_cpc",
-  "semantic_models": [{ "from": "acquisition",
+  "semantic_models": [{ "source": "acquisition",
     "measures": [{ "name": "cpc_p50", "expr": { "fn": "median", "args": [{ "column": "cost_per_click" }] } }] }],
   "metrics": [{ "name": "cpc_p50", "type": "simple", "measure": "cpc_p50" }] }
 ```

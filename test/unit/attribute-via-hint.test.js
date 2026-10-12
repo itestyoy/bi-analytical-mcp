@@ -7,6 +7,8 @@ import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { buildSchemas } from '../../src/schema.js';
+import { makeValidators, validateInput } from '../../src/validate.js';
 import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: the property page's RECOMMENDATION (a UX affordance), not query
@@ -52,12 +54,31 @@ function engine() {
   return settle(new Engine({ catalog: loadCatalog(join(dir, 'catalog.yml'), {}), recipes: loadRecipes(null), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'viahint-ws-')) }) }));
 }
 
-test('an attribute reached through several relationships: its page names via and every choice', async () => {
+test('a column reached through several relationships: its page names via and every choice', async () => {
   const e = engine();
-  const page = await e.semantic_index({ source: 'users', property: 'country' });
-  const rec = page.recommendations.find((r) => r.includes("model: 'users'"));
+  const page = await e.semantic_index({ source: 'users', column: 'country' });
+  const rec = page.recommendations.find((r) => r.includes("{ source: 'users', column: 'country' }"));
   assert.ok(rec, JSON.stringify(page.recommendations));
   assert.match(rec, /from 'events' add via: one of 'user', 'referrer'|from 'events' add via: one of 'referrer', 'user'/);
+  // a model's column is `column` — the earlier `property` is told its name, not served
+  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country' }), /unexpected property 'property' — here that field is called 'column'/);
+});
+
+// Allowed non-data test: an input-validation guard. The `via` a metric query's group_by takes is not a
+// view's: semantic_index reads a column where it is (REF_PLACES.index_view), so its schema offers no
+// `via` even where several relationships lead to the model — while the group_by still does.
+test('a column reached through several relationships: via is a group_by\'s, not a semantic_index view\'s', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'viahint-'));
+  writeFileSync(join(dir, 'catalog.yml'), CATALOG);
+  const validators = makeValidators(buildSchemas(loadCatalog(join(dir, 'catalog.yml'), {})));
+  const view = validateInput(validators.semantic_index, { source: 'users', column: 'country', via: 'user' });
+  assert.equal(view.ok, false, 'a view takes no via');
+  assert.ok(view.errors.some((m) => m.includes("unexpected property 'via'")), view.errors.join(' | '));
+  assert.equal(validateInput(validators.semantic_index, { source: 'users', column: 'country' }).ok, true);
+  const groupBy = (via) => validateInput(validators.query_semantic_model, { context_id: 'ctx_abcdef123456', metrics: ['m'], group_by: [{ source: 'users', column: 'country', via }] });
+  assert.equal(groupBy('user').ok, true, groupBy('user').errors?.join(' | '));
+  assert.equal(groupBy('referrer').ok, true, groupBy('referrer').errors?.join(' | '));
+  assert.equal(groupBy('nope').ok, false, 'via names a relationship that leads to the model');
 });
 
 test('recipe files are split on commas only: a path with a colon is one path', () => {

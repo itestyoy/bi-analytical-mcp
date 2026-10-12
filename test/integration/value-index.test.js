@@ -331,9 +331,9 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
 // are distinguishable from real gaps (there are none here — both ad events are 100% filled).
 test('semantic_index({ source, property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
   if (skip(t)) return;
-  // include_coverage:true → the FULL per-event table (incl. always-NULL events), needed to assert
+  // include: ["coverage"] → the FULL per-event table (incl. always-NULL events), needed to assert
   // the whole-fact partition below. (Default is carriers-only; covered by property-view-lean.test.js.)
-  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include: ['coverage'] });
   // overall: 24 non-null of 184 rows → 160 NULL.
   assert.equal(out.value_stats.non_null_count, 24);
   assert.equal(out.value_stats.row_count, 184);
@@ -399,12 +399,15 @@ test('semantic_index({ source: "users" }) lists dimensions with sample_values + 
   assert.equal(ms.distinct_count, 4); // meta/organic/google/applovin
 });
 
-// semantic_index({ source: 'users', property: 'country' }) drills an attribute like a property.
-test('semantic_index({ source: "users", property: "country" }) returns the attribute value distribution', opts, async (t) => {
+// semantic_index({ source: 'users', column: 'country' }) drills a model's column as the ref names it.
+test('semantic_index({ source: "users", column: "country" }) returns the column\'s value distribution — the seed\'s', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ source: 'users', property: 'country' });
+  const out = await engine.semantic_index({ source: 'users', column: 'country' });
   // the answer names the source once, and the column as the view takes it
-  assert.deepEqual([out.source, out.property, out.model, out.column], ['users', 'country', undefined, undefined]);
+  assert.deepEqual([out.source, out.column, out.model, out.property], ['users', 'country', undefined, undefined]);
+  // every value with its frequency, as the warehouse holds them (a row per player version)
+  const seed = (await wh.query('select country, count(*) as n from dim_users group by 1')).rows;
+  assert.deepEqual(Object.fromEntries(out.sample_values.map((v) => [v.value, v.freq])), Object.fromEntries(seed.map((r) => [r.country, Number(r.n)])), '[the seed distribution] the column view');
   assert.equal(out.distinct_count, 4);
   assert.equal(valOf(out.sample_values, 'US').freq, 4);
   // dim_users is SCD-2 and u1 has a US version and a GB one, so US and GB are TIED at 4
@@ -415,26 +418,28 @@ test('semantic_index({ source: "users", property: "country" }) returns the attri
   assert.equal(valOf(out.sample_values, out.value_stats.top_value).freq, maxFreq);
   // the guidance names the JOIN path (user attributes are reached via the users join).
   assert.ok(out.recommendations.some((r) => r.includes('users_country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
-  // unknown attribute → clear error, not a silent empty result.
-  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /`property` must be one of: .*country/s);
+  // unknown column → clear error, not a silent empty result.
+  await assert.rejects(() => engine.semantic_index({ source: 'users', column: 'nope' }), /`column` must be one of: .*country/s);
+  // a model's column written as an event property is refused with the field's name here
+  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'country' }), /here that field is called 'column'/);
 });
 
 // search now finds: attribute VALUES (a country code), dimension attributes by name,
 // experiment names, and matching recipes — the full discovery loop in one call.
 test('semantic_index({ search }) finds attribute values, dimensions, experiments and recipes', opts, async (t) => {
   if (skip(t)) return;
-  // a known country code resolves to the users.country attribute.
+  // a known country code resolves to the users.country column — named as its view takes it.
   const de = await engine.semantic_index({ search: 'DE' });
-  const deHit = de.value_matches.find((m) => m.source === 'users' && m.property === 'country' && m.value === 'DE');
+  const deHit = de.value_matches.find((m) => m.source === 'users' && m.column === 'country' && m.value === 'DE');
   assert.ok(deHit, `expected users.country DE value match: ${JSON.stringify(de.value_matches)}`);
   assert.equal(deHit.freq, 3);
   assert.equal(deHit.model, undefined, 'a value names its source once');
   // an experiment name is discoverable by substring.
   const exp = await engine.semantic_index({ search: 'checkout' });
-  assert.ok(exp.value_matches.some((m) => m.source === 'experiments' && m.property === 'experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
-  // a dimension attribute is discoverable by its name.
+  assert.ok(exp.value_matches.some((m) => m.source === 'experiments' && m.column === 'experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
+  // a model's column is discoverable by its name.
   const dim = await engine.semantic_index({ search: 'country' });
-  assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.property === 'country'), JSON.stringify(dim.dimension_matches));
+  assert.ok(dim.column_matches.some((d) => d.source === 'users' && d.column === 'country'), JSON.stringify(dim.column_matches));
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
   assert.ok(ret.recipe_matches.some((r) => r.id === 'conversion_metric_window'), JSON.stringify(ret.recipe_matches));
@@ -473,10 +478,10 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
   // the { property } view carries the same per-app split: by default a summary (empty_apps count),
-  // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
+  // and the full per-app list under include: ["coverage"] — ad_type is non_null=0 for colorfit.
   const adSummary = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(adSummary.bundle_coverage_summary.empty_apps >= 1, 'summary flags the empty app(s) by default');
-  const adProp = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
+  const adProp = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include: ['coverage'] });
   const cf = (adProp.bundle_coverage || []).find((b) => b.bundle === 'com.omg.colorfit');
   assert.equal(cf?.non_null, 0, JSON.stringify(adProp.bundle_coverage));
 

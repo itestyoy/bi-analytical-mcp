@@ -47,11 +47,11 @@ test('_deletePipelineModel removes EVERY file of the pipeline, not just the .sql
 // ── the { source, property } view threw TypeError instead of refusing ───────────────────────
 // The schema's enum normally makes an unknown name unwritable, but a source that declares no
 // columns projects no enum and the field degrades to an open string. The view then read `.type`
-// off a column that was not there.
-test('an unknown column name is refused by the property view, not read off undefined', async () => {
+// off a column that was not there. (A model's column is the { source, column } view now.)
+test('an unknown column name is refused by the column view, not read off undefined', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ source: 'users', property: 'no_such_column' }),
-    /not a property or attribute of 'users'|`property` must be one of/);
+  await assert.rejects(() => e.semantic_index({ source: 'users', column: 'no_such_column' }),
+    /not a column of 'users'|`column` must be one of/);
 });
 
 // ── meta.mcp.dimension: false was ignored on a non-fact's time axis ─────────────────────────
@@ -230,23 +230,23 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users', dimensions: [{ column: 'country' }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
   assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
-  assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
+  assert.ok(first.groupable.some((g) => g.source === 'users' && g.column === 'country'), 'offered as the column');
 
   await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', column: 'platform' }] } }),
+    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ source: 'users', column: 'platform' }] } }),
     /cannot remove dimension 'platform'.*It has: country/s,
   );
   // a dimension is named the way it was declared: the earlier { from, field } is refused with that way
   await assert.rejects(
     () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } }),
-    (err) => err.message.includes('is written in an earlier spelling — write {"from":"users","column":"country"}'),
+    (err) => err.message.includes('is written in an earlier spelling — write {"source":"users","column":"country"}'),
   );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', column: 'country' }] } });
+  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ source: 'users', column: 'country' }] } });
   assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
   // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
   // own surface), but the task no longer declares its own copy of it
@@ -263,18 +263,18 @@ test('groupable and the example only name models this context loaded', async () 
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const loaded = new Set(out.joined_models);
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
-  assert.ok((out.groupable || []).every((g) => loaded.has(g.model)), JSON.stringify(out.groupable));
-  assert.ok((out.groupable_after_loading || []).some((g) => g.model === 'users'), 'and the rest is offered separately');
-  assert.match(out.groupable_after_loading_note || '', /semantic_models: \[\{ from: '\w+' \}\]/);
-  // whatever is published as groupable is accepted by the query path
+  assert.ok((out.groupable || []).length > 0 && out.groupable.every((g) => loaded.has(g.source)), JSON.stringify(out.groupable));
+  assert.ok((out.groupable_after_loading || []).some((g) => g.source === 'users'), 'and the rest is offered separately');
+  assert.match(out.groupable_after_loading_note || '', /semantic_models: \[\{ source: '\w+' \}\]/);
+  // whatever is published as groupable is accepted by the query path, as it is written there (the one ref)
   const ctx = e.ctxs.get(out.context_id);
-  for (const g of out.groupable || []) {
-    assert.equal(typeof e._normalizeRef(ctx, { model: g.model, attribute: g.attribute, ...(g.via ? { via: g.via } : {}) }, 'group_by'), 'string');
+  for (const [i, g] of (out.groupable || []).entries()) {
+    assert.equal(typeof e._taskRef(ctx, g, `group_by[${i}]`).path, 'string', JSON.stringify(g));
   }
 });
 
@@ -467,11 +467,11 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   // relationship to it (two facts do not point at each other).
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'crashlytics' }, { from: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }),
     (err) => {
       assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
       assert.match(err.message, /relationships/, 'and says where to look');
@@ -481,7 +481,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   // …while the REACHABLE model of the same context still resolves under its relationship (the fix
   // closed no path; the warehouse-backed group-bys prove the rest).
   const ctx = e.ctxs.get(out.context_id);
-  assert.equal(e._normalizeRef(ctx, { model: 'users', attribute: 'country' }), 'user__country');
+  assert.equal(e._taskRef(ctx, { source: 'users', column: 'country' }).path, 'user__country');
 });
 
 // ── one name, two meanings: the value index silently overwrote one with the other ────────────

@@ -1,6 +1,8 @@
 // The catalog SEARCH subsystem behind semantic_index({ request: { search } }). Owns all matching +
 // ranking so the engine just delegates. Five corpora are searched in one call:
-//   event names · event properties · dimension attributes · recipes · indexed VALUES.
+//   event names · event properties · models' columns · recipes · indexed VALUES.
+// Every match names what it found as the ref names it — { source, event }, { source, property },
+// { source, column } — so a hit is the view to drill into, written as that view takes it.
 //
 // The four SCHEMA corpora are static for the engine's life, so their Fuse indexes are
 // built ONCE (lazily) and reused — weighted so a NAME/id outranks a description match.
@@ -11,6 +13,7 @@
 // 'exact' | 'fuzzy' }, exact hits first — a consistent shape the AI can rely on.
 
 import { FuzzyIndex } from './fuzzy.js';
+import { keyRef, keyView } from './engine/value-index-views.js';
 
 const round3 = (n) => (n == null ? null : Math.round(n * 1000) / 1000);
 const NAME_WEIGHT = 2; // a name/id match outranks a description match
@@ -46,8 +49,7 @@ export class CatalogSearch {
       ],
       tiebreak: (p) => `${p.source}.${p.name}`,
     });
-    // Dimension attributes of the non-fact models (users/experiments): { source, column } —
-    // the same pair the { source, property } drill-down takes.
+    // The models' groupable columns: { source, column } — the pair the { source, column } view takes.
     const dimItems = [];
     // EVERY model's attributes, events sources included: a dimension that lives only on a fact
     // (the app column, a crash source's app_version) is as searchable as a users attribute.
@@ -105,48 +107,45 @@ export class CatalogSearch {
       events: appliesOf(p.source)[p.name] || null,
       score: round3(score), match,
     }));
-    const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
-      source: d.source, property: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
+    const column_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
+      source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
     const recipe_matches = recipes
       ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
       : [];
 
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.
-    // Each hit names its SOURCE plus the property within it — so "rewarded" resolves to the
+    // Each hit names its SOURCE plus what carries it there — so "rewarded" resolves to the
     // property that carries it, and a mistyped "germny" still surfaces 'Germany'.
-    // An indexed value belongs to (source, property): an event property of that source, or one of its
-    // attribute columns. Which, is decided here once — by the catalog, as the { source, property } view
-    // decides it — and carried as `kind` for the recommendation to word.
-    const matched = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-      const base = { value: v.value, freq: v.freq, source: v.source, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      if (c.attributeKind(v.source, v.property) === 'property') {
-        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null, kind: 'property' };
-      }
-      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null, kind: 'attribute' };
+    // An indexed value belongs to (source, key): an event property of that source ({ property }), or one
+    // of its columns ({ column }) — which, the catalog says (keyRef), as the views take them.
+    const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
+      const ref = keyRef(c, v.source, v.property);
+      const base = { value: v.value, freq: v.freq, source: v.source, ...ref, score: round3(v.score ?? 1), match: v.match || 'exact' };
+      if (ref.property !== undefined) return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
+      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null };
     });
-    const recommendations = this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches: matched, recipe_matches });
-    // `kind` stays internal: a match is { value, freq, source, property, score, match, type, events }
-    const value_matches = matched.map(({ kind: _kind, ...m }) => m);
+    const recommendations = this._recommend({ query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches });
 
-    return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations };
+    return { query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches, recommendations };
   }
 
   /** Concrete next-move guidance from the matches (≤4), with a did-you-mean note. */
-  _recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) {
+  _recommend({ query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches }) {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      // an attribute is a column of its model; a property rides on that source's events (run() says which)
-      recs.push(`Value '${top.value}' lives in ${top.kind} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}' } }).`);
+      // a column of its model, or a property riding on that source's events (run() says which)
+      const name = top.property ?? top.column;
+      recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
       if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
     if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.`);
-    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.property}' of source '${d.source}' matches — drill its values with semantic_index({ request: { source: '${d.source}', property: '${d.property}' } }).`); }
+    if (column_matches.length) { const d = column_matches[0]; recs.push(`Column '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ request: { source: '${d.source}', column: '${d.column}' } }).`); }
     if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ request: { source: '${pm.source}', property: '${pm.property}' } }).`); }
     if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ request: { source: '${ev.source}', event: '${ev.event}' } }).`); }
 
-    const all = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
+    const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {
       recs.unshift(`No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
     }

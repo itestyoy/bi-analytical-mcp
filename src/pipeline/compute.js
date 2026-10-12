@@ -1,25 +1,30 @@
 // THE EXPRESSION GRAMMAR — ONE, for every place a value, a condition or a measure is written. An
-// expression is a LEAF — a column ({ column }), an event property read where it is stored
-// ({ property, field?, type? }), a constant ({ value }), the current time ({ now: true }), or a leaf a
-// level adds of its own (a metric, a dimension reference) — or a FUNCTION over expressions ({ fn, args:
-// [...], …its parameters }), nested to any depth. A condition is a function (eq, in, between, is_null …
-// combined by and / or / not), and so is an aggregate (sum, count, percentile …), so a where, a measure
-// and a computed column are one grammar placed in different stages.
+// expression is a LEAF — a column of the rows here ({ column }), an event property read where it is
+// stored ({ property, field?, type? }), a constant ({ value }), the current time ({ now: true }), or a
+// thing a ref names that holds a value (src/schema/refs.js: { source, column }, { source, property },
+// { semantic_model, dimension }, { entity }, { time: "metric_time" }, { metric }) — or a FUNCTION over
+// expressions ({ fn, args: [...], …its parameters }), nested to any depth. A condition is a function
+// (eq, in, between, is_null … combined by and / or / not), and so is an aggregate (sum, count,
+// percentile …), so a where, a measure and a computed column are one grammar placed in different stages.
 //
 // One table (FNS) says each function's arguments, parameters, kind and SQL; one builder (exprSchema)
-// turns it into a level's schema — a closed form per leaf and per function shape, `args` referring back
-// to the same definition; one writer (exprSql, and conditionListSql for a condition slot) turns an
-// expression into SQL and holds the rules of WHERE each kind may stand: an aggregate folds rows only
-// where a measure is written, a window keeps them only in a compute stage, a condition slot takes
-// booleans. A function is added in one place, and a parameter it does not read is not in its form, so
-// it is refused instead of silently ignored.
+// turns it into THE schema every tool that takes an expression carries as `$defs.expr` — a closed form
+// per leaf and per function shape, `args` referring back to the same definition, holding what the tool's
+// own places take; one writer (exprSql, and conditionListSql for a condition slot) turns an expression
+// into SQL. What a PLACE takes of it is one table (PLACES: the leaves and the functions of a pipeline
+// step, a read, a semantic model, a metric query's where, a derived metric), read by the builder for a
+// tool's definition and checked by the writer as the value is built, and so are the rules of
+// WHERE each kind may stand: an aggregate folds rows only where a measure is written, a window keeps them
+// only in a compute stage, a condition slot takes booleans. A function is added in one place, and a
+// parameter it does not read is not in its form, so it is refused instead of silently ignored.
 
-import { GRAINS } from '../catalog.js';
+import { GRAINS, TASK_MEASURE_AGGS } from '../catalog.js';
 import { isNumericType, isTimeType } from '../dialects/base.js';
 // (sql.js is read when a function runs, never as this module loads)
-import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, propEnum, sourceProp, partitionItem, partitionColumn } from './sql.js';
+import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, sourceProp, partitionItem, partitionColumn } from './sql.js';
 import { OPS, predicateSql } from '../conditions.js';
-import { form, SCALAR, conditionSlot } from '../schema-kit.js';
+import { form, strEnum, SCALAR, conditionSlot } from '../schema-kit.js';
+import { REFS, VALUE_REFS, REF_PLACES, refKind, valueRefForms } from '../schema/refs.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { currentOf } from '../earlier-spelling.js';
 
@@ -41,7 +46,8 @@ export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
 // (built when the schema is: what the window parameters reference is read lazily)
 const ORDER = () => ({ type: 'array', items: SORT_KEY, description: 'Window ordering: each key a column, its direction and where its NULLs go (last unless said).' });
-const PARTITION = (catalog, entities) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog, { entities }), description: 'What the window restarts per: columns, or a declared relationship { entity } (its key column). Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.' });
+// `entities`: whether the rows are a source's, so a declared relationship { entity } may name a partition
+const PARTITION = (catalog, entities) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog, { entities }), description: `What the window restarts per: columns${entities ? ', or a declared relationship { entity } (its key column)' : ''}. Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.` });
 
 // a frame bound: an offset, or the edge of the partition
 const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
@@ -55,10 +61,10 @@ const FRAME = {
   },
 };
 
-// the parameters a function may take, by name — each function's form picks its own. `ref` is the
-// level's own definition (a CASE's branches and an aggregate's where are expressions of the same level),
-// `entities` whether a window may restart per a relationship of the source.
-const params = (catalog, { ref, entities }) => ({
+// the parameters a function may take, by name — each function's form picks its own. `ref` is the one
+// expression's definition (a CASE's branches and an aggregate's where are expressions too); `entities`
+// whether a window may restart per a relationship of the source.
+const params = (catalog, { ref, entities = true }) => ({
   places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
   type: TYPE,
   start: { type: 'integer', minimum: 1, description: '1-based start position.' },
@@ -306,6 +312,95 @@ const kindOf = (fn) => FNS[fn].kind || 'scalar';
 /** The scalar functions: neither a condition, logic, an aggregate nor a window. */
 export const SCALAR_FNS = Object.keys(FNS).filter((fn) => kindOf(fn) === 'scalar');
 
+// ── The places an expression stands in ───────────────────────────────────────────────────────────────
+
+/** The leaves of the rows a step reads, each told apart by the field that names it: the fields its form
+ *  takes, and how a refusal says it. */
+const ROW_LEAVES = {
+  column: { fields: ['column'], says: '{ column }' },
+  property: { fields: ['property', 'field', 'type'], says: '{ property }' },
+  value: { fields: ['value'], says: '{ value }' },
+  now: { fields: ['now'], says: '{ now: true }' },
+};
+/** Every leaf of the one expression: the rows' own, and the refs that name a value (src/schema/refs.js). */
+const LEAVES = { ...ROW_LEAVES, ...Object.fromEntries(VALUE_REFS.map((k) => [k, REFS[k]])) };
+
+/** Which leaf an expression is (a ref by its fields first: { source, column } is no { column }), or null. */
+const leafKind = (e) => refKind(e) || Object.keys(ROW_LEAVES).find((k) => Object.hasOwn(e, k)) || null;
+
+/** The scalar functions a metric query's where leaves out: raw, whose dialect SQL would reach
+ *  MetricFlow's where, which MetricFlow renders as Jinja; and those that read an array, a JSON document or
+ *  a sketch — never what a dimension holds. */
+const NOT_OVER_DIMENSIONS = new Set(['raw', 'json_parse_array', 'json_field', 'array_length', 'array_contains', 'element_at', 'array_last', 'hll_extract']);
+
+/**
+ * THE PLACES — what each place an expression stands in takes of the one grammar: its `leaves` (by kind)
+ * and its `fns`, whether a window may stand there, and whether its rows are a source's (`entities`: a
+ * window may restart per a relationship the source declares, { entity }). The writer refuses anything else as it builds the
+ * value (exprSql's `place`), naming the place (`what`) and what it takes, with the place's `hint` where
+ * something it refuses has a home elsewhere. A tool's `$defs.expr` holds what its places take together
+ * (exprSchema's `places`); each place narrows it further, as the value is built.
+ *   source_rows    — a pipeline step over a source's rows (a build, an eventstream's start);
+ *   stored_rows    — rows without a payload: a read of a stored table, the steps after a metric query,
+ *                    a card's drill (a feature's filter over its own rows passes a place of this shape);
+ *   semantic_model — a semantic model's where, its computed dimensions and its measures (no raw: its SQL
+ *                    would reach MetricFlow unchecked, a semantic model's columns are not tracked; no
+ *                    window: a semantic model has no order of rows);
+ *   metric_where   — a metric query's where: what its group_by names, and constants;
+ *   derived_metric — a derived metric's value: other metrics and constants, in arithmetic.
+ */
+export const PLACES = {
+  source_rows: {
+    what: 'a step over a source\'s rows', leaves: ['column', 'property', 'value', 'now'], fns: Object.keys(FNS), windows: true, entities: true,
+    hint: 'A column of another model arrives by a join stage (its attrs), and a metric is query_semantic_model\'s',
+  },
+  stored_rows: {
+    what: 'a read of stored rows', leaves: ['column', 'value', 'now'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,
+    hint: 'Raw SQL and an event property are a build\'s: build from the task — build_pipeline_model({ request: { action: "start", name, from_task } }) (a pipeline build\'s task, or a query run with materialize: true)',
+  },
+  semantic_model: {
+    what: 'a semantic model\'s where, dimension or measure', leaves: ['column', 'property', 'value', 'now'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw'), ...TASK_MEASURE_AGGS], windows: false,
+    hint: 'A window or raw SQL is a pipeline\'s (build_pipeline_model)',
+  },
+  metric_where: {
+    what: 'a metric query\'s where', leaves: [...REF_PLACES.group_by.takes, 'value'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => !NOT_OVER_DIMENSIONS.has(fn))], windows: false,
+    hint: 'It filters the rows a metric folds, named as group_by names them; an aggregate is what a metric\'s measure is, and a condition on a metric\'s value is a where step after the query',
+  },
+  derived_metric: {
+    what: 'a derived metric\'s expr', leaves: ['metric', 'value'], fns: ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest'], windows: false,
+    hint: 'What a metric folds is its measure\'s',
+  },
+};
+
+/** A place by its name, or the place itself (a feature passes one of its own, of the same shape). */
+const placeOf = (place) => (typeof place === 'string' ? PLACES[place] : place) || null;
+
+/** How each kind of function is called, for saying what a place takes. */
+const KIND_SAID = { condition: 'the conditions', logic: 'and / or / not', scalar: 'the scalar functions', aggregate: 'the aggregates', window: 'the window functions' };
+
+/** The functions of a place, said plainly: every one but a few, or kind by kind — a whole kind by its
+ *  name, most of one as that kind but the few it leaves out, a few of one by their names. */
+function fnsSaid(fns) {
+  const all = Object.keys(FNS);
+  const left = all.filter((fn) => !fns.includes(fn));
+  if (!left.length) return 'every function';
+  if (left.length <= 3) return `every function but ${left.join(', ')}`;
+  return Object.keys(KIND_SAID).flatMap((kind) => {
+    const of = all.filter((fn) => kindOf(fn) === kind);
+    const taken = of.filter((fn) => fns.includes(fn));
+    if (!taken.length) return [];
+    if (taken.length === of.length) return [KIND_SAID[kind]];
+    const out = of.filter((fn) => !taken.includes(fn));
+    return [out.length < taken.length && out.length <= 8 ? `${KIND_SAID[kind]} but ${out.join(', ')}` : taken.join(', ')];
+  }).join('; ');
+}
+
+/** What a place takes, said whole: its leaves, its functions, whether a window stands there, and its hint. */
+const placeSaid = (p) => `${p.leaves.map((k) => LEAVES[k].says).join(', ')}, and ${fnsSaid(p.fns)}${p.windows ? '' : ', with no window'}${p.hint ? `. ${p.hint}` : ''}`;
+
+/** The refusal of what a place does not take: `what` (a leaf, a function), named with the place. */
+const notTaken = (p, what, at) => new Error(`${at}: ${what} is not what ${p.what} takes — it takes ${placeSaid(p)}`);
+
 /** The parameter a function's spec names, as the caller writes it (`over_frame` is written `over`). */
 const written = (name) => (name === 'over_frame' ? 'over' : name);
 
@@ -318,29 +413,24 @@ export const isAggregateCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '')
 /** Whether an expression is a condition or a logic function — a boolean by what it is. */
 export const isConditionCall = (e) => isObj(e) && (CONDITION_FNS.includes(e.fn) || LOGIC_FNS.includes(e.fn));
 
-// ── The leaves, as a level's schema offers them ─────────────────────────────────────────────────────
+// ── The leaves, as the schema offers them ────────────────────────────────────────────────────────────
 /** { column } — a column of the rows here (checked when built, with the columns there are). */
-export const columnLeaf = (description = 'A column of the rows here.', { pattern } = {}) => form({ title: 'a column — { column }', required: ['column'], properties: { column: { type: 'string', ...(pattern ? { pattern } : {}), description } } });
+export const columnLeaf = (description = 'A column of the rows here: a pipeline step\'s, a stored table\'s, a semantic model\'s (a column, an entity key, an amount the catalog marks aggregatable).') => form({ title: 'a column — { column }', required: ['column'], properties: { column: { type: 'string', description } } });
 /** { value } — a constant: a string, a number, a boolean or null; never a list. */
 export const valueLeaf = () => form({ title: 'a constant — { value }', required: ['value'], properties: { value: { ...SCALAR, description: 'A string, a number, a boolean or null — never a list (in / not_in take each member as an argument of its own). A constant is compared in the type of what it meets.' } } });
 /** { now: true } — the current time. */
 export const nowLeaf = () => form({ title: 'the current time — { now: true }', required: ['now'], properties: { now: { const: true } } });
-/** { property, field?, type? } — an event property among `values`, read where it is stored. */
-export const propertyLeaf = (values, description = 'An event property of the source (semantic_index lists them) — a scalar, an array or a JSON object, read where it is stored: its own column, or the event_data payload.') => form({
+/** { property, field?, type? } — an event property among `values`, read where it is stored. (The enum
+ *  carries no sentence of its own: the transport folds it with a ref's that lists the same names.) */
+export const propertyLeaf = (values) => form({
   title: 'an event property — { property }', required: ['property'],
+  description: 'An event property of the pipeline\'s or the semantic model\'s source (semantic_index lists them) — a scalar, an array or a JSON object, read where it is stored: its own column, or the event_data payload.',
   properties: {
-    property: propEnum(values || [], description),
+    property: strEnum(values || []),
     field: { type: 'string', description: 'One field of a JSON object property.' },
     type: { ...TYPE, description: 'What it is read as (default: as the catalog declares it; a field as a string).' },
   },
 });
-/** The leaves of a level, by what it reads: a pipeline over a source reads its event properties too. */
-export const expressionLeaves = (catalog, { sourced = true } = {}) => [
-  columnLeaf(),
-  ...(sourced ? [propertyLeaf(catalog?.eventPropEnum ? catalog.eventPropEnum() : [])] : []),
-  valueLeaf(),
-  nowLeaf(),
-];
 
 /** The shapes a function is offered in: an aggregate in two when it is windowable — folding rows (with
  *  an optional `where`) and over a window (with `over`, which the fold does not take) — so the forms
@@ -357,18 +447,51 @@ function shapesOf(fn) {
   return [{ ...base, window: kindOf(fn) === 'window', label: kindOf(fn) === 'condition' ? 'a condition' : kindOf(fn) === 'logic' ? 'logic' : null }];
 }
 
+/** Where the one expression is defined in every tool schema that takes one. */
+export const EXPR_REF = '#/$defs/expr';
+
+/** Places by their PLACES names (or places of that shape, as a feature passes) — null for none named. */
+function exprPlacesOf(places) {
+  if (!places?.length) return null;
+  return places.map((p) => {
+    const place = placeOf(p);
+    if (!place) throw new Error(`exprSchema: no expression place '${p}'`);
+    return place;
+  });
+}
+
+/** How the description says each of the rows' leaves. */
+const LEAF_SAID = {
+  column: 'a column of the rows here { column }',
+  property: 'an event property of the source { property, field?, type? }',
+  value: 'a constant { value }',
+  now: 'the current time { now: true }',
+};
+
+/** A list said in words: "a, b or c". */
+const either = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}` : xs[0] || '');
+
 /**
- * A LEVEL'S EXPRESSION SCHEMA — recursive through `ref` (the level's own `$defs` entry: every argument,
- * a CASE's branches, an aggregate's where refer back to it). `leaves`: the level's leaf forms (default:
- * a pipeline's — { column }, { property } of the catalog's events, { value }, { now }; `sourced: false`
- * leaves the property out); `fns`: the functions it offers (default: all); `windows: false` leaves out
- * every window form (a level whose rows are not a pipeline's). One form per function SHAPE — the
- * functions that take the same arguments and parameters share one, tagged by all of them — each with
- * exactly its own fields.
+ * THE EXPRESSION SCHEMA — `$defs.expr` of every tool that takes an expression, ONE definition built by
+ * this one builder for the PLACES of that tool (PLACES names, or places of that shape; none named —
+ * everything): the leaves those places take (the rows' { column }, { property } of the catalog's events,
+ * { value }, { now }, and the refs that name a value — src/schema/refs.js, with the catalog's names closed
+ * per source and, given `project`, the dbt project's semantic models and entities) and the functions they
+ * take, a window's form only where one of them takes windows, recursive through `#/$defs/expr` (every
+ * argument, a CASE's branches, an aggregate's where refer back to it). One form per function SHAPE — the
+ * functions that take the same arguments and parameters share one, tagged by those of them the places
+ * take — each with exactly its own fields. Places of one tool that take different parts share the one
+ * definition, never one each: what each takes is the writer's check (PLACES) as the value is built.
  */
-export function exprSchema(catalog, { ref = '#/$defs/expr', leaves = null, fns = Object.keys(FNS), windows = true, sourced = true, description = null } = {}) {
-  const P = params(catalog, { ref, entities: sourced });
-  const offered = fns.filter((fn) => Object.hasOwn(FNS, fn));
+export function exprSchema(catalog, { project = null, places = null } = {}) {
+  const ref = EXPR_REF;
+  const at = exprPlacesOf(places);
+  // a window restarts per a declared relationship only over a source's rows
+  const entities = !at || at.some((p) => p.entities);
+  const P = params(catalog, { ref, entities });
+  const leaves = Object.keys(LEAVES).filter((k) => !at || at.some((p) => p.leaves.includes(k)));
+  const offered = Object.keys(FNS).filter((fn) => !at || at.some((p) => p.fns.includes(fn)));
+  const windows = !at || at.some((p) => p.windows);
   const byShape = new Map();
   for (const fn of offered) {
     for (const shape of shapesOf(fn)) {
@@ -399,21 +522,33 @@ export function exprSchema(catalog, { ref = '#/$defs/expr', leaves = null, fns =
       properties: { ...(takesArgs ? { args: argsOf(args) } : {}), ...fields },
     });
   });
-  const leafForms = leaves || expressionLeaves(catalog, { sourced });
-  const has = (list) => list.some((fn) => offered.includes(fn));
+  const rowLeaf = { column: () => columnLeaf(), property: () => propertyLeaf(catalog?.eventPropEnum ? catalog.eventPropEnum() : []), value: valueLeaf, now: nowLeaf };
+  const leafForms = [...Object.keys(ROW_LEAVES).filter((k) => leaves.includes(k)).map((k) => rowLeaf[k]()), ...valueRefForms(catalog, { project, kinds: leaves })];
+  // what the definition holds, said from what it holds — and, where the tool's places take different parts
+  // of it, what each takes, read off the one table, so the description and the refusals say the same
+  const has = (...fns) => fns.every((fn) => offered.includes(fn));
+  const refLeaves = VALUE_REFS.filter((k) => leaves.includes(k));
+  const leafSaid = [...Object.keys(ROW_LEAVES).filter((k) => leaves.includes(k)).map((k) => LEAF_SAID[k]), ...(refLeaves.length ? [`what a ref names that holds a value (${refLeaves.map((k) => REFS[k].says).join(', ')})`] : [])];
+  // the places the definition is for, each once (none named: every place there is)
+  const ownPlaces = at ? at.filter((p, i) => at.findIndex((q) => q.what === p.what) === i) : Object.values(PLACES);
+  const noRaw = at && has('raw') ? ownPlaces.filter((p) => !p.fns.includes('raw')).map((p) => `${p.what} takes no raw`) : [];
   const text = [
-    `An expression: a leaf — ${leafForms.map((l) => (l.title || '').replace(/^.* — /, '')).filter(Boolean).join(', ')} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`,
-    ...(has(['add', 'round']) ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
-    ...(has(CONDITION_FNS) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
-    ...(has(AGGREGATE_FNS) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written; its `where` folds only the rows those conditions hold for.'] : []),
-    ...(windows && has([...WINDOW_FNS, ...WINDOW_AGGREGATE_FNS]) ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
-    ...(has(['raw']) ? ['raw is the escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
+    `An expression: a leaf — ${either(leafSaid)} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`,
+    ...(ownPlaces.length > 1 ? [`Each place takes some of them, and a refusal says which — ${ownPlaces.map((p) => `${p.what}: ${p.leaves.map((k) => LEAVES[k].says).join(', ')}`).join('; ')}${noRaw.length ? `; ${noRaw.join('; ')}` : ''}.`] : []),
+    // where what a place leaves out is written instead — its hint, as its refusal says it
+    ...(at ? ownPlaces.filter((p) => p.hint).map((p) => (ownPlaces.length > 1 ? `For ${p.what}: ${p.hint.charAt(0).toLowerCase()}${p.hint.slice(1)}.` : `${p.hint}.`)) : []),
+    ...(leaves.includes('column') && has('round', 'div', 'sub') ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
+    ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
+    ...(AGGREGATE_FNS.some((fn) => offered.includes(fn)) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written; its `where` folds only the rows those conditions hold for.'] : []),
+    ...(windows ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
+    ...(has('raw') ? ['raw is a build\'s escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
   ].join(' ');
+  // what an argument and a conditional aggregate's where are, said once beside the forms that take them
   const nested = {
-    args: { type: 'array', items: { $ref: ref }, description: 'A function\'s arguments, each an expression.' },
-    ...(has(AGGREGATE_FNS) ? { where: conditionSlot(ref, P.where.description) } : {}),
+    ...(forms.some((f) => f.properties.args) ? { args: { type: 'array', items: { $ref: ref }, description: 'A function\'s arguments, each an expression.' } } : {}),
+    ...(forms.some((f) => f.properties.where) ? { where: conditionSlot(ref, P.where.description) } : {}),
   };
-  return { type: 'object', description: description || text, properties: nested, anyOf: [...leafForms, ...forms] };
+  return { type: 'object', description: text, properties: nested, anyOf: [...leafForms, ...forms] };
 }
 
 // ── The writer ───────────────────────────────────────────────────────────────────────────────────────
@@ -422,9 +557,6 @@ export function exprSchema(catalog, { ref = '#/$defs/expr', leaves = null, fns =
 const said = (r) => (r.constant ? `the constant ${JSON.stringify(r.value)}` : r.name ? `'${r.name}' (${r.type || 'of unknown type'})` : `an expression of type ${r.type || 'unknown'}`);
 /** Whether a written argument is a boolean — or may be one: nothing is known of its type. */
 const mayBeBoolean = (r) => (r.constant ? typeof r.value === 'boolean' : r.type === 'boolean' || r.type == null || r.type === 'unknown');
-
-/** The fields a leaf takes, by the field that says which leaf it is. */
-const LEAF_FIELDS = { column: ['column'], property: ['property', 'field', 'type'], value: ['value'], now: ['now'] };
 
 /** A refusal of a value written in an earlier spelling of the grammar, with the value it is now. */
 function earlier(e, at) {
@@ -436,6 +568,9 @@ function writer(d, cols, opts) {
   const groupBy = new Set(opts.groupBy || []);
   const aggregateLevel = opts.context === 'aggregate' || opts.context === 'measure';
   const offeredAggregates = opts.aggregates ? new Set(opts.aggregates) : null;
+  // the place the expression stands in — what it takes of the grammar (PLACES); with none named, every
+  // leaf the rows have and every function, the level's own leaves resolved by `opts.leaf` first
+  const place = placeOf(opts.place);
   let aggregates = 0;
 
   // outside an aggregate, a measure reads only what is the same on every row of a group
@@ -444,27 +579,42 @@ function writer(d, cols, opts) {
     throw new Error(`${at}: '${name}' stands outside an aggregate, so it has to be one of the group_by columns (${[...groupBy].join(', ') || 'none'}) — group by it, or fold it ({ fn: "max", args: [{ column: "${name}" }] })`);
   };
 
+  // a leaf of `kind` where the place stands: refused when the place does not take it
+  const takes = (kind, at) => { if (place && !place.leaves.includes(kind)) throw notTaken(place, LEAVES[kind].says, at); };
+
   function leaf(e, at, s) {
-    const hooked = opts.leaf ? opts.leaf(e, at, s) : undefined;
-    if (hooked) return hooked;
-    const which = Object.keys(LEAF_FIELDS).find((k) => Object.hasOwn(e, k));
-    const stray = which ? Object.keys(e).filter((k) => !LEAF_FIELDS[which].includes(k)) : [];
-    if (!which || stray.length) {
-      throw earlier(e, at) || new Error(which
-        ? `${at}: { ${which} } takes ${LEAF_FIELDS[which].join(', ')}, not ${stray.join(', ')}`
-        : `${at}: an expression is { column }, { property }, { value }, { now: true } or a function { fn, args, … }`);
+    if (!place && opts.leaf) {
+      const hooked = opts.leaf(e, at, s);
+      if (hooked) return hooked;
     }
-    if (which === 'column') {
+    const kind = leafKind(e);
+    const def = kind ? LEAVES[kind] || REFS[kind] : null;
+    const stray = def ? Object.keys(e).filter((k) => !def.fields.includes(k)) : [];
+    if (!def || stray.length) {
+      throw earlier(e, at) || new Error(def
+        ? `${at}: ${def.says} takes ${def.fields.join(', ')}, not ${stray.join(', ')}`
+        : `${at}: an expression is ${(place ? place.leaves : Object.keys(ROW_LEAVES)).map((k) => LEAVES[k].says).join(', ')} — or a function { fn, args, … }`);
+    }
+    if (!LEAVES[kind]) throw new Error(`${at}: ${def.says} names no value — an expression's leaves are ${place ? place.leaves.map((k) => LEAVES[k].says).join(', ') : Object.values(LEAVES).map((l) => l.says).join(', ')}`);
+    takes(kind, at);
+    // a place's own leaves — a metric, what a metric query's group_by names, a declared amount — are the
+    // level's to resolve
+    if (place && opts.leaf) {
+      const hooked = opts.leaf(e, at, s);
+      if (hooked) return hooked;
+    }
+    if (!ROW_LEAVES[kind]) throw new Error(`${at}: ${def.says} is not resolved here${place ? ` (${place.what})` : ''}`);
+    if (kind === 'column') {
       groupRule(e.column, at, s);
       if (cols) requireCol(cols, e.column);
       const c = cols?.get(e.column);
       return { sql: d.quoteIdent(e.column), type: c?.type ?? opts.columnType?.(e.column) ?? null, physical: !!c?.physical, name: e.column };
     }
-    if (which === 'property') {
+    if (kind === 'property') {
       groupRule(e.property, at, s);
       return { ...propertyRead('value', { d, cols, catalog: opts.catalog, source: opts.source, property: e.property, field: e.field, type: e.type, at }), name: e.property };
     }
-    if (which === 'now') {
+    if (kind === 'now') {
       if (e.now !== true) throw new Error(`${at}: the current time is { now: true }`);
       return { sql: d.nowExpr(), type: 'time', name: 'now' };
     }
@@ -482,8 +632,9 @@ function writer(d, cols, opts) {
       throw new Error(`${at}: array_contains takes [array, { value }] — the element looked for is a constant`);
     }
     const v = item?.value;
-    if (isObj(arr) && arr.fn === undefined && arr.property !== undefined) {
+    if (isObj(arr) && arr.fn === undefined && arr.property !== undefined && arr.source === undefined) {
       if (arr.field !== undefined || arr.type !== undefined) throw new Error(`${at}: ${e.fn} reads the array itself — { property: '${arr.property}' }, with no field or type`);
+      takes('property', `${at} ${e.fn} args[0]`);
       groupRule(arr.property, at, s);
       return { ...propertyRead(kind, { d, cols, catalog: opts.catalog, source: opts.source, property: arr.property, item: v, at }), name: `${e.fn}(${arr.property})` };
     }
@@ -510,6 +661,9 @@ function writer(d, cols, opts) {
     const kind = kindOf(fn);
     const window = kind === 'window' || (spec.windowable && e.over !== undefined);
     const folds = kind === 'aggregate' && !window;
+    // what the place takes: its functions, and a window only where one may stand
+    if (place && !place.fns.includes(fn)) throw notTaken(place, fn, at);
+    if (place && window && !place.windows) throw notTaken(place, `a window (${fn} with over)`, at);
     // the fields a call may carry: its function's parameters, an aggregate's where (folding) or over (a window)
     const allowed = new Set(['fn', ...(spec.args !== 0 ? ['args'] : []), ...(spec.needs || []).map(written), ...(spec.may || []).map(written), ...(folds ? ['where'] : []), ...(window ? ['over'] : [])]);
     const stray = Object.keys(e).filter((k) => !allowed.has(k));
@@ -574,9 +728,12 @@ function writer(d, cols, opts) {
  * THE ONE WRITER: an expression's SQL and type over the columns at this step (`cols`, a Map name →
  * { type, physical? }; null where columns are not tracked — a { column } is then taken as written, its
  * type `opts.columnType(name)`). `at` names it in a refusal. `opts`:
+ *   place           — where it stands (a PLACES name, or a place of that shape): a leaf or a function the
+ *                     place does not take is refused, naming the place and what it takes;
  *   catalog, source — what a { property } is read from and a window's { entity } resolved against;
- *   leaf(e, at)     — a level's own leaves (a metric, a dimension reference): { sql, type, … } for one
- *                     it resolves, undefined to fall back to { column } / { property } / { value } / { now };
+ *   leaf(e, at)     — a place's own leaves (a metric, what a metric query's group_by names, a declared
+ *                     amount): { sql, type, … } for one it resolves, undefined to fall back to the rows'
+ *                     { column } / { property } / { value } / { now } (asked after the place's check);
  *   context         — 'row' (default: a compute stage's expression; no aggregate without over, a window
  *                     only with `windows` not false), 'aggregate' (a measure of an aggregate stage or a
  *                     pivot: aggregates combined by scalar functions, at least one, and a column outside

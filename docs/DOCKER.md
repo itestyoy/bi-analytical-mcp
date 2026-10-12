@@ -131,7 +131,7 @@ the runtime: server version and surface, dbt, dialect.
 
 `explore_errors()` gives the newest 20 and a summary by source, tool and stage. `time_range`
 (`{ start, end, timezone }`, read as every other window: a date-only end is the whole day),
-`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `search` narrow them, `detail: "full"`
+`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `search` narrow them, `include: ["details"]`
 gives each of the page in full, and `{ id }` — alone — gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
 newest `MCP_ERROR_MAX_ROWS` (default **10000**). It is not cleared by `MCP_DB_RESET`, because a server
 that fails on every start is exactly what it is for.
@@ -159,7 +159,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   events — `steps: [...]` of `where` (the events kept or dropped, a slice of the source, a condition on an
   event property), `compute` (events renamed, merged or split by a parameter — a `case` or a `concat`
   into a column that `columns.event` then names — or an event property read into a column) and
-  `join` (a related model's attributes through the declared relationship; a slowly-changing model
+  `join` (a related model's columns through the declared relationship; a slowly-changing model
   states its `between`, and a join of one without it is refused, since every version would repeat
   each event). Then it names its columns: `columns: { event, time }` when not the source's own,
   `path` — the column(s) one path is (the user by default; a bidfloor id, a tracking id, a level, or
@@ -187,8 +187,8 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   process on the feature's environment, over stand-in eventstreams of what the eventstream holds at
   that step — a step it refuses is refused at once with its message; each one it takes comes back with what
   it changed (events, path columns, segments added or removed) and the answer with `steps_count`, as a
-  pipeline draft answers: `include_columns: true` adds the eventstream's shape after them (its events,
-  path columns, segments and their levels), `include_steps: true` every step. `fork` takes a `name` of
+  pipeline draft answers: `include: ["columns"]` adds the eventstream's shape after them (its events,
+  path columns, segments and their levels), `include: ["steps"]` every step. `fork` takes a `name` of
   its own. `action: "materialize"` runs the steps
   on the warehouse (one dbt Python model, a task) and stores the eventstream after them.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, eventstream, analyses: [...] }`
@@ -205,13 +205,17 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
   for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
-  (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
+  (`ui://betti/retentioneering-view.html`), once per analysis — `{ task_id, display: { analysis,
+  title?, edge_weight? } }`, as `display_model_result` takes `{ task_id, display }`. The graph opens on each event's
   strongest exits (retentioneering's own default) and switches weights and how many exits it shows
   on the page itself — no recomputation; every card gives its scope (users, period, sample) and
   counts next to shares, has a table view of its numbers, and opens to the whole screen where the
   host offers it (the graph grows into the frame). A distribution is drawn as its
   histogram and a diff as heatmaps (the difference shaded above and below zero); describe, a
   conversion rate and per-path metrics have no card — their numbers come back for the answer.
+- **`delete_context`** takes one more form while the feature is on — `{ what: "eventstream",
+  context_id, eventstream }` removes one eventstream from its context (its tables stay until the
+  context is dropped); off, the form does not exist.
 
 Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
 table comes back. Configuration:

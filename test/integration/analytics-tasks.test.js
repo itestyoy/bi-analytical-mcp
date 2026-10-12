@@ -82,7 +82,7 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'castq',
-    semantic_models: [{ from: 'events', measures: [{ name: 'sum_ct', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }, { name: 'avg_ct', expr: { fn: 'average', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'sum_ct', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }, { name: 'avg_ct', expr: { fn: 'average', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
     metrics: [
       { name: 'sum_ct', type: 'simple', measure: 'sum_ct' },
       { name: 'avg_ct', type: 'simple', measure: 'avg_ct' },
@@ -96,7 +96,7 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
   // the same aggregation WITHOUT a cast is rejected (string is not numeric)
   await assert.rejects(engine.build_semantic_model({
     name: 'castbad',
-    semantic_models: [{ from: 'events', measures: [{ name: 'bad', expr: { fn: 'average', args: [{ property: 'complete_time_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'bad', expr: { fn: 'average', args: [{ property: 'complete_time_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
     metrics: [{ name: 'bad', type: 'simple', measure: 'bad' }],
   }), /not numeric|cast/i);
 });
@@ -120,15 +120,15 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.ok(num(onWeekend.n) > 0 && num(onWeekend.n) < 184, `[where date_part] the weekend holds some of the events: ${onWeekend.n}`);
   assert.equal(num(weekend.rows[0].active_users_events), num(onWeekend.n), '[where date_part] the weekend\'s events');
 
-  // dry_run: the rendered SQL WITHOUT executing; the dataflow plan only with include_plan (feature/
+  // dry_run: the rendered SQL WITHOUT executing; the dataflow plan only with include: ["plan"] (feature/
   // lifecycle check — we assert the plan/SQL are PRESENT, not their content).
-  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, include_plan: true });
+  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, include: ['plan'] });
   assert.equal(planned.ok, true, JSON.stringify(planned.error || planned));
   assert.equal(planned.dry_run, true, '[dry run] a dry run says so');
   assert.ok(typeof planned.sql === 'string' && planned.sql.length > 0, '[dry run] rendered SQL returned');
-  assert.ok(planned.plan && typeof planned.plan === 'object', '[include_plan] plan object returned');
-  assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0, '[include_plan] dataflow plan present');
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include_plan: true }), /include_plan goes with dry_run/);
+  assert.ok(planned.plan && typeof planned.plan === 'object', '[include plan] plan object returned');
+  assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0, '[include plan] dataflow plan present');
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include: ['plan'] }), (e) => e.field === 'include' && /include: \["plan"\] goes with dry_run/.test(e.message));
   // a dry run stores nothing: materialize beside it is refused, not ignored
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, materialize: true }), /materialize goes with a query that runs/);
 
@@ -181,18 +181,18 @@ test('TASK group_by_joined_attribute: revenue/payers/ARPPU by user attribute (1-
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'group_by_joined_attribute');
   const total = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'] });
-  const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
-  const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'platform' }] });
-  const byAcq = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers', 'rev_segment_arppu'], group_by: [{ model: 'users', attribute: 'acquisition_type' }] });
+  const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'country' }] });
+  const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'platform' }] });
+  const byAcq = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers', 'rev_segment_arppu'], group_by: [{ source: 'users', column: 'acquisition_type' }] });
   for (const r of [total, byCountry, byPlatform, byAcq]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].rev_segment_revenue), 85);             // total revenue 85
   assert.equal(num(total.rows[0].rev_segment_payers), 7);              // payers 7
   const cm = mapCol(byCountry.rows, 'users_country', 'rev_segment_revenue');
   assert.equal(cm.US, 35); assert.equal(cm.GB, 25); assert.equal(cm.BR, 25); // by country
-  // a where compares a function of a joined attribute: the country lowered is 'us' — the US revenue
-  const lowered = await q(ctx, { metrics: ['rev_segment_revenue'], where: [{ fn: 'eq', args: [{ fn: 'lower', args: [{ model: 'users', attribute: 'country' }] }, { value: 'us' }] }] });
+  // a where compares a function of a joined column: the country lowered is 'us' — the US revenue
+  const lowered = await q(ctx, { metrics: ['rev_segment_revenue'], where: [{ fn: 'eq', args: [{ fn: 'lower', args: [{ source: 'users', column: 'country' }] }, { value: 'us' }] }] });
   assert.equal(lowered.ok, true, JSON.stringify(lowered.error || lowered));
-  assert.equal(num(lowered.rows[0].rev_segment_revenue), cm.US, '[where lower(attribute)] the US revenue, 35');
+  assert.equal(num(lowered.rows[0].rev_segment_revenue), cm.US, '[where lower(column)] the US revenue, 35');
   // DE has no completed purchases -> either absent or a null/0 revenue row
   assert.ok(!Number.isFinite(cm.DE) || cm.DE === 0, `[behavior: by country] DE=${cm.DE}`);
   assert.equal(sumCol(byCountry.rows, 'rev_segment_revenue'), 85);      // grouped sum == grand total
@@ -255,8 +255,8 @@ test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers g
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'cohort_grid_two_time_axes');
   const total = await q(ctx, { metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'] });
-  const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'], group_by: [{ model: 'users', attribute: 'install_date' }] });
-  const grid = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ model: 'users', attribute: 'install_date' }, { time: 'metric_time', grain: 'day' }] });
+  const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'], group_by: [{ source: 'users', column: 'install_date' }] });
+  const grid = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ source: 'users', column: 'install_date' }, { time: 'metric_time', grain: 'day' }] });
   for (const r of [total, byCohort, grid]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].cohort_grid_revenue), 85, '[total] revenue 85');
   assert.equal(num(total.rows[0].cohort_grid_buyers), 7, '[total] distinct buyers 7');
@@ -270,12 +270,13 @@ test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers g
 // at `grain` when one is given (week), at the catalog's own granularity (day) when not — the same
 // rows as the users model's own install_date. The day cohorts summed by ISO week (Monday) are the
 // week cohorts. The labels given go with the dimension, the measure and the metric. A dimension
-// COMPUTED from the row ({ name, expr }) is grouped by its name like any other attribute.
+// COMPUTED from the row ({ name, expr }) is grouped by where it lives: { semantic_model: [<its source>],
+// dimension: <its name> }.
 test('a task dimension over a time column is read at its grain (week), or at the catalog\'s (day); a computed one by its name', opts, async (t) => {
   if (skip(t)) return;
   const task = (name, dims, eventDims) => engine.build_semantic_model({
     name,
-    semantic_models: [{ from: 'events', ...(eventDims ? { dimensions: eventDims } : {}), measures: [{ name: 'n', expr: { fn: 'count' }, label: 'Events counted' }] }, { from: 'users', ...(dims ? { dimensions: dims } : {}) }],
+    semantic_models: [{ source: 'events', ...(eventDims ? { dimensions: eventDims } : {}), measures: [{ name: 'n', expr: { fn: 'count' }, label: 'Events counted' }] }, { source: 'users', ...(dims ? { dimensions: dims } : {}) }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n', label: 'Events' }],
   });
   // (the week task also computes a dimension of its own on the events: whether the event is a completed purchase)
@@ -287,7 +288,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
     built[name] = out.context_id;
   }
   const cohorts = async (name) => {
-    const r = await q(built[name], { metrics: [`${name}_n`], group_by: [{ model: 'users', attribute: 'install_date' }] });
+    const r = await q(built[name], { metrics: [`${name}_n`], group_by: [{ source: 'users', column: 'install_date' }] });
     assert.equal(r.ok, true, JSON.stringify(r.error || r));
     assert.ok(r.columns.some((c) => c.name === 'users_install_date'), `the column is named for the reference: ${JSON.stringify(r.columns)}`);
     return r.rows;
@@ -310,14 +311,14 @@ test('a task dimension over a time column is read at its grain (week), or at the
   const weekly = byKey(await cohorts('coh_wk'), 'coh_wk');
   assert.deepEqual(weekly, byKey(dailyRows, 'coh_dy', isoWeek));
   assert.equal(Object.keys(weekly).filter((k) => k !== 'null').length, 2, 'Jan 1-4 and Jan 5 2026 are two ISO weeks');
-  // filtered on the same attribute: only the cohort of the week of Jan 5
-  const late = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ model: 'users', attribute: 'install_date' }], where: [{ fn: 'gte', args: [{ model: 'users', attribute: 'install_date' }, { value: '2026-01-05' }] }] });
+  // filtered on the same column: only the cohort of the week of Jan 5
+  const late = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ source: 'users', column: 'install_date' }], where: [{ fn: 'gte', args: [{ source: 'users', column: 'install_date' }, { value: '2026-01-05' }] }] });
   assert.equal(late.ok, true, JSON.stringify(late.error || late));
   assert.deepEqual(byKey(late.rows, 'coh_wk'), { '2026-01-05': weekly['2026-01-05'] });
 
   // the computed dimension splits the events into the completed purchases and the rest, as the
   // warehouse counts them by hand
-  const split = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ model: 'events', attribute: 'purchased' }] });
+  const split = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] });
   assert.equal(split.ok, true, JSON.stringify(split.error || split));
   const flag = split.group_by_resolved['events.purchased'];
   const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.coh_wk_n)]));
@@ -357,7 +358,7 @@ test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, a
   const ctx = await buildRecipe(t, 'agg_chosen_per_question');
   const totals = await q(ctx, { metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate', 'progression_avg_time'] });
   // the recipe's first example (starts and completes by level_id), with the rate beside them
-  const byLevel = await q(ctx, { metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
+  const byLevel = await q(ctx, { metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate'], group_by: [{ source: 'events', property: 'level_id_of_event_data' }] });
   for (const r of [totals, byLevel]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const row = totals.rows[0];
   assert.equal(num(row.progression_starts), 28, '[totals] level_started 28');
@@ -385,7 +386,7 @@ test('TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment', opts, async 
   const ctx = await buildRecipe(t, 'ratio_metric');
   const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases', 'monetization_aov'] });
   // revenue is a sum, so the product and the country splits are the marginals of ONE query grouped by both
-  const byProductCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }, { model: 'users', attribute: 'country' }] });
+  const byProductCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ source: 'events', property: 'product_id_of_event_data' }, { source: 'users', column: 'country' }] });
   // (the recipe's first example, as it is served)
   const byDay = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [totals, byProductCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
@@ -405,8 +406,8 @@ test('TASK payload_property_measure_and_dimension: ad revenue & impressions by n
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'payload_property_measure_and_dimension');
   const totals = await q(ctx, { metrics: ['ads_ad_revenue', 'ads_impressions', 'ads_rev_per_imp'] });
-  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: [{ model: 'events', attribute: 'network_of_additional_info_of_event_data' }] });
-  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ model: 'events', attribute: 'placement_of_event_data' }] });
+  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: [{ source: 'events', property: 'network_of_additional_info_of_event_data' }] });
+  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ source: 'events', property: 'placement_of_event_data' }] });
   for (const r of [totals, byNetwork, byPlacement]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].ads_ad_revenue), 29);                // total ad revenue 29 cents
   assert.equal(num(totals.rows[0].ads_impressions), 12);              // 12 ad_finished impressions
@@ -422,7 +423,7 @@ test('TASK payload_property_measure_and_dimension: ad revenue & impressions by n
 test('TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source split', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'two_event_scopes_and_a_net');
-  const bySource = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
+  const bySource = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'], group_by: [{ source: 'events', property: 'source_type_of_event_data' }] });
   // the recipe's first example (net coins by day), with both of its inputs beside it — both are sums,
   // so the day split also carries the totals
   const byDay = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out', 'economy_net_coins'], group_by: [{ time: 'metric_time', grain: 'day' }] });
@@ -448,7 +449,7 @@ test('TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source spli
 // SQL written by hand in the test (events by day: 01-01 33, 01-02 42, 01-03 27, 01-04 39, 01-05 37).
 const CUMULATIVE_TASK = {
   name: 'cum',
-  semantic_models: [{ from: 'events', measures: [{ name: 'events_n', expr: { fn: 'count' } }] }],
+  semantic_models: [{ source: 'events', measures: [{ name: 'events_n', expr: { fn: 'count' } }] }],
   metrics: [
     { name: 'daily', type: 'simple', measure: 'events_n' },
     { name: 'two_day', type: 'cumulative', measure: 'events_n', window: '2 days' },

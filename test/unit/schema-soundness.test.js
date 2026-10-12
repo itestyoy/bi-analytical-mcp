@@ -88,7 +88,7 @@ test('every tool schema compiles for a model with no groupable dimension', () =>
   assert.deepEqual(catalog.modelDimensionColumns('users'), []);
   // the branch exists, minus the field there is nothing to fill in
   const bsm = engine.schemas.build_semantic_model;
-  const branch = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'from').includes('users'));
+  const branch = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'source').includes('users'));
   assert.ok(branch, 'the users model can still carry a semantic model');
   // no column to group by → the one dimension it can take is one computed from the row, { name, expr }
   const dims = forms(bsm, field(bsm, branch, 'dimensions').items);
@@ -101,7 +101,7 @@ test('every tool schema compiles for an events source with no declared event voc
   assert.deepEqual(catalog.eventNames('events'), [], 'nothing is declared yet');
   // the semantic model of that source is still offered: its event is named by a condition's value
   const bsm = engine.schemas.build_semantic_model;
-  const events = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'from').includes('events'));
+  const events = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'source').includes('events'));
   assert.ok(events, 'the events source can be declared');
   // and the funnel stage, which builds its own step vocabulary, is offered too
   assert.ok(field(engine.schemas.build_pipeline_model, engine.schemas.build_pipeline_model, 'step'), 'the pipeline tool is still offered');

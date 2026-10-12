@@ -54,7 +54,7 @@ test('build_pipeline_model({ start }) answers within the grace when introspectio
   const runner = hangingRunner();
   const e = engineWith(runner);
   const t0 = Date.now();
-  const r = await e.build_pipeline_model({ action: 'start', name: 'slow_start', source: 'events', description: 'a description', include_columns: true, time_range: { start: '2024-01-01', end: '2024-01-31' } });
+  const r = await e.build_pipeline_model({ action: 'start', name: 'slow_start', source: 'events', description: 'a description', include: ['columns'], time_range: { start: '2024-01-01', end: '2024-01-31' } });
   const held = Date.now() - t0;
 
   assert.ok(held < GRACE * 5, `the call held ${held}ms — it must hand back at the grace, not at dbt's own timeout`);
@@ -77,7 +77,7 @@ test('the abandoned introspection primes the cache: the NEXT call is grounded to
   runner.state.release(declared.slice(1).map((name) => ({ name })));
   await new Promise((resolve) => setImmediate(resolve));
 
-  const second = await e.build_pipeline_model({ action: 'start', name: 'second', source: 'events', include_columns: true });
+  const second = await e.build_pipeline_model({ action: 'start', name: 'second', source: 'events', include: ['columns'] });
   assert.equal(runner.state.calls, 1, 'the cached set is reused — no second dbt round trip');
   assert.equal(second.column_count, declared.length - 1, 'the column the relation lacks is not offered');
   assert.ok(!second.available_columns.some((c) => c.name === declared[0]));

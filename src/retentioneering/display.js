@@ -1,5 +1,6 @@
 // DISPLAY_RETENTIONEERING_RESULT — one analysis of a finished task drawn as its card, at most once; an
-// analysis whose kind has no card is refused with where its numbers are.
+// analysis whose kind has no card is refused with where its numbers are. Asked for in the one shape a
+// card is asked for, { task_id, display } — here display: { analysis, title?, edge_weight? }.
 
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
@@ -8,6 +9,7 @@ import { truncatedTables } from './results.js';
 import { retentioneeringViewModel, hasCard, diffForm, DIFF_CARD_KINDS } from './view-model.js';
 import { SIDE, QUERY, DISPLAY } from './names.js';
 import { readResult, resultOrigin, taskOutput } from './query.js';
+import { refuseEarlierDisplay } from './earlier.js';
 
 /** Whether this analysis of the task is drawn — or being drawn right now (held in memory only, so a
  *  draw that does not happen leaves nothing behind, not even across a restart). */
@@ -19,22 +21,24 @@ export function drawnAlready(engine, feature, taskId, analysis) {
 }
 
 export async function display(engine, feature, input) {
+  refuseEarlierDisplay(input);
   engine.host.validate(DISPLAY, input);
+  const { analysis } = input.display;
   const job = engine.tasks.forSide(input.task_id, SIDE);
   if (job.tool !== QUERY) throw new ToolError(`task ${input.task_id} built an eventstream — draw an analysis of a ${QUERY} task`, { stage: 'validate', field: 'task_id' });
   if (!job.contextId || !engine.ctxs.has(job.contextId)) throw new ToolError(`task ${input.task_id} has no result to draw: its context is gone (dropped, or expired) — run the analyses again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-  if (drawnAlready(engine, feature, input.task_id, input.analysis)) throw new ToolError(`analysis '${input.analysis}' of task ${input.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'analysis' });
+  if (drawnAlready(engine, feature, input.task_id, analysis)) throw new ToolError(`analysis '${analysis}' of task ${input.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'display.analysis' });
   // taken before anything is awaited, so a second call for the same analysis — a retry, or one made
   // alongside — is refused rather than drawn twice; recorded with the task only once it is drawn
-  const key = `${input.task_id}\u0000${input.analysis}`;
+  const key = `${input.task_id}\u0000${analysis}`;
   const drawing = (feature.drawing ||= new Set());
   drawing.add(key);
   try {
     const ctx = engine.ctxs.get(job.contextId);
-    const drawn = await drawOne(engine, feature, ctx, input);
+    const drawn = await drawOne(engine, feature, ctx, input.task_id, input.display);
     if (drawn.drawn) {
       const marks = (ctx.state.retentioneering.drawn ||= {});
-      (marks[input.task_id] ||= []).push(input.analysis);
+      (marks[input.task_id] ||= []).push(analysis);
       engine.ctxs.touch(ctx.id);
     }
     return drawn;
@@ -43,31 +47,33 @@ export async function display(engine, feature, input) {
   }
 }
 
-export async function drawOne(engine, feature, ctx, input) {
-  await engine.tasks.await([input.task_id], MAX_WAIT_SECONDS);
-  const now = engine.jobs.get(input.task_id);
-  if (now.status === 'running') throw new ToolError(`task ${input.task_id} is still running — read it with ${QUERY}({ request: { task_ids } }) until it is done, then draw it`, { stage: 'validate', field: 'task_id' });
+/** One analysis of a task drawn as its display says ({ analysis, title?, edge_weight? }). */
+export async function drawOne(engine, feature, ctx, taskId, { analysis, title, edge_weight: edgeWeight }) {
+  await engine.tasks.await([taskId], MAX_WAIT_SECONDS);
+  const now = engine.jobs.get(taskId);
+  if (now.status === 'running') throw new ToolError(`task ${taskId} is still running — read it with ${QUERY}({ request: { task_ids } }) until it is done, then draw it`, { stage: 'validate', field: 'task_id' });
   const state = ctx.state.retentioneering;
   const origin = resultOrigin(state, now.table);
   // a card draws every record of its analysis: held in memory, and cut there, it is read whole — that
   // analysis alone; not held, it is read whole at once
   const held = engine.tasks.held(now.id);
-  const out = held || await taskOutput(engine, feature, now, { rows: Infinity, analysis: input.analysis });
-  if (!out || out.ok === false) throw new ToolError(`task ${input.task_id} has no result to draw${out?.error?.message ? ` (${out.error.message})` : ''}`, { stage: 'validate', field: 'task_id' });
-  let result = out.analyses[input.analysis];
+  const out = held || await taskOutput(engine, feature, now, { rows: Infinity, analysis });
+  if (!out || out.ok === false) throw new ToolError(`task ${taskId} has no result to draw${out?.error?.message ? ` (${out.error.message})` : ''}`, { stage: 'validate', field: 'task_id' });
+  let result = out.analyses[analysis];
   const names = held ? Object.keys(out.analyses) : origin.analyses || Object.keys(out.analyses);
-  if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field: 'analysis' });
-  if (result.error) throw new ToolError(`'${input.analysis}' did not compute — the library said ${result.error.type}: ${result.error.message} — so there is nothing to draw; the call's other analyses have their results`, { stage: 'validate', field: 'analysis' });
+  const field = 'display.analysis';
+  if (!result) throw new ToolError(`task ${taskId} has no analysis '${analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field });
+  if (result.error) throw new ToolError(`'${analysis}' did not compute — the library said ${result.error.type}: ${result.error.message} — so there is nothing to draw; the call's other analyses have their results`, { stage: 'validate', field });
   if (!hasCard(result.kind, diffForm(result))) {
     // a diff of a kind that has its card, stored in a form before its card existed, is drawn by running the query again
     const earlier = result.diff && DIFF_CARD_KINDS.includes(result.kind);
     throw new ToolError(earlier
-      ? `'${input.analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers ${QUERY}({ request: { task_ids } }) returned`
-      : `'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers ${QUERY}({ request: { task_ids } }) returned`, { stage: 'validate', field: 'analysis' });
+      ? `'${analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers ${QUERY}({ request: { task_ids } }) returned`
+      : `'${analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers ${QUERY}({ request: { task_ids } }) returned`, { stage: 'validate', field });
   }
   if (held && truncatedTables(result)) {
-    const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [input.analysis], rows: Infinity, analysis: input.analysis });
-    if (whole?.ok && whole.analyses[input.analysis]) result = whole.analyses[input.analysis];
+    const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [analysis], rows: Infinity, analysis });
+    if (whole?.ok && whole.analyses[analysis]) result = whole.analyses[analysis];
   }
   // what the numbers are about — who, when, how much of it — from the table the analyses read, shown on
   // the card with them (whatever the eventstream became after)
@@ -80,8 +86,8 @@ export async function drawOne(engine, feature, ctx, input) {
     ...(sm.sample?.events ? { sampled_events: sm.sample.events } : {}),
   } : null;
   // which events are the library's own (a path's start and end), for the card — the page carries no facts sheet
-  const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(input.title ? { title: input.title } : {}), ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), synthetic_events: retentioneeringFacts().synthetic_events, result };
-  const vm = retentioneeringViewModel(drawn, input);
+  const drawn = { ok: true, task_id: taskId, analysis, eventstream: out.eventstream, ...(title ? { title } : {}), ...(scope ? { scope } : {}), ...(edgeWeight ? { edge_weight: edgeWeight } : {}), synthetic_events: retentioneeringFacts().synthetic_events, result };
+  const vm = retentioneeringViewModel(drawn);
   if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps, groups or rows)' };
   return { ...drawn, drawn: true };
 }

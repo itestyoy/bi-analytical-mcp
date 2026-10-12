@@ -9,6 +9,11 @@ import { buildGuide } from '../guide.js';
 import { pythonAuthoringGuide } from '../python-guide.js';
 import { SUPPORTED_DIALECTS } from '../dialects/index.js';
 import { memoryView } from '../engine/helpers.js';
+import { REFS, refAt, refColumns } from '../schema/refs.js';
+import { keyRef, keyView } from './value-index-views.js';
+
+/** The fields of a view that are its ref's (the rest — paging, include — are what the view reads). */
+const REF_KEYS = new Set(Object.values(REFS).flatMap((r) => r.fields));
 
 export const semanticIndexMethods = {
   // Not a tool of its own — reached through semantic_index({ request: { recipe } }) and the skills.
@@ -71,8 +76,10 @@ export const semanticIndexMethods = {
    * OVERVIEW, then drill down:
    *   { source }   → one model's entities/time/dimensions (with real values) + physical columns
    *   { source, event } → only the properties populated on that event (what you can use)
-   *   { source, property } → one property/attribute: spec + real value distribution + NULL
-   *                  coverage per event + indexing history (one page per column)
+   *   { source, column } → one column of a model: its meaning + real value distribution + NULL
+   *                  coverage + indexing history (one page per column)
+   *   { source, property } → one event property: spec + real value distribution + NULL coverage
+   *                  per event and per app + indexing history
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
    *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
    *   { guide }    → the analyst procedure + IF/DO routing (how to approach a question)
@@ -125,8 +132,14 @@ export const semanticIndexMethods = {
       return this._recipe({ id: input.recipe });
     }
 
-    // ── the catalog's views, one method each; none of them is the default ──
+    // ── the catalog's views, one method each; none of them is the default. A view of a thing of the
+    // catalog is the ref that names it, read at its place (REF_PLACES.index_view): what the schema's
+    // forms leave open — a relationship chosen for a column — is refused there, naming what it takes ──
+    if (input.event !== undefined || input.column !== undefined || input.property !== undefined) {
+      try { refAt('index_view', Object.fromEntries(Object.entries(input).filter(([k]) => REF_KEYS.has(k))), 'request'); } catch (e) { throw new ToolError(e.message, { stage: 'validate' }); }
+    }
     if (input.event) return this._indexEvent(input);
+    if (input.column) return this._indexColumn(input);
     if (input.property) return this._indexProperty(input);
     if (input.bundle !== undefined && input.bundle !== false) return this._indexBundle(input);
     if (input.search) return this._indexSearch(input);
@@ -179,7 +192,7 @@ export const semanticIndexMethods = {
       const viaable = rels.filter((r) => r.joins);
       const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
       const notes = [];
-      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { steps: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>' }, with the model loaded by a semantic_models item { from: '${viaable[0].joins}' }.`);
+      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { steps: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { source: '${viaable[0].joins}', column: '<column>' }, with the model loaded by a semantic_models item { source: '${viaable[0].joins}' }.`);
       // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
       // onto a unique key) — say so here, or it looks like a missing feature at query time.
       if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
@@ -197,7 +210,7 @@ export const semanticIndexMethods = {
         ...(a.label ? { label: a.label } : {}),
         ...(a.description ? { description: a.description } : {}),
       }));
-      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ request: { semantic_models: [{ from: '${k}', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }] }] } }) (percentile also takes percentile: 0.9 beside its args).`;
+      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ request: { semantic_models: [{ source: '${k}', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }] }] } }) (percentile also takes percentile: 0.9 beside its args).`;
     }
     // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way. Listed
     // with the catalog's own keys — `agg` is dbt's aggregation as the declaration fixes it (sum_boolean
@@ -233,7 +246,7 @@ export const semanticIndexMethods = {
         out.bundle_column = c.bundleColumn(k);
         out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
-      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } })). The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
+      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }. The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
     } else {
       // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
       // keys them by (this model, column), so each source has its own value space.
@@ -262,7 +275,7 @@ export const semanticIndexMethods = {
         `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ request: { search: '<value>' } }).`,
       ]
       : [
-        `Drill into an attribute's full value/frequency distribution: semantic_index({ request: { source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } }).`,
+        `Drill into a column's full value/frequency distribution: semantic_index({ request: { source: '${k}', column: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } }).`,
         `Looking for a known attribute value? semantic_index({ request: { search: '<value>' } }) tells you where it occurs.`,
       ];
     // Concrete next calls (structured) for this model.
@@ -273,7 +286,7 @@ export const semanticIndexMethods = {
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'trace a value to the property/event that carries it' },
       ]
       : [
-        { call: `semantic_index({ request: { source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } })`, why: "drill an attribute's full value/frequency distribution" },
+        { call: `semantic_index({ request: { source: '${k}', column: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } })`, why: "drill a column's full value/frequency distribution" },
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'find where a known attribute value occurs' },
       ];
     // Saved findings about this model (memory tool) — surface them where they belong (compact).
@@ -336,60 +349,85 @@ export const semanticIndexMethods = {
     return eventOut;
   },
 
-  /** { source, property }: one property's full spec, its values, NULL coverage per event and indexing history. */
-  _indexProperty(input) {
+  /** { source, column }: one column of a model — its meaning, its values, NULL coverage and indexing history. */
+  _indexColumn(input) {
     const c = this.catalog;
     // The SOURCE is a separate argument and the view has no source-less spelling: the schema
     // pairs each column with the model that carries it, so both arrive named.
-    const pSource = input.source; const p = String(input.property);
+    const mk = input.source; const col = String(input.column);
+    const m = c.getModel(mk);
+    // the event column of an events source: its values are the events the source declares, each drilled
+    // as { source, event } — the value index profiles the events through it, not it as a column
+    if (c.isFact(mk) && col === c.eventNameColumn(mk)) {
+      const events = c.eventNames(mk);
+      const out = {
+        column: col, source: mk, type: c.modelColumns(mk).find((x) => x.name === col)?.type ?? null, description: c.columnDescriptions(mk)[col],
+        values: events, distinct_count: events.length,
+        next_actions: [{ call: `semantic_index({ request: { source: '${mk}', event: '${events[0] || '<event_name>'}' } })`, why: 'see the properties an event carries' }],
+        recommendations: [`'${col}' names each row's event: its values are the ${events.length} events '${mk}' declares — drill one with semantic_index({ request: { source: '${mk}', event } }).`],
+      };
+      this.notes.attach(out, { kind: 'column', source: mk, name: col });
+      return out;
+    }
     // The enum normally makes an unknown name unwritable — but a source that declares NOTHING
     // yet (a table whose columns have not been introspected) has no enum to project, and the
     // field degrades to an open string. Answer that with the catalog's own refusal instead of
     // reading `.type` off a column that is not there.
-    const kind = c.attributeKind(pSource, p);
-    if (!kind) {
-      const known = c.propertyEnumFor(pSource);
-      throw new ToolError(`'${p}' is not a property or attribute of '${pSource}'.${known.length ? ` It carries: ${known.slice(0, 20).join(', ')}${known.length > 20 ? `, … (${known.length} in all)` : ''}.` : ' It declares no columns at all.'}`, { stage: 'validate', field: 'property' });
-    }
-    if (kind !== 'property') {
-      const mk = pSource; const col = p;
-      const dim = (c.getModel(mk).dimensions || {})[col];
-      const dDescs = c.columnDescriptions(mk);
-      const { samples, value_stats } = this.indexViews.valueListing(mk, col, input);
-      // NULL coverage + indexing freshness make this ONE page the full truth about the
-      // column: meaning, values, completeness, and how recently it was profiled.
-      // (event_coverage is [] here — attributes live on the dimension model, not on
-      // events — but the SHAPE matches the event-property page exactly.)
-      const { nulls, coverage: attrCoverage, recs: nullRecs } = this.indexViews.nullCoverage(mk, col);
-      Object.assign(value_stats, nulls);
-      const ent = c.primaryEntityName(mk);
-      const recommendations = [];
-      if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
-      else recommendations.push('No values indexed yet (the background value index may not have run).');
-      if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
-      recommendations.push(...nullRecs);
-      // A metric query names the attribute STRUCTURALLY — { model, attribute }.
-      // `via` is needed exactly where the query resolver asks for it: a source carrying SEVERAL
-      // relationships to this model. Which source the caller will query from is not known here,
-      // so each such source is named with its choices — the same candidates the resolver lists.
-      const several = c.modelKeys().filter((src) => src !== mk)
-        .map((src) => [src, Object.keys(c.entitiesOf(src)).filter((e) => c.joinTargetFor(e) === mk)])
-        .filter(([, rels]) => rels.length > 1);
-      const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
-      recommendations.push(ent
-        ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (load the model with a semantic_models item { from: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
-        : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
-      const attrOut = {
-        property: col, source: mk, type: dim.type,
-        description: dDescs[col],
-        sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
-        indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
-        indexing: this.indexViews.history(mk, col, input.recent ?? 3),
-        recommendations: recommendations.slice(0, 3),
-      };
-      this.notes.attach(attrOut, { kind: 'property', source: mk, name: col });
-      return attrOut;
-    }
+    const dim = (m.dimensions || {})[col];
+    if (!dim) throw this._notOf(mk, col, 'column');
+    const dDescs = c.columnDescriptions(mk);
+    const { samples, value_stats } = this.indexViews.valueListing(mk, col, input);
+    // NULL coverage + indexing freshness make this ONE page the full truth about the
+    // column: meaning, values, completeness, and how recently it was profiled.
+    // (event_coverage is [] here — a model's column is not event-scoped — but the SHAPE
+    // matches the event-property page exactly.)
+    const { nulls, coverage: attrCoverage, recs: nullRecs } = this.indexViews.nullCoverage(mk, col);
+    Object.assign(value_stats, nulls);
+    const ent = c.primaryEntityName(mk);
+    const recommendations = [];
+    if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
+    else recommendations.push('No values indexed yet (the background value index may not have run).');
+    if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
+    recommendations.push(...nullRecs);
+    // A metric query names the column STRUCTURALLY — { source, column }, as this view does.
+    // `via` is needed exactly where the query resolver asks for it: a source carrying SEVERAL
+    // relationships to this model. Which source the caller will query from is not known here,
+    // so each such source is named with its choices — the same candidates the resolver lists.
+    const several = c.modelKeys().filter((src) => src !== mk)
+      .map((src) => [src, Object.keys(c.entitiesOf(src)).filter((e) => c.joinTargetFor(e) === mk)])
+      .filter(([, rels]) => rels.length > 1);
+    const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
+    recommendations.push(ent
+      ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (load the model with a semantic_models item { source: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
+      : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
+    const out = {
+      column: col, source: mk, type: dim.type,
+      description: dDescs[col],
+      sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
+      indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
+      indexing: this.indexViews.history(mk, col, input.recent ?? 3),
+      recommendations: recommendations.slice(0, 3),
+    };
+    this.notes.attach(out, { kind: 'column', source: mk, name: col });
+    return out;
+  },
+
+  /** A name `source` does not carry as a `kind` ('column' | 'property'): refused with what it carries of
+   *  that kind — and, where the name is the other kind there, with the view that takes it. */
+  _notOf(source, name, kind) {
+    const c = this.catalog;
+    const other = c.attributeKind(source, name);
+    const known = kind === 'property' ? (c.isFact(source) ? c.eventProps(source) : []) : refColumns(c, source);
+    const isOther = other && (other === 'property') !== (kind === 'property');
+    return new ToolError(`'${name}' is not ${kind === 'property' ? 'an event property' : 'a column'} of '${source}'.${isOther ? ` It is ${other === 'property' ? 'an event property' : 'a column'} there: semantic_index({ request: { source: '${source}', ${other === 'property' ? 'property' : 'column'}: '${name}' } }).` : known.length ? ` It carries: ${known.slice(0, 20).join(', ')}${known.length > 20 ? `, … (${known.length} in all)` : ''}.` : ` It declares no ${kind === 'property' ? 'event properties' : 'columns'} at all.`}`, { stage: 'validate', field: kind });
+  },
+
+  /** { source, property }: one event property's full spec, its values, NULL coverage per event and per app, and indexing history. */
+  _indexProperty(input) {
+    const c = this.catalog;
+    const pSource = input.source; const p = String(input.property);
+    // as a column's view: an open string where the source declares nothing yet is refused by the catalog
+    if (c.attributeKind(pSource, p) !== 'property') throw this._notOf(pSource, p, 'property');
     const propFact = pSource; const propName = p;
     const spec = c.eventPropertySpec(propName, propFact);
     const numeric = c.eventNumericProps(propFact).includes(propName);
@@ -426,11 +464,11 @@ export const semanticIndexMethods = {
     // string must be cast before aggregation — say so HERE, before a query mixes units
     // or averages a string.
     // Token-lean by default: show only the events that CARRY the property (applies:true) — the
-    // full per-event table incl. always-NULL events is fetched with include_coverage:true. The
+    // full per-event table incl. always-NULL events is fetched with include: ["coverage"]. The
     // omitted count + the drill call are always present so the AI knows the rest exists.
     const carriers = coverage.filter((e) => e.applies);
     const coverageOmitted = coverage.length - carriers.length;
-    const showFullCoverage = !!input.include_coverage;
+    const showFullCoverage = (input.include || []).includes('coverage');
     const historyN = input.recent ?? 3;
     const out = {
       property: p, source: propFact, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex,
@@ -451,7 +489,7 @@ export const semanticIndexMethods = {
         ...(evs ? [{ call: `semantic_index({ request: { source: '${propFact}', event: '${evs[0]}' } })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'trace one of these values across the catalog' },
         ...(value_stats.has_more ? [{ call: `semantic_index({ request: { source: '${propFact}', property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} } })`, why: 'page further through the value distribution' }] : []),
-        ...(!showFullCoverage && coverageOmitted > 0 ? [{ call: `semantic_index({ request: { source: '${propFact}', property: '${p}', include_coverage: true } })`, why: `full per-event + per-app coverage, incl. the ${coverageOmitted} event(s) where '${p}' is always NULL (hidden by default)` }] : []),
+        ...(!showFullCoverage && coverageOmitted > 0 ? [{ call: `semantic_index({ request: { source: '${propFact}', property: '${p}', include: ['coverage'] } })`, why: `full per-event + per-app coverage, incl. the ${coverageOmitted} event(s) where '${p}' is always NULL (hidden by default)` }] : []),
       ],
       recommendations: recommendations.slice(0, 4),
     };
@@ -471,14 +509,14 @@ export const semanticIndexMethods = {
         } else {
           // Compact: list EVERY populated app (non_null > 0) — apps that carry the property are
           // signal — and only tally the empty (always-NULL) ones, which are the noise. The full
-          // per-app split incl. the empties is behind include_coverage:true / semantic_index({ request: { bundle } }).
+          // per-app split incl. the empties is behind include: ["coverage"] / semantic_index({ request: { bundle } }).
           out.bundle_coverage_summary = {
             populated_apps: populated.length,
             empty_apps: empty.length,
             populated: populated.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })),
           };
         }
-        if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { bundle: '<app>' } }) or include_coverage:true.`];
+        if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { bundle: '<app>' } }) or include: ['coverage'].`];
       }
     }
     this.notes.attach(out, { kind: 'property', source: propFact, name: p });
@@ -486,10 +524,10 @@ export const semanticIndexMethods = {
   },
 
   /**
-   * { bundle }: per-app coverage — which event properties are POPULATED vs EMPTY for one app (bundle
-   * id), so the properties that carry no data for it are skipped instead of queried blindly. Needs a
-   * source that designates a bundle column (meta.mcp.dimension: { bundle: true }) AND the value index
-   * to have run.
+   * { bundle }: per-app coverage — which event properties (and columns of the source) are POPULATED vs
+   * EMPTY for one app (bundle id), so the ones that carry no data for it are skipped instead of queried
+   * blindly; each populated one named as its view takes it ({ property } or { column }). Needs a source
+   * that designates a bundle column (meta.mcp.dimension: { bundle: true }) AND the value index to have run.
    */
   _indexBundle(input) {
     const c = this.catalog;
@@ -512,7 +550,7 @@ export const semanticIndexMethods = {
     }
     const block = (hit) => {
       const cov = this.valueIndex.bundlePropertyCoverage(hit.source, bundleId);
-      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
+      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ ...keyRef(c, hit.source, r.property), non_null: r.non_null }));
       const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
       return {
         source: hit.source,
@@ -529,18 +567,20 @@ export const semanticIndexMethods = {
     const blocks = hits.map(block);
     const others = known.filter((b) => b.bundle !== bundleId);
     const first = blocks.find((b) => b.populated.length) || blocks[0];
+    // the view of a populated one, as it is named there ({ source, property } or { source, column })
+    const drillOf = (p) => keyView(c, first.source, p.property ?? p.column);
     const out = {
       bundle: bundleId,
       ...(blocks.length === 1 ? blocks[0] : { by_source: blocks, note: `'${bundleId}' emits into ${blocks.length} sources; coverage is reported per source and never merged.` }),
       next_actions: [
-        ...(first.populated.length ? [{ call: `semantic_index({ request: { source: '${first.source}', property: '${first.populated[0].property}' } })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
+        ...(first.populated.length ? [{ call: drillOf(first.populated[0]), why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
         ...(others.length ? [{ call: `semantic_index({ request: { source: '${others[0].source}', bundle: '${others[0].bundle}' } })`, why: 'compare another app — a property empty here may be populated there' }] : []),
       ],
       recommendations: [
         ...blocks.map((b) => (b.empty.length
           ? `[${b.source}] ${b.empty.length} of ${b.property_count} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app on this source: ${b.empty.slice(0, 8).join(', ')}${b.empty.length > 8 ? ', …' : ''}.`
           : `[${b.source}] Every indexed property carries data for '${bundleId}'.`)),
-        `Use the populated properties; drill one with semantic_index({ request: { source: '${first.source}', property: '${(first.populated[0] || {}).property || '<name>'}' } }) (its per-app split is under bundle_coverage).`,
+        `Use the populated properties; drill one with ${first.populated.length ? drillOf(first.populated[0]) : `semantic_index({ request: { source: '${first.source}', property: '<name>' } })`} (its per-app split is under bundle_coverage).`,
         others.length ? `Other apps: ${[...new Set(others.map((b) => `${b.source}: ${b.bundle}`))].slice(0, 6).join(', ')} — a property empty here may be populated there.` : 'Only one app is indexed.',
       ],
     };
@@ -662,13 +702,13 @@ export const semanticIndexMethods = {
     // Declared models the warehouse cannot back (a structural column or the table is missing):
     // excluded from every tool; the reason is here so the analyst can be told what to fix.
     ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ request: { source } }) on one shows what is missing.' } : {}),
-    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
+    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }), semantic_models[].source; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
     // Each events source lists its OWN event names — they are never merged into one list,
     // because two sources may legitimately carry the same event name.
     event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
-    // Every attribute a metric query can group/filter by, addressed by where it lives:
-    // group_by: [{ model, attribute }] — the join is resolved from the schema, never spelled.
-    groupable_attributes: c.reachableAttributes(),
+    // Every column a metric query can group/filter by, addressed by where it lives — the ref
+    // { source, column, via? } — and the join is resolved from the schema, never spelled.
+    groupable_columns: c.reachableAttributes(),
     // Saved analyst findings (the memory tool): how many are stored + how to reach them.
     // They also surface inline on the entity views/{ search } they were linked to.
     ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views, via { search } and { notes: true }; the memory tool records and forgets them.' } } : {}),
@@ -677,7 +717,7 @@ export const semanticIndexMethods = {
     // pipelines. The fact holds only per-event columns — user/experiment attributes
     // always come via their model.
     join_note: userModel
-      ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (load it with a semantic_models item { from: '${userModel}' } in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
+      ? `Group or filter by { source: '${userModel}', column: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (load it with a semantic_models item { source: '${userModel}' } in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
       : null,
     value_index_status: sync ? {
       ready: (sync.indexed_properties || 0) > 0,
@@ -702,7 +742,8 @@ export const semanticIndexMethods = {
     views: [
       { view: 'source', arg: 'source (a model key)', when: "one model's columns/entities/time + dimension attributes with real sample values" },
       { view: 'event', arg: 'event name', when: 'the properties populated on that event (what you can measure/group/filter)' },
-      { view: 'property', arg: 'source + property', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
+      { view: 'column', arg: 'source + column', when: "one column of a model — its full passport: real value distribution (paged), NULL coverage, freshness" },
+      { view: 'property', arg: 'source + property', when: "one event property's full passport: real value distribution (paged), NULL coverage per event, per-app split, freshness" },
       { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
       ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),
       ...(this.recipes ? [{ view: 'recipe', arg: 'recipe id', when: 'one ready-made task template in full (payload + example_queries + hack)' }] : []),
@@ -721,7 +762,7 @@ export const semanticIndexMethods = {
     recommendations: [
       `New to this dataset or unsure how to approach the question? semantic_index({ request: { guide: true } }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
       `Start by inspecting an event's properties: semantic_index({ request: { source: '${exFact}', event: '${exEvent || '<event_name>'}' } }) — it lists each property with its real sample values + cardinality.`,
-      `Segmentation attributes live on the dimension models: semantic_index({ request: { source: '${userModel || 'users'}' } }) shows them with real values; drill one via semantic_index({ request: { source: '${userModel || 'users'}', property: '${exAttr || 'country'}' } }).`,
+      `Segmentation attributes live on the dimension models: semantic_index({ request: { source: '${userModel || 'users'}' } }) shows them with real values; drill one via semantic_index({ request: { source: '${userModel || 'users'}', column: '${exAttr || 'country'}' } }).`,
       ...(bundleList.length ? [`Working with ONE app? semantic_index({ request: { source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' } }) lists which event properties carry data for it vs are EMPTY in that source (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
       `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ request: { search: '<value>' } }) tells you exactly where it lives.`,
     ],

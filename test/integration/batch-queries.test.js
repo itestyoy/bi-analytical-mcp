@@ -1,4 +1,4 @@
-// A BATCH OF QUERIES — one call starts up to five queries on a context, they run side by side, and
+// A BATCH OF QUERIES — one call starts several queries on a context, they run side by side, and
 // one read returns them all. Run with the production runner (the `mf` CLI and `dbt`, each member its
 // own process), proven on DATA against DuckDB: SEED_DATA's total IAP revenue 85, by country US 35 /
 // GB 25 / BR 25; 184 event rows, 11 of them priced (8 completed purchases = 85, 3 failed = 35).
@@ -28,10 +28,10 @@ let monCtx;
 const monContext = async () => monCtx ?? (monCtx = (await engine.build_semantic_model(TASK)).context_id);
 const TASK = {
   name: 'mon',
-  semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
+  semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
   metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
 };
-const byCountry = [{ model: 'users', attribute: 'country' }];
+const byCountry = [{ source: 'users', column: 'country' }];
 const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_country), num(r.mon_revenue)]));
 
 before(async () => {
@@ -68,18 +68,34 @@ test('a batch started right after the declaration waits for its parse, runs ever
       { metrics: ['mon_revenue'] },
       { metrics: ['mon_revenue'], group_by: byCountry },
       { metrics: ['mon_revenue'], group_by: byCountry, materialize: true },
-      { metrics: ['mon_revenue'], where: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }] },
+      { metrics: ['mon_revenue'], where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] },
       // steps after the query, over its result: the countries whose revenue reaches 25 (a having), the largest first
       { metrics: ['mon_revenue'], group_by: byCountry, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'mon_revenue' }, { value: 25 }] }] }, { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }, { key: 'users_country' }] }] },
+      // grouped by an entity the measure source carries: one row per value of its key there
+      { metrics: ['mon_revenue'], group_by: [{ entity: 'user' }] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
-  assert.equal(started.task_ids.length, 5);
-  const [total, grouped, stored, us, ranked] = await readAll('query_semantic_model', started.task_ids);
-  for (const r of [total, grouped, stored, us, ranked]) assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(started.task_ids.length, 6);
+  const [total, grouped, stored, us, ranked, byUser] = await readAll('query_semantic_model', started.task_ids);
+  for (const r of [total, grouped, stored, us, ranked, byUser]) assert.equal(r.status, 'done', JSON.stringify(r.error));
   assert.equal(num(total.rows[0].mon_revenue), 85);
   const g = revenueBy(grouped.rows);
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
+  // the truth, read from the warehouse by hand: each completed purchase's price under the country of
+  // the install version valid at its time (dim_users is slowly changing) — what { source: 'users',
+  // column: 'country' } groups and filters by
+  const truth = Object.fromEntries((await wh.query(`select u.country, sum(e.price_in_usd_of_event_data) as revenue
+    from fct_analytics_events e join dim_users u on u.player_id_of_internal = e.player_id_of_internal
+      and e.device_time between u.install_time_valid_from and u.install_time_valid_until
+    where e.event_name = 'iap_purchase_completed' group by 1`)).rows.map((r) => [String(r.country), num(r.revenue)]));
+  // (a country with no purchase has no revenue there — a NULL here)
+  assert.deepEqual(Object.fromEntries(Object.entries(g).filter(([, v]) => v !== 0)), truth, '[grouped by users.country] the warehouse\'s revenue per country');
+  assert.equal(num(us.rows[0].mon_revenue), truth.US, '[filtered by users.country] the warehouse\'s US revenue');
+  // { entity: 'user' }: the user key events carry (player_id_of_internal), the column named for the entity
+  const perPlayer = Object.fromEntries((await wh.query(`select player_id_of_internal as player, sum(price_in_usd_of_event_data) as revenue
+    from fct_analytics_events where event_name = 'iap_purchase_completed' group by 1`)).rows.map((r) => [String(r.player), num(r.revenue)]));
+  assert.deepEqual(Object.fromEntries(byUser.rows.map((r) => [String(r.user), num(r.mon_revenue)]).filter(([, v]) => v !== 0)), perPlayer, '[grouped by { entity: user }] the warehouse\'s revenue per player');
   // the materialized member left its table, which pages like any stored result
   assert.equal(stored.table, `qr_${stored.task_id}`);
   const s = revenueBy(stored.rows);

@@ -109,7 +109,7 @@ test('segments a step makes and collapsed paths: each level holds its paths, no 
   assert.equal(moved.users, kept.filter((p) => p.long && p.early).length, 'T13 + T30: the materialized fork holds the paths both filters kept — the collapsed length, and a time metric compared in seconds since the epoch');
   assert.ok(moved.users < read1.users, 'T25: the eventstream moved on — fewer paths');
   // T25 — a card speaks of the rows its analysis read, whatever the eventstream became after
-  const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' });
+  const d = await engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'transition_graph' } });
   assert.deepEqual([d.scope.users, d.scope.events], [read1.users, read1.events], 'T25: the card\'s scope is the rows its analysis read');
   // T13 — the fork left its parent as it was: its own steps, materialized, and every path in its table
   const parent = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'collapsed' });
@@ -127,8 +127,8 @@ test('each step is checked by the library as it is added, and says what it chang
   assert.deepEqual([s1.steps_added[0].checked, s1.steps_added[0].changed.events_added, s1.steps_added[0].changed.events_removed, s1.steps_count], [true, ['shop'], ['shop_opened'], 1]);
   const s2 = await add({ type: 'split_sessions', timeout: '30m', session_col: 'visit' });
   assert.deepEqual(s2.steps_added[0].changed.paths_added, ['visit']);
-  // with include_columns, the whole shape the steps leave: the segment's levels among it
-  const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } }, { include_columns: true });
+  // with include: ["columns"], the whole shape the steps leave: the segment's levels among it
+  const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } }, { include: ['columns'] });
   assert.deepEqual(s3.steps_added[0].changed.segments_added, ['band']);
   assert.deepEqual(s3.shape.segments.band.levels.sort(), ['long', 'short']);
   // refused by the library, with its own message, on what the eventstream holds at that step

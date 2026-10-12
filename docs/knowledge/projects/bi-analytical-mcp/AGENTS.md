@@ -40,7 +40,7 @@ Project index router for this repository. It keeps orientation short; the rules 
 ## Hotspots
 
 - Schemas and refusals: `src/schema.js`, `src/schema/`, `src/schema-kit.js`, `src/validate.js` — every change is held by `test/unit/schema-portability.test.js` and the size budget.
-- The expression grammar every tool shares: `src/pipeline/compute.js` (the function table, `exprSchema`, `exprSql`), `src/conditions.js` (`predicateSql`), `src/earlier-spelling.js` (the one converter table for earlier spellings).
+- The one definition per concept every tool shares: `src/pipeline/compute.js` (the function table, `exprSchema` — `$defs.expr`, `exprSql`, the places an expression stands in: `PLACES`), `src/pipeline/stages.js` (`stageDefs` — `$defs.stage`, `STAGE_PLACES`), `src/schema/refs.js` (`refSchema` — `$defs.ref`, `REF_PLACES`), `src/schema.js` (`TOOL_PLACES` — which places each tool's definitions are built for), `src/conditions.js` (`predicateSql`), `src/earlier-spelling.js` (the one converter table for earlier spellings, `include` flags among them).
 - Pipelines: `src/pipeline/` (stages, reads of stored tables — `renderRead`, which also runs the steps after a metric query) and `src/pipeline/earlier.js` (steps stored by an earlier version).
 - The semantic side: `src/compile.js`, `src/engine/semantic-query.js` (a metric query and its `steps` — `mf query`, or MetricFlow's compiled SQL under the read compiler), `src/project-semantics.js`.
 - The dbt client: `src/dbt/` — the only place dbt and `mf` are spawned.

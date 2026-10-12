@@ -7,6 +7,7 @@ import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { targetKey, targetWords, aboutOf } from '../memory.js';
 import { memoryView } from './helpers.js';
+import { refAt, refColumns } from '../schema/refs.js';
 
 export class MemoryTool {
   constructor({ catalog, store, validate }) {
@@ -16,30 +17,38 @@ export class MemoryTool {
   }
 
   /**
-   * Resolve what a note is ABOUT — written as semantic_index's views address it — to the target the
-   * store keeps. { source, property } a column or payload property of that source, { source, event }
-   * an event of an events source, { source } the model, { term } a phrase the catalog has no entity
-   * for. The key says which it is, so nothing is looked up to tell a property from an event; the
-   * schema's enums make an unknown name unwritable, and a source whose vocabulary is empty (an open
+   * Resolve what a note is ABOUT — the ref, as semantic_index's views name it — to the target the store
+   * keeps: { source } the model, { source, event } an event of an events source, { source, column } a
+   * column of a model, { source, property } an event property, or { term } a phrase the catalog has no
+   * entity for. Which refs a note may be about is the place's (REF_PLACES.about), refused here naming
+   * what it takes; the key says which it is, so nothing is looked up to tell a column from an event.
+   * The schema's enums make an unknown name unwritable, and a source whose vocabulary is empty (an open
    * string there) is refused here with its own nearest names.
    */
-  resolveTarget(t) {
+  resolveTarget(t, at = 'about') {
     const c = this.catalog;
     if (t.term !== undefined) return memoryTarget('term', String(t.term).trim());
+    let kind;
+    try { kind = refAt('about', t, at); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'about' }); }
     const source = t.source;
     if (!c.models[source]) throw new ToolError(`memory about: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'about' });
-    const miss = (kind, name, own) => {
+    const miss = (what, name, own) => {
       const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
-      return new ToolError(`memory about: '${name}' is not ${kind === 'event' ? 'an event' : 'a column or payload property'} of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ request: { source: '${source}' } }) lists what it carries.`, { stage: 'validate', field: `about.${kind}` });
+      return new ToolError(`memory about: '${name}' is not ${{ event: 'an event', column: 'a column', property: 'an event property' }[what]} of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ request: { source: '${source}' } }) lists what it carries.`, { stage: 'validate', field: `about.${what}` });
     };
-    if (t.event !== undefined) {
+    if (kind === 'source_event') {
       const event = String(t.event).trim();
       if (!c.isFact(source) || !c.eventNames(source).includes(event)) throw miss('event', event, c.isFact(source) ? c.eventNames(source) : []);
       return memoryTarget('event', source, event);
     }
-    if (t.property !== undefined) {
+    if (kind === 'source_column') {
+      const column = String(t.column).trim();
+      if (!refColumns(c, source).includes(column)) throw miss('column', column, refColumns(c, source));
+      return memoryTarget('column', source, column);
+    }
+    if (kind === 'source_property') {
       const property = String(t.property).trim();
-      if (!c.attributeKind(source, property)) throw miss('property', property, c.propertyEnumFor(source));
+      if (c.attributeKind(source, property) !== 'property') throw miss('property', property, c.isFact(source) ? c.eventProps(source) : []);
       return memoryTarget('property', source, property);
     }
     return memoryTarget('model', source);
@@ -61,7 +70,7 @@ export class MemoryTool {
    * each note truncated. Always leaves an explicit drill so nothing is lost —
    * semantic_index({ request: { notes: true, about } }) returns EVERY linked finding in full, `about`
    * being the entity this view is about, written as the filter takes it ({ source, property },
-   * { source, event }, { source }).
+   * { source, column }, { source, event }, { source }).
    */
   attach(out, target, { cap = 3 } = {}) {
     const all = this.store.forTargets([targetKey(target)]);
@@ -85,7 +94,8 @@ export class MemoryTool {
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { source }/
-   * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
+   * { source, event }/{ source, column }/{ source, property } views and { search }) next time the same
+   * word/field comes up.
    *   action:'record' → save notes, one or several (each + what it is `about`, + aliases the user used, + links)
    *   action:'forget' → delete one note by id
    * (the notes are read with semantic_index: { search }, { notes, about? } — see list() below)
@@ -158,7 +168,8 @@ export class MemoryTool {
 
 /**
  * A resolved memory target: `target` is what gets STORED (the kind and its parts), `about` is the
- * same thing as the tools write it ({ source, property } / { source, event } / { source } / { term })
+ * same thing as the tools write it ({ source, property } / { source, column } / { source, event } /
+ * { source } / { term })
  * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
  */
 function memoryTarget(kind, source, name = null) {

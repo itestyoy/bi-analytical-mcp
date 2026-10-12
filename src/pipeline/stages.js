@@ -1,10 +1,17 @@
 // THE STAGE REGISTRY — every stage a pipeline can have: its schema, its build (the SQL op it adds and
 // the columns it leaves), and what the registry knows about it (`available` on this warehouse,
-// `keepsSourceRows`, the next-step hints it `recommend`s). match_recognize and python register
-// themselves (src/match-recognize.js, src/python-model.js).
+// `keepsSourceRows`, the next-step hints it `recommend`s, the `group` it is listed under — what it needs
+// to work). match_recognize and python register themselves (src/match-recognize.js, src/python-model.js).
+//
+// ONE STAGE DEFINITION PER TOOL (`$defs.stage`, stageDefs): the stages the tool's places take, grouped by
+// what a step needs — SQL over rows, over a source's events, on a runtime — and a feature adds its own
+// runtime steps to ITS tools' definition. What a PLACE takes of it (a build, a read) is one table
+// (STAGE_PLACES), read by the builder for a tool's definition and checked as the step is built: a refusal
+// names the place and what it takes. A build is handed the expression's place (`place` in its context:
+// src/pipeline/compute.js PLACES) and passes it to the one writer.
 
 import { NAME, statAccuracyNote, EXPR, TYPE, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
-import { exprSchema, exprSql, conditionListSql, isConditionCall, mapAggregates, FNS } from './compute.js';
+import { exprSchema, exprSql, conditionListSql, isConditionCall, mapAggregates } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType } from '../catalog/column-types.js';
 
@@ -13,12 +20,12 @@ const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 /** A stage's measures, each { name, expr } folded over the rows' groups: the SQL of each, and the type
  *  of the column it produces (what its expression yields). A name is one column: a group_by column or
  *  another measure under it would be two. */
-function measuresSql({ d, catalog, cols, source }, groupBy, measures, at) {
+function measuresSql({ d, catalog, cols, source, place }, groupBy, measures, at) {
   const names = new Set(groupBy);
   return measures.map((m) => {
     if (names.has(m.name)) throw new Error(`${at}: '${m.name}' names ${groupBy.includes(m.name) ? 'a group_by column' : 'two measures'} — give each measure a column name of its own`);
     names.add(m.name);
-    const r = exprSql(d, cols, m.expr, `${at} measure '${m.name}'`, { context: 'aggregate', groupBy, catalog, source });
+    const r = exprSql(d, cols, m.expr, `${at} measure '${m.name}'`, { context: 'aggregate', groupBy, catalog, source, place });
     return { as: m.name, expr: r.sql, type: r.type };
   });
 }
@@ -35,13 +42,14 @@ export const STAGES = {
         conditions: conditionSlot('#/$defs/expr', 'The conditions a row is kept by: all of them hold.'),
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => ({ op: { op: 'where', preds: conditionListSql(d, cols, p.conditions, 'where conditions', { catalog, source }) }, cols }),
+    build: ({ d, catalog, cols, source, place }, p) => ({ op: { op: 'where', preds: conditionListSql(d, cols, p.conditions, 'where conditions', { catalog, source, place }) }, cols }),
   },
 
   compute: {
     keepsSourceRows: true,
-    // the expression grammar, once: every stage that takes an expression references it
-    defs: (catalog) => ({ expr: exprSchema(catalog) }),
+    // the expression grammar, once: every stage that takes an expression references it — built for the
+    // expression places of the tool (`places`: what its stages' expressions take)
+    defs: (catalog, { project = null, places = null } = {}) => ({ expr: exprSchema(catalog, { project, places }) }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
       description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a condition (a flag: true or false, never missing), a window function — nested, so a whole formula is one stage.',
@@ -51,8 +59,8 @@ export const STAGES = {
         expr: EXPR,
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => {
-      const { sql, type, physical } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source });
+    build: ({ d, catalog, cols, source, place }, p) => {
+      const { sql, type, physical } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source, place });
       // a flag a condition computes is stored true or false: where the condition cannot be decided (a
       // missing operand) it does not hold, as it does not hold in a where
       const out = addCol(cols, p.name, type);
@@ -77,7 +85,7 @@ export const STAGES = {
         type: TYPE,
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => {
+    build: ({ d, catalog, cols, source, place }, p) => {
       const e = p.expr;
       const leaf = isObj(e) && e.fn === undefined;
       const elementType = (isStruct) => (p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string')));
@@ -107,7 +115,7 @@ export const STAGES = {
       }
       // an expression that yields an array: computed into a working column first, exploded, and the
       // working column dropped — the columns after it are those before plus the element
-      const r = exprSql(d, cols, e, `unnest '${p.name}' expr`, { catalog, source, windows: false });
+      const r = exprSql(d, cols, e, `unnest '${p.name}' expr`, { catalog, source, place, windows: false });
       if (r.type && r.type !== 'array' && r.type !== 'unknown') throw new Error(`unnest: its expr yields ${r.type}, not an array — json_parse_array makes one from a JSON text`);
       const work = `_unnest_${p.name}`;
       const type = elementType(false);
@@ -293,11 +301,11 @@ export const STAGES = {
         },
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => {
+    build: ({ d, catalog, cols, source, place }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
       if (!(p.measures || []).length) throw new Error('aggregate: `measures` — what each group folds to (the distinct groups alone: a count of their rows, { name: "rows", expr: { fn: "count" } })');
-      const aggs = measuresSql({ d, catalog, cols, source }, groupBy, p.measures, 'aggregate');
+      const aggs = measuresSql({ d, catalog, cols, source, place }, groupBy, p.measures, 'aggregate');
       const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
       for (const a of aggs) out.set(a.as, { type: a.type });
@@ -331,7 +339,7 @@ export const STAGES = {
         },
       },
     }),
-    build: ({ d, catalog, cols, source }, p) => {
+    build: ({ d, catalog, cols, source, place }, p) => {
       const groupBy = p.group_by || [];
       [...groupBy, p.on].forEach((c) => requireCol(cols, c));
       const taken = new Set(groupBy); const seen = new Set();
@@ -347,7 +355,7 @@ export const STAGES = {
         const cell = v.value === null ? { fn: 'is_null', args: [{ column: p.on }] } : { fn: 'eq', args: [{ column: p.on }, { value: v.value }] };
         return { name: v.name, expr: mapAggregates(p.measure, (agg) => ({ ...agg, where: [...(agg.where || []), cell] })) };
       });
-      const aggs = measuresSql({ d, catalog, cols, source }, groupBy, cells, 'pivot');
+      const aggs = measuresSql({ d, catalog, cols, source, place }, groupBy, cells, 'pivot');
       const out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
       for (const a of aggs) out.set(a.as, { type: a.type });
@@ -431,7 +439,8 @@ export const STAGES = {
   },
 };
 
-/** Register an additional stage from another module (e.g. match_recognize). */
+/** Register an additional stage from another module (match_recognize, python) — with the `group` it is
+ *  listed under. */
 export function registerStage(name, def) { STAGES[name] = def; }
 
 /** One stage's definition by name (null for a name no stage has). */
@@ -442,62 +451,109 @@ export function listSome(columns, n = 6) {
   return `${columns.slice(0, n).map((c) => c.name).join(', ')}${columns.length > n ? ', …' : ''}`;
 }
 
-/**
- * Root-level `$defs` the stage schemas reference (`#/$defs/<name>`). A tool schema that embeds
- * pipelineStageSchema() must carry these at ITS root — `$ref` resolves against
- * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
- */
-export function stageDefs(catalog) {
-  return {
-    ...Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs(catalog) : {}))),
-    // THE STAGE UNION ITSELF, once. A tool that takes both one stage and a list of them embedded
-    // the whole union TWICE — with this catalog that was ~49 KB of schema repeated verbatim, half
-    // of everything the client is handed before it reads a single word. Both sites now point here.
-    pipeline_stage: pipelineStageSchema(catalog),
-  };
-}
-
 /** A stage may declare `available(catalog)`: false hides it from the schemas and refuses it in a build. */
 export function availableStages(catalog) {
   return Object.values(STAGES).filter((s) => typeof s.available !== 'function' || s.available(catalog));
 }
 
-export function pipelineStageSchema(catalog) {
-  // each stage's schema pins `stage` to its own name, so exactly one branch is the stage asked for —
-  // and the refusal of a bad stage is that stage's, not every stage's (src/validate.js)
-  return { anyOf: availableStages(catalog).map((s) => s.schema(catalog)) };
+/**
+ * WHAT A PLACE TAKES OF THE STAGES — one table, read by the builder for a tool's `$defs.stage` (stageSchema)
+ * and checked as each step is built (stageAt): `what` names the
+ * place in a refusal, `stages` lists what it takes (null: every stage there is), `elsewhere` says where a
+ * stage it leaves out is built. A feature checks a place of its own with stageAt, in this shape.
+ *   build — a pipeline build: every stage;
+ *   read  — a read of a stored table, the steps after a metric query, a card's drill: the SQL stages that
+ *           keep it one table; a join, an unnest, a funnel or a python model makes a new table, built from
+ *           the task.
+ */
+export const STAGE_PLACES = {
+  build: { what: 'a pipeline build', stages: null },
+  read: {
+    what: 'a read', stages: ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project'],
+    elsewhere: 'makes a new table: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })',
+  },
+};
+
+/** A step at a place (a STAGE_PLACES name, or a place of that shape): refused when the place does not
+ *  take its stage — naming the place, what it takes and where a stage it leaves out is built. `at` names
+ *  the step. */
+export function stageAt(place, st, at) {
+  const p = typeof place === 'string' ? STAGE_PLACES[place] : place;
+  const kind = st?.stage;
+  if (!p.stages || p.stages.includes(kind)) return;
+  const why = kind === undefined ? 'this step names no `stage`' : !stageDef(kind) ? `there is no '${kind}' stage` : `${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind} stage ${p.elsewhere || 'is not one of them'}`;
+  throw new Error(`${at}: ${p.what} takes ${p.stages.join(', ')} — ${why}`);
 }
-
-/** The stages a READ takes — the pipeline's own, those that re-slice a stored table without making a new
- *  one: a join, an unnest, a funnel or a python model reshapes the rows into a table to build. */
-export const READ_STAGES = ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project'];
-
-/** The functions a read's expression takes: every one but raw. Dialect SQL of the caller's is a build's
- *  escape hatch (a step written into a model, refused or reviewed as one); a read runs under a tool that
- *  only reads, which a client calls without asking first. */
-export const READ_FNS = Object.keys(FNS).filter((fn) => fn !== 'raw');
 
 /**
- * Root-level `$defs` of a tool that READS rows in steps (query_pipeline_model over a stored table, the
- * steps after a metric query): the expression over the rows' columns, constants and the current time (a
- * read has no source: no { property }, no { entity } partition; no raw SQL, READ_FNS) — under `expr`, or
- * the name given when the tool's `expr` is another level's (a metric query's where) — and `read_stage`,
- * the union of READ_STAGES, each the pipeline's own stage schema referring to that expression. A list of
- * read steps is `{ type: 'array', items: { $ref: '#/$defs/read_stage' } }`.
+ * THE STAGE GROUPS — what a step needs to work, the titles a tool's `$defs.stage` lists its stages under.
+ * A stage says its `group`; one that says none is SQL over rows.
  */
-export function readStageDefs(catalog, { expr = 'expr' } = {}) {
-  const ref = `#/$defs/${expr}`;
-  const stages = { anyOf: READ_STAGES.map((k) => STAGES[k].schema(catalog)) };
-  return {
-    [expr]: exprSchema(catalog, { ref, sourced: false, fns: READ_FNS }),
-    // the stage schemas name the pipeline's `#/$defs/expr`: pointed at this one's name instead
-    read_stage: expr === 'expr' ? stages : retargeted(stages, '#/$defs/expr', ref),
-  };
+export const STAGE_GROUPS = {
+  sql: 'SQL over rows — needs a table',
+  events: 'over a source\'s events — needs the rows still that source\'s events',
+  runtime: 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows',
+};
+
+/** Places by their STAGE_PLACES names (or places of that shape, as a feature passes) — null for none named. */
+function stagePlacesOf(places) {
+  if (!places?.length) return null;
+  return places.map((p) => {
+    const place = typeof p === 'string' ? STAGE_PLACES[p] : p;
+    if (!place) throw new Error(`stageSchema: no stage place '${p}'`);
+    return place;
+  });
 }
 
-/** A schema with every `$ref` to `from` pointed at `to` instead (copied where it changes). */
-function retargeted(node, from, to) {
-  if (Array.isArray(node)) return node.map((n) => retargeted(n, from, to));
-  if (node === null || typeof node !== 'object') return node;
-  return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, k === '$ref' && v === from ? to : retargeted(v, from, to)]));
+/**
+ * THE STAGE — `$defs.stage` of every tool that takes steps, ONE definition built by this one builder for
+ * the PLACES of that tool (STAGE_PLACES names, or places of that shape; none named — every stage): the
+ * stages this warehouse offers that one of them takes, each the closed form(s) its schema writes, tagged
+ * by `stage` (so the refusal of a bad step is that stage's, not every stage's: src/validate.js), grouped
+ * by what it needs (a titled union per group; a group left empty is left out). `runtime`: the forms a
+ * feature adds to ITS tools' runtime group — its library's steps, tagged by what they are; the core's
+ * tools pass none, so nothing of a feature is in their definition. One definition per tool: the one step
+ * and the list of steps point at it, and where its places take different stages, each place narrows it
+ * as the step is built (STAGE_PLACES, stageAt).
+ */
+export function stageSchema(catalog, { runtime = [], places = null } = {}) {
+  const at = stagePlacesOf(places);
+  const offered = Object.entries(STAGES).filter(([, s]) => typeof s.available !== 'function' || s.available(catalog));
+  const taken = offered.filter(([name]) => !at || at.some((p) => !p.stages || p.stages.includes(name)));
+  const forms = (group) => [...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog)), ...(group === 'runtime' ? runtime : [])];
+  const anyOf = Object.entries(STAGE_GROUPS).map(([group, title]) => ({ title, anyOf: forms(group) })).filter((g) => g.anyOf.length);
+  if (!at) {
+    const read = STAGE_PLACES.read;
+    return {
+      description: `One step: a stage { stage: "where" | "compute" | "join" | …, … }, grouped by what it needs. Each place takes some of them, and a refusal says which: ${STAGE_PLACES.build.what} takes every one; ${read.what} takes ${read.stages.join(', ')} — a join, an unnest, a funnel or a python step ${read.elsewhere.replace(/: .*$/, '')}, built from the task (from_task).`,
+      anyOf,
+    };
+  }
+  // what the definition holds, said from what it holds: what each of several places takes, and where a
+  // stage none of them takes is built
+  const names = taken.map(([name]) => name);
+  const several = at.length > 1 && new Set(at.map((p) => (p.stages || ['*']).join())).size > 1;
+  const left = offered.map(([name]) => name).filter((name) => !names.includes(name));
+  const elsewhere = at.find((p) => p.elsewhere && p.stages && left.some((name) => !p.stages.includes(name)))?.elsewhere;
+  const text = [
+    `One step: a stage { stage: ${names.slice(0, 3).map((n) => `"${n}"`).join(' | ')}${names.length > 3 ? ' | …' : ''}, … }, grouped by what it needs.`,
+    ...(several ? [`Each place takes some of them, and a refusal says which: ${at.map((p) => `${p.what} takes ${p.stages ? p.stages.join(', ') : 'every one'}`).join('; ')}.`] : []),
+    ...(left.length && elsewhere ? [`${/^[aeiou]/.test(left[0]) ? 'An' : 'A'} ${left.join(' / ')} step ${elsewhere}.`] : []),
+  ].join(' ');
+  return { description: text, anyOf };
+}
+
+/**
+ * Root-level `$defs` of a tool that takes steps: what the stages' schemas reference (each stage may
+ * declare its own — the one expression, `expr`, is compute's) and `stage`, the one stage definition. They
+ * sit at the tool's root, where `#/$defs/…` resolves. `project` reaches the expression's refs (the dbt
+ * project's semantic models and entities); `runtime` and `places` (the tool's stage places) as
+ * stageSchema's; `exprPlaces` the tool's expression places (src/pipeline/compute.js PLACES), which its
+ * `$defs.expr` is built for.
+ */
+export function stageDefs(catalog, { project = null, runtime = [], places = null, exprPlaces = null } = {}) {
+  return {
+    ...Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs(catalog, { project, places: exprPlaces }) : {}))),
+    stage: stageSchema(catalog, { runtime, places }),
+  };
 }

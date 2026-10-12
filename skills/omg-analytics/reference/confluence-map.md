@@ -39,7 +39,8 @@ available, search/read directly; otherwise open the links in a browser.
   (e.g. `space = JCS AND title ~ "currency"`).
 - **What's actually live here / exact field names + real values**:
   `semantic_index({ request: { … } })` — `{ source, event }` for an event's properties,
-  `{ source, property }` for values + cardinality, `{ search }` to map a business term/value to
+  `{ source, property }` for an event property's values + cardinality, `{ source, column }` for a
+  model's column (a player attribute on `users`), `{ search }` to map a business term/value to
   its property and the event(s) carrying it.
   This is the runtime source of truth that the Confluence pages describe.
 

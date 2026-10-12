@@ -5,9 +5,13 @@
 // aggregations, clustering methods and scalers — all rendered from config/retentioneering-facts.json,
 // the sheet scripts/retentioneering-facts.py extracts from the installed library. Nothing here restates
 // one from the library's prose. What the CATALOG decides (the events sources, the models a join stage
-// can bring in, the event properties an expression reads) comes from the catalog, through the
-// pipeline's own stage schemas. Names that exist only once an eventstream is built (the columns its
-// start's steps make, the event names it holds) are checked at call time against what the steps produced.
+// can bring in, the event properties an expression reads) comes from the catalog, through the core's one
+// stage definition (`$defs.stage`, src/pipeline/stages.js stageDefs) — the library's ops are this tool's
+// runtime group in it — and its one expression (`$defs.expr`), each built for this tool's places, so they
+// hold what a start and filter_events take and nothing else. What each place of the build takes of them
+// is checked as the step is built (build-input.js checkStepPlaces). Names that exist only once an
+// eventstream is built (the columns its start's steps make, the event names it holds) are checked at call
+// time against what the steps produced.
 //
 // What a call cannot carry is not offered, each for its stated reason (NOT_OFFERED): a Python callable,
 // a DuckDB statement run on the analysis runtime (code, which this server never takes from a call —
@@ -21,8 +25,8 @@ import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
 import { form, pick, stringOtherThan, timeRange, conditionSlot } from '../schema-kit.js';
-import { STAGES } from '../pipeline/stages.js';
-import { exprSchema, conditionListSql, columnLeaf, valueLeaf, CONDITION_FNS, LOGIC_FNS, SCALAR_FNS } from '../pipeline/compute.js';
+import { STAGES, stageDefs } from '../pipeline/stages.js';
+import { conditionListSql, PLACES, EXPR_REF } from '../pipeline/compute.js';
 import { CTX, NAME as CORE_NAME, TASK_READ, READ_PAGE } from '../schema/fields.js';
 import { cardTitle } from '../schema/display.js';
 import { ES_COLUMNS } from './names.js';
@@ -68,11 +72,8 @@ const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
 /** The library's per-path column, which this wrapper names `path` (see pathField). */
 const PATH_PARAM = 'path_col';
 export const CONDITION_DEF = 'retentioneering_condition';
-/** filter_events' expression over the eventstream's columns — a level of the one expression grammar
- *  with its own `$defs` entry, beside the pipeline's `expr` that a start's steps read. */
-export const EVENTSTREAM_EXPR_DEF = 'eventstream_expr';
-/** The pipeline stages a start's `steps` take, as one union the list refers to. */
-const START_STAGE_DEF = 'eventstream_stage';
+/** Where the one stage definition is, in this tool's schema as in every tool that takes steps. */
+const STAGE_REF = '#/$defs/stage';
 
 const eventstreamWindow = timeRange('The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.');
 
@@ -102,7 +103,22 @@ export function startStages(catalog) {
  *  from_task carries. */
 export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s steps cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
 
-export function buildSchema(catalog) {
+/**
+ * WHAT EACH PLACE OF THE BUILD TAKES OF THE ONE STAGE DEFINITION — checked as the build is called
+ * (build-input.js checkStepPlaces), a refusal naming the place and what it takes; the schema's own
+ * description of `$defs.stage` reads the same two:
+ *   startPlace    — a start's steps: the pipeline's stages that keep the rows the source's events
+ *                   (startStages), a place of the core's shape (src/pipeline/stages.js stageAt);
+ *   LIBRARY_STEPS — add_steps / edit_step / insert_step: the library's own steps ({ type }) only, the
+ *                   rows having been prepared in SQL by the start.
+ */
+export const startPlace = (catalog) => ({
+  what: 'an eventstream\'s start', stages: startStages(catalog),
+  elsewhere: `is not one of them: they keep the rows the source's events, one each and the same on every build (a share of users is the start's own sample). ${COMPLEX_EVENT_LOGIC}`,
+});
+export const LIBRARY_STEPS = { what: 'the library\'s steps (add_steps, edit_step, insert_step)', takes: 'the library\'s own steps — { type: <op>, …its parameters }' };
+
+export function buildSchema(catalog, { project = null } = {}) {
   const sources = pathSources(catalog);
   const f = retentioneeringFacts();
   const kinds = startStages(catalog);
@@ -126,16 +142,17 @@ export function buildSchema(catalog) {
     description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start: the rows of an events source, or of a task\'s stored table, prepared by its steps — the pipeline\'s own SQL stages), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized.',
     sourceColumns: columns(false),
     // a start's steps are the pipeline's SQL stages ({ stage }); the steps added after it are the
-    // library's ops ({ type }) — one word for a list run in order, each item tagged by what it is
+    // library's ops ({ type }) — one word for a list run in order, each item tagged by what it is, and
+    // both of the one stage definition (each place takes its part of it: startPlace, LIBRARY_STEPS)
     startSteps: {
-      type: 'array', minItems: 1, items: { $ref: `#/$defs/${START_STAGE_DEF}` },
-      description: `The steps the rows are prepared by, in SQL — the pipeline's own stages (${kinds.join(', ')}), each { stage: … } as build_pipeline_model takes it: those that keep the rows events, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns. The library's own steps come after the build (add_steps).`,
+      type: 'array', minItems: 1, items: { $ref: STAGE_REF },
+      description: `The steps the rows are prepared by, in SQL — the pipeline's own stages that keep the rows events (${kinds.join(', ')}), each { stage: … } as build_pipeline_model takes it, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns. The library's own steps come after the build (add_steps).`,
     },
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
       eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
-      step: { ...stepSchema(), description: 'edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
-      steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: the library\'s own steps — one or several, applied in order, each { type: <op>, ...its parameters under the library\'s names }.' },
+      step: { $ref: STAGE_REF, description: 'edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
+      steps: { type: 'array', minItems: 1, items: { $ref: STAGE_REF }, description: 'add_steps: the library\'s own steps — one or several, applied in order, each { type: <op>, ...its parameters under the library\'s names }.' },
       index,
       after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
       name: { type: 'string', pattern: NEW_EVENTSTREAM, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
@@ -179,18 +196,23 @@ export function buildSchema(catalog) {
           anyOf: [by('a share of users', ['share']), by('a share of some events', ['events']), by('both', ['share', 'events'])],
         };
       })(),
-      // what a step action answers with beyond what it changed — the pipeline builder's own two flags
-      include_columns: { type: 'boolean', description: 'Also return the eventstream\'s whole shape after the call — every event, path column, segment with its levels and custom column; by default the answer says what the steps changed (the events, path columns and segments added and removed).' },
-      include_steps: { type: 'boolean', description: 'Also return every step of the eventstream, as preview lists them; by default only the steps just added (or the one put in place) and steps_count.' },
+      // what a step action answers with beyond what it changed — the pipeline builder's own list
+      include: { type: 'array', uniqueItems: true, items: { enum: ['columns', 'steps'] }, description: 'What else the answer shows: "columns" — the eventstream\'s whole shape after the call, every event, path column, segment with its levels and custom column (by default what the steps changed: the events, path columns and segments added and removed); "steps" — every step of the eventstream, as preview lists them (by default only the steps just added, or the one put in place, and steps_count).' },
     },
-    $defs: {
-      // the start's steps are the pipeline's own stages, each referring to the pipeline's `expr` (a
-      // compute stage's definitions bring it) — gathered under one union the `steps` list refers to
-      ...Object.assign({}, ...kinds.map((k) => (typeof STAGES[k].defs === 'function' ? STAGES[k].defs(catalog) : {}))),
-      [START_STAGE_DEF]: { anyOf: kinds.map((k) => STAGES[k].schema(catalog)) },
-      [EVENTSTREAM_EXPR_DEF]: eventstreamExprSchema(),
-      [CONDITION_DEF]: f.condition_schema,
-    },
+    $defs: (() => {
+      // THE ONE STAGE DEFINITION, the core's (src/pipeline/stages.js), built for this tool's places — the
+      // stages its start takes, and the library's ops as this tool's runtime group — and what its stages
+      // refer to (the one expression, `expr`), built for where this tool's expressions stand: a start's
+      // steps over the source's rows, and filter_events' where over the eventstream's (FILTER_PLACE). Said
+      // here for this tool's own places, which take their parts of it
+      const start = startPlace(catalog);
+      const defs = stageDefs(catalog, { project, runtime: opSchemas(), places: [start], exprPlaces: ['source_rows', FILTER_PLACE] });
+      return {
+        ...defs,
+        stage: { ...defs.stage, description: `One step, grouped by what it needs: a stage { stage: "where" | "compute" | "join" | …, … }, or one of the library's own steps { type: <op>, … } on its runtime. Each place takes its part, and a refusal says which: ${start.what}'s steps take ${start.stages.join(', ')} (the rows stay the source's events); ${LIBRARY_STEPS.what} take ${LIBRARY_STEPS.takes}.` },
+        [CONDITION_DEF]: f.condition_schema,
+      };
+    })(),
   });
 }
 
@@ -220,13 +242,13 @@ const ACTION_SAYS = () => ({
  * event and time columns (`columns` only when a stage made others: `sourceColumns`) and takes a window, a
  * task's table names its path and its columns always (its columns carry no catalog meaning) and was
  * bounded by the pipeline that made it. The actions that change the steps answer with what changed, and
- * take the pipeline builder's two flags for more (`include_columns`, `include_steps`).
+ * take the pipeline builder's list for more (`include`: columns, steps).
  */
 function buildForms(schema) {
   const { properties: F, description, sourceColumns, startSteps, $defs } = schema;
   const action = (value) => ({ tag: ['action', value], tagDescription: [].concat(value).map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') });
   const declaration = ['context_id', 'name', 'description', 'path', 'segments', 'top', 'sessions', 'sample'];
-  const echo = ['include_columns', 'include_steps'];
+  const echo = ['include'];
   // a step names the context its eventstream is in — a start may omit it (a new context), a step may not
   const stepContext = { ...F.context_id, description: 'The context the eventstream is in — the context_id start returned.' };
   const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: { ...pick(F, ['context_id', 'eventstream', ...required, ...optional]), context_id: stepContext } });
@@ -363,39 +385,29 @@ function rulesToLibrary({ cases, else: otherwise }, field) {
 }
 
 /**
- * filter_events' expression — a level of the ONE expression grammar (src/pipeline/compute.js): a column
- * of the eventstream or a constant, combined by the conditions, and / or / not and the scalar functions.
- * No window (the library keeps rows, it computes none), no event property and no current time (the
- * eventstream carries columns, and its run should not depend on the hour), and no raw SQL: the library
- * runs what this tool writes, and SQL a call brings is code (NOT_OFFERED.params.sql).
+ * filter_events' where — a where over rows without a payload: the eventstream's own columns. It is
+ * written in the ONE expression (`$defs.expr`, src/pipeline/compute.js), and what it takes of it is the
+ * core's place of stored rows (PLACES.stored_rows: a column, a constant, the current time; the
+ * conditions, and / or / not and the scalar functions), named as this filter in a refusal: no event
+ * property (the eventstream carries columns) and no raw SQL — the library runs what this tool writes,
+ * and SQL a call brings is code (NOT_OFFERED.params.sql).
  */
-function eventstreamExprSchema() {
-  return exprSchema(null, {
-    ref: `#/$defs/${EVENTSTREAM_EXPR_DEF}`,
-    leaves: [
-      columnLeaf('A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.', { pattern: NAME_OR_COLUMN }),
-      valueLeaf(),
-    ],
-    fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw')],
-    windows: false,
-    sourced: false,
-  });
-}
+const FILTER_PLACE = { ...PLACES.stored_rows, what: 'filter_events\' where', hint: 'A column is one the eventstream has at this step; an event property is read into a column by the start\'s steps (a compute stage)' };
 
-/** filter_events' where: a condition slot of that expression — a list that all hold, as every where. */
+/** filter_events' where: a condition slot of the one expression — a list that all hold, as every where. */
 function rowConditionSchema() {
-  return conditionSlot(`#/$defs/${EVENTSTREAM_EXPR_DEF}`, 'Keep only the rows where every condition holds — a comparison, a range, a membership, a text test, a missing value (is_null), and / or / not over them — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). A column compared with constants is read as their kind, whatever it is stored as (a segment is text: a threshold on it is a number\'s). A comparison with a missing value does not hold — neq, not_in and not_like too (present and different); not(…) holds wherever its condition does not, a missing value included, as drop does. This tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.');
+  return conditionSlot(EXPR_REF, 'Keep only the rows where every condition holds — a comparison, a range, a membership, a text test, a missing value (is_null), and / or / not over them — on any column the eventstream has at this step ({ column }: the event, its time, a path column, a segment, a custom column) and constants ({ value }) (what keep / drop cannot say: they match listed values only). A column compared with constants is read as their kind, whatever it is stored as (a segment is text: a threshold on it is a number\'s). A comparison with a missing value does not hold — neq, not_in and not_like too (present and different); not(…) holds wherever its condition does not, a missing value included, as drop does. This tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.');
 }
 
 /** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, written
- *  by the one writer for DuckDB — every column quoted, every constant a literal, so the caller's input
- *  stays data. A column compared with constants is read as their kind (castToConstant: a segment is
- *  stored as text, and a threshold on it is a number's), and a comparison with a missing value holds for
- *  no row, as it holds nowhere else; not(…) is what keeps one. */
+ *  by the one writer for DuckDB at this filter's place — every column quoted, every constant a literal,
+ *  so the caller's input stays data. A column compared with constants is read as their kind
+ *  (castToConstant: a segment is stored as text, and a threshold on it is a number's), and a comparison
+ *  with a missing value holds for no row, as it holds nowhere else; not(…) is what keeps one. */
 function whereToSql(where, field) {
   let preds;
   try {
-    preds = conditionListSql(DUCKDB, null, where, field, { castToConstant: true });
+    preds = conditionListSql(DUCKDB, null, where, field, { castToConstant: true, place: FILTER_PLACE });
   } catch (e) {
     throw new ToolError(e?.message || String(e), { stage: 'validate', field });
   }
@@ -471,6 +483,8 @@ function callableForms({ tag, title, description, properties, required, variants
   return out;
 }
 
+/** The library's own steps ({ type: <op>, ...its parameters }) — an eventstream's steps, this tool's
+ *  runtime group of the one stage definition. */
 function opSchemas() {
   const f = retentioneeringFacts();
   return offeredOps().flatMap((op) => {
@@ -478,11 +492,6 @@ function opSchemas() {
     for (const [name, a] of Object.entries(ADDED[op] || {})) properties[name] = a.schema();
     return callableForms({ tag: ['type', op], title: op, description: f.ops[op].summary, properties, required, variants });
   });
-}
-
-/** One of the library's own steps ({ type: <op>, ...its parameters }) — an eventstream's step. */
-function stepSchema() {
-  return { anyOf: opSchemas() };
 }
 
 /** The ops left out, each with its reason — said wherever steps are offered. */
@@ -530,16 +539,39 @@ export function querySchema() {
   };
 }
 
+/** The display, in the one shape a card is asked for — { task_id, display }, as display_model_result
+ *  takes it: the task, and what its card draws. */
 export function displaySchema() {
   const f = retentioneeringFacts();
   return {
-    type: 'object', additionalProperties: false, required: ['task_id', 'analysis'],
+    type: 'object', additionalProperties: false, required: ['task_id', 'display'],
     description: 'Draw one analysis of a finished task as a card.',
     properties: {
       task_id: { type: 'string', pattern: TASK_ID_PATTERN, description: 'A finished query_retentioneering_model task (its task_id).' },
-      analysis: { type: 'string', pattern: NAME, description: 'Which analysis of the task: its name — the kind, unless you named it.' },
-      title: cardTitle,
-      edge_weight: { enum: f.edge_weights, description: 'transition_graph: the weight the graph opens on (default proba_out); the card switches between all of them.' },
+      display: {
+        type: 'object', additionalProperties: false, required: ['analysis'],
+        description: 'What the card draws: one analysis of the task, under a title of yours.',
+        properties: {
+          analysis: { type: 'string', pattern: NAME, description: 'Which analysis of the task: its name — the kind, unless you named it.' },
+          title: cardTitle,
+          edge_weight: { enum: f.edge_weights, description: 'transition_graph: the weight the graph opens on (default proba_out); the card switches between all of them.' },
+        },
+      },
     },
   };
+}
+
+/** delete_context's form for an eventstream — the kind of build a path-analysis context holds, removed
+ *  as the core's are (src/features.js deletes): `what` pinned, its context and the eventstream named. */
+export function deleteSchema() {
+  return form({
+    title: 'one eventstream',
+    tag: ['what', 'eventstream'],
+    tagDescription: 'eventstream: remove one eventstream of a path-analysis context and keep the context (its tables stay until the context is dropped, so the tasks that built and read it still read back).',
+    required: ['context_id', 'eventstream'],
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: 'The path-analysis context the eventstream is in (the context_id build_retentioneering_model returned).' },
+      eventstream: { type: 'string', pattern: EVENTSTREAM_REF, description: 'Which eventstream of the context, by its name.' },
+    },
+  });
 }

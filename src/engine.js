@@ -40,7 +40,7 @@ import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
 import { lookbackDays, shiftDay } from './metric-graph.js';
 import { CatalogSearch } from './search.js';
-import { featureToolDefinitions } from './features.js';
+import { featureToolDefinitions, featureDeletes } from './features.js';
 import { toolRegistry } from './tools/define.js';
 import { CORE_TOOLS } from './tools/core.js';
 import { JobManager } from './jobs.js';
@@ -80,10 +80,10 @@ export class Engine {
     // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
     // container restarts — then it lives in its own store, isolated from the value index.
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
-    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder, catalog }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.notes = new MemoryTool({ catalog, store: this.memoryStore, validate: (tool, input) => this._validate(tool, input) }); // the `memory` tool (engine.memory → notes.run)
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ request: { search } })
-    this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs }); // what semantic_index shows of the value index
+    this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs, catalog }); // what semantic_index shows of the value index
     this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
     // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (engine.probe.bestEffort): the extras
     // an answer is enriched with — a physical column set, a freshness mark. Past it the answer goes
@@ -122,8 +122,11 @@ export class Engine {
     for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
     for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
-    // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js)
-    const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
+    // one schema per tool, and apart from them the input contracts of the methods tools hand to (src/schema.js);
+    // what the features this deployment runs hold in a context is removed by delete_context, in their forms
+    const deletes = featureDeletes(features, catalog);
+    this._featureDeletes = new Map(deletes.map((d) => [d.what, d]));
+    const built = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [], deletes });
     this.schemas = Object.fromEntries(Object.entries(built).filter(([name]) => !METHOD_CONTRACTS.has(name)));
     this.contracts = Object.fromEntries(Object.entries(built).filter(([name]) => METHOD_CONTRACTS.has(name)));
     // THE TOOLS — ONE REGISTRY (src/tools/define.js): the core's (src/tools/core.js) and those of the
@@ -136,7 +139,7 @@ export class Engine {
     for (const def of this.tools.values()) {
       if (def.feature) {
         if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);
-        this.schemas[def.name] = transportSchema(def.schema(catalog));
+        this.schemas[def.name] = transportSchema(def.schema(catalog, { project: this.project?.layer || null }));
         this[def.name] = (input) => def.run(this, input || {});
       } else if (!Object.prototype.hasOwnProperty.call(this.schemas, def.name)) throw new Error(`tool '${def.name}' has no schema (src/schema.js builds one per core tool)`);
     }
@@ -281,7 +284,7 @@ export class Engine {
     const start = back === Infinity ? null : bounds.start && back ? shiftDay(bounds.start, -back) : bounds.start;
     // the bounds compare the partition column; in a metric query's where it is the dimension that carries it
     const onDimension = partitionConditions(m, { start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
-      .map((c) => ({ ...c, args: c.args.map((a) => (a.column !== undefined ? { model: sources[0], attribute: PARTITION_DIM } : a)) }));
+      .map((c) => ({ ...c, args: c.args.map((a) => (a.column !== undefined ? { source: sources[0], column: PARTITION_DIM } : a)) }));
     // a source pruned by its time axis alone has no partition condition, and a where is never an empty list
     if (!onDimension.length) return [];
     return whereSql(this.catalog.dialect, onDimension, () => ({ kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }), 'partition');
@@ -411,9 +414,15 @@ export class Engine {
     return input.action === 'list' ? this._listContexts(input) : this._describeContext({ context_id: input.context_id });
   }
 
-  /** Remove a context, its pipeline model, or one model's task additions. */
+  /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context
+   *  holds, handed to the feature in its own form (src/features.js deletes). */
   async delete_context(input = {}) {
     this._validate('delete_context', input);
+    const contributed = this._featureDeletes?.get(input.what);
+    if (contributed) {
+      const { what: _what, ...fields } = input;
+      return contributed.run(this, fields);
+    }
     switch (input.what || 'context') {
       case 'pipeline_model': return this._deletePipelineModel({ context_id: input.context_id });
       case 'semantic_model': return this._deleteSemanticModel({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });

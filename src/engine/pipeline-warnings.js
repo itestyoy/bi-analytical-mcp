@@ -207,7 +207,7 @@ export class PipelineAdvisor {
       }
     }
     if (errors.length) {
-      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ request: { source, property } }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ request: { source, property } }) for an event property, ({ source, column }) for a column, and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
     warnings.onEmpty = unverified;
     return warnings;
@@ -318,7 +318,7 @@ export class PipelineAdvisor {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...this.dateBoundWarnings(stage, available),
-      ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
+      ...(own ? own(available) : [`Reference any column available now in the next stage (${listSome(available)}; include: ["columns"] lists them all).`]),
       ...(building ? [] : ['Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }

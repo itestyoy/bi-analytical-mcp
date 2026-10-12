@@ -31,15 +31,16 @@
   `semantic_index()` — без всяких drill-down. Это самое дорогое место в схеме и
   единственное, что агент гарантированно прочитает. Сюда идут правила поведения.
 - **`description` колонки видно только при углублении** — `semantic_index({ source })`,
-  `({ source, event })`, `({ source, property })`. Значит поле описывается так, чтобы текст был полезен
+  `({ source, event })`, `({ source, column })` для колонки модели, `({ source, property })` для
+  свойства события. Значит поле описывается так, чтобы текст был полезен
   тому, кто уже пришёл именно за этим полем.
-- **Агент никогда не пишет путь соединения.** Атрибут адресуется только тем, где он лежит:
-  `group_by: [{ model: 'users', attribute: 'country' }]`,
-  `where: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }]`,
+- **Агент никогда не пишет путь соединения.** Колонка адресуется только тем, где она лежит:
+  `group_by: [{ source: 'users', column: 'country' }]`,
+  `where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }]`,
   `steps: [{ stage: 'order_by', keys: [{ key: 'users_country' }] }]` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —
-  `groupable_attributes` в обзоре и `groupable` в ответе `build_semantic_model`. Колонки результата
+  `groupable_columns` в обзоре и `groupable` в ответе `build_semantic_model`. Колонки результата
   тоже без внутреннего разделителя: `users_country`, `crashlytics_app_version`, `metric_time_day` —
   ими же адресуются шаги после запроса (`steps`), карточка (`display_model_result`) и пайплайн от сохранённого результата (`from_task`); соответствие возвращается в
   `group_by_resolved`; внутреннего написания MetricFlow агент не видит ни на входе, ни на выходе.
@@ -333,8 +334,8 @@ models:
         config: { meta: { mcp: { is_time: true } } }
       - name: event_name
         config: { meta: { mcp: { is_event_name: true } } }
-      - name: app_version                          # атрибут ФАКТА — доступен через связь
-        config: { meta: { mcp: { dimension: true } } }         #   как { model: crashlytics, attribute: app_version } у того, кто ссылается
+      - name: app_version                          # колонка ФАКТА — доступна через связь
+        config: { meta: { mcp: { dimension: true } } }         #   как { source: crashlytics, column: app_version } у того, кто ссылается
       - name: device_model
         config: { meta: { mcp: { dimension: true } } }
       - name: anr_duration_of_event_data
@@ -711,7 +712,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
-| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ from }` без мер подключает модель ради её атрибутов), `metrics` |
+| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ source }` без мер подключает модель ради её колонок), `metrics` |
 | `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, steps }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
 | `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
@@ -765,13 +766,13 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
   "semantic_payload": {
     "name": "rev_segment",
     "semantic_models": [{
-      "from": "events",
+      "source": "events",
       "where": [{ "fn": "eq", "args": [{ "column": "event_name" }, { "value": "iap_purchase_completed" }] }],
       "measures": [
         { "name": "revenue", "expr": { "fn": "sum",            "args": [{ "property": "price_in_usd_of_event_data" }] } },
         { "name": "payers",  "expr": { "fn": "count_distinct", "args": [{ "column": "player_id_of_internal" }] } }
       ]
-    }, { "from": "users" }],
+    }, { "source": "users" }],
     "metrics": [
       { "name": "revenue", "type": "simple",  "measure": "revenue" },
       { "name": "payers",  "type": "simple",  "measure": "payers" },
@@ -779,11 +780,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
     ]
   },
   "example_queries": [
-    { "metrics": ["rev_segment_revenue"], "group_by": [{ "model": "users", "attribute": "country" }] },
-    { "metrics": ["rev_segment_arppu"],   "group_by": [{ "model": "users", "attribute": "acquisition_type" }] }
+    { "metrics": ["rev_segment_revenue"], "group_by": [{ "source": "users", "column": "country" }] },
+    { "metrics": ["rev_segment_arppu"],   "group_by": [{ "source": "users", "column": "acquisition_type" }] }
   ],
   "notes": "User attributes come through the declared events.user → users.user relationship; no join is written.",
-  "hack": "Any measure + group_by { model: 'users', attribute: '<attr>' } makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
+  "hack": "Any measure + group_by { source: 'users', column: '<attr>' } makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
 }
 ```
 

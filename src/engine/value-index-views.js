@@ -5,10 +5,28 @@
 
 import { ToolError } from '../validate.js';
 
+/**
+ * An indexed key of `source` — one of its event properties, or one of its columns — named as the ref
+ * names it, and as its semantic_index view takes it: { property } or { column }. The catalog says which
+ * (attributeKind); a key it no longer declares keeps the name the index kept it under, a property.
+ */
+export function keyRef(catalog, source, name) {
+  const kind = catalog?.attributeKind(source, name);
+  return kind && kind !== 'property' ? { column: name } : { property: name };
+}
+
+/** The semantic_index view of an indexed key, as a call to copy. */
+export function keyView(catalog, source, name) {
+  const [[k, v]] = Object.entries(keyRef(catalog, source, name));
+  return `semantic_index({ request: { source: '${source}', ${k}: '${v}' } })`;
+}
+
 export class ValueIndexViews {
-  constructor({ valueIndex, jobs }) {
+  constructor({ valueIndex, jobs, catalog = null }) {
     this.valueIndex = valueIndex;
     this.jobs = jobs;
+    // what an indexed key is — a property or a column — is the catalog's word (keyRef)
+    this.catalog = catalog;
   }
 
   /**
@@ -54,9 +72,14 @@ export class ValueIndexViews {
     return { samples, value_stats };
   }
 
-  /** Compact row for a property's per-run indexing record. */
+  /** Compact row for an indexed key's per-run record: the key named as its view takes it ({ source, property } or { source, column }). */
   propertyRow(r) {
-    return { ...(r.source ? { source: r.source } : {}), property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+    return { ...(r.source ? { source: r.source, ...keyRef(this.catalog, r.source, r.property) } : { property: r.property }), ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+  }
+
+  /** The view of a row propertyRow made, as a call to copy. */
+  rowView(row) {
+    return row.source ? keyView(this.catalog, row.source, row.property ?? row.column) : `semantic_index({ request: { source: '<source>', property: '${row.property}' } })`;
   }
 
   /**
@@ -107,7 +130,7 @@ export class ValueIndexViews {
       // NB: per-property `ms` is only meaningful for properties scanned individually (~0 when batched).
       ...(fallbacks.length ? { fallbacks } : {}),
       recommendations: [
-        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ request: { source: '${props[0].source || '<source>'}', property: '${props[0].property}' } }).` : `No per-property timing recorded for run ${run.id}.`,
+        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property ?? p.column} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with ${this.rowView(props[0])}.` : `No per-property timing recorded for run ${run.id}.`,
         ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property — full reason in fallbacks[].`] : []),
       ],
     };
@@ -138,11 +161,11 @@ export class ValueIndexViews {
 
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) and ({ source, column }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ request: { source, property } }).`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect an event property's values via semantic_index({ request: { source, property } }), a column's via ({ source, column }).`);
     if (running.length) recommendations.push(`${running.length} task(s) running — read one with the query tool of the side its \`tool\` names (query_semantic_model, query_pipeline_model, or a feature's own) and { task_ids }; it waits for the task.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or semantic_index({ request: { source: '${slowest[0].source}', property: '${slowest[0].property}' } }) for one property across syncs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or ${this.rowView(slowest[0])} for one across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ request: { run: ${last.id} } }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
 

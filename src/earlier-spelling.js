@@ -8,6 +8,12 @@
 //   a pivot's     { agg, column?, percentile? } measure → the aggregate expression itself;
 //   a dimension   of a semantic model { field, grain?, label? } (and an update's { from, field }) →
 //                 { column | property, … };
+//   a semantic    model item { from, where?, dimensions?, measures? } and a dimension an update removes
+//                 { from, column | property | name } → `source` names the model;
+//   an update     of build_semantic_model naming its task `task` → `name`;
+//   a ref         { model, attribute, via? } (a metric query's group_by and where) → { source, column,
+//                 via? }, { source, property } or { semantic_model: [model], dimension } — which of the
+//                 three `opts.subject(attribute, model)` says ('column' | 'property' | 'dimension');
 //   an expression { fn: "event_property", property, field?, type? } → the leaf { property, field?, type? },
 //                 array_length / array_contains naming `property` (and `item`) → args;
 //   an unnest's   { property } / { column } → its `expr`;
@@ -18,7 +24,10 @@
 //                 metric's SQL text over its listed `metrics` → the expression of { metric } leaves, a
 //                 side or a measure referenced as { name } → its name;
 //   a display's   fold (a pivot value's, a drill's) `agg` → `fn` (currentDisplay — a display only: a
-//                 pivot value { column, agg } is no measure, so it is not one of currentOf's).
+//                 pivot value { column, agg } is no measure, so it is not one of currentOf's);
+//   a request's   "show me more" flags (include_columns, include_steps, include_yaml, include_plan,
+//                 include_coverage, explore_errors' detail: full) → the one list `include` of what they
+//                 asked for (currentInclude).
 // Each converter leaves a value already in the current spelling as it is (by what it says), so it may
 // be applied to anything a store holds. They serve whoever reads a kept value — a draft's steps
 // (src/pipeline/earlier.js), a kept eventstream, a stored declaration, a deployment's recipe file, a
@@ -39,6 +48,35 @@ const aggregation = (name) => (['average', 'percentile'].includes(SPELLING[name]
  *  model's `field`, a funnel step's or a kept prefilter's `property`): what it resolved to,
  *  said by the caller that knows (`opts.subject(name)` → 'column' | 'property'); a column without one. */
 const subjectOf = (name, opts) => ((opts.subject ? opts.subject(name) : 'column') === 'property' ? { property: name } : { column: name });
+
+/** Whether a value is a ref of an earlier form: what a metric query names, { model, attribute, via? }. */
+export function isEarlierRef(v) {
+  return isObj(v) && typeof v.model === 'string' && typeof v.attribute === 'string' && Object.keys(v).every((k) => ['model', 'attribute', 'via'].includes(k));
+}
+
+/**
+ * A ref in this version's spelling: the model's column { source, column, via? }, its event property
+ * { source, property } (a payload property the task declared a dimension) or a dimension the task
+ * computed there { semantic_model: [model], dimension } — which, the caller that knows says
+ * (`opts.subject(attribute, model)` → 'column' | 'property' | 'dimension'); a column without one, and
+ * one that names a relationship (`via`), which only a column is reached through.
+ */
+export function currentRef(v, opts = {}) {
+  if (!isEarlierRef(v)) return v;
+  const { model, attribute, via } = v;
+  const kind = via === undefined && opts.subject ? opts.subject(attribute, model) : 'column';
+  if (kind === 'property') return { source: model, property: attribute };
+  if (kind === 'dimension') return { semantic_model: [model], dimension: attribute };
+  return { source: model, column: attribute, ...(via !== undefined ? { via } : {}) };
+}
+
+/** Whether a value names its model `from` where this version names it `source`: an item of a
+ *  declaration's semantic_models, or a dimension an update removes. */
+const isEarlierSourceItem = (v) => isObj(v) && typeof v.from === 'string' && v.source === undefined
+  && Object.keys(v).every((k) => ['from', 'where', 'dimensions', 'measures', 'column', 'property', 'name'].includes(k));
+
+/** Whether a value is build_semantic_model's update naming the task it changes `task` (`name` now). */
+const isEarlierUpdate = (v) => isObj(v) && v.action === 'update' && typeof v.task === 'string' && v.name === undefined;
 
 /** Whether an expression is in / not_in / between with its constants as ONE list — { value: [...] }, the
  *  way a condition's `value` held them. */
@@ -62,10 +100,10 @@ export function currentCondition(c, opts = {}) {
   }
   if (!isEarlierCondition(c)) return c;
   // a metric query's `field` was a reference named as group_by names it ({ model, attribute }, the time
-  // axis …): it is the leaf now, as it was written
+  // axis …): it is the leaf now, in this version's spelling
   const subject = c.left !== undefined ? currentExpression(c.left, opts)
     : c.column !== undefined ? { column: c.column }
-      : isObj(c.field) ? c.field
+      : isObj(c.field) ? currentRef(c.field, opts)
         : c.field !== undefined ? subjectOf(c.field, opts) : subjectOf(c.property, opts);
   if (c.op === 'is_null' || c.op === 'is_not_null') return { fn: c.op, args: [subject] };
   // what the earlier build compared with: the expression `right` when there was one (a `value` beside
@@ -87,7 +125,7 @@ export function currentConditions(list, opts = {}) {
 export function currentExpression(e, opts = {}) {
   if (Array.isArray(e)) return e.map((x) => currentExpression(x, opts));
   if (!isObj(e)) return e;
-  if (e.fn === undefined) return isEarlierCondition(e) ? currentCondition(e, opts) : e;
+  if (e.fn === undefined) return isEarlierCondition(e) ? currentCondition(e, opts) : currentRef(e, opts);
   // an event property read by a function of its own, then; a leaf now
   if (e.fn === 'event_property' && e.args === undefined && e.property !== undefined) {
     return { property: e.property, ...(e.field !== undefined ? { field: e.field } : {}), ...(e.type !== undefined ? { type: e.type } : {}) };
@@ -146,11 +184,12 @@ export function isEarlierDimension(d) {
 }
 
 /** A semantic model's dimension in this version's spelling: the column or the event property it reads
- *  ({ column } | { property }, which of the two `opts.subject` says), its other fields as they were. */
+ *  ({ column } | { property }, which of the two `opts.subject` says), its other fields as they were —
+ *  an update's model, `from` then, named `source`. */
 export function currentDimension(d, opts = {}) {
   if (!isEarlierDimension(d)) return d;
   const { from, field, ...own } = d;
-  return { ...(from !== undefined ? { from } : {}), ...subjectOf(field, opts), ...own };
+  return { ...(from !== undefined ? { source: from } : {}), ...subjectOf(field, opts), ...own };
 }
 
 /** An unnest of an earlier form — the array named { property } or { column } beside the stage's fields
@@ -189,18 +228,26 @@ const earlierQueryParts = (v) => (isObj(v.transform) && v.steps === undefined &&
  * A QUERY'S INPUT AS AN EARLIER VERSION KEPT IT WITH ITS TASK, in this version's spelling — what a query
  * is read back by when it is read again (paged, drawn, its table's header written). The steps a read
  * runs were its `stages` (its `transform` before that); a metric query's `order_by` is the order_by step
- * after its steps, which run over the metric result. A batch's queries alike. The same object when
- * nothing in it is of an earlier spelling. (A NEW call that writes `stages` is told the field's name by
- * the refusal, CROSS_PATH_SPELLING; one with a `transform` or a metric query's `order_by` is shown
- * converted, currentOf.)
+ * after its steps, which run over the metric result; what its group_by and where name were
+ * { model, attribute } refs (currentRef, `opts.subject` as there), and its plan was `include_plan`. A
+ * batch's queries alike. The same object when nothing in it is of an earlier spelling. (A NEW call that
+ * writes `stages` is told the field's name by the refusal, CROSS_PATH_SPELLING; one with a `transform`, a
+ * metric query's `order_by`, a { model, attribute } or a flag is shown converted, currentOf.)
  */
-export function currentQueryInput(input) {
+export function currentQueryInput(input, opts = {}) {
   if (!isObj(input)) return input;
+  const o = isObj(opts) ? opts : {}; // (mapped over a list, the second argument is an index)
   let out = input;
   if (Array.isArray(out.queries)) {
-    const queries = out.queries.map(currentQueryInput);
+    const queries = out.queries.map((q) => currentQueryInput(q, o));
     if (queries.some((q, i) => q !== out.queries[i])) out = { ...out, queries };
   }
+  if (Array.isArray(out.group_by) && out.group_by.some(isEarlierRef)) out = { ...out, group_by: out.group_by.map((g) => currentRef(g, o)) };
+  if (Array.isArray(out.where)) {
+    const where = currentOf(out.where, o);
+    if (where !== out.where) out = { ...out, where };
+  }
+  if (Array.isArray(out.metrics) && isEarlierInclude(out)) out = currentInclude(out);
   if (out.steps === undefined && (Array.isArray(out.stages) || isObj(out.transform))) {
     const { stages, transform, ...rest } = out;
     out = { ...rest, steps: Array.isArray(stages) ? stages : transformStages(transform) };
@@ -210,6 +257,38 @@ export function currentQueryInput(input) {
     out = keys.length ? { ...rest, steps: [...(rest.steps || []), { stage: 'order_by', keys }] } : rest;
   }
   return out;
+}
+
+/** A boolean "show me more" flag: true asked for `name`, false for nothing — any other value is no such flag. */
+const flag = (name) => (x) => (typeof x === 'boolean' ? (x ? [name] : []) : null);
+
+/** Each "show me more" field an earlier version took, and what it asked for in the one list `include`
+ *  now (null: the value is not that field's earlier form) — a flag per thing, and explore_errors' level
+ *  of `detail` (full: each error's details; summary, its default: nothing more). */
+const EARLIER_INCLUDE = {
+  include_columns: flag('columns'), include_steps: flag('steps'), include_yaml: flag('yaml'), include_plan: flag('plan'), include_coverage: flag('coverage'),
+  detail: (x) => (x === 'full' ? ['details'] : x === 'summary' ? [] : null),
+};
+const asked = (k, x) => (Object.hasOwn(EARLIER_INCLUDE, k) ? EARLIER_INCLUDE[k](x) : null);
+
+/** Whether a value asks for more of an answer the way an earlier version did: a field per thing. */
+export const isEarlierInclude = (v) => isObj(v) && Object.entries(v).some(([k, x]) => asked(k, x) !== null) && (v.include === undefined || Array.isArray(v.include));
+
+/**
+ * A request's flags as the one list `include` — what each flag set to true asked for, after what the
+ * list already holds (a flag set to false asked for nothing, and goes); the same value when it holds no
+ * flag. A request kept with its task and read again is carried over by this, and a new call written so
+ * is refused with it converted (src/validate.js).
+ */
+export function currentInclude(v) {
+  if (!isEarlierInclude(v)) return v;
+  const include = [...(v.include || [])];
+  const out = {};
+  for (const [k, x] of Object.entries(v)) {
+    const names = asked(k, x);
+    if (names) { for (const n of names) if (!include.includes(n)) include.push(n); } else if (k !== 'include') out[k] = x;
+  }
+  return include.length ? { ...out, include } : out;
 }
 
 const METRIC_TYPES = ['simple', 'cumulative', 'ratio', 'derived'];
@@ -344,11 +423,12 @@ export function currentDisplay(display) {
 
 /**
  * ANY VALUE, with every earlier form in it converted — a condition, a measure, a pivot's measure, a
- * semantic metric, an expression, an unnest, a read's transform, a metric query's order_by — wherever it
- * sits; the same value (by identity) when nothing in it is of an earlier form. `opts.subject` as
- * currentCondition's. A metric's sides are read as metrics here (a list's are read by currentMetrics); a
- * display is not walked (currentDisplay); a field only renamed (`stages`) is the refusal's hint, not a
- * conversion of the whole value.
+ * semantic metric, an expression, an unnest, a read's transform, a metric query's order_by, a request's
+ * include flags, a { model, attribute } ref, a semantic model item's `from`, an update's `task` —
+ * wherever it sits; the same value (by identity) when nothing in it is of an earlier form. `opts.subject`
+ * as currentCondition's and currentRef's. A metric's sides are read as metrics here (a list's are read
+ * by currentMetrics); a display is not walked (currentDisplay); a field only renamed (`stages`) is the
+ * refusal's hint, not a conversion of the whole value.
  */
 export function currentOf(value, opts = {}) {
   if (Array.isArray(value)) {
@@ -362,7 +442,11 @@ export function currentOf(value, opts = {}) {
   if (isEarlierDimension(value)) return currentDimension(value, opts);
   if (value.fn === 'event_property' || ((value.fn === 'array_length' || value.fn === 'array_contains') && value.args === undefined && value.property !== undefined) || listConstant(value)) return currentExpression(value, opts);
   if (value.stage === 'unnest' && value.expr === undefined && (value.property !== undefined || value.column !== undefined)) return currentUnnest(value);
-  if (earlierQueryParts(value)) return currentOf(currentQueryInput(value), opts);
+  if (earlierQueryParts(value)) return currentOf(currentQueryInput(value, opts), opts);
+  if (isEarlierInclude(value)) return currentOf(currentInclude(value), opts);
+  if (isEarlierRef(value)) return currentRef(value, opts);
+  if (isEarlierSourceItem(value)) { const { from, ...rest } = value; return currentOf({ source: from, ...rest }, opts); }
+  if (isEarlierUpdate(value)) { const { task, ...rest } = value; return currentOf({ ...rest, name: task }, opts); }
   let changed = false;
   const out = {};
   for (const [k, v] of Object.entries(value)) {

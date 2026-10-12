@@ -2,35 +2,26 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 //
-// Every value a declaration computes is written in the ONE expression grammar (src/pipeline/compute.js)
-// and turned into SQL by its one writer: a semantic model's where, a computed dimension, a measure's
-// argument and scope over the model's leaves, and a derived metric over { metric } leaves. What is the
-// semantic layer's own is only which leaves a place takes and what MetricFlow is handed: a measure is
-// ONE aggregate (dbt's `agg` and the `expr` it folds, the scope baked in), a derived metric a SQL
-// expression over the stored names of the metrics it reads.
+// Every value a declaration computes is written in the ONE expression (src/pipeline/compute.js) and
+// turned into SQL by its one writer, at its PLACE: a semantic model's where, a computed dimension, a
+// measure's argument and scope at PLACES.semantic_model (the model's columns and event properties,
+// constants and the current time; no raw — its SQL would reach MetricFlow unchecked — and no window), and
+// a derived metric at PLACES.derived_metric (other metrics and numbers, in arithmetic). What is the
+// semantic layer's own is only what MetricFlow is handed: a measure is ONE aggregate (dbt's `agg` and the
+// `expr` it folds, the scope baked in), a derived metric a SQL expression over the stored names of the
+// metrics it reads.
 
 import { isNumericType } from './dialects/base.js';
 import { getDialect } from './dialects/index.js';
 import { NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog.js';
-import { exprSql, conditionListSql, eachNode, isConditionCall, isAggregateCall, FNS, CONDITION_FNS, LOGIC_FNS, SCALAR_FNS } from './pipeline/compute.js';
+import { exprSql, conditionListSql, eachNode, isConditionCall, isAggregateCall } from './pipeline/compute.js';
+import { refKind } from './schema/refs.js';
 import { rankFuzzy } from './fuzzy.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
 // Exported so an update names what it removes by the same rule (src/engine/semantic-build.js).
 export const NS = (task, name) => `${task}_${name}`;
-
-/**
- * The functions a semantic model's expressions take — a where, a computed dimension, a measure's
- * argument and its scope: the conditions, the logic, the scalar functions and, where a measure is
- * written, the aggregates a task chooses from (TASK_MEASURE_AGGS). Not raw: its dialect SQL would be
- * handed to MetricFlow unchecked — a semantic model's columns are not tracked the way a pipeline step's
- * are, so no column could be refused in its text. No window either: a semantic model has no order of rows.
- */
-export const MODEL_FNS = [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw'), ...TASK_MEASURE_AGGS];
-
-/** What a derived metric's value is computed with: arithmetic over other metrics and numbers. */
-export const DERIVED_FNS = ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest'];
 
 /** Throw a compile error that CARRIES the input field it refers to — the engine
  *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
@@ -78,27 +69,30 @@ function columnNames(catalog, modelKey) {
 }
 
 /**
- * Every leaf of an expression of `modelKey`, checked against the model before anything is written: a
- * { column } names one of its columns, an entity key or a declared amount; a { property } an event
- * property of the model, which is then an events source (one of another source is refused, naming its
- * owner); a { value } is a constant. An event compared with the event column by eq / neq / in / not_in is
- * one the source declares — a name of another source's is refused with the fix, not left to match nothing.
- * `row` names a place that holds a value of each row (a where, a computed dimension, what a measure
- * folds): an aggregate there is refused as the semantic layer says it, not as a pipeline stage would.
+ * The model's own leaves of an expression of `modelKey`, checked against the model before anything is
+ * written: a { column } names one of its columns, an entity key or a declared amount; a { property } an
+ * event property of the model, which is then an events source (one of another source is refused, naming
+ * its owner). An event compared with the event column by eq / neq / in / not_in is one the source declares
+ * — a name of another source's is refused with the fix, not left to match nothing. What the place does
+ * not take — a ref, a window, raw SQL, a function it has not — the one writer refuses, naming what a
+ * semantic model takes. `row` names a place that holds a value of each row (a where, a computed
+ * dimension, what a measure folds): an aggregate there is refused as the semantic layer says it, not as a
+ * pipeline stage would.
  */
 function checkLeaves(catalog, modelKey, e, field, row = null) {
   const columns = columnNames(catalog, modelKey);
   const eventColumn = catalog.isFact(modelKey) ? catalog.getModel(modelKey).event_name?.column : null;
   eachNode(e, (n) => {
     if (n.fn !== undefined) {
-      if (typeof n.fn === 'string' && Object.hasOwn(FNS, n.fn) && !MODEL_FNS.includes(n.fn)) fail(`${n.fn} is not a function a semantic model's expression takes — it computes with conditions, and / or / not, the scalar functions and, in a measure, one aggregate (${[...TASK_MEASURE_AGGS].join(', ')}); a window or a raw SQL is a pipeline's`, field);
       if (row && isAggregateCall(n)) fail(`${row}: ${n.fn} folds rows into one value, and this is a value of each row — an aggregate is what a measure is ({ name, expr: { fn: "${n.fn}", … } }); a formula over several aggregates is several measures and a derived metric`, field);
       const [subject, ...rest] = Array.isArray(n.args) ? n.args : [];
-      if (eventColumn && EVENT_VALUE_OPS.has(n.fn) && isObj(subject) && subject.fn === undefined && subject.column === eventColumn) {
+      if (eventColumn && EVENT_VALUE_OPS.has(n.fn) && isObj(subject) && subject.fn === undefined && !refKind(subject) && subject.column === eventColumn) {
         for (const x of rest) if (isObj(x) && typeof x.value === 'string') factName(catalog, modelKey, x.value, field);
       }
       return;
     }
+    // a ref ({ source, column } …) names a thing elsewhere: the writer refuses it at this place
+    if (refKind(n)) return;
     if (n.column !== undefined) {
       // SQL's count(*) habit, said as the pipeline's builder says it: the rows are a count with no argument
       if (n.column === '*') fail("'*' is not a column — a count with no argument counts the ROWS ({ fn: 'count' })", field);
@@ -108,17 +102,15 @@ function checkLeaves(catalog, modelKey, e, field, row = null) {
     if (n.property !== undefined) {
       if (!catalog.isFact(modelKey)) fail(`{ property: '${n.property}' } reads an event property, and '${modelKey}' is not an events source — name one of its columns ({ column }).`, field);
       if (!factProp(catalog, modelKey, n.property, field)) fail(`'${n.property}' is not an event property of '${modelKey}'.${nearest(n.property, catalog.eventProps(modelKey))} semantic_index({ request: { source: '${modelKey}' } }) lists them.`, field);
-      return;
     }
-    if (Object.hasOwn(n, 'value')) return;
-    fail(`${JSON.stringify(n)}: an expression of a semantic model reads its columns ({ column }), its event properties on an events source ({ property }) and constants ({ value }).`, field);
   });
 }
 
 /**
- * The one writer's options over `modelKey`: no window, the columns typed as the catalog types them, an
- * event property read where the source stores it, and a declared amount written as the catalog's
- * expression for it (a plain column of that name is the column itself).
+ * The one writer's options over `modelKey`: the place (a semantic model's — no window, no raw), the
+ * columns typed as the catalog types them, an event property read where the source stores it, and a
+ * declared amount written as the catalog's expression for it (a plain column of that name is the column
+ * itself).
  */
 function modelWriter(catalog, modelKey) {
   const d = getDialect(catalog.dialect);
@@ -129,7 +121,7 @@ function modelWriter(catalog, modelKey) {
     if (!amount || amount.expr === n.column) return undefined;
     return { sql: `(${amount.expr})`, type: amount.type ?? null, name: n.column };
   };
-  return { d, opts: { catalog, source: modelKey, windows: false, columnType: (n) => types.get(n) ?? null, leaf } };
+  return { d, opts: { place: 'semantic_model', catalog, source: modelKey, columnType: (n) => types.get(n) ?? null, leaf } };
 }
 
 /** A list of conditions over `modelKey` as one boolean (or null) — each item checked and written by the one writer. */
@@ -242,27 +234,21 @@ function compileDimension(catalog, task, modelKey, decl) {
 }
 
 /**
- * A derived metric's value (`md.expr`, an expression of { metric } leaves and numbers) as the SQL
- * MetricFlow computes it with, each metric written by its stored name — `stored(name)` resolves one (or
- * refuses it) and records it as an input. A metric is named bare: MetricFlow reads a derived metric's
- * inputs in its expression by their names, which the name pattern keeps identifiers. A division by zero
- * is NULL (div is the pipeline's NULLIF division).
+ * A derived metric's value (`md.expr`, an expression at PLACES.derived_metric: { metric } leaves and
+ * numbers, in arithmetic) as the SQL MetricFlow computes it with, each metric written by its stored name —
+ * `stored(name)` resolves one (or refuses it) and records it as an input. A metric is named bare:
+ * MetricFlow reads a derived metric's inputs in its expression by their names, which the name pattern
+ * keeps identifiers. A division by zero is NULL (div is the pipeline's NULLIF division).
  */
 function derivedSql(catalog, md, stored) {
   const field = 'metrics.expr';
   const at = `derived metric '${md.name}'`;
+  // what the place takes is the writer's to refuse; a constant beside metrics is a number
   eachNode(md.expr, (n) => {
-    if (n.fn !== undefined) {
-      if (!DERIVED_FNS.includes(n.fn)) fail(`${at}: ${n.fn} is not arithmetic over metrics — a derived metric is computed with ${DERIVED_FNS.join(', ')}; what a metric folds is its measure's`, field);
-      return;
-    }
-    const keys = Object.keys(n);
-    if (keys.length === 1 && typeof n.metric === 'string') return;
-    if (keys.length === 1 && typeof n.value === 'number') return;
-    fail(`${at}: ${JSON.stringify(n)} — a derived metric reads other metrics ({ metric: <name> }) and numbers ({ value: 2 })`, field);
+    if (n.fn === undefined && Object.hasOwn(n, 'value') && typeof n.value !== 'number') fail(`${at}: ${JSON.stringify(n)} — a derived metric computes with numbers ({ value: 2 }) beside the metrics it reads`, field);
   });
   const leaf = (n) => (n.metric !== undefined ? { sql: stored(n.metric), type: 'numeric', name: n.metric } : undefined);
-  return attempt(field, () => exprSql(getDialect(catalog.dialect), null, md.expr, at, { windows: false, leaf }).sql);
+  return attempt(field, () => exprSql(getDialect(catalog.dialect), null, md.expr, at, { place: 'derived_metric', leaf }).sql);
 }
 
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure. */
@@ -326,16 +312,16 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
 
   // The models this task READS — taken from the payload, never assumed. A context carries only
   // the sources it was asked for, so a task on one events source does not drag in another. An item
-  // of semantic_models loads its model: one with only `from` loads it for its attributes alone.
+  // of semantic_models loads its model: one with only `source` loads it for its columns alone.
   const usedModels = new Set(models);
 
   for (const sm of decl.semantic_models || []) {
-    const modelKey = sm.from;
-    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${catalog.semanticModelKeys().join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
+    const modelKey = sm.source;
+    if (!catalog.models[modelKey]) fail(`semantic_models.source: unknown model '${modelKey}'. Known models: ${catalog.semanticModelKeys().join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.source');
     // a model with no primary entity has nothing MetricFlow could address its dimensions through
-    if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.from: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows are joined in a pipeline instead: build_pipeline_model with a join stage { stage: 'join', with: '${modelKey}', … }. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.from');
+    if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.source: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows are joined in a pipeline instead: build_pipeline_model with a join stage { stage: 'join', with: '${modelKey}', … }. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.source');
     // an item's where scopes the measures declared beside it — with none, it would scope nothing
-    if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or put each measure's own condition in its aggregate's where; { from: '${modelKey}' } alone loads the model for its attributes`, 'semantic_models.where');
+    if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or put each measure's own condition in its aggregate's where; { source: '${modelKey}' } alone loads the model for its columns`, 'semantic_models.where');
     usedModels.add(modelKey);
     // Each semantic model scopes its OWN measures: its where is baked into every measure expr below.
     const scope = conditionsOf(catalog, modelKey, sm.where, `${modelKey} where`, 'semantic_models.where');
@@ -442,7 +428,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
   }
 
   if (!usedModels.size) {
-    fail('this task reads no source: declare at least one semantic_models item ({ from: <source>, … })', 'semantic_models');
+    fail('this task reads no source: declare at least one semantic_models item ({ source, … })', 'semantic_models');
   }
 
   return {

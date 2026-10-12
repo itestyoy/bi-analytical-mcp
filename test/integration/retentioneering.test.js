@@ -147,7 +147,7 @@ test('transition graph: every transition count is the number of consecutive pair
   for (const e of transitions) assert.ok(near(e.proba_out, e.count / out[e.from]), `${e.from}>${e.to}`);
   // the card draws the same transitions, its weights unrounded, and its layout places every event,
   // deterministically
-  const g = (await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'transition_graph' })).result;
+  const g = (await engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'transition_graph' } })).result;
   assert.deepEqual(new Map(g.edges.map((e) => [`${e.source}>${e.target}`, e.count])), expected);
   for (const e of g.edges) assert.ok(Math.abs(e.proba_out - e.count / out[e.source]) < 1e-9, `${e.source}>${e.target}`);
   assert.ok(g.nodes.every((n) => Number.isFinite(n.x) && Number.isFinite(n.y)));
@@ -177,7 +177,7 @@ test('step matrix: the share at each step is the share of paths whose t-th posit
 test('step sankey: the flows out of each step add up to that step\'s shares', opts, async (t) => {
   if (skip(t)) return;
   // the card's flows and shares, unrounded
-  const s = (await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'step_sankey' })).result;
+  const s = (await engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'step_sankey' } })).result;
   const [block] = s.blocks;
   assert.ok(block.links.length > 0);
   const out = {};
@@ -238,15 +238,15 @@ test('a metric asked for at two aggs — or twice — in one overview is compute
 test('display draws one analysis once — the card model is built from the stored numbers', opts, async (t) => {
   if (skip(t)) return;
   // a card takes a title in the person's words, and draws the analysis's numbers under it
-  const d = await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel', title: 'Tutorial to first purchase' });
+  const d = await engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'funnel', title: 'Tutorial to first purchase' } });
   assert.equal(d.drawn, true);
-  const vm = retentioneeringViewModel(d, { task_id: analyses.task_id, analysis: 'funnel' });
+  const vm = retentioneeringViewModel(d);
   assert.equal(vm.title, 'Tutorial to first purchase');
   assert.deepEqual(vm.steps.map((s) => s.value), table(analyses.read.analyses.funnel, 'funnel').map((s) => s.unique_paths));
   assert.ok(toCallToolResult(d, 'display_retentioneering_result', {}, engine).structuredContent, 'a drawn card carries its structured result');
-  await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel' }), /shown already/);
+  await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'funnel' } }), /shown already/);
   // two calls at once for one analysis: one draws it, the other is refused — never two cards
-  const both = await Promise.allSettled([0, 1].map(() => engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'step_matrix' })));
+  const both = await Promise.allSettled([0, 1].map(() => engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'step_matrix' } })));
   assert.deepEqual(both.map((b) => b.status).sort(), ['fulfilled', 'rejected']);
   assert.equal(both.find((b) => b.status === 'fulfilled').value.drawn, true);
   assert.match(String(both.find((b) => b.status === 'rejected').reason?.message), /shown already/);
@@ -270,7 +270,7 @@ test('every event keeps its name by default; the card carries its scope and path
   assert.ok(!built.vocabulary.some((v) => v.event === 'other'), 'no "other" by default');
   // an analysis knows how many paths it read; the card, who and when
   assert.equal(analyses.read.analyses.funnel.paths, built.users);
-  const d = await engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel_sessions' });
+  const d = await engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'funnel_sessions' } });
   assert.equal(d.result.paths, built.sessions, 'per-session paths');
   assert.deepEqual({ users: d.scope.users, events: d.scope.events }, { users: built.users, events: rows.length });
 });
@@ -283,8 +283,8 @@ test('an analysis the library raises on keeps its error; the call\'s other analy
   // the graph is computed all the same: its transitions are the pairs of the paths
   const pairs = [...paths().values()].reduce((n, l) => n + l.length + 1, 0);
   assert.equal(table(r.analyses.transition_graph, 'transitions').reduce((n, e) => n + e.count, 0), pairs);
-  assert.notEqual(r.show_to_user?.arguments.request.analysis, 'unmatched', 'the failed one is not offered as a card');
-  await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'unmatched' }), (e) => e.field === 'analysis' && /PatternNoMatchError/.test(e.message));
+  assert.notEqual(r.show_to_user?.arguments.request.display.analysis, 'unmatched', 'the failed one is not offered as a card');
+  await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, display: { analysis: 'unmatched' } }), (e) => e.field === 'display.analysis' && /PatternNoMatchError/.test(e.message));
   assert.ok(JSON.stringify(await engine.explore_errors({ task_id: analyses.task_id })).includes('PatternNoMatchError'), 'the failure is in the error log');
 });
 
@@ -315,9 +315,9 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
 
   // T17 — a funnel's diff has a card: both groups on the same steps, each the funnel of that group alone
   // (the read was made before anything of the call was drawn)
-  assert.equal(r.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T17: the diff is offered as a card');
-  const df = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel_diff' });
-  const vf = retentioneeringViewModel(df, { task_id: q.task_id, analysis: 'funnel_diff' });
+  assert.equal(r.show_to_user?.arguments.request.display.analysis, 'funnel_diff', 'T17: the diff is offered as a card');
+  const df = await engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'funnel_diff' } });
+  const vf = retentioneeringViewModel(df);
   assert.equal(vf.kind, 'funnel_diff', 'T17: drawn as a funnel diff');
   assert.deepEqual([vf.groups.segment, vf.groups.first, vf.groups.second], ['platform', p1, p2], 'T17: its groups');
   // each group's steps are the funnel of that group's paths alone, as the rows reach them (the rule the funnel test holds the library to)
@@ -331,7 +331,7 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
 
   // T33 — once the funnel is drawn, the anchored diff is the card offered next
   const again = await readDone(q.task_id);
-  assert.equal(again.show_to_user?.arguments.request.analysis, 'step_matrix_diff', 'T33: the anchored diff is offered as a card');
+  assert.equal(again.show_to_user?.arguments.request.display.analysis, 'step_matrix_diff', 'T33: the anchored diff is offered as a card');
   const all = analyses.full;
   assert.equal(all.status, 'done', JSON.stringify(all.error));
 
@@ -349,7 +349,7 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
       assert.ok(near(row[k + 1], value(first, row[0], k + 1) - value(second, row[0], k + 1), 3), `T33: block ${b} ${row[0]} step ${diff.columns[k + 1]}`);
     });
   }
-  const dm = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix_diff' }), {});
+  const dm = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'step_matrix_diff' } }));
   assert.equal(dm.kind, 'diff', 'T33: drawn as tables');
   assert.equal(dm.tables.filter((x) => x.diverging).length, blocks.length, 'T33: each block\'s difference on a diverging scale');
 
@@ -373,12 +373,12 @@ test('diffs and a distribution in one call — each group the rows\' own, each d
   assert.deepEqual(cells('second'), second, `T32: ${p2}'s transitions`);
   const diff = new Map([...new Set([...first.keys(), ...second.keys()])].map((k) => [k, (first.get(k) || 0) - (second.get(k) || 0)]).filter(([, v]) => v !== 0));
   assert.deepEqual(cells('diff'), diff, 'T32: their difference');
-  const dg = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'graph_diff' }), {});
+  const dg = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'graph_diff' } }));
   assert.equal(dg.kind, 'diff', 'T32: drawn as tables');
   assert.deepEqual(dg.tables.map((x) => [x.role, x.diverging]), [['diff', true], ['first', false], ['second', false]], 'T32: the difference on a diverging scale');
 
   // T35 — a distribution comparison is drawn as one histogram: each level's bins hold its paths
-  const dd = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'metric_distribution' }), {});
+  const dd = retentioneeringViewModel(await engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'metric_distribution' } }));
   assert.equal(dd.kind, 'distribution', 'T35: drawn as a distribution');
   assert.equal(dd.histograms.length, 1, 'T35: two levels on the same bins: one comparison');
   const [h] = dd.histograms;
@@ -420,7 +420,7 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, every 
   // offer names the first analysis of the call that can be drawn (the read was made before any was): the
   // two listed first are passed over for the funnel's diff listed after them
   assert.deepEqual(Object.keys(summary.analyses).slice(0, 3), ['conversion_rate', 'path_metrics', 'funnel_diff'], 'guard: the read lists the two without a card first, then one with a card');
-  assert.equal(summary.show_to_user?.arguments.request.analysis, 'funnel_diff', 'T31: the analyses without a card are passed over for the first one that has one');
+  assert.equal(summary.show_to_user?.arguments.request.display.analysis, 'funnel_diff', 'T31: the analyses without a card are passed over for the first one that has one');
   // …and a call made of them alone offers no card at all: nothing in it can be drawn
   const alone = await engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', analyses: cardless() });
   const aloneRead = await readDone(alone.task_id);
@@ -428,11 +428,11 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, every 
   assert.deepEqual(Object.keys(aloneRead.analyses), ['conversion_rate', 'path_metrics'], 'guard: the call holds the two alone');
   for (const k of ['conversion_rate', 'path_metrics']) assert.deepEqual(aloneRead.analyses[k].tables, summary.analyses[k].tables, `guard: ${k} alone has the numbers it has in Q1`);
   assert.equal(aloneRead.show_to_user, undefined, 'T31: a call of analyses without a card offers none');
-  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), (e) => e.field === 'analysis' && /no card/.test(e.message), 'T31: a card asked for is refused');
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'conversion_rate' } }), (e) => e.field === 'display.analysis' && /no card/.test(e.message), 'T31: a card asked for is refused');
   // T27 — the refusal leaves nothing behind: no mark, nothing held
   const ctx = engine.ctxs.get(built.context_id);
   assert.ok(!ctx.state.retentioneering.drawn?.[q.task_id]?.includes('conversion_rate'), 'T27: a draw that does not happen leaves no mark');
-  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/, 'T27: refused for what it is, not as shown already');
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'conversion_rate' } }), /no card/, 'T27: refused for what it is, not as shown already');
   const metrics = table(a.path_metrics, 'result');
   assert.equal(metrics.length, built.users, 'T31: one row per path, all of them');
   for (const [u, list] of paths()) {
@@ -532,8 +532,12 @@ test('filter_events.where: every operator, a number compared as a number, not(�
   assert.notDeepEqual(tally(keptBy({ above: () => false })), want, 'guard: the level above 5 keeps rows the negations leave out');
   assert.notDeepEqual(tally(keptBy({ above: aboveAsText })), want, 'guard: the level above 5 read as text keeps other rows');
   assert.ok(keptBy().some((x) => x.l == null), 'guard: rows with no level pass every condition');
+  // the current time ({ now: true }) is a leaf of the one expression this place takes too: every event is
+  // before it, so it leaves the count as it is — a moment read as anything else would not run
+  assert.ok(own.every((x) => new Date(x.t) < new Date()), 'guard: every event is before now');
   assert.deepEqual(await kept('negations', [
     { fn: 'gte', args: [{ column: 'event_time' }, { value: from }] },
+    { fn: 'lt', args: [{ column: 'event_time' }, { now: true }] },
     { fn: 'or', args: [
       { fn: 'and', args: [
         { fn: 'not_in', args: [event, { value: top }] },
@@ -595,6 +599,9 @@ test('filter_events.where: every operator, a number compared as a number, not(�
   // T14 — a name that is not a column of the eventstream is the library's refusal, as the step is added
   await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'levels', name: 'bad_where', after: 0 });
   await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ column: 'no_such_col' }, { value: 'x' }] }] }] }), (e) => e.field === 'steps[0]' && /no_such_col/.test(e.message), 'T14: a column the eventstream does not have');
+  // …and an event property is the source's, not the eventstream's: refused at this place, naming what it
+  // takes — the start's compute stage is where a property becomes a column (as `level` above)
+  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: '1' }] }] }] }), (e) => e.field === 'steps[0].where' && /\{ property \} is not what filter_events' where takes/.test(e.message), 'an event property at filter_events\' place');
 });
 
 // G — one context's eventstreams over time (a context of its own, deleted at the end): a start, its
@@ -653,9 +660,17 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   const reread = await readDone(first.task_id);
   assert.equal(reread.events, first.events, 'T21: the first build\'s task still says its rows');
 
+  // delete_context in the feature's own form removes one eventstream: the context keeps the other, and the
+  // task that read the removed one still reads its rows — its tables stay until the context is dropped
+  const removed = await engine.delete_context({ what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' });
+  assert.deepEqual([removed.removed, removed.eventstream], [true, 'origin_copy']);
+  assert.deepEqual(Object.keys(await described()), ['origin'], 'one eventstream removed, the other kept');
+  assert.deepEqual((await readDone(q.task_id, EVERY_ROW)).analyses.transition_graph, a.analyses.transition_graph, 'the task that read the removed eventstream reads the same rows');
+  await assert.rejects(engine.delete_context({ what: 'eventstream', context_id: ctx, eventstream: 'origin_copy' }), (e) => e.field === 'eventstream' && /no eventstream 'origin_copy'/.test(e.message), 'an eventstream the context no longer holds');
+
   // T28 — a task whose context is gone is refused as gone
   await engine.delete_context({ context_id: ctx, force: true });
-  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'transition_graph' } }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
 });
 
 test('the source\'s own columns and event properties filter the paths and carry as segments, by the start\'s steps — no join needed', opts, async (t) => {

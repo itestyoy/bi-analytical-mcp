@@ -615,16 +615,15 @@ export class Catalog {
   }
 
   /**
-   * Every attribute a metric query can group or filter by, addressed by WHERE IT LIVES — the
-   * only form the query tools accept: { model, attribute, via? }. `via` names the relationship
-   * when the attribute is reached through a join whose name differs from the model's identity
-   * (an owned key such as ad_funnel), and is omitted when the relationship IS the identity
-   * (user → users) or the attribute is the source's own. One hop only — that is what a
-   * structured reference can say.
+   * Every model column a metric query can group or filter by, addressed by WHERE IT LIVES — the
+   * ref { source, column, via? } (src/schema/refs.js). `via` names the relationship when the
+   * column is reached through a join whose name differs from the model's identity (an owned key
+   * such as ad_funnel), and is omitted when the relationship IS the identity (user → users) or the
+   * column is the source's own. One hop only — that is what a structured reference can say.
    */
   reachableAttributes() {
     const out = []; const seen = new Set();
-    const push = (model, attribute, via) => { const k = `${model}\u0000${attribute}\u0000${via || ''}`; if (!seen.has(k)) { seen.add(k); out.push({ model, attribute, ...(via ? { via } : {}) }); } };
+    const push = (source, column, via) => { const k = `${source}\u0000${column}\u0000${via || ''}`; if (!seen.has(k)) { seen.add(k); out.push({ source, column, ...(via ? { via } : {}) }); } };
     for (const fact of this.facts) {
       const m = this.models[fact];
       for (const [ent, e] of Object.entries(m.entities || {})) {

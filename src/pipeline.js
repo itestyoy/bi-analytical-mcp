@@ -63,8 +63,8 @@ import { partitionConditions } from './time-range.js';
 import { physicalColumnType } from './catalog/column-types.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { comparisonOf } from './pipeline/compute.js';
-import { STAGES, READ_STAGES, registerStage, stageDef, listSome, stageDefs, readStageDefs, pipelineStageSchema } from './pipeline/stages.js';
-export { registerStage, stageDef, listSome, stageDefs, readStageDefs, pipelineStageSchema, READ_STAGES };
+import { STAGES, STAGE_PLACES, registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt } from './pipeline/stages.js';
+export { registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt, STAGE_PLACES };
 
 /**
  * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is
@@ -134,8 +134,9 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null, spel
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    // (a stage lowers to one op, or to several — an unnest of a computed array)
-    const res = def.build({ d, catalog, cols, source, physical }, st);
+    // (a stage lowers to one op, or to several — an unnest of a computed array); its expressions stand
+    // over a source's rows (src/pipeline/compute.js PLACES)
+    const res = def.build({ d, catalog, cols, source, physical, place: 'source_rows' }, st);
     ops.push(...(res.ops || [res.op]));
     cols = res.cols;
   }
@@ -255,17 +256,15 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null, current };
 }
 
-/** Whether a stage holds a raw expression anywhere — in an expression, a measure, a CASE inside them. */
-const holdsRaw = (v) => (Array.isArray(v) ? v.some(holdsRaw) : v !== null && typeof v === 'object' && (v.fn === 'raw' || Object.values(v).some(holdsRaw)));
-
 /**
  * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_pipeline_model and a card's
- * drill run, and the steps after a metric query: stages of READ_STAGES (where, compute, aggregate, pivot,
- * unpivot, order_by, limit, sample, project), built by the stage builders over the relation's columns
- * and rendered by the dialect into one statement over `relation`; nothing is materialized, its rows are
- * the answer. The relation has no source: a { property } or an { entity } partition is refused; raw SQL
- * is a build's (READ_FNS); and a stage that makes a new table (a join, an unnest, a funnel, a python
- * model) is a build from the task instead.
+ * drill run, and the steps after a metric query: the stages a read takes (STAGE_PLACES.read — where,
+ * compute, aggregate, pivot, unpivot, order_by, limit, sample, project), built by the stage builders over
+ * the relation's columns and rendered by the dialect into one statement over `relation`; nothing is
+ * materialized, its rows are the answer. Its expressions stand over stored rows (src/pipeline/compute.js
+ * PLACES.stored_rows): raw SQL and a { property } are a build's, and the relation has no source, so an
+ * { entity } partition is refused too; a stage that makes a new table (a join, an unnest, a funnel, a
+ * python model) is a build from the task instead. Each is refused as the step is built, before any SQL.
  *   catalog   — whose dialect writes the SQL (`dialect` names another);
  *   relation  — what is read, as SQL a FROM takes: a stored table (`{{ ref('…') }}`), or a query as a
  *               parenthesized, aliased subquery (`(\n<sql>\n) AS _q`) whose columns carry the names the
@@ -281,14 +280,9 @@ export function renderRead(catalog, relation, columns, steps = [], { dialect = c
   let cols = columnMap(columns);
   const ops = [];
   steps.forEach((st, i) => {
-    const kind = st?.stage;
-    if (!READ_STAGES.includes(kind)) {
-      throw new Error(`steps[${i}]: a read takes ${READ_STAGES.join(', ')} — ${kind === undefined ? 'this step names no `stage`' : `a ${kind} stage makes a new table`}: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
-    }
-    // what reaches a read without its schema (a card's drill, a kept value) is held to it here too
-    if (holdsRaw(st)) throw new Error(`steps[${i}]: raw SQL is a build's escape hatch, not a read's — build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })`);
+    stageAt(STAGE_PLACES.read, st, `steps[${i}]`);
     let res;
-    try { res = STAGES[kind].build({ d, catalog, cols, source: null, physical: null }, st); }
+    try { res = STAGES[st.stage].build({ d, catalog, cols, source: null, physical: null, place: 'stored_rows' }, st); }
     catch (e) { throw new Error(`steps[${i}]: ${e.message}`); }
     ops.push(...(res.ops || [res.op]));
     cols = res.cols;

@@ -235,7 +235,7 @@ export function answer(engine, feature, id, out, at = {}) {
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, readView(r, at)])),
-    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { request: { task_id: id, analysis: drawable[0] } }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
+    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { request: { task_id: id, display: { analysis: drawable[0] } } }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
   };
 }
 

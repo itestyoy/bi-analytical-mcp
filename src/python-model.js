@@ -409,6 +409,8 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
+  // it runs on the warehouse's python runtime, not in SQL: listed in the runtime group of a stage definition
+  group: 'runtime',
   // The DESCRIPTION also names this deployment's worked recipes for a python stage (the engine
   // puts their ids on the catalog): the caller must know they exist before writing a function.
   schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile({ ...rt, recipes: catalog?.pythonRecipes || [] }, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },

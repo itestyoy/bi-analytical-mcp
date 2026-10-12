@@ -69,7 +69,7 @@ const TEXT_FALSE = ['false', '0', 'f'];
  *  spelling. Only an equality or a membership can say that, and only with booleans on the other side. */
 function textFlag(op, subject, constants) {
   if (!['eq', 'neq', 'in', 'not_in'].includes(op) || !constants.every((v) => typeof v === 'boolean')) {
-    throw new Error(`'${subject.name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values it holds)`);
+    throw new Error(`'${subject.name}' is a text column in the warehouse: a boolean is compared with it by eq / neq / in / not_in alone, and not mixed with other constants — or compare it with its text value (semantic_index({ request: { source, property } }) lists the values an event property holds, ({ source, column }) a column's)`);
   }
   const spellings = constants.flatMap((v) => (v ? TEXT_TRUE : TEXT_FALSE)).map((x) => sqlLiteral(x));
   return `LOWER(TRIM(${subject.sql})) ${op === 'neq' || op === 'not_in' ? 'NOT IN' : 'IN'} (${spellings.join(', ')})`;

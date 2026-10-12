@@ -209,44 +209,52 @@ test('semantic_index recipe view is absent when no recipes configured', async ()
 // A governed path is served by the semantic model of the model it ends on. A task built from one
 // events source does not load the other's, so a path onto that fact's own attributes is refused
 // here with the fix — instead of reaching MetricFlow as an unknown entity.
-test('a group-by path onto an unloaded FACT is refused with the fix: an item { from } that loads it', async () => {
+test('a group-by path onto an unloaded FACT is refused with the fix: an item { source } that loads it', async () => {
   const e = engine();
   const out = await e.build_semantic_model({
     name: 'evonly',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
-    /needs model 'crashlytics'.*semantic_models: \[\{ from: 'crashlytics' \}\]/s,
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }),
+    (err) => err.field === 'group_by' && /needs model 'crashlytics'.*semantic_models: \[\{ source: 'crashlytics' \}\]/s.test(err.message),
   );
 });
 
-// A structured reference names only what is there: an attribute the model lacks, the events
-// source's session key (no join key is an attribute by name) and a `via` that is not a relationship
-// onto that model are each refused, listing what the model does have — before anything runs. (On a
-// model a semantic layer loads, an attribute may also be a computed dimension's name, so a name the
-// catalog does not list is refused when the reference resolves, against the context's own dimensions.)
-test('a group-by attribute or via the model does not have is refused, listing the real ones', async () => {
+// A ref names only what is there: a column the model lacks, the events source's session key (no join
+// key is a column by name) and a `via` that is not a relationship onto that model are each refused by
+// the schema, listing what the model does have — before anything runs. A dimension a task computed is
+// { semantic_model: [<its model>], dimension }, resolved against the context's own dimensions; a
+// column named that way is told where it lives, and an event property the task did not declare a
+// dimension is told the update that declares it.
+test('a group-by column or via the model does not have is refused, listing the real ones', async () => {
   const e = engine();
   const evu = await e.build_semantic_model({
     name: 'evu',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, metrics: [metric], group_by: [ref] });
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'users', attribute: 'shoe_size' }),
-    (err) => err.field === 'attribute' && /'shoe_size' is not an attribute of 'users'\. Its attributes: .*country/s.test(err.message), 'an attribute the model does not have is refused, listing the ones it has');
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'users', column: 'shoe_size' }),
+    /`group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
   assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { model: 'events', attribute: 'session_number' }),
-    /'session_number' is not an attribute of 'events'/, 'the session key is not a groupable path of the events source');
-  // a dimension the task computes is an attribute of its model by its name
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', column: 'session_number' }),
+    (err) => /`group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop()), 'the session key is not a groupable column of the events source');
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { semantic_model: ['users'], dimension: 'country' }),
+    (err) => err.field === 'group_by' && /'users\.country' is a column of 'users', named where it lives in the catalog — write \{ source: 'users', column: 'country' \}/.test(err.message));
+  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', property: 'level_id_of_event_data' }),
+    (err) => err.field === 'group_by' && /is not a dimension of this context — declare it one: build_semantic_model\(.*dimensions: \[\{ property: 'level_id_of_event_data' \}\]/.test(err.message));
+  // a dimension the task computes is named by its semantic model and its name
   const computed = await e.build_semantic_model({
     name: 'evc',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users', dimensions: [{ name: 'is_us', expr: { fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users', dimensions: [{ name: 'is_us', expr: { fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] } }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
-  assert.equal(typeof e._normalizeRef(e.ctxs.get(computed.context_id), { model: 'users', attribute: 'is_us' }, 'group_by'), 'string');
+  const ctx = e.ctxs.get(computed.context_id);
+  assert.equal(e._taskRef(ctx, { semantic_model: ['users'], dimension: 'is_us' }).column, 'users_is_us');
+  await assert.rejects(() => groupBy(e, computed.context_id, 'evc_n', { semantic_model: ['users'], dimension: 'is_eu' }),
+    (err) => err.field === 'group_by' && /'users\.is_eu' is not a dimension this context computed on 'users'/.test(err.message));
   // the crash source OWNS ad_funnel here (type: unique): ad_funnel is a relationship onto it, 'session' is not
   const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
   const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
@@ -257,10 +265,10 @@ test('a group-by attribute or via the model does not have is refused, listing th
   const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
   const own = await owner.build_semantic_model({
     name: 'own',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'crashlytics' }, { from: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
-  await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { model: 'crashlytics', attribute: 'app_version', via: 'session' }),
+  await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { source: 'crashlytics', column: 'app_version', via: 'session' }),
     /`group_by.0.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
 });
 
@@ -281,32 +289,33 @@ test('semantic_index({ source }) reports an owned relationship as owned, with a 
 
 // What a note is about is the PAIR the tool itself emits. A name on its own has no spelling at all — so
 // a name two sources carry can never be attached to the wrong one, and never has to be disambiguated.
-test('memory about: { source, property } and { source, event } resolve; a bare name is no entity', async () => {
+test('memory about: { source, property }, { source, column } and { source, event } resolve; a bare name is no entity', async () => {
   const e = engine();
-  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', about: [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }] }] })).notes[0];
-  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', property: 'country' }]);
+  const saved = (await e.memory({ action: 'record', notes: [{ note: 'ad_finished fires once per completed impression', about: [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', column: 'country' }] }] })).notes[0];
+  assert.deepEqual(saved.about, [{ source: 'events', event: 'ad_finished' }, { source: 'crashlytics', property: 'anr_duration_of_event_data' }, { source: 'users', column: 'country' }]);
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
   // …and on the qualified crash property it is about as well
   const crashProp = await e.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
   assert.ok((crashProp.memory || []).some((m) => /fires once per completed impression/.test(m.note)), `the finding surfaces on the crash property: ${JSON.stringify(crashProp.memory)}`);
-  // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
-  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /must be exactly one of: \{ source: "events", property\? \}[^;]*\| \{ term \}/);
-  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', about: [{ source: 'users', property: 'app_version' }, { source: 'crashlytics', property: 'app_version' }] }] })).notes[0];
+  // app_version is a column of BOTH users and crashlytics — each is written as its own target
+  await assert.rejects(() => e.memory({ action: 'record', notes: [{ note: 'x', about: ['app_version'] }] }), /`notes\.0\.about\.0` must be exactly one of: .*\| \{ term \}/);
+  const both = (await e.memory({ action: 'record', notes: [{ note: 'app_version means the build, on either source', about: [{ source: 'users', column: 'app_version' }, { source: 'crashlytics', column: 'app_version' }] }] })).notes[0];
   assert.deepEqual(both.about.map((a) => a.source), ['users', 'crashlytics']);
 });
 
-// Attributes that live only on an events source are searchable by name like any other.
-test('semantic_index({ search }) finds a dimension that exists only on an events source', async () => {
+// Columns that live only on an events source are searchable by name like any other.
+test('semantic_index({ search }) finds a column that exists only on an events source', async () => {
   const e = engine();
   const r = await e.semantic_index({ search: 'bundle_id' });
-  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.property === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  assert.ok(r.column_matches.some((d) => d.source === 'events' && d.column === 'bundle_id'), JSON.stringify(r.column_matches));
+  assert.equal(r.dimension_matches, undefined, 'one name for the matches');
   // a match is named as the view that opens it takes it
-  const m = r.dimension_matches.find((d) => d.property === 'bundle_id');
-  assert.equal((await e.semantic_index({ source: m.source, property: m.property })).property, 'bundle_id');
+  const m = r.column_matches.find((d) => d.column === 'bundle_id');
+  assert.equal((await e.semantic_index({ source: m.source, column: m.column })).column, 'bundle_id');
   const r2 = await e.semantic_index({ search: 'device_model' });
-  assert.ok(r2.dimension_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
+  assert.ok(r2.column_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
 });
 
 // The guide speaks only about what the catalog declares: its variant trigger names the real
@@ -332,14 +341,14 @@ test('a task dimension is reported under its declared attribute even when one ta
   const e = engine();
   const first = await e.build_semantic_model({
     name: 'ret',
-    semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { from: 'users', dimensions: [{ column: 'country' }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   // a second task beside the first: a declaration into the same context
   const out = await e.build_semantic_model({
     context_id: first.context_id,
     name: 'ret_v2',
-    semantic_models: [{ from: 'users', dimensions: [{ column: 'country' }] }],
+    semantic_models: [{ source: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'ret_n' }],
   });
   const ctx = e.ctxs.get(first.context_id);
@@ -348,10 +357,10 @@ test('a task dimension is reported under its declared attribute even when one ta
   assert.deepEqual(names, ['ret_country', 'ret_v2_country'], 'both tasks namespaced their own copy');
   // every declared dimension is offered under 'country' — never under 'v2_country'
   const groupable = out.groupable || [];
-  assert.ok(groupable.some((r) => r.model === 'users' && r.attribute === 'country'), JSON.stringify(groupable));
-  assert.ok(!groupable.some((r) => String(r.attribute).startsWith('v2_')), `no half-stripped attribute: ${JSON.stringify(groupable)}`);
+  assert.ok(groupable.some((r) => r.source === 'users' && r.column === 'country'), JSON.stringify(groupable));
+  assert.ok(!groupable.some((r) => String(r.column ?? r.property ?? r.dimension).startsWith('v2_')), `no half-stripped column: ${JSON.stringify(groupable)}`);
   // and the offered ref is accepted back by the query path (it resolves to a real manifest path)
-  assert.equal(typeof e._normalizeRef(ctx, { model: 'users', attribute: 'country' }, 'group_by'), 'string');
+  assert.equal(typeof e._taskRef(ctx, { source: 'users', column: 'country' }, 'group_by[0]').path, 'string');
   // the manifest itself carries no internal annotation — dbt rejects a key it does not know
   const { yaml } = renderContext(e.catalog, ctx.state);
   assert.ok(/ret_v2_country/.test(yaml), 'the namespaced dimension IS in the manifest');

@@ -54,7 +54,7 @@ test('event drill-down rows carry the unit per property', async () => {
 
 // Compile errors carry the INPUT FIELD that caused them (ToolError.field via e.field).
 test('compile errors name the offending field', () => {
-  const declWith = (metrics) => ({ name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics });
+  const declWith = (metrics) => ({ name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics });
   try {
     compileDeclaration(catalog, declWith([{ name: 'm', type: 'simple', measure: 'nope' }]));
     assert.fail('expected unknown-measure error');
@@ -64,15 +64,15 @@ test('compile errors name the offending field', () => {
     assert.equal(e.field, 'metrics.measure');
   }
   try {
-    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'nope' }] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'nope' }] });
     assert.fail('expected unknown-model error');
   } catch (e) {
     assert.match(e.message, /unknown model 'nope'/);
     assert.match(e.message, /users/); // lists the known models
-    assert.equal(e.field, 'semantic_models.from');
+    assert.equal(e.field, 'semantic_models.source');
   }
   try {
-    compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ property: 'complete_time_of_event_data' }] } }] }] });
+    compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ property: 'complete_time_of_event_data' }] } }] }] });
     assert.fail('expected cast-required error');
   } catch (e) {
     // a text property summed is read as a number first: the refusal writes the cast as the argument it is
@@ -80,14 +80,17 @@ test('compile errors name the offending field', () => {
     assert.equal(e.field, 'measures.expr');
   }
   // …and with that cast it compiles
-  assert.ok(compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }] }] }));
+  assert.ok(compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'events', measures: [{ name: 'x', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }] }] }));
 });
 
 test('overview carries join_note + value_index_status; payload-less event is not a dead end', async () => {
   const e = engine();
   const out = await e.semantic_index({});
-  assert.ok(/model: 'users', attribute:/.test(out.join_note), 'join_note shows the structured attribute reference');
-  assert.ok(out.join_note.includes("{ from: 'users' }"), 'join_note names the declaration that loads the model');
+  assert.ok(/\{ source: 'users', column: '\w+' \}/.test(out.join_note), 'join_note shows the one ref of a model column');
+  assert.ok(out.join_note.includes("{ source: 'users' }"), 'join_note names the declaration that loads the model');
+  // what a metric query can group by, spelled as it groups: { source, column, via? } — the one ref
+  assert.ok(out.groupable_columns.some((g) => g.source === 'users' && g.column === 'country'), JSON.stringify(out.groupable_columns));
+  assert.equal(out.groupable_attributes, undefined, 'one name for the list');
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');
   // Applicability is DATA-DERIVED: seed coverage so every event property is observed on some event

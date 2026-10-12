@@ -203,7 +203,7 @@ test('grounding: a model without its identity key column is UNAVAILABLE and stop
   }
   assert.ok(pruned.events.some((x) => /entity:user \(owner 'users' unavailable\)/.test(x)), JSON.stringify(pruned.events));
   // nothing reachable through users any more
-  assert.ok(!catalog.reachableAttributes().some((a) => a.model === 'users'));
+  assert.ok(!catalog.reachableAttributes().some((a) => a.source === 'users'));
 });
 
 test('grounding: a table that cannot be introspected makes its model UNAVAILABLE (relation not found)', async () => {
@@ -309,11 +309,11 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.match(view.reason, /is_event_name/);
   // a task on it is refused at validation with the reason (schema enum excludes it; the engine names why)
   const { compileDeclaration } = await import('../../src/compile.js');
-  assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'crashlytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
+  assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ source: 'crashlytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
   // the tool schema no longer offers it as a source, but the { source } view still accepts it to explain
   const { buildSchemas } = await import('../../src/schema.js');
   const schemas = buildSchemas(catalog);
-  // the values a schema offers: its enums, and its pinned constants (a semantic_models item's `from`)
+  // the values a schema offers: its enums, and its pinned constants (a semantic_models item's `source`)
   const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); if (typeof node.const === 'string') out.push([node.const]); for (const v of Object.values(node)) enums(v, out); } return out; };
   const offers = (schema, key) => enums(schema).some((e) => e.includes(key));
   assert.ok(!offers(schemas.build_semantic_model, 'crashlytics'), 'build_semantic_model must not offer the unavailable source');

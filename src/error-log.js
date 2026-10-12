@@ -93,7 +93,7 @@ export class ErrorLog {
   /**
    * What explore_errors answers (its input already validated against the tool's schema): one kept
    * failure in full by `id` — everything that reproduces it — or a page of them, newest first, each
-   * cut to its message, with a count per source.
+   * cut to its message (in full with include: ["details"]), with a count per source.
    */
   explore(input = {}) {
     const iso = (ms) => (ms == null ? null : new Date(Number(ms)).toISOString());
@@ -126,7 +126,7 @@ export class ErrorLog {
       total,
       shown: rows.length,
       ...(offset + rows.length < total ? { next_offset: offset + rows.length } : {}),
-      errors: rows.map((r) => shown(r, input.detail === 'full')),
+      errors: rows.map((r) => shown(r, (input.include || []).includes('details'))),
       by_source: this.summary(filter).map((g) => ({ ...g, last_at: iso(g.last_at) })),
       note: `Newest first. explore_errors({ request: { id } }) gives one in full — what reproduces it: the call's arguments (a task's input), the state of the context it worked on, the code of each generated model the error names (as written and as dbt compiled it), the runtime, and everything the warehouse said. Kept ${this.retentionMs / 86400000} days, the newest ${this.maxRows}.`,
     };

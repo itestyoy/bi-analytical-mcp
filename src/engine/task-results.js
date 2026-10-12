@@ -7,7 +7,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { RESULT_MODEL_PREFIX } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
-import { renderRead } from '../pipeline.js';
+import { renderRead, stageAt, STAGE_PLACES } from '../pipeline.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 import { sqlConfigHeader } from '../sql-header.js';
 import { DRILL_ROWS, PIVOT_LEVEL_ROWS, buildViewModel, drillView, pivotStages } from '../apps/result-view-model.js';
@@ -254,10 +254,14 @@ export const taskResultMethods = {
     }
     // the steps are built HERE, over the model's columns, by the compiler the read runs through: a
     // mistake is refused in the call (the columns are unknown only while a first build whose plan was
-    // edited away runs — the schema alone holds the steps then, and the read builds them when it runs)
-    if (input.steps?.length && columns.length) {
+    // edited away runs — then what a read takes of the stages is checked alone, and the read builds the
+    // steps when it runs)
+    if (input.steps?.length) {
       // (a refusal names the step, and an unknown column the columns there are at that step)
-      try { renderRead(this.catalog, `{{ ref('${building?.model || ctx.state.model}') }}`, columns, input.steps); } catch (e) {
+      try {
+        if (columns.length) renderRead(this.catalog, `{{ ref('${building?.model || ctx.state.model}') }}`, columns, input.steps);
+        else input.steps.forEach((st, i) => stageAt(STAGE_PLACES.read, st, `steps[${i}]`));
+      } catch (e) {
         throw new ToolError(e.message, { stage: 'validate', field: 'steps' });
       }
     }

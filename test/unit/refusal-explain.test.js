@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { renderRead } from '../../src/pipeline.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = () => new Engine({ catalog: loadCatalog(CATALOG), ctxs: new ContextManager({ root: mkdtempSync(join(tmpdir(), 'refusal-')) }) });
@@ -29,7 +30,7 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   const e = engine();
   // one tree of each level's grammar: a metric query's where over a dimension, a pipeline where over a column
   const levels = [
-    ['query_semantic_model', { model: 'users', attribute: 'country' }, (where) => ({ context_id: 'abc123', metrics: ['x'], where })],
+    ['query_semantic_model', { source: 'users', column: 'country' }, (where) => ({ context_id: 'abc123', metrics: ['x'], where })],
     ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
@@ -59,11 +60,13 @@ test('a read\'s condition is the one grammar over the stored table\'s columns, a
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] }]), null);
   // a column against another column, an expression on either side: a read's too
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'length', args: [{ column: 'a' }] }, { column: 'b' }] }] }]), null);
-  // a stored table has no source: no event property is a leaf of a read, and the refusal names the leaves there are
-  const property = read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'a' }, { value: 1 }] }] }]);
-  assert.match(property, /a column — \{ column \}/);
-  assert.match(property, /unexpected property 'property'/);
-  assert.doesNotMatch(property, /option 1/);
+  // a stored table has no source: a read's expression, the one definition built for a read's place
+  // (PLACES.stored_rows), has no event property among its leaves, so the schema refuses one — and the
+  // read's place refuses it as the step is built, for a caller past the schema (src/pipeline.js renderRead)
+  assert.match(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]), /`steps\.0\.conditions\.0\.args\.0` has an unexpected property 'property'/);
+  const property = (() => { try { renderRead(e.catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]); return null; } catch (err) { return err.message; } })();
+  assert.match(property, /steps\[0\]: .*\{ property \} is not what a read of stored rows takes — it takes \{ column \}, \{ value \}, \{ now: true \}/);
+  assert.match(property, /from_task/);
   // a field a condition does not read, in a measure's where, is refused under the condition's own title
   assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }] } }] }]), /`steps\.0\.measures\.0\.expr\.where\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
 });

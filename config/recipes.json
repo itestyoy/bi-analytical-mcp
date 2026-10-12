@@ -17,7 +17,7 @@
         "name": "active_users",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "active_users",
@@ -106,8 +106,8 @@
     {
       "id": "group_by_joined_attribute",
       "task_type": "joins",
-      "title": "Group or filter by an attribute of ANOTHER model",
-      "when_to_use": "Any metric sliced or filtered by an attribute that is not on the fact: country, platform, media source, acquisition type, campaign, install date — segmentation of anything.",
+      "title": "Group or filter by a column of ANOTHER model",
+      "when_to_use": "Any metric sliced or filtered by a column that is not on the fact: country, platform, media source, acquisition type, campaign, install date — segmentation of anything.",
       "required_events": [
         "iap_purchase_completed"
       ],
@@ -128,7 +128,7 @@
         "name": "rev_segment",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "revenue",
@@ -168,7 +168,7 @@
             ]
           },
           {
-            "from": "users"
+            "source": "users"
           }
         ],
         "metrics": [
@@ -206,8 +206,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "country"
+              "source": "users",
+              "column": "country"
             }
           ]
         },
@@ -217,8 +217,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "platform"
+              "source": "users",
+              "column": "platform"
             }
           ]
         },
@@ -228,8 +228,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "media_source"
+              "source": "users",
+              "column": "media_source"
             }
           ]
         },
@@ -239,8 +239,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "acquisition_type"
+              "source": "users",
+              "column": "acquisition_type"
             }
           ]
         },
@@ -250,14 +250,14 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "media_source"
+              "source": "users",
+              "column": "media_source"
             }
           ]
         }
       ],
-      "notes": "The attribute model must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where on { model, attribute } filters through the same join.",
-      "hack": "Load the model with a semantic_models item { from: \"<model>\" } and group_by { model, attribute }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any attribute of any joined model, always this form."
+      "notes": "The model whose column it is must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where on { source, column } filters through the same join.",
+      "hack": "Load the model with a semantic_models item { source: \"<model>\" } and group_by { source: \"<model>\", column }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any column of any joined model, always this form."
     },
     {
       "id": "funnel_from_event_property_steps",
@@ -279,7 +279,7 @@
         "name": "tut_funnel",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "s1",
@@ -632,7 +632,7 @@
         "name": "cohort_grid",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "revenue",
@@ -672,7 +672,7 @@
             ]
           },
           {
-            "from": "users"
+            "source": "users"
           }
         ],
         "metrics": [
@@ -695,8 +695,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "install_date"
+              "source": "users",
+              "column": "install_date"
             },
             {
               "time": "metric_time",
@@ -710,14 +710,14 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "install_date"
+              "source": "users",
+              "column": "install_date"
             }
           ]
         }
       ],
-      "notes": "The cohort axis comes from the dimension model, so the task loads it (a semantic_models item { from: \"users\" }); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
-      "hack": "Group by a TIME attribute of the joined model (the cohort) and by metric_time (the activity) at once — the grid is just two time dimensions in one group_by. Swap either axis (any cohort attribute, any grain) and the shape holds."
+      "notes": "The cohort axis comes from the dimension model, so the task loads it (a semantic_models item { source: \"users\" }); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
+      "hack": "Group by a TIME column of the joined model (the cohort, { source, column }) and by metric_time (the activity) at once — the grid is just two time dimensions in one group_by. Swap either axis (any cohort column, any grain) and the shape holds."
     },
     {
       "id": "boolean_condition_as_measure",
@@ -737,7 +737,7 @@
         "name": "behavior",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "purchases",
@@ -837,7 +837,7 @@
         "name": "progression",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "dimensions": [
               {
                 "property": "level_id_of_event_data"
@@ -950,8 +950,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "level_id_of_event_data"
+              "source": "events",
+              "property": "level_id_of_event_data"
             }
           ]
         },
@@ -961,8 +961,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "level_id_of_event_data"
+              "source": "events",
+              "property": "level_id_of_event_data"
             }
           ]
         }
@@ -993,7 +993,7 @@
         "name": "monetization",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "dimensions": [
               {
                 "property": "product_id_of_event_data"
@@ -1044,7 +1044,7 @@
             ]
           },
           {
-            "from": "users"
+            "source": "users"
           }
         ],
         "metrics": [
@@ -1113,8 +1113,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "product_id_of_event_data"
+              "source": "events",
+              "property": "product_id_of_event_data"
             }
           ]
         },
@@ -1124,8 +1124,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "country"
+              "source": "users",
+              "column": "country"
             }
           ]
         },
@@ -1161,7 +1161,7 @@
         "name": "ads",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "dimensions": [
               {
                 "property": "network_of_additional_info_of_event_data"
@@ -1242,8 +1242,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "network_of_additional_info_of_event_data"
+              "source": "events",
+              "property": "network_of_additional_info_of_event_data"
             }
           ]
         },
@@ -1253,8 +1253,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "placement_of_event_data"
+              "source": "events",
+              "property": "placement_of_event_data"
             }
           ]
         },
@@ -1264,8 +1264,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "ad_type_of_event_data"
+              "source": "events",
+              "property": "ad_type_of_event_data"
             }
           ]
         }
@@ -1295,7 +1295,7 @@
         "name": "economy",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "dimensions": [
               {
                 "property": "source_type_of_event_data"
@@ -1405,8 +1405,8 @@
           ],
           "group_by": [
             {
-              "model": "events",
-              "attribute": "source_type_of_event_data"
+              "source": "events",
+              "property": "source_type_of_event_data"
             }
           ]
         }
@@ -1431,7 +1431,7 @@
         "name": "stickiness",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "active_users",
@@ -1682,7 +1682,7 @@
         "name": "cumulative_rev",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "revenue",
@@ -1774,7 +1774,7 @@
         "name": "blended",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "iap_revenue",
@@ -5654,7 +5654,7 @@
         "name": "ua_spend",
         "semantic_models": [
           {
-            "from": "acquisition",
+            "source": "acquisition",
             "measures": [
               {
                 "name": "cost",
@@ -5715,7 +5715,7 @@
             ]
           },
           {
-            "from": "users"
+            "source": "users"
           }
         ],
         "metrics": [
@@ -5774,8 +5774,8 @@
           ],
           "group_by": [
             {
-              "model": "acquisition",
-              "attribute": "media_source"
+              "source": "acquisition",
+              "column": "media_source"
             }
           ]
         },
@@ -5803,8 +5803,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "country"
+              "source": "users",
+              "column": "country"
             }
           ]
         }
@@ -5832,7 +5832,7 @@
         "name": "gov",
         "semantic_models": [
           {
-            "from": "acquisition",
+            "source": "acquisition",
             "dimensions": [
               {
                 "column": "media_source"
@@ -5840,7 +5840,7 @@
             ]
           },
           {
-            "from": "users"
+            "source": "users"
           }
         ],
         "metrics": [
@@ -5863,8 +5863,8 @@
           ],
           "group_by": [
             {
-              "model": "acquisition",
-              "attribute": "media_source"
+              "source": "acquisition",
+              "column": "media_source"
             }
           ]
         },
@@ -5885,8 +5885,8 @@
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "country"
+              "source": "users",
+              "column": "country"
             }
           ]
         }
@@ -5912,7 +5912,7 @@
         "name": "mix",
         "semantic_models": [
           {
-            "from": "events",
+            "source": "events",
             "measures": [
               {
                 "name": "launches",
@@ -5936,7 +5936,7 @@
             ]
           },
           {
-            "from": "crashlytics",
+            "source": "crashlytics",
             "measures": [
               {
                 "name": "fatal",
@@ -5998,14 +5998,14 @@
           ],
           "group_by": [
             {
-              "model": "crashlytics",
-              "attribute": "app_version"
+              "source": "crashlytics",
+              "column": "app_version"
             }
           ]
         }
       ],
-      "notes": "Each semantic model names its own `from` and is scoped with its own event vocabulary — an event or property of one source is not readable on the other, and there is no default source. What makes them comparable is metric_time: both are put on the same axis without being joined.",
-      "hack": "One context, several `semantic_models`, each with its own `from`: the layer answers both in one query and lines them up over metric_time. Extrapolate: any number of sources side by side; a RATIO across two of them belongs in a derived metric, not in a measure."
+      "notes": "Each semantic model names its own `source` and is scoped with its own event vocabulary — an event or property of one source is not readable on the other, and there is no default source. What makes them comparable is metric_time: both are put on the same axis without being joined.",
+      "hack": "One context, several `semantic_models`, each with its own `source`: the layer answers both in one query and lines them up over metric_time. Extrapolate: any number of sources side by side; a RATIO across two of them belongs in a derived metric, not in a measure."
     },
     {
       "required_events": [],
@@ -6085,6 +6085,9 @@
       "task_type": "joins",
       "title": "Joining a slowly-changing model: state the window",
       "when_to_use": "Joining attributes that CHANGE (an install record, a plan, a price list) — anything with a validity window.",
+      "required_roles": [
+        "acquisition"
+      ],
       "pipeline_payload": {
         "action": "start",
         "name": "spend_by_country_pit",

@@ -47,7 +47,6 @@ export const OUTPUTS = {
     offset: num,
     next_offset: num,
     description: str,
-    eventstreams: list(obj),
     continue_with: str,
     context_id: str,
     engine: str,

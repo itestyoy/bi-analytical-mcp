@@ -50,7 +50,7 @@ before(async () => {
   const out = await engine.build_semantic_model({
     name: 'uacq',
     semantic_models: [{
-      from: 'acquisition',
+      source: 'acquisition',
       measures: [
         { name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } },
         { name: 'impressions', expr: { fn: 'sum', args: [{ column: 'impressions' }] } },
@@ -61,7 +61,7 @@ before(async () => {
         { name: 'avg_cost_per_click', expr: { fn: 'average', args: [{ column: 'cost_per_click' }] } },
       ],
     },
-    { from: 'users' }],
+    { source: 'users' }],
     metrics: [
       { name: 'cost', type: 'simple', measure: 'cost' },
       { name: 'impressions', type: 'simple', measure: 'impressions' },
@@ -123,7 +123,7 @@ test('every aggregation the task chose over the marked amounts, in one ungrouped
 // split is the unwindowed one.
 test('grouped by an attribute of the same source: cost by media_source; and the declared time axis drives metric_time on a non-events source', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'acquisition', attribute: 'media_source' }, { time: 'metric_time', grain: 'day' }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
+  const r = await q({ metrics: ['uacq_cost'], group_by: [{ source: 'acquisition', column: 'media_source' }, { time: 'metric_time', grain: 'day' }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = marginal(r.rows, (row) => String(row[r.group_by_resolved['acquisition.media_source']]), 'uacq_cost');
   assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
@@ -214,7 +214,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
 
   // it groups like any other measure — by the source's own attribute, and through a declared
   // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
-  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'acquisition', attribute: 'media_source' }, { model: 'users', attribute: 'country' }] });
+  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'gov_total_spend');
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);

@@ -69,8 +69,8 @@ function currentSemanticModel(sm) {
  * earlier version may load a model for its attributes with `use_base_models`, reference a measure as
  * `{ name }`, write a derived metric as text over its inputs or a ratio of two sides, type a dimension
  * with `as_type`, fold a measure with `sum_boolean`, or write its measures, conditions and dimensions
- * in the earlier grammar; a deployment's file is not ours to rewrite, so each is read here as what it
- * said: a model loaded is a `{ from }` item of semantic_models.
+ * in the earlier grammar, or name an item's model `from`; a deployment's file is not ours to rewrite, so
+ * each is read here as what it said: a model loaded is a `{ source }` item of semantic_models.
  */
 export function semanticRequest(payload) {
   if (!isObj(payload)) return payload;
@@ -78,8 +78,8 @@ export function semanticRequest(payload) {
   let out = base === undefined ? payload : rest;
   if (Array.isArray(out.semantic_models) && out.semantic_models.some((sm) => currentSemanticModel(sm) !== sm)) out = { ...out, semantic_models: out.semantic_models.map(currentSemanticModel) };
   if (Array.isArray(base) && base.length) {
-    const loaded = new Set((out.semantic_models || []).map((sm) => sm?.from));
-    out = { ...out, semantic_models: [...(out.semantic_models || []), ...base.filter((k) => !loaded.has(k)).map((from) => ({ from }))] };
+    const loaded = new Set((out.semantic_models || []).map((sm) => sm?.source));
+    out = { ...out, semantic_models: [...(out.semantic_models || []), ...base.filter((k) => !loaded.has(k)).map((source) => ({ source }))] };
   }
   // its metrics as the converter table reads a declaration's (src/earlier-spelling.js): a ratio's side
   // that names a measure through the simple metric over it, as the earlier build read it
@@ -128,20 +128,35 @@ export function experimentMap(e) {
   return { ...rest, arm };
 }
 
+/** What an earlier example query's `{ model, attribute }` named, read off the recipe's own declaration
+ *  (src/earlier-spelling.js currentRef): an event property its semantic model declared a dimension, a
+ *  dimension it computed there, else a column of that model. */
+function refSubject(semantic) {
+  const models = (isObj(semantic) && Array.isArray(semantic.semantic_models)) ? semantic.semantic_models : [];
+  return (attribute, model) => {
+    const d = (models.find((sm) => sm?.source === model)?.dimensions || []).find((x) => x?.property === attribute || x?.name === attribute);
+    return d?.property !== undefined ? 'property' : d?.expr !== undefined ? 'dimension' : 'column';
+  };
+}
+
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. An example query
- *  written for an earlier version (a metric query's `order_by`, a read's `stages` / `transform`) is read
- *  as the query it is now — its steps (src/earlier-spelling.js currentQueryInput). */
+ *  written for an earlier version (a metric query's `order_by`, a read's `stages` / `transform`, a
+ *  `{ model, attribute }` it groups or filters by) is read as the query it is now — its steps, its refs
+ *  (src/earlier-spelling.js currentQueryInput). */
 function readFile(path, origin) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  return (raw.recipes || []).map((r) => ({
-    ...r,
-    ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}),
-    ...(r.semantic_payload ? { semantic_payload: semanticRequest(r.semantic_payload) } : {}),
-    ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map(currentQueryInput) } : {}),
-    ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
-    origin,
-  }));
+  return (raw.recipes || []).map((r) => {
+    const semantic = r.semantic_payload ? semanticRequest(r.semantic_payload) : undefined;
+    return {
+      ...r,
+      ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}),
+      ...(semantic ? { semantic_payload: semantic } : {}),
+      ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic) })) } : {}),
+      ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
+      origin,
+    };
+  });
 }
 
 /**

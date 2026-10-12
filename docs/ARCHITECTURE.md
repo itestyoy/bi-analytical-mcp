@@ -49,16 +49,28 @@ stage tagged by its `stage`:
 
 There is **no raw SQL** anywhere in the input — only stage objects with
 catalog-constrained, enum/typed parameters. The engine generates the SQL. (`fn: "raw"` is the one
-escape hatch, its columns structured as arguments and quoted by the server.)
+escape hatch, a build's — a read's schema has none —, its columns structured as arguments and quoted by
+the server.)
 
 What a stage holds — a condition, a measure, a computed value — is ONE expression grammar:
 `{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property, field?, type? }`,
 `{ value }`, `{ now: true }`), nested to any depth. A condition is an expression with a boolean value
 (`eq`, `in`, `between`, `is_null`, a text test, `and` / `or` / `not`); a `where` is a list of them that
 all hold; a measure is `{ name, expr }` whose expression folds rows (`sum`, `count`, `percentile` with
-its `percentile`, a formula over several, an aggregate's own `where` for a conditional count). One
-builder makes each level's schema (`exprSchema`) and one writer its SQL (`exprSql`), both in
-`src/pipeline/compute.js`.
+its `percentile`, a formula over several, an aggregate's own `where` for a conditional count). Every
+tool that takes an expression carries ONE definition of it, `$defs.expr`, built by one builder
+(`exprSchema`) for the tool's places: what a PLACE takes (a step over a source's rows, a read of stored
+rows, a semantic model, a metric query's where, a derived metric) is one table, `PLACES`, and a tool's
+definition holds the union of what its places take (`TOOL_PLACES`, `src/schema.js`) — of the leaves,
+the rows' and the refs that name a value (`{ source, column }`, `{ source, property }`,
+`{ semantic_model, dimension }`, `{ entity }`, `{ time }`, `{ metric }`), and of the functions — and
+nothing else, so a read's has no `raw` and no event property and its schema refuses them. It is never
+split per place inside a tool: where two places of one tool take different parts, each is checked as
+the value is built by the one writer (`exprSql`), whose refusal names the place and what it takes —
+both in `src/pipeline/compute.js`. A step is likewise one `$defs.stage` (its places in `STAGE_PLACES`,
+`src/pipeline/stages.js`: a read's has no join, unnest, funnel or python stage) and a name of a catalog
+or semantic-layer thing one `$defs.ref` (`REF_PLACES`, `src/schema/refs.js`: semantic_index's and
+memory's hold the catalog's forms alone), each built the same way.
 
 ## 2. The stage registry (the "Lego")
 

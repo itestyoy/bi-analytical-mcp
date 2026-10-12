@@ -17,7 +17,7 @@
   → resolve (нашли реальное поле/значение)
   → memory record (notes: [{ note + question + bilingual aliases + about }])
   → в следующий раз: semantic_index { search } (RU/EN, лексика + семантика), { notes: true }
-                      ИЛИ инлайн в semantic_index { source, property } / { source, event } / { source }
+                      ИЛИ инлайн в semantic_index { source, property } / { source, column } / { source, event } / { source }
   → строим запрос
   → гард значений не даёт подставить непроверенное / не-то-регистра значение
 ```
@@ -127,7 +127,8 @@ RU "низкая выручка" → memory_semantic = true → нашёл EN-з
 
 ```
 REJECTED: steps[0]: filter value(s) not verified against the real data — check the exact value
-via semantic_index({ request: { source, property } }) and use it as stored:
+via semantic_index({ request: { source, property } }) for an event property, ({ source, column }) for a column,
+and use it as stored:
   where result_of_event_data: value 'organic' is not a real value —
   the column holds it with different casing. Did you mean: 'Organic'?
 ```

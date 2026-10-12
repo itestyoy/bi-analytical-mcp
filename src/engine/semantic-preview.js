@@ -140,9 +140,9 @@ export const semanticPreviewMethods = {
           : { dimensions_from: [...new Set(dims.map((r) => r.item.semantic_model))], entities: ents, ...time };
         if (groupBys && !dims.length && !ents.length && (def.numerator || def.inputs || def.input || def.base)) shown.push({ severity: 'note', metric: m.name, message: 'its inputs share no dimension or entity: it can be grouped by metric_time only' });
       } else {
-        // a task's context: its attributes are the context's (one list, under groupable), named in full
-        // for one metric
-        cut = { ...(input.metric ? { attributes: groupable } : {}), ...time };
+        // a task's context: its dimensions are the context's (one list, under groupable) and its entities
+        // the keys its measure sources carry — named in full for one metric, as a project's are
+        cut = { ...(input.metric ? { dimensions: groupable, entities: this._taskEntities(ctx).map((entity) => ({ entity })) } : {}), ...time };
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
       return { ...m, definition: def, group_by: cut };

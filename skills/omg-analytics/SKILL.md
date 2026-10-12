@@ -71,7 +71,8 @@ OMG cautions on top of the generic procedure:
 - **Record what you learn**: when you track a fuzzy OMG term down to a real field, hit a
   non-obvious gotcha, or rely on a specific Confluence page, save it with the **`memory`** tool
   (`memory({ request: { action: "record", notes: [{ note, about, aliases, links }] } })`) — each
-  note linked to the field/event it concerns (`about`: `{ source, property }` or `{ source, event }`), with the words the user used (`aliases`)
+  note linked to the field/event it concerns (`about`: `{ source, property }` for an event property,
+  `{ source, column }` for a model's column such as a player attribute, or `{ source, event }`), with the words the user used (`aliases`)
   and the page in `links`. It resurfaces through `semantic_index` (the linked views + search)
   next time, turning one investigation into durable shared knowledge. (Put findings in the live
   memory store, NOT as copied definitions in this skill — same no-drift reason.)

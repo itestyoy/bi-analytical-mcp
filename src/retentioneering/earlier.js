@@ -28,7 +28,9 @@
 //     value does not hold now, neq's too, and not(…) keeps one: so each negation is carried over as
 //     not(eq / in / like), and a step keeps the rows it kept.
 // What is in the current spelling passes through unchanged. A NEW call in an earlier spelling is refused
-// (refuseEarlierSpelling, refuseEarlierRead), never taken as an alias.
+// (refuseEarlierSpelling, refuseEarlierRead, refuseEarlierDisplay), never taken as an alias — a step
+// action's include_columns / include_steps by the core's converter (src/earlier-spelling.js currentInclude,
+// as the schema refuses them), a display's { task_id, analysis, … } here.
 
 import { ES_COLUMNS } from './names.js';
 import { ToolError } from '../validate.js';
@@ -250,6 +252,19 @@ export function refuseEarlierSpelling(input, catalog) {
     const where = currentWhere(s.where);
     if (where !== s.where) refuse(`${field}.where`, where);
   }
+}
+
+/**
+ * A display call in the shape before `display` held what is drawn — { task_id, analysis, title?,
+ * edge_weight? } — is refused with it in the one shape a card is asked for, { task_id, display }, as
+ * display_model_result takes it. (A card drawn so is kept as it was: its marks name the analysis, and the
+ * drawn result carries its title and weight.)
+ */
+export function refuseEarlierDisplay(input) {
+  if (!isObj(input) || input.display !== undefined || input.analysis === undefined) return;
+  const { task_id: taskId, analysis, title, edge_weight: edgeWeight, ...rest } = input;
+  const now = { ...(taskId !== undefined ? { task_id: taskId } : {}), display: { analysis, ...(title !== undefined ? { title } : {}), ...(edgeWeight !== undefined ? { edge_weight: edgeWeight } : {}) }, ...rest };
+  throw new ToolError(`invalid input: request is written in an earlier spelling — write ${JSON.stringify(now)}`, { stage: 'validate', field: 'display' });
 }
 
 /**

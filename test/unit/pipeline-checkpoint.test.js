@@ -127,7 +127,7 @@ test('a stage needing the source columns is refused after a checkpoint that drop
   await e.build_pipeline_model({ action: 'add_steps', context_id: b.context_id, steps: [keepEvents('level_started')] });
   const built = await e.build_pipeline_model({ action: 'materialize', context_id: b.context_id });
   assert.equal(built.checkpoint.carries_source, 'events');
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: b.context_id, steps: [funnel], include_columns: true });
+  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: b.context_id, steps: [funnel], include: ['columns'] });
   assert.equal(ok.from_checkpoint.at, 1);
   assert.ok(ok.available_columns.some((c) => c.name === 'reached_a'), 'funnel built on top of the materialized slice');
 });
@@ -238,7 +238,7 @@ test('materialize keeps each step in the spelling it was built in, and a draft s
   const pv = await e.build_pipeline_model({ action: 'preview', context_id });
   assert.equal(pv.from_checkpoint.model, built.model, 'the step is in the prefix the checkpoint stands for');
   assert.deepEqual(pv.steps[0].steps[1].where, asBuilt);
-  const fork = await e.build_pipeline_model({ action: 'fork', context_id, name: 'lvl_alt', include_steps: true });
+  const fork = await e.build_pipeline_model({ action: 'fork', context_id, name: 'lvl_alt', include: ['steps'] });
   assert.deepEqual(fork.steps[0].steps[1].where, asBuilt);
 });
 
@@ -324,7 +324,7 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   const eq = await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [flag, { value: true }] }] }] });
   assert.equal(eq.from_checkpoint.model, built.model, 'the step reads the built table');
 
-  const from = await e.build_pipeline_model({ action: 'start', name: 'flg2', from_task: started.task_id, include_columns: true });
+  const from = await e.build_pipeline_model({ action: 'start', name: 'flg2', from_task: started.task_id, include: ['columns'] });
   assert.ok(from.available_columns.some((c) => c.name === 'is_clicked_of_event_data'));
   assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
   await refusedBoth(from.context_id, 'from the task');
@@ -369,7 +369,7 @@ test('a draft started from an earlier build reads its table\'s types from the wa
   const owner = e.ctxs.get(context_id).state;
   assert.ok(![...(owner.draft.checkpoints || []), ...(owner.pipeline_origin?.checkpoints || [])].some((c) => c.task_id === first), 'no checkpoint records the first build any more');
   for (const task of [first, second]) {
-    const from = await e.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include_columns: true });
+    const from = await e.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
     assert.ok(from.available_columns.every((c) => !Object.hasOwn(c, 'physical')), 'the answer lists names and types only');
     await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG, `from task ${task}`);
     const eq = await e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, steps: [flagEq] });
@@ -387,11 +387,11 @@ test('where the warehouse cannot be asked about a task\'s table, the marks its b
 
 test('a draft started from a semantic query run with materialize: true has its table\'s column types from the warehouse', async () => {
   const e = flagEngine(flagRunner());
-  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
+  const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
-  const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ model: 'events', attribute: 'event_name' }], materialize: true });
+  const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ source: 'events', column: 'event_name' }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');
-  const from = await e.build_pipeline_model({ action: 'start', name: 'slice', from_task: stored.task_id, include_columns: true });
+  const from = await e.build_pipeline_model({ action: 'start', name: 'slice', from_task: stored.task_id, include: ['columns'] });
   assert.deepEqual(from.available_columns, [{ name: 'task_cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
   await assert.rejects(
     () => e.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 'many' }] }] }] }),
@@ -412,7 +412,7 @@ test('after a restart, a draft started from a build\'s task has its table\'s col
   // a new process over the same registry and job store: the task's answer held in memory is gone
   const e2 = flagEngine(flagRunner(), { workspaceRoot, store });
   assert.equal(e2.jobs.get(task).status, 'ready');
-  const from = await e2.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include_columns: true });
+  const from = await e2.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
   assert.deepEqual(from.available_columns.find((c) => c.name === 'is_clicked_of_event_data'), { name: 'is_clicked_of_event_data', type: 'string' });
   await assert.rejects(() => e2.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG);
 });

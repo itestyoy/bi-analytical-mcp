@@ -52,7 +52,7 @@ before(async () => {
   // inside it the source's own events and properties are named as-is.
   const crash = await engine.build_semantic_model({
     name: 'stab',
-    semantic_models: [{ from: 'crashlytics', dimensions: [{ property: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', expr: { fn: 'count' } }, { name: 'crashed_users', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'fatal_crash' }] }] }, { from: 'users' }],
+    semantic_models: [{ source: 'crashlytics', dimensions: [{ property: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', expr: { fn: 'count' } }, { name: 'crashed_users', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'fatal_crash' }] }] }, { source: 'users' }],
     metrics: [
       { name: 'fatal', type: 'simple', measure: 'fatal' },
       { name: 'crashed_users', type: 'simple', measure: 'crashed_users' },
@@ -84,7 +84,7 @@ const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...inpu
 // would inflate its total as it would either split's.
 test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2, and by users.country attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'crashlytics', attribute: 'issue_title_of_event_data' }, { model: 'users', attribute: 'country' }] });
+  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ source: 'crashlytics', property: 'issue_title_of_event_data' }, { source: 'users', column: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const byIssue = marginal(r.rows, r.group_by_resolved['crashlytics.issue_title_of_event_data'], 'stab_fatal');
   assert.equal(byIssue.NullPointer, 4, '[by issue] NullPointer');
@@ -106,7 +106,7 @@ test('governed metrics on the crash fact, and a payload property scoped to ONE e
   const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'anr',
-    semantic_models: [{ from: 'crashlytics', measures: [{ name: 'events', expr: { fn: 'count' } }, { name: 'secs', expr: { fn: 'sum', args: [{ property: 'anr_duration_of_event_data' }] } }, { name: 'avg_secs', expr: { fn: 'average', args: [{ property: 'anr_duration_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'anr' }] }] }],
+    semantic_models: [{ source: 'crashlytics', measures: [{ name: 'events', expr: { fn: 'count' } }, { name: 'secs', expr: { fn: 'sum', args: [{ property: 'anr_duration_of_event_data' }] } }, { name: 'avg_secs', expr: { fn: 'average', args: [{ property: 'anr_duration_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'anr' }] }] }],
     metrics: [
       { name: 'events', type: 'simple', measure: 'events' },
       { name: 'secs', type: 'simple', measure: 'secs' },
@@ -132,11 +132,11 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
   const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'ver',
-    semantic_models: [{ from: 'crashlytics', dimensions: [{ column: 'app_version' }], measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
+    semantic_models: [{ source: 'crashlytics', dimensions: [{ column: 'app_version' }], measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'reports', type: 'simple', measure: 'reports' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] });
+  const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'ver_reports'), 'ver_reports');
   assert.equal(by['1.0.0'], 7);
@@ -277,14 +277,14 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
   if (skip(t)) return;
   const out = await engine.build_semantic_model({
     name: 'gov',
-    semantic_models: [{ from: 'crashlytics', dimensions: [{ column: 'app_version' }] }],
+    semantic_models: [{ source: 'crashlytics', dimensions: [{ column: 'app_version' }] }],
     metrics: [{ name: 'anr_seconds', type: 'simple', measure: 'anr_seconds' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   // It slices like any other measure: only the ANR reports carry the column, and their versions
   // split 5.5 on 1.0.0 against 8.0 + 12.5 on 1.1.0 (SEED_DATA §10) — 26 in all, the total the
   // ungrouped query read.
-  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] });
+  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: [{ source: 'crashlytics', column: 'app_version' }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = mapCol(g.rows, groupCol(g, 'gov_anr_seconds'), 'gov_anr_seconds');
   assert.equal(by['1.0.0'], 5.5);

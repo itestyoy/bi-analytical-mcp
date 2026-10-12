@@ -23,10 +23,11 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildSchemas } from '../../src/schema.js';
-import { pipelineStageSchema } from '../../src/pipeline.js';
+import { stageSchema } from '../../src/pipeline.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { getDialect } from '../../src/dialects/index.js';
 import { settle, stepNotes } from '../helpers/settle.js';
+import { formWhere } from '../helpers/schema-nav.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (dialect) => {
@@ -107,9 +108,9 @@ test('the stage says whether this warehouse computes median/percentile exactly o
   const describe = (dialect) => {
     const catalog = loadCatalog(CATALOG, { dialect });
     catalog.dialect = dialect;
-    const stages = pipelineStageSchema(catalog);
-    const branches = stages.anyOf || stages.oneOf || [];
-    return branches.find((b) => b.properties?.stage?.enum?.[0] === 'aggregate').description;
+    // the one stage definition, its forms grouped by what they need (SQL over rows holds aggregate)
+    const stage = stageSchema(catalog);
+    return formWhere(stage, stage, 'stage', 'aggregate').description;
   };
   assert.match(describe('bigquery'), /median\/percentile are APPROXIMATE/);
   assert.match(describe('duckdb'), /every measure here is exact/);

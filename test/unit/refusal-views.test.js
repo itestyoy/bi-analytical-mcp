@@ -44,11 +44,11 @@ test('a field the value gives at its own level still decides first', () => {
   const e = engine();
   // a single view keeps its refusal: fuzzy is not a field of { source }
   assert.match(refusal(e, 'semantic_index', { source: 'users', fuzzy: true }), /request has an unexpected property 'fuzzy' — \{ source \} takes source/);
-  // a source with a paging field beside it meant the property view, and is told which property it lacks
-  assert.match(refusal(e, 'semantic_index', { source: 'users', limit: 5 }), /request is missing required property 'property' — one of: .*country/);
-  // a misspelt property is refused within the { source, property } form, not as a stray field of { source }
-  const misspelt = refusal(e, 'semantic_index', { source: 'users', property: 'countryy' });
-  assert.match(misspelt, /`property` must be one of: .*Did you mean 'country'\?/);
+  // a model with a paging field beside it meant the column view, and is told which column it lacks
+  assert.match(refusal(e, 'semantic_index', { source: 'users', limit: 5 }), /request is missing required property 'column' — one of: .*country/);
+  // a misspelt column is refused within the { source, column } form, not as a stray field of { source }
+  const misspelt = refusal(e, 'semantic_index', { source: 'users', column: 'countryy' });
+  assert.match(misspelt, /`column` must be one of: .*Did you mean 'country'\?/);
   assert.doesNotMatch(misspelt, /\{ source \} takes source/);
   // a field beside views is said as the { views } form's own
   const beside = refusal(e, 'semantic_index', { views: [{ source: 'users' }, { source: 'events' }], limit: 5 });
@@ -78,13 +78,18 @@ test('a field only one form takes, with a wrong value, is refused as that form, 
 // takes no fields", which every form with one unknown field would otherwise tie with and the empty one win.
 test('a field in another path\'s spelling is refused as the form that names it, with its name there', () => {
   const e = engine();
-  for (const input of [{ model: 'users' }, { model: 'users', property: 'country' }]) {
+  for (const input of [{ model: 'users' }, { model: 'users', column: 'country' }, { model: 'users', property: 'country' }]) {
     const msg = refusal(e, 'semantic_index', input);
     assert.match(msg, /request has an unexpected property 'model' — here that field is called 'source'/, JSON.stringify(input));
     assert.doesNotMatch(msg, /overview \(an empty request\) takes no fields/, JSON.stringify(input));
     // the field it stands for is not reported missing as well
     assert.doesNotMatch(msg, /missing required property 'source'/, JSON.stringify(input));
   }
+  // a model's column named as an event property is named too: there it is `column`
+  assert.match(refusal(e, 'semantic_index', { model: 'users', property: 'country' }), /unexpected property 'property' — here that field is called 'column'/);
+  assert.match(refusal(e, 'semantic_index', { source: 'users', property: 'country' }), /unexpected property 'property' — here that field is called 'column'/);
+  // …and only where `column` takes the name: an event property stays `property`
+  assert.equal(refusal(e, 'semantic_index', { source: 'events', property: 'result_of_event_data' }), null);
 });
 
 // …and only where that field means the same thing. explore_errors' `source` is where an error came from
@@ -97,7 +102,7 @@ test('a field in another path\'s spelling is told its name only where that field
   assert.doesNotMatch(errors, /here that field is called 'source'/);
   // where `source` names a catalog model, the same spelling is told its name — a view, a note's about, a pipeline
   assert.match(refusal(e, 'semantic_index', { model: 'events' }), /request has an unexpected property 'model' — here that field is called 'source'/);
-  assert.match(refusal(e, 'memory', { action: 'record', notes: [{ note: 'x', about: [{ model: 'users', property: 'country' }] }] }), /`notes\.0\.about\.0` has an unexpected property 'model' — here that field is called 'source'/);
+  assert.match(refusal(e, 'memory', { action: 'record', notes: [{ note: 'x', about: [{ model: 'users', column: 'country' }] }] }), /`notes\.0\.about\.0` has an unexpected property 'model' — here that field is called 'source'/);
   assert.match(refusal(e, 'build_pipeline_model', { name: 'm', model: 'events', steps: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
 });
 
@@ -131,10 +136,10 @@ test('stages and stage are told their name, steps and step, where the form takes
 });
 
 // A form pinned to one source is further off than the form of the source named that lacks a field:
-// a stray field beside a users property is said as that, not as "`source` must be events".
+// a stray field beside a users column is said as that, not as "`source` must be events".
 test('a field a source\'s form does not take is refused as that source\'s form, not steered to another source', () => {
   const e = engine();
-  const msg = refusal(e, 'semantic_index', { source: 'users', property: 'country', include_coverage: true });
-  assert.match(msg, /request has an unexpected property 'include_coverage' — \{ source, property \} takes source, property, limit, offset, order_by, recent/);
+  const msg = refusal(e, 'semantic_index', { source: 'users', column: 'country', include: ['coverage'] });
+  assert.match(msg, /request has an unexpected property 'include' — \{ source, column \} takes source, column, limit, offset, order_by, recent/);
   assert.doesNotMatch(msg, /`source` must be "events"/);
 });

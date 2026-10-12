@@ -8,12 +8,13 @@ import { renderContext } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { clone } from './helpers.js';
+import { refText, wants } from './semantic-query.js';
 
 /** What a semantic declaration keeps in a context's state — all an update changes. */
 const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
 
-/** The call that loads `model` into a context for its attributes: an item of semantic_models with only `from`. */
-export const loadModelCall = (contextId, model) => `build_semantic_model({ request: { action: 'update', context_id: '${contextId}', semantic_models: [{ from: '${model}' }] } }) — or, in a declaration, an item { from: '${model}' } in its semantic_models`;
+/** The call that loads `model` into a context for its columns: an item of semantic_models with only `source`. */
+export const loadModelCall = (contextId, model) => `build_semantic_model({ request: { action: 'update', context_id: '${contextId}', semantic_models: [{ source: '${model}' }] } }) — or, in a declaration, an item { source: '${model}' } in its semantic_models`;
 
 /** What a context already holds, which a declaration into it reads and may not declare again (compileDeclaration). */
 const heldBy = (state) => ({
@@ -37,16 +38,16 @@ export const semanticBuildMethods = {
   /**
    * The model a reference resolves onto must be LOADED in this context: a task built from one
    * source does not load another's semantic model, so MetricFlow would reject the entity. The
-   * model is taken from the reference the caller wrote — the compiled path is not read back.
+   * model is taken from the reference the caller wrote — the compiled path is not read back; `said`
+   * is how the reference is shown (users.country).
    */
-  _checkModelLoaded(ctx, ref) {
-    const model = ref?.model;
-    if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
+  _checkModelLoaded(ctx, model, said, field = 'group_by') {
+    if (!model || !this.catalog.models[model]) return; // already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
-      `'${model}.${ref.attribute}' needs model '${model}', which this context does not read. `
+      `'${said}' needs model '${model}', which this context does not read. `
         + `Load it: ${loadModelCall(ctx.id, model)}.`,
-      { stage: 'validate', field: 'model' },
+      { stage: 'validate', field },
     );
   },
 
@@ -133,19 +134,19 @@ export const semanticBuildMethods = {
     const { now: groupable, afterLoading } = this._groupableSplit(ctx);
     // the example must be a call that RUNS in this context, so it comes from what is loaded
     const exRef = groupable[0];
-    const exText = exRef ? `{ model: '${exRef.model}', attribute: '${exRef.attribute}'${exRef.via ? `, via: '${exRef.via}'` : ''} }` : "{ time: 'metric_time', grain: 'day' }";
+    const exText = exRef ? refText(exRef) : "{ time: 'metric_time', grain: 'day' }";
     return {
       context_id: ctx.id,
       task: compiled.task,
       files: [file],
-      ...(input.include_yaml ? { yaml: render.yaml } : {}),
+      ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
       semantic_models: render.semanticModels,
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
       groupable,
       ...(afterLoading.length ? {
         groupable_after_loading: afterLoading,
-        groupable_after_loading_note: `These attributes are reachable in the catalog but this context does not read their model — load it before naming them in group_by/where: ${loadModelCall(ctx.id, afterLoading[0].model)}.`,
+        groupable_after_loading_note: `These columns are reachable in the catalog but this context does not read their model — load it before naming them in group_by/where: ${loadModelCall(ctx.id, afterLoading[0].source)}.`,
       } : {}),
       parse,
       assumptions: this._assumptions(ctx),
@@ -153,7 +154,7 @@ export const semanticBuildMethods = {
       // Never a dead end: name the exact next call with real metric/path names.
       next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
       recommendations: [
-        `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
+        `Bound every query with time_range. Group or filter by a ref from \`groupable\`, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
         `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
@@ -169,12 +170,12 @@ export const semanticBuildMethods = {
     // the task changed is one the context holds: a name it does not hold is a new task, which is a
     // declaration beside it (create with context_id), not an update
     const tasks = state.tasks || [];
-    if (input.task && !tasks.includes(input.task)) {
-      throw new ToolError(`context '${ctx.id}' holds no task '${input.task}'. ${tasks.length ? `It holds: ${tasks.join(', ')}.` : 'It holds none.'} To add a task beside ${tasks.length ? 'them' : 'what it holds'}, declare one: build_semantic_model({ request: { name: '${input.task}', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } })`, { stage: 'validate', field: 'task' });
+    if (input.name && !tasks.includes(input.name)) {
+      throw new ToolError(`context '${ctx.id}' holds no task '${input.name}'. ${tasks.length ? `It holds: ${tasks.join(', ')}.` : 'It holds none.'} To add a task beside ${tasks.length ? 'them' : 'what it holds'}, declare one: build_semantic_model({ request: { name: '${input.name}', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } })`, { stage: 'validate', field: 'name' });
     }
-    const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.from), ...(input.remove?.dimensions || []).map((d) => d.from)])];
-    for (const sm of input.semantic_models || []) state.additions[sm.from] ||= { measures: [], dimensions: [] };
-    const task = input.task || tasks[0] || 'task';
+    const models = [...new Set([...(input.semantic_models || []).map((sm) => sm.source), ...(input.remove?.dimensions || []).map((d) => d.source)])];
+    for (const sm of input.semantic_models || []) state.additions[sm.source] ||= { measures: [], dimensions: [] };
+    const task = input.name || tasks[0] || 'task';
     const measureNames = () => heldBy(state).measures;
 
     // Removals first (so one update can replace a measure). A measure or metric is named as it was
@@ -216,12 +217,12 @@ export const semanticBuildMethods = {
       // ('ret_country'), a name the caller is never shown; a name that matches nothing is refused
       // rather than reported removed.
       const named = d.column ?? d.property ?? d.name;
-      const dims = state.additions[d.from]?.dimensions || [];
+      const dims = state.additions[d.source]?.dimensions || [];
       if (!dims.some((x) => x._attribute === named || x.name === named)) {
         const have = [...new Set(dims.map((x) => x._attribute))];
-        throw new ToolError(`cannot remove dimension '${named}': '${d.from}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
+        throw new ToolError(`cannot remove dimension '${named}': '${d.source}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove.dimensions' });
       }
-      state.additions[d.from].dimensions = dims.filter((x) => x._attribute !== named && x.name !== named);
+      state.additions[d.source].dimensions = dims.filter((x) => x._attribute !== named && x.name !== named);
     }
 
     // the additions are a declaration fragment, compiled as a declaration is, against the measures the
@@ -245,7 +246,7 @@ export const semanticBuildMethods = {
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
       return {
-        context_id: ctx.id, semantic_models: models, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
+        context_id: ctx.id, semantic_models: models, files: [file], ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
         next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
       };

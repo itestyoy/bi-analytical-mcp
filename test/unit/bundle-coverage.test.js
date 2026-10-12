@@ -77,9 +77,9 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
   assert.equal(prop.bundle_coverage_summary.empty_apps, 1);
   assert.ok(prop.bundle_coverage_summary.populated.some((b) => b.bundle === 'com.omg.words'), 'lists every populated app');
   assert.ok(prop.recommendations.some((r) => /Always NULL for 1 of 2 app/i.test(r)), 'flags the empty count + how to drill');
-  // include_coverage:true returns the FULL per-app split (nothing lost, just on demand).
-  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
-  assert.ok(Array.isArray(full.bundle_coverage), 'include_coverage returns the full per-app array');
+  // include: ['coverage'] returns the FULL per-app split (nothing lost, just on demand).
+  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include: ['coverage'] });
+  assert.ok(Array.isArray(full.bundle_coverage), 'include: [coverage] returns the full per-app array');
   assert.equal(full.bundle_coverage.find((b) => b.bundle === 'com.omg.relax').non_null, 0, 'empty for relax');
 });
 

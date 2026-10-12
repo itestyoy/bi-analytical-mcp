@@ -75,7 +75,7 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // ───────────────────────── 3. PIPELINE (incremental) ─────────────────────────
 test('3a. build_pipeline_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include: ['columns'] });
   assert.ok(s.context_id, 'start returns a context_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.context_id;
@@ -128,13 +128,13 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   if (skip(t)) return;
   const created = await engine.build_semantic_model({
     name: 'e2e_mon',
-    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { from: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.e2e_mon_revenue)]));
   assert.equal(by.US, 35);
@@ -154,7 +154,7 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
-    semantic_models: [{ from: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] } }] }],
     metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));

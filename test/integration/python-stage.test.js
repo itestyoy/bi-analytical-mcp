@@ -7,11 +7,13 @@
 //
 // Runs on dbt 1.x (the dbt-v1 environment: dbt-duckdb + pandas) — dbt v2 runs no Python models on DuckDB, so this
 // file alone stays on 1.x while the rest of the suite runs on v2. Skipped when the venv is absent.
+// One lifecycle check beside the rows: a Python model run leaves nothing in the temporary directory
+// (src/dbt/process.js gives each dbt process one of its own).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -206,4 +208,21 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   for (const m of r.models) assert.equal((await readTable(engine, r.context_id, m.model)).ok !== false, true, m.model);
   const s1 = await readTable(engine, r.context_id, r.models[0].model);
   assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
+});
+
+// A Python model leaves nothing in the temporary directory. dbt-duckdb writes the model to a temporary
+// .py, imports it — Python compiles it into __pycache__ beside it — and removes only the .py: in a
+// temporary directory of the dbt process's own (src/dbt/process.js), the bytecode goes with it, where
+// in the server's it stayed for good, one file per run.
+test('python stage: a run leaves no model file or bytecode in the temporary directory', opts, async (t) => {
+  if (skip(t)) return;
+  const left = () => [
+    ...readdirSync(tmpdir()).filter((n) => /^tmp\w*\.py$/.test(n)),
+    ...(existsSync(join(tmpdir(), '__pycache__')) ? readdirSync(join(tmpdir(), '__pycache__')).filter((n) => /^tmp\w*\..*\.pyc$/.test(n)) : []),
+  ];
+  const had = new Set(left());
+  const r = await engine._buildPipeline({ name: 'seg_tmp', pipeline: { source: 'events', stages: [AGG, PY] } });
+  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
+  assert.equal(r.rows.length, 4);
+  assert.deepEqual(left().filter((n) => !had.has(n)), [], `left in ${tmpdir()}`);
 });

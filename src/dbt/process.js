@@ -12,10 +12,17 @@
 //     two dbt processes on it at once — a batch of queries, a card's drill-down during a build, the
 //     value index — fail. Such a warehouse gets one FIFO turn per database, shared by every client
 //     on it (a context's queries, the indexer, MetricFlow's list of group-by items), and a process waits for it.
+//
+// A one-shot process has a TEMPORARY DIRECTORY OF ITS OWN (its TMPDIR, under the server's), removed
+// when it has ended — however it ended: what dbt and the Python under it leave there goes with it. dbt-duckdb
+// runs a Python model from a temporary .py that it removes after, and Python compiles it into a
+// __pycache__ beside it that nothing removes: in the server's own temporary directory that was one file
+// per Python model run, for good (and the .py too, where a cancel or a timeout killed the run).
 
 import { execFile, spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
 import { currentSignal, currentProgress } from '../request-context.js';
 import { setting } from '../settings.js';
 
@@ -95,7 +102,7 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
  */
 export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, turn = null } = {}) {
   return underTurn(bin, args, (signal) => new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) });
+    const child = ownTemp((TMPDIR) => spawn(bin, args, { cwd, env: { ...process.env, ...env, TMPDIR }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) }));
     let stdout = '';
     let stderr = '';
     let timer = null;
@@ -166,9 +173,26 @@ function failedResult(e) {
   return { ok: false, code: null, killed: false, signal: null, stdout: '', stderr: error, error };
 }
 
+/**
+ * Spawn `start(TMPDIR)` — a one-shot process — with a temporary directory of its own, removed once the
+ * child has CLOSED (not when its outcome is known: a cancelled call is answered while the process it
+ * killed may still be writing), or at once when the process never started (the spawn threw, or it has
+ * no pid).
+ */
+function ownTemp(start) {
+  const dir = mkdtempSync(join(tmpdir(), 'dbt-proc-'));
+  const clear = () => {
+    try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* a process it started outlived it: theirs */ }
+  };
+  let child;
+  try { child = start(dir); } catch (e) { clear(); throw e; }
+  if (child.pid === undefined) clear(); else child.once('close', clear);
+  return child;
+}
+
 function spawnOnce(bin, args, { cwd, env, timeout, signal }) {
   return new Promise((resolve) => {
-    execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
+    ownTemp((TMPDIR) => execFile(bin, args, { cwd, env: { ...process.env, ...env, TMPDIR }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
       // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,
       // which is just the "Command failed: <whole command>" + node-internal-stack wrapper.
       // A killed/SIGTERM exit means the runner timeout fired (the query never finished) — unless
@@ -184,6 +208,6 @@ function spawnOnce(bin, args, { cwd, env, timeout, signal }) {
             : `dbt exited with code ${err.code}`;
       }
       resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed || cancelled, signal: err?.signal ?? null, ...(cancelled ? { cancelled: true } : {}), stdout: stdout || '', stderr: stderr || '', error });
-    });
+    }));
   });
 }

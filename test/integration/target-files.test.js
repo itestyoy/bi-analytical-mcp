@@ -9,8 +9,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -19,6 +18,7 @@ import { Engine } from '../../src/engine.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, one } from '../helpers/settle.js';
 import { HAS_DBT, TEST_ENV, dbtEnv } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -37,14 +37,14 @@ for (const name of new Set([TEST_ENV, 'dbt-v2'])) {
     const environment = dbtEnv(name);
     if (!environment) { t.skip(`dbt environment ${name} not built (npm run dbt:env -- create ${name})`); return; }
     const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-    const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'tgt-')), timeSpineDialect: 'duckdb' });
+    const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('tgt'), timeSpineDialect: 'duckdb' });
     const engine = settle(new Engine({ catalog, contextManager: ctxs, runner: createDbt({ environment, profilesDir: BASE }) }));
-    const draft = await engine.build_pipeline_model({ action: 'start', name: 'per_event', source: 'events' });
-    await engine.build_pipeline_model({ action: 'add_steps', draft_id: draft.draft_id, stages: [
-      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }] },
+    const s = await engine.build_pipeline_model({ action: 'start', name: 'per_event', source: 'events' });
+    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
       { stage: 'order_by', keys: [{ key: 'event_name', direction: 'asc' }] },
     ] });
-    const built = await engine.build_pipeline_model({ action: 'materialize', draft_id: draft.draft_id });
+    const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
     assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
     const target = join(ctxs.dir(built.context_id), 'target');
     const before = filesUnder(target);

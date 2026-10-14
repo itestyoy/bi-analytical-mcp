@@ -123,7 +123,7 @@ test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFl
 
 test('a dbt v2 show runs in a target directory of its own, removed after: the file it writes on every call never lands in the context\'s target/', async () => {
   const { existsSync, mkdirSync, readdirSync } = await import('node:fs');
-  const dir = mkdtempSync(join(tmpdir(), 'show-target-'));
+  const dir = tempDir('show-target');
   const proj = project('bigquery');
   mkdirSync(join(proj, 'target'));
   // a stand-in dbt: writes a file under a fresh name into the target it was given, as v2's show does,

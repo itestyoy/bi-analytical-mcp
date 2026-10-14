@@ -200,7 +200,8 @@ export class DbtV1 {
 
   /**
    * A dbt command other than parse. Run as one of several concurrent tasks on a context (a batch of
-   * queries, src/request-context.js isolatedTarget), it writes its artifacts (manifest, run results,
+   * queries, src/request-context.js isolatedTarget) — or as a dbt v2 show, which would leave files of
+   * its own in target/ on every call (src/dbt/v2.js) — it writes its artifacts (manifest, run results,
    * the partial-parse cache) to a target directory of its own — seeded with the context's
    * partial-parse cache so it still parses incrementally — and that directory is removed after.
    * The context's own target/ (whose semantic manifest MetricFlow reads) is left untouched.

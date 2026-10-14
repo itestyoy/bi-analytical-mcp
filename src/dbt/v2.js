@@ -5,6 +5,8 @@
 //     tells the renderer (src/semantic-latest.js);
 //   * `dbt show --output json` prints a bare array of rows (src/dbt/output.js reads both);
 //   * there is no partial-parse cache to seed an isolated target with;
+//   * `dbt show --inline` leaves three files of its own in target/ on every call, so a show runs in
+//     a target directory of its own (below);
 //   * its manifest's percentiles are put back as asked — the same correction dbt 1.12 needs on the
 //     latest spec (src/dbt/v1.js restorePercentiles), so it lives in the shared parse;
 //   * Python models: not on DuckDB ("Python models are not supported for duckdb adapter").
@@ -12,6 +14,7 @@
 // src/dbt/metricflow-server.js), which reads the semantic_manifest.json v2 writes.
 
 import { DbtV1 } from './v1.js';
+import { isolatedTarget } from '../request-context.js';
 
 const NO_PYTHON_MODELS = new Set(['duckdb']);
 
@@ -28,4 +31,17 @@ export class DbtV2 extends DbtV1 {
   unparsedSqlConfig() { return { static_analysis: 'off' }; }
 
   pythonModelsOn(adapter) { return !NO_PYTHON_MODELS.has(String(adapter || '').toLowerCase()); }
+
+  /**
+   * Every `dbt show --inline` writes the query under a fresh id — target/inline_<id>.sql, and its
+   * compiled SQL and macro spans under target/compiled/ — that no later command removes, so a
+   * context read again and again would grow without bound; and it rewrites
+   * target/semantic_manifest.json without the percentiles parse() put back (restorePercentiles).
+   * So a show runs in a target directory of its own, removed after (src/dbt/v1.js _dbt): the
+   * context's target/ stays as its parse and runs left it. v2 keeps no partial-parse cache, so a
+   * show parses the project in full either way — on DuckDB it takes as long as before.
+   */
+  show(projectDir, sql, limit, timeout) {
+    return isolatedTarget(() => super.show(projectDir, sql, limit, timeout));
+  }
 }

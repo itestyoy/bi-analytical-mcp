@@ -43,11 +43,11 @@
 //                            Solves: bring user attributes (country/platform/install_date).
 //   aggregate  |> AGGREGATE  group + measures { name, expr }: aggregates (sum/average/min/max/count/
 //                            count_distinct, approx_count_distinct (HLL++), stddev/variance/median/
-//                            percentile, each with an optional where) and formulas over them.
+//                            percentile, a conditional one over a case) and formulas over them.
 //                            Solves: totals, rates, distributions, DAU/MAU (count_distinct), fast
 //                            approximate uniques, revenue, ARPU / ARPPU.
 //   pivot      |> AGGREGATE  turn listed values of a column into columns: the measure with each
-//                            value's condition in its aggregates' where. Solves: dashboard-ready
+//                            value's condition folded into its aggregates' case. Solves: dashboard-ready
 //                            matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
@@ -167,14 +167,15 @@ export function columnList(columns) {
  * rows are the source's while every stage before the `where` declares `keepsSourceRows` (its rows
  * are source rows — a subset, perhaps with columns added — not groups or reshaped ones).
  */
-function boundPartitions(m, stages, cols) {
+function boundPartitions(m, stages, cols, ctx = {}) {
   const time = m.time?.column; const part = m.partition_column;
   if (!time || !part || part === time || !cols.has(part)) return stages;
   const out = [];
   let leading = true;
   for (const st of stages) {
-    // (read in this version's spelling: a kept where bounds the window as a new one does)
-    const cur = currentSpelling(st);
+    // (read in this version's spelling — against the source, as the build reads it: a kept where bounds
+    // the window as a new one does)
+    const cur = currentSpelling(st, ctx);
     if (leading && !stageDef(cur?.stage)?.keepsSourceRows) leading = false;
     // a where of its own on the partition column prunes already; one naming it inside an or / a not does not
     if (!leading || cur?.stage !== 'where' || (cur.conditions || []).some((c) => comparisonOf(c)?.subject.column === part)) { out.push(st); continue; }
@@ -220,7 +221,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const given = stages;
-  if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols));
+  if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols), { catalog, source });
   const spelled = new Map();
   // Cut the stage list at every python stage.
   const segments = []; let cur = [];
@@ -258,8 +259,9 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
 
 /**
  * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_pipeline_model and a card's
- * drill run, and the steps after a metric query: the stages a read takes (STAGE_PLACES.read — where,
- * compute, aggregate, pivot, unpivot, order_by, limit, sample, project), built by the stage builders over
+ * drill run, and the steps after a metric query's metrics step: the stages a read takes (STAGE_PLACES.read
+ * — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project; checked first at
+ * STAGE_PLACES.metric_result after a metrics step, the same list), built by the stage builders over
  * the relation's columns and rendered by the dialect into one statement over `relation`; nothing is
  * materialized, its rows are the answer. Its expressions stand over stored rows (src/pipeline/compute.js
  * PLACES.stored_rows): raw SQL and a { property } are a build's, and the relation has no source, so an

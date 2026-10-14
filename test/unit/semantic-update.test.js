@@ -322,7 +322,7 @@ test('a semantic model condition on event_name takes the pattern functions; an e
   const catalog = loadCatalog(CATALOG, {});
   const decl = (cond) => ({
     name: 'pat',
-    semantic_models: [{ source: 'events', where: [cond], measures: [{ name: 'm', expr: { fn: 'count', where: [cond] } }] }],
+    semantic_models: [{ source: 'events', where: [cond], measures: [{ name: 'm', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [cond], then: { value: 1 } }] }] } }] }],
     metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
   const onEvent = (fn, ...values) => ({ fn, args: [{ column: 'event_name' }, ...values.map((value) => ({ value }))] });
@@ -333,6 +333,9 @@ test('a semantic model condition on event_name takes the pattern functions; an e
     assert.throws(() => compileDeclaration(catalog, decl(cond)), /unknown event 'nope' on 'events'/, JSON.stringify(cond));
   }
   assert.doesNotThrow(() => compileDeclaration(catalog, decl(onEvent('in', 'level_started', 'level_completed'))));
+  // …the case a measure folds alone, with no where of its model beside it, as well
+  const caseOnly = { name: 'pat', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [onEvent('eq', 'nope')], then: { value: 1 } }] }] } }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] };
+  assert.throws(() => compileDeclaration(catalog, caseOnly), /unknown event 'nope' on 'events'/);
 });
 
 // ── what a semantic model computes stands where its kind may stand ──────────────────────────

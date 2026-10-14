@@ -84,7 +84,7 @@ const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...inpu
 // would inflate its total as it would either split's.
 test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2, and by users.country attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ source: 'crashlytics', property: 'issue_title_of_event_data' }, { source: 'users', column: 'country' }] });
+  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal'], group_by: [{ source: 'crashlytics', property: 'issue_title_of_event_data' }, { source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const byIssue = marginal(r.rows, r.group_by_resolved['crashlytics.issue_title_of_event_data'], 'stab_fatal');
   assert.equal(byIssue.NullPointer, 4, '[by issue] NullPointer');
@@ -114,7 +114,7 @@ test('governed metrics on the crash fact, and a payload property scoped to ONE e
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { metrics: ['stab_fatal', 'stab_crashed_users', 'anr_events', 'anr_secs', 'anr_avg_secs'] });
+  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal', 'stab_crashed_users', 'anr_events', 'anr_secs', 'anr_avg_secs'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 'governed metrics on the crash fact: fatal = 6 from 3 distinct players'
   assert.equal(num(r.rows[0].stab_fatal), 6, '[governed crash metrics] fatal');
@@ -136,7 +136,7 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
     metrics: [{ name: 'reports', type: 'simple', measure: 'reports' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] });
+  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'ver_reports'), 'ver_reports');
   assert.equal(by['1.0.0'], 7);
@@ -148,7 +148,7 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
 // analytics fact (SEED_DATA §2) and 6 fatal crashes on the crash fact (§5).
 test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { metrics: ['mix_launches', 'mix_fatal'] });
+  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['mix_launches', 'mix_fatal'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].mix_launches), 12);
   assert.equal(num(r.rows[0].mix_fatal), 6);
@@ -187,18 +187,20 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
 // A BOOL column compared with a constant written as text ("true", as a caller often writes it): the
 // constant is written as the column's own type — a warehouse compares a BOOL only with a BOOL
 // (BigQuery refuses BOOL = STRING) — and a constant that is no boolean is refused when the step is added.
-// The four spellings are four conditional counts of ONE aggregate: a measure's where is written by
-// the same condition writer as a where stage (src/pipeline/sql.js condPred), so one build reads all.
+// The four spellings are four conditional counts of ONE aggregate — each a count over a case whose
+// `when` is written by the same condition writer as a where stage's — so one build reads all.
 test('a boolean column takes true / false however it is written, and its rows are the warehouse\'s own', opts, async (t) => {
   if (skip(t)) return;
   const [want] = (await wh.query('select count(*) filter (where is_fatal_of_event_data) as yes, count(*) filter (where not is_fatal_of_event_data) as no from fct_crashlytics_events')).rows;
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
+  // the rows where `cond` holds: a count over a case that yields 1 there and nothing elsewhere
+  const rowsWhere = (cond) => ({ fn: 'count', args: [{ fn: 'case', cases: [{ when: [cond], then: { value: 1 } }] }] });
   const s0 = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s0.context_id, steps: [{ stage: 'aggregate', measures: [
-    { name: 'true_text', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }] } },
-    { name: 'false_upper', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'FALSE' }] }] } },
-    { name: 'either', expr: { fn: 'count', where: [{ fn: 'in', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }, { value: false }] }] } },
-    { name: 'flipped', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ value: 'true' }, { column: 'is_fatal_of_event_data' }] }] } },
+    { name: 'true_text', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }) },
+    { name: 'false_upper', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'FALSE' }] }) },
+    { name: 'either', expr: rowsWhere({ fn: 'in', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }, { value: false }] }) },
+    { name: 'flipped', expr: rowsWhere({ fn: 'eq', args: [{ value: 'true' }, { column: 'is_fatal_of_event_data' }] }) },
   ] }] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s0.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
@@ -260,7 +262,7 @@ test('a raw expression takes its columns in args, with functions, keywords and s
   await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
-    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'fatal_flag' }, { value: 'fatal_x' }] }] } }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'fatal_flag' }, { value: 'fatal_x' }] }], then: { value: 1 } }] }] } }] },
   ] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
@@ -284,7 +286,7 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
   // It slices like any other measure: only the ANR reports carry the column, and their versions
   // split 5.5 on 1.0.0 against 8.0 + 12.5 on 1.1.0 (SEED_DATA §10) — 26 in all, the total the
   // ungrouped query read.
-  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: [{ source: 'crashlytics', column: 'app_version' }] });
+  const g = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['gov_anr_seconds'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = mapCol(g.rows, groupCol(g, 'gov_anr_seconds'), 'gov_anr_seconds');
   assert.equal(by['1.0.0'], 5.5);

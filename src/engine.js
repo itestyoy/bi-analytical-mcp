@@ -64,6 +64,7 @@ import { MemoryTool } from './engine/memory.js';
 import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
 import { CONTEXT_PAGE } from './schema/fields.js';
+import { propertyTypes } from './pipeline/compute.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -209,7 +210,7 @@ export class Engine {
   }
 
   _validate(tool, input) {
-    const res = validateInput(this.validators[tool], input || {});
+    const res = validateInput(this.validators[tool], input || {}, { propertyType: propertyTypes(this.catalog) });
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
   }
 
@@ -219,7 +220,7 @@ export class Engine {
    */
   _ctxToWrite(id, field = 'context_id') {
     const ctx = this._ctx(id);
-    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ request: { context_id: '${id}', metrics } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ request: { context_id: '${id}', steps: [{ stage: 'metrics', metrics }] } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
     return ctx;
   }
 

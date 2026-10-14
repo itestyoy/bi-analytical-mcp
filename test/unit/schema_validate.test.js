@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
+import { propertyTypes } from '../../src/pipeline/compute.js';
 
 const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'));
 const validators = makeValidators(buildSchemas(catalog));
@@ -82,27 +83,36 @@ test('create: a ratio is no metric type of its own — it is a derived metric di
   assert.ok(v('build_semantic_model', { name: 'task_a', metrics: [{ name: 'r', type: 'derived', expr: { fn: 'div', args: [{ metric: 'a' }, { metric: 'b' }] } }] }).ok);
 });
 
-test('query: requires context_id and metrics', () => {
-  assert.equal(v('query_semantic_model', { metrics: ['x'] }).ok, false);
-  assert.ok(v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'] }).ok);
-  // a single query names its metrics as a batch item does
-  assert.match(v('query_semantic_model', { context_id: 'abcd12' }).errors.join(' | '), /metrics/);
+// A METRIC QUERY IS ITS STEPS: a context and a list of steps that holds its metrics step — { stage:
+// "metrics", metrics, group_by? } — in a single query and in each of a batch's alike.
+test('query: requires context_id and steps, its metrics in a metrics step', () => {
+  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['x'], ...extra });
+  assert.equal(v('query_semantic_model', { steps: [metrics()] }).ok, false);
+  assert.ok(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics()] }).ok);
+  assert.ok(v('query_semantic_model', { context_id: 'abcd12', queries: [{ steps: [metrics()] }, { steps: [metrics(), { stage: 'limit', limit: 3 }] }] }).ok);
+  // a single query names its steps as a batch item does
+  assert.match(v('query_semantic_model', { context_id: 'abcd12' }).errors.join(' | '), /missing required property 'steps'/);
+  for (const bad of [[], [metrics({ metrics: [] })], [metrics({ metrics: ['x', 'x'] })], [{ stage: 'metrics' }]]) assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: bad }).ok, false, JSON.stringify(bad));
   // a field nothing reads is refused, not ignored
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'], task: 'mon' }).ok, false);
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', queries: [{ metrics: ['x'], task: 'mon' }] }).ok, false);
+  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics()], task: 'mon' }).ok, false);
+  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ task: 'mon' })] }).ok, false);
+  assert.equal(v('query_semantic_model', { context_id: 'abcd12', queries: [{ steps: [metrics()], task: 'mon' }] }).ok, false);
   // the same group_by item twice would be two identical columns
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'], group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'day' }] }).ok, false);
-  assert.ok(v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'], group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }] }).ok);
+  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'day' }] })] }).ok, false);
+  assert.ok(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }] })] }).ok);
+  // a step that makes a new table is no step of a metric query: its schema holds none
+  assert.match(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics(), { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.1\.stage` must be one of: .*\bmetrics\b/);
 });
 
-// A METRIC QUERY'S WHERE is the one expression over what the query groups by: a ref spelled as group_by
-// names it, constants, conditions, and / or / not and the scalar functions. The schema is the one
-// definition, built for the tool's places — its where's and its steps' together; what the where's place
-// leaves out of it (a column of a table, an aggregate, a window — the steps' own) is refused as the query
-// is built, naming the place (expression-grammar.test.js).
-test('query: a where is conditions over the refs group_by takes, nested to any depth', () => {
+// A METRIC QUERY'S WHERE is a where step before its metrics step: the one expression over what the query
+// groups by — a ref spelled as group_by names it, constants, conditions, and / or / not and the scalar
+// functions. The schema is the one definition, built for the tool's places — the where steps' and the
+// steps' after the metrics step together; what the where's place leaves out of it (a column of a table,
+// an aggregate, a window — the steps' after it) is refused as the query is built, naming the place
+// (expression-grammar.test.js).
+test('query: a where step before the metrics step is conditions over the refs group_by takes, nested to any depth', () => {
   const country = { source: 'users', column: 'country' };
-  const q = (where) => v('query_semantic_model', { context_id: 'abcd12', metrics: ['x'], where });
+  const q = (where) => v('query_semantic_model', { context_id: 'abcd12', steps: [{ stage: 'where', conditions: where }, { stage: 'metrics', metrics: ['x'] }] });
   for (const ok of [
     [{ fn: 'eq', args: [country, { value: 'US' }] }],
     [{ fn: 'or', args: [{ fn: 'in', args: [country, { value: 'US' }, { value: 'DE' }] }, { fn: 'not', args: [{ fn: 'is_null', args: [country] }] }] }],
@@ -225,12 +235,13 @@ test('a dimension takes a grain only on a column the catalog types as time, and 
 });
 
 // ONE MEASURE: a task's measure is { name, expr }, its expr ONE aggregate of the task's (sum_boolean is a
-// count with a where), and a value read as a number first is a cast inside its argument.
+// count over a case), and a value read as a number first is a cast inside its argument.
 test('a task measure is one of the task\'s aggregates — no sum_boolean, no sketch, no window — and a cast is an argument', async () => {
   const check = (expr) => v('build_semantic_model', { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
   const asNumber = (type) => ({ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type });
+  const first = eventIs(catalog.eventNames('events')[0]);
   for (const ok of [
-    { fn: 'count', where: [eventIs(catalog.eventNames('events')[0])] },
+    { fn: 'count', args: [{ fn: 'case', cases: [{ when: [first], then: { value: 1 } }] }] },
     { fn: 'sum', args: [asNumber('numeric')] },
     { fn: 'percentile', args: [asNumber('float')], percentile: 0.9 },
   ]) assert.ok(check(ok).ok, JSON.stringify(ok));
@@ -251,6 +262,30 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
   // the earlier { agg, field, cast } is refused with the measure written today
   const earlier = v('build_semantic_model', { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', agg: 'count' }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
   assert.ok(earlier.errors.join(' ').includes('is written in an earlier spelling — write {"name":"m","expr":{"fn":"count","args":[]}}'), earlier.errors.join(' | '));
+  // …an aggregate's where with the case it folds, a typed read with the read (cast where it named a type
+  // the catalog does not read it as; without the catalog to ask, a cast)
+  const said = (r, path, now) => assert.ok(r.errors.join(' ').includes(`\`${path}\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
+  said(check({ fn: 'count', where: [first] }), 'semantic_models.0.measures.0.expr', { fn: 'count', args: [{ fn: 'case', cases: [{ when: [first], then: { value: 1 } }] }] });
+  const price = { property: 'price_in_usd_of_event_data', type: 'numeric' };
+  said(check({ fn: 'sum', args: [price] }), 'semantic_models.0.measures.0.expr.args.0', { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'numeric' });
+  const typedBy = validateInput(validators.build_semantic_model, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr: { fn: 'sum', args: [price] } }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] }, { propertyType: propertyTypes(catalog) });
+  said(typedBy, 'semantic_models.0.measures.0.expr.args.0', { property: 'price_in_usd_of_event_data' });
+});
+
+// THE ELSE TRAP, IN A SEMANTIC MODEL TOO: a measure that folds only some rows folds a case with no else —
+// an else gives every other row a value, and any aggregate but sum folds it (a count counts it, an average
+// averages it in). Refused when the declaration compiles, naming the rule; a sum may keep else: 0.
+test('a semantic measure over a case with an else is refused but for sum', async () => {
+  const { compileDeclaration } = await import('../../src/compile.js');
+  const first = eventIs(catalog.eventNames('events')[0]);
+  const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const over = (fn, then, other) => ({ fn, args: [{ fn: 'case', cases: [{ when: [first], then }], ...(other ? { else: other } : {}) }] });
+  for (const fn of ['count', 'count_distinct', 'average', 'max']) {
+    assert.throws(() => compileDeclaration(catalog, decl(over(fn, { column: 'session_number' }, { value: 0 }))), (e) => e.field === 'measures.expr' && new RegExp(`${fn} over a case with an else folds every row.*leave the else out`).test(e.message), fn);
+  }
+  assert.ok(compileDeclaration(catalog, decl(over('sum', { column: 'session_number' }, { value: 0 }))));
+  assert.ok(compileDeclaration(catalog, decl(over('count', { value: 1 }, { value: null }))));
+  assert.ok(compileDeclaration(catalog, decl(over('count', { value: 1 }))));
 });
 
 // UPDATE: a removed dimension is named the way it was declared — a column, an event property, or a

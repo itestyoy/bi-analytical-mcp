@@ -89,7 +89,7 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse.error || out.parse));
-  const r = await q(out.context_id, { metrics: ['castq_sum_ct', 'castq_avg_ct'] });
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['castq_sum_ct', 'castq_avg_ct'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(r.rows[0].castq_sum_ct), 1263);            // exact Σ complete_time
   assert.ok(Math.abs(num(r.rows[0].castq_avg_ct) - 50.52) < 1e-6);
@@ -104,17 +104,17 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
 test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'measure_over_metric_time');
-  const grand = await q(ctx, { metrics: ['active_users_dau', 'active_users_events'] });
-  const byMonth = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'month' }] });
+  const grand = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['active_users_dau', 'active_users_events'] }] });
+  const byMonth = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'month' }] }] });
   for (const r of [grand, byMonth]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(grand.rows[0].active_users_dau), 12, '[grand] 12 distinct users overall');
   const mau = num(byMonth.rows[0].active_users_dau);
   assert.equal(mau, 12, '[by month] MAU = 12');
   assert.equal(num(grand.rows[0].active_users_events), 184, '[event volume] 184 seeded events');
 
-  // a where computes with a function of what group_by names: the weekend's events — the ISO day of the
-  // week of metric_time is 6 or 7 — against the warehouse's own count of them
-  const weekend = await q(ctx, { metrics: ['active_users_events'], where: [{ fn: 'in', args: [{ fn: 'date_part', args: [{ time: 'metric_time', grain: 'day' }], part: 'dow' }, { value: 6 }, { value: 7 }] }] });
+  // a where step before the metrics step computes with a function of what group_by names: the weekend's
+  // events — the ISO day of the week of metric_time is 6 or 7 — against the warehouse's own count of them
+  const weekend = await q(ctx, { steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ fn: 'date_part', args: [{ time: 'metric_time', grain: 'day' }], part: 'dow' }, { value: 6 }, { value: 7 }] }] }, { stage: 'metrics', metrics: ['active_users_events'] }] });
   assert.equal(weekend.ok, true, JSON.stringify(weekend.error || weekend));
   const { rows: [onWeekend] } = await wh.query('select count(*) as n from fct_analytics_events where isodow(device_time) in (6, 7)');
   assert.ok(num(onWeekend.n) > 0 && num(onWeekend.n) < 184, `[where date_part] the weekend holds some of the events: ${onWeekend.n}`);
@@ -122,35 +122,35 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
 
   // dry_run: the rendered SQL WITHOUT executing; the dataflow plan only with include: ["plan"] (feature/
   // lifecycle check — we assert the plan/SQL are PRESENT, not their content).
-  const planned = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, include: ['plan'] });
+  const dauByDay = { stage: 'metrics', metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const planned = await q(ctx, { steps: [dauByDay], dry_run: true, include: ['plan'] });
   assert.equal(planned.ok, true, JSON.stringify(planned.error || planned));
   assert.equal(planned.dry_run, true, '[dry run] a dry run says so');
   assert.ok(typeof planned.sql === 'string' && planned.sql.length > 0, '[dry run] rendered SQL returned');
   assert.ok(planned.plan && typeof planned.plan === 'object', '[include plan] plan object returned');
   assert.ok(typeof planned.plan.dataflow_plan === 'string' && planned.plan.dataflow_plan.length > 0, '[include plan] dataflow plan present');
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], include: ['plan'] }), (e) => e.field === 'include' && /include: \["plan"\] goes with dry_run/.test(e.message));
+  await assert.rejects(() => q(ctx, { steps: [{ stage: 'metrics', metrics: ['active_users_dau'] }], include: ['plan'] }), (e) => e.field === 'include' && /include: \["plan"\] goes with dry_run/.test(e.message));
   // a dry run stores nothing: materialize beside it is refused, not ignored
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], dry_run: true, materialize: true }), /materialize goes with a query that runs/);
+  await assert.rejects(() => q(ctx, { steps: [dauByDay], dry_run: true, materialize: true }), /materialize goes with a query that runs/);
 
   // a dry run is compiled with the caller's own limit: its SQL, run as shown, returns that many rows
   // (it was compiled with the fetch size, one past the page); without a limit, every one of the 7 days
-  const limited = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], limit: 3, dry_run: true });
+  const limited = await q(ctx, { steps: [dauByDay], limit: 3, dry_run: true });
   assert.equal(limited.ok, true, JSON.stringify(limited.error || limited));
   assert.equal(limited.dry_run, true, '[dry run] a dry run says so');
   assert.equal(limited.plan, undefined, '[dry run] no plan unless asked for');
   assert.equal((await wh.query(limited.sql)).rows.length, 3, '[dry run] compiled with the caller\'s limit');
   assert.equal((await wh.query(planned.sql)).rows.length, 7, '[dry run] without a limit, every one of the 7 days');
 
-  // #4b: the steps after a query name its result columns — the day axis is metric_time_day; dry_run
-  // surfaces the columns the rows come back with; an order_by step naming a column the result does not
-  // have (the bare `metric_time` too, which with two grains in group_by named only one of them) is
-  // refused with the columns there are.
-  const byDay = [{ time: 'metric_time', grain: 'day' }];
-  const sortBy = (...keys) => [{ stage: 'order_by', keys }];
+  // #4b: the steps after the metrics step name its result columns — the day axis is metric_time_day;
+  // dry_run surfaces the columns the rows come back with; an order_by step naming a column the result
+  // does not have (the bare `metric_time` too, which with two grains in group_by named only one of them)
+  // is refused with the columns there are.
+  const sortBy = (...keys) => ({ stage: 'order_by', keys });
   assert.deepEqual(planned.output_columns.map((c) => c.name).sort(), ['active_users_dau', 'metric_time_day'], `output_columns: ${JSON.stringify(planned.output_columns)}`);
   // a lone order_by step is MetricFlow's own order: the rows of the plain query, in that order
-  const plain = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay });
-  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day' }) });
+  const plain = await q(ctx, { steps: [dauByDay] });
+  const sorted = await q(ctx, { steps: [dauByDay, sortBy({ key: 'metric_time_day' })] });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
   assert.equal(sorted.row_count, 7, '[by day] 7 distinct active days, in ascending order');
   assert.equal(Math.max(...sorted.rows.map((r) => num(r.active_users_dau))), 6, '[by day] peak DAU 6 (2026-01-05)');
@@ -162,35 +162,37 @@ test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t
   assert.deepEqual(pairs(sorted.rows), pairs(plain.rows).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), '[order_by step] the plain query\'s rows, in that order');
   // the same order asked with NULLs first — no NULL day here — is written by the read compiler over
   // MetricFlow's SQL: the same rows in the same order
-  const nullsFirst = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day', nulls: 'first' }) });
+  const nullsFirst = await q(ctx, { steps: [dauByDay, sortBy({ key: 'metric_time_day', nulls: 'first' })] });
   assert.deepEqual(pairs(nullsFirst.rows), pairs(sorted.rows), '[order_by step, over the SQL] the same rows in the same order');
   // …and in the same form: a day reads the same whichever path ran the query (`mf query`'s CSV, the dbt client's show)
   assert.deepEqual(nullsFirst.rows, sorted.rows, '[one form] the same values, whichever path ran the query');
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'nonsense' }) }), /steps\[0\]: .*unknown column 'nonsense'.*available: metric_time_day, active_users_dau/);
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [...byDay, { time: 'metric_time', grain: 'week' }], steps: sortBy({ key: 'metric_time' }) }), /unknown column 'metric_time'.*available: metric_time_day, metric_time_week/);
+  // (the step is named by its place in the query's steps: the one after the metrics step)
+  await assert.rejects(() => q(ctx, { steps: [dauByDay, sortBy({ key: 'nonsense' })] }), /steps\[1\]: .*unknown column 'nonsense'.*available: metric_time_day, active_users_dau/);
+  await assert.rejects(() => q(ctx, { steps: [{ ...dauByDay, group_by: [...dauByDay.group_by, { time: 'metric_time', grain: 'week' }] }, sortBy({ key: 'metric_time' })] }), /unknown column 'metric_time'.*available: metric_time_day, metric_time_week/);
   // a key is the result column it is handed as — the same 7 days, desc puts the latest first — never
   // the token the server resolves it to
-  const byColumn = await q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time_day', direction: 'desc' }) });
+  const byColumn = await q(ctx, { steps: [dauByDay, sortBy({ key: 'metric_time_day', direction: 'desc' })] });
   assert.equal(byColumn.row_count, 7);
   assert.deepEqual(byColumn.rows.map((r) => String(r.metric_time_day)), sorted.rows.map((r) => String(r.metric_time_day)).reverse());
-  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: byDay, steps: sortBy({ key: 'metric_time__day' }) }), /unknown column 'metric_time__day'/);
+  await assert.rejects(() => q(ctx, { steps: [dauByDay, sortBy({ key: 'metric_time__day' })] }), /unknown column 'metric_time__day'/);
 });
 
 // ── 2. joins: group_by_joined_attribute ──────────────────────────────────────
 test('TASK group_by_joined_attribute: revenue/payers/ARPPU by user attribute (1-hop join)', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'group_by_joined_attribute');
-  const total = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'] });
-  const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'country' }] });
-  const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'platform' }] });
-  const byAcq = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers', 'rev_segment_arppu'], group_by: [{ source: 'users', column: 'acquisition_type' }] });
+  const total = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['rev_segment_revenue', 'rev_segment_payers'] }] });
+  const byCountry = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const byPlatform = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['rev_segment_revenue'], group_by: [{ source: 'users', column: 'platform' }] }] });
+  const byAcq = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['rev_segment_revenue', 'rev_segment_payers', 'rev_segment_arppu'], group_by: [{ source: 'users', column: 'acquisition_type' }] }] });
   for (const r of [total, byCountry, byPlatform, byAcq]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].rev_segment_revenue), 85);             // total revenue 85
   assert.equal(num(total.rows[0].rev_segment_payers), 7);              // payers 7
   const cm = mapCol(byCountry.rows, 'users_country', 'rev_segment_revenue');
   assert.equal(cm.US, 35); assert.equal(cm.GB, 25); assert.equal(cm.BR, 25); // by country
-  // a where compares a function of a joined column: the country lowered is 'us' — the US revenue
-  const lowered = await q(ctx, { metrics: ['rev_segment_revenue'], where: [{ fn: 'eq', args: [{ fn: 'lower', args: [{ source: 'users', column: 'country' }] }, { value: 'us' }] }] });
+  // a where step before the metrics step compares a function of a joined column: the country lowered is
+  // 'us' — the US revenue
+  const lowered = await q(ctx, { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'lower', args: [{ source: 'users', column: 'country' }] }, { value: 'us' }] }] }, { stage: 'metrics', metrics: ['rev_segment_revenue'] }] });
   assert.equal(lowered.ok, true, JSON.stringify(lowered.error || lowered));
   assert.equal(num(lowered.rows[0].rev_segment_revenue), cm.US, '[where lower(column)] the US revenue, 35');
   // DE has no completed purchases -> either absent or a null/0 revenue row
@@ -214,7 +216,7 @@ test('TASK group_by_joined_attribute: revenue/payers/ARPPU by user attribute (1-
 test('TASK funnel_from_event_property_steps: tutorial step_id drop-off 8 -> 5 -> 3', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'funnel_from_event_property_steps');
-  const r = await q(ctx, { metrics: ['tut_funnel_step1', 'tut_funnel_step2', 'tut_funnel_step3', 'tut_funnel_conv_1_2', 'tut_funnel_conv_2_3'] });
+  const r = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['tut_funnel_step1', 'tut_funnel_step2', 'tut_funnel_step3', 'tut_funnel_conv_1_2', 'tut_funnel_conv_2_3'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const row = r.rows[0];
   assert.equal(num(row.tut_funnel_step1), 8, '[steps] step_1 distinct users');
@@ -254,9 +256,9 @@ test('TASK conversion_metric_window: a return (a second session) within 48h / 7�
 test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers grid', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'cohort_grid_two_time_axes');
-  const total = await q(ctx, { metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'] });
-  const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'], group_by: [{ source: 'users', column: 'install_date' }] });
-  const grid = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ source: 'users', column: 'install_date' }, { time: 'metric_time', grain: 'day' }] });
+  const total = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'] }] });
+  const byCohort = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['cohort_grid_revenue', 'cohort_grid_buyers'], group_by: [{ source: 'users', column: 'install_date' }] }] });
+  const grid = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['cohort_grid_revenue'], group_by: [{ source: 'users', column: 'install_date' }, { time: 'metric_time', grain: 'day' }] }] });
   for (const r of [total, byCohort, grid]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].cohort_grid_revenue), 85, '[total] revenue 85');
   assert.equal(num(total.rows[0].cohort_grid_buyers), 7, '[total] distinct buyers 7');
@@ -288,7 +290,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
     built[name] = out.context_id;
   }
   const cohorts = async (name) => {
-    const r = await q(built[name], { metrics: [`${name}_n`], group_by: [{ source: 'users', column: 'install_date' }] });
+    const r = await q(built[name], { steps: [{ stage: 'metrics', metrics: [`${name}_n`], group_by: [{ source: 'users', column: 'install_date' }] }] });
     assert.equal(r.ok, true, JSON.stringify(r.error || r));
     assert.ok(r.columns.some((c) => c.name === 'users_install_date'), `the column is named for the reference: ${JSON.stringify(r.columns)}`);
     return r.rows;
@@ -312,13 +314,13 @@ test('a task dimension over a time column is read at its grain (week), or at the
   assert.deepEqual(weekly, byKey(dailyRows, 'coh_dy', isoWeek));
   assert.equal(Object.keys(weekly).filter((k) => k !== 'null').length, 2, 'Jan 1-4 and Jan 5 2026 are two ISO weeks');
   // filtered on the same column: only the cohort of the week of Jan 5
-  const late = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ source: 'users', column: 'install_date' }], where: [{ fn: 'gte', args: [{ source: 'users', column: 'install_date' }, { value: '2026-01-05' }] }] });
+  const late = await q(built.coh_wk, { steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ source: 'users', column: 'install_date' }, { value: '2026-01-05' }] }] }, { stage: 'metrics', metrics: ['coh_wk_n'], group_by: [{ source: 'users', column: 'install_date' }] }] });
   assert.equal(late.ok, true, JSON.stringify(late.error || late));
   assert.deepEqual(byKey(late.rows, 'coh_wk'), { '2026-01-05': weekly['2026-01-05'] });
 
   // the computed dimension splits the events into the completed purchases and the rest, as the
   // warehouse counts them by hand
-  const split = await q(built.coh_wk, { metrics: ['coh_wk_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] });
+  const split = await q(built.coh_wk, { steps: [{ stage: 'metrics', metrics: ['coh_wk_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] }] });
   assert.equal(split.ok, true, JSON.stringify(split.error || split));
   const flag = split.group_by_resolved['events.purchased'];
   const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.coh_wk_n)]));
@@ -337,16 +339,16 @@ test('a task dimension over a time column is read at its grain (week), or at the
 });
 
 // ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────
-// (A did / didn't split by a Metric() filter is not tested here: no tool takes one — a query's where is
-// the one expression grammar, and caller Jinja stays literal text: CALLER TEXT IS NEVER JINJA in
-// pipeline-stages.test.js.)
+// (A did / didn't split by a Metric() filter is not tested here: no tool takes one — a where step before
+// the metrics step is the one expression grammar, and caller Jinja stays literal text: CALLER TEXT IS
+// NEVER JINJA in pipeline-stages.test.js.)
 test('TASK boolean_condition_as_measure: did-purchase and session counts as counts with a condition (8 of 21)', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'boolean_condition_as_measure');
-  const both = await q(ctx, { metrics: ['behavior_purchases', 'behavior_sessions'] });
-  const sessByDay = await q(ctx, { metrics: ['behavior_sessions'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  const both = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['behavior_purchases', 'behavior_sessions'] }] });
+  const sessByDay = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['behavior_sessions'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   for (const r of [both, sessByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  assert.equal(num(both.rows[0].behavior_purchases), 8, '[purchases] 8 completed purchases (a count with a where)');
+  assert.equal(num(both.rows[0].behavior_purchases), 8, '[purchases] 8 completed purchases (a count over a case)');
   assert.equal(num(both.rows[0].behavior_sessions), 21, '[sessions] 21 new_session events');
   assert.equal(sumCol(sessByDay.rows, 'behavior_sessions'), 21, '[sessions by day] per-day sessions sum to 21');
   assert.ok(num(both.rows[0].behavior_purchases) < num(both.rows[0].behavior_sessions), '[both] behavior is a subset signal');
@@ -356,9 +358,9 @@ test('TASK boolean_condition_as_measure: did-purchase and session counts as coun
 test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'agg_chosen_per_question');
-  const totals = await q(ctx, { metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate', 'progression_avg_time'] });
+  const totals = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate', 'progression_avg_time'] }] });
   // the recipe's first example (starts and completes by level_id), with the rate beside them
-  const byLevel = await q(ctx, { metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate'], group_by: [{ source: 'events', property: 'level_id_of_event_data' }] });
+  const byLevel = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['progression_starts', 'progression_completes', 'progression_completion_rate'], group_by: [{ source: 'events', property: 'level_id_of_event_data' }] }] });
   for (const r of [totals, byLevel]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const row = totals.rows[0];
   assert.equal(num(row.progression_starts), 28, '[totals] level_started 28');
@@ -384,11 +386,11 @@ test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, a
 test('TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'ratio_metric');
-  const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases', 'monetization_aov'] });
+  const totals = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases', 'monetization_aov'] }] });
   // revenue is a sum, so the product and the country splits are the marginals of ONE query grouped by both
-  const byProductCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ source: 'events', property: 'product_id_of_event_data' }, { source: 'users', column: 'country' }] });
+  const byProductCountry = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['monetization_revenue'], group_by: [{ source: 'events', property: 'product_id_of_event_data' }, { source: 'users', column: 'country' }] }] });
   // (the recipe's first example, as it is served)
-  const byDay = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  const byDay = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   for (const r of [totals, byProductCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].monetization_revenue), 85, '[totals] revenue 85');
   assert.equal(num(totals.rows[0].monetization_payers), 7, '[totals] payers 7');
@@ -405,9 +407,9 @@ test('TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment', opts, async 
 test('TASK payload_property_measure_and_dimension: ad revenue & impressions by network/placement', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'payload_property_measure_and_dimension');
-  const totals = await q(ctx, { metrics: ['ads_ad_revenue', 'ads_impressions', 'ads_rev_per_imp'] });
-  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: [{ source: 'events', property: 'network_of_additional_info_of_event_data' }] });
-  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ source: 'events', property: 'placement_of_event_data' }] });
+  const totals = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['ads_ad_revenue', 'ads_impressions', 'ads_rev_per_imp'] }] });
+  const byNetwork = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['ads_ad_revenue'], group_by: [{ source: 'events', property: 'network_of_additional_info_of_event_data' }] }] });
+  const byPlacement = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['ads_impressions'], group_by: [{ source: 'events', property: 'placement_of_event_data' }] }] });
   for (const r of [totals, byNetwork, byPlacement]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].ads_ad_revenue), 29);                // total ad revenue 29 cents
   assert.equal(num(totals.rows[0].ads_impressions), 12);              // 12 ad_finished impressions
@@ -423,10 +425,10 @@ test('TASK payload_property_measure_and_dimension: ad revenue & impressions by n
 test('TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source split', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'two_event_scopes_and_a_net');
-  const bySource = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'], group_by: [{ source: 'events', property: 'source_type_of_event_data' }] });
+  const bySource = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['economy_coins_in', 'economy_coins_out'], group_by: [{ source: 'events', property: 'source_type_of_event_data' }] }] });
   // the recipe's first example (net coins by day), with both of its inputs beside it — both are sums,
   // so the day split also carries the totals
-  const byDay = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out', 'economy_net_coins'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  const byDay = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['economy_coins_in', 'economy_coins_out', 'economy_net_coins'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   for (const r of [bySource, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const coinsIn = sumCol(byDay.rows, 'economy_coins_in');
   const coinsOut = sumCol(byDay.rows, 'economy_coins_out');
@@ -468,14 +470,10 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const day = await eventsPerDay();
   const at = (d) => day.get(d) || 0;
   const created = await engine.build_semantic_model(CUMULATIVE_TASK);
-  const query = {
-    context_id: created.context_id,
-    metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'],
-    group_by: [{ time: 'metric_time', grain: 'day' }],
-    time_range: { start: '2026-01-03', end: '2026-01-05' },
-  };
+  const query = { context_id: created.context_id, time_range: { start: '2026-01-03', end: '2026-01-05' } };
+  const cumulative = { stage: 'metrics', metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
   const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];
-  const r = await engine.query_semantic_model({ ...query, steps: byDay });
+  const r = await engine.query_semantic_model({ ...query, steps: [cumulative, ...byDay] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const got = r.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]);
   const days = ['2026-01-03', '2026-01-04', '2026-01-05'];
@@ -483,9 +481,10 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const upTo = (d) => [...day].filter(([k]) => k <= d).reduce((a, [, n]) => a + n, 0);
   assert.ok(at('2026-01-02') > 0, 'the fixture has events the day before the range');
   assert.deepEqual(got, days.map((d) => [at(d), at(prev[d]) + at(d), upTo(d)]));
-  // a where step filters the RESULT, not the rows a metric folds (that is the query's where, or its
-  // window): the days it keeps carry the sums the whole query gave them, the days before them included
-  const later = await engine.query_semantic_model({ ...query, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
+  // a where step after the metrics step filters the RESULT, not the rows a metric folds (that is a where
+  // step before it, or the window): the days it keeps carry the sums the whole query gave them, the days
+  // before them included
+  const later = await engine.query_semantic_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
   assert.equal(later.ok, true, JSON.stringify(later.error));
   assert.deepEqual(later.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
 });

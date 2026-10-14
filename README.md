@@ -27,7 +27,7 @@ Design docs:
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
-| `query_semantic_model` | run `mf query` against a context (metrics + group_by + where), then optional `steps` over its result in the pipeline's own read stages (a where step on a metric is a having) |
+| `query_semantic_model` | a metric query as `steps`: one `metrics` step (metrics + group_by) run by `mf query` against a context, `where` steps before it for the rows its metrics fold, and the pipeline's own read stages after it over its result (a where step on a metric is a having) |
 | `query_pipeline_model` | read a built pipeline's rows, or query its stored table in `steps` of the pipeline's own stages (where, compute, aggregate, pivot, …) |
 | `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
 
@@ -48,10 +48,24 @@ Conditions, measures and computed values are written in ONE expression grammar i
 { stage: "aggregate", group_by: ["country"], measures: [
   { name: "revenue", expr: { fn: "sum", args: [{ column: "price" }] } },
   { name: "p90_load", expr: { fn: "percentile", args: [{ column: "load_ms" }], percentile: 0.9 } },
-  { name: "failed_loads", expr: { fn: "count", where: [{ fn: "eq", args: [{ column: "status" }, { value: "error" }] }] } } ] }
+  { name: "failed_loads", expr: { fn: "count", args: [{ fn: "case", cases: [
+    { when: [{ fn: "eq", args: [{ column: "status" }, { value: "error" }] }], then: { value: 1 } }] }] } } ] }
+{ stage: "compute", name: "level", expr: { fn: "cast", args: [{ property: "level_id_of_event_data" }], type: "int" } }
 ```
 
-A `where` is a list of conditions that all hold; `and` / `or` / `not` nest inside it.
+A `where` is a list of conditions that all hold; `and` / `or` / `not` nest inside it. A conditional
+aggregate folds a `case` (missing on the rows it leaves out — so no `else`, except `sum`'s `else: 0`),
+and a value has the type of what it is read from (a property the catalog's), converted by `cast`.
+
+A metric query is steps too — where steps before its `metrics` step filter the rows its metrics fold,
+the read steps after it work on its result:
+
+```js
+{ context_id, steps: [
+  { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] },
+  { stage: "metrics", metrics: ["revenue"], group_by: [{ time: "metric_time", grain: "day" }] },
+  { stage: "order_by", keys: [{ key: "revenue", direction: "desc" }] } ] }
+```
 
 ## Architecture
 
@@ -67,8 +81,8 @@ AI ──► query_semantic_model (enum-constrained)
   names at the boundary (`src/validate.js`).
 - **Compile** (`src/compile.js`): declaration → dbt measures/dimensions/metrics.
   A measure is `{ name, expr }`, its expression ONE aggregate in the expression grammar every
-  tool shares (`{ fn: "sum", args: [{ column }], where: [...] }`); the model's and the measure's
-  `where` are baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
+  tool shares (`{ fn: "sum", args: [{ column }] }`, the rows where a condition holds by a `case` it
+  folds); the model's `where` and the measure's case are baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
   `{ metric }` leaves — a ratio is `div` of two metrics. Namespacing
   uses a single underscore (dbt 1.11 forbids `__` in names).
 - **Render** (`src/yaml-render.js`): exactly one semantic model per dbt model per

@@ -25,18 +25,25 @@
                   "fn": "count_distinct",
                   "args": [
                     {
-                      "column": "player_id_of_internal"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "new_session"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "new_session"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "column": "player_id_of_internal"
+                          }
                         }
                       ]
                     }
@@ -67,41 +74,56 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "active_users_dau"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "active_users_dau"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "active_users_dau"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "week"
+              "stage": "metrics",
+              "metrics": [
+                "active_users_dau"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "week"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "active_users_dau"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "month"
+              "stage": "metrics",
+              "metrics": [
+                "active_users_dau"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "month"
+                }
+              ]
             }
           ]
         }
       ],
       "notes": "count_distinct is not additive: a month is re-counted from the fact, never summed from its days — which is why the same measure at two grains is a legitimate question (see same_measure_two_grains). The newest period is partial until the source is fully loaded; check freshness in the semantic_index overview.",
-      "hack": "group_by { time: \"metric_time\", grain } turns ANY measure into a series, and the grain is a QUERY argument — one model answers day, week and month. count counts rows, count_distinct of the entity key counts actors."
+      "hack": "The metrics step's group_by { time: \"metric_time\", grain } turns ANY measure into a series, and the grain is a QUERY argument — one model answers day, week and month. count counts rows, count_distinct of the entity key counts actors."
     },
     {
       "id": "group_by_joined_attribute",
@@ -201,62 +223,87 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "rev_segment_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "country"
+              "stage": "metrics",
+              "metrics": [
+                "rev_segment_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "country"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "rev_segment_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "platform"
+              "stage": "metrics",
+              "metrics": [
+                "rev_segment_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "platform"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "rev_segment_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "media_source"
+              "stage": "metrics",
+              "metrics": [
+                "rev_segment_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "media_source"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "rev_segment_arppu"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "acquisition_type"
+              "stage": "metrics",
+              "metrics": [
+                "rev_segment_arppu"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "acquisition_type"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "rev_segment_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "media_source"
+              "stage": "metrics",
+              "metrics": [
+                "rev_segment_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "media_source"
+                }
+              ]
             }
           ]
         }
       ],
-      "notes": "The model whose column it is must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where on { source, column } filters through the same join.",
+      "notes": "The model whose column it is must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where step before the metrics step, on { source, column }, filters through the same join.",
       "hack": "Load the model with a semantic_models item { source: \"<model>\" } and group_by { source: \"<model>\", column }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any column of any joined model, always this form."
     },
     {
@@ -287,29 +334,36 @@
                   "fn": "count_distinct",
                   "args": [
                     {
-                      "column": "player_id_of_internal"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "tutorial"
-                        }
-                      ]
-                    },
-                    {
-                      "fn": "eq",
-                      "args": [
-                        {
-                          "property": "element_of_event_data"
-                        },
-                        {
-                          "value": "step_1"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "tutorial"
+                                }
+                              ]
+                            },
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "property": "element_of_event_data"
+                                },
+                                {
+                                  "value": "step_1"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "column": "player_id_of_internal"
+                          }
                         }
                       ]
                     }
@@ -322,29 +376,36 @@
                   "fn": "count_distinct",
                   "args": [
                     {
-                      "column": "player_id_of_internal"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "tutorial"
-                        }
-                      ]
-                    },
-                    {
-                      "fn": "eq",
-                      "args": [
-                        {
-                          "property": "element_of_event_data"
-                        },
-                        {
-                          "value": "step_2"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "tutorial"
+                                }
+                              ]
+                            },
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "property": "element_of_event_data"
+                                },
+                                {
+                                  "value": "step_2"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "column": "player_id_of_internal"
+                          }
                         }
                       ]
                     }
@@ -357,29 +418,36 @@
                   "fn": "count_distinct",
                   "args": [
                     {
-                      "column": "player_id_of_internal"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "tutorial"
-                        }
-                      ]
-                    },
-                    {
-                      "fn": "eq",
-                      "args": [
-                        {
-                          "property": "element_of_event_data"
-                        },
-                        {
-                          "value": "step_3"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "tutorial"
+                                }
+                              ]
+                            },
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "property": "element_of_event_data"
+                                },
+                                {
+                                  "value": "step_3"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "column": "player_id_of_internal"
+                          }
                         }
                       ]
                     }
@@ -439,25 +507,40 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "tut_funnel_step1",
-            "tut_funnel_step2",
-            "tut_funnel_step3"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "tut_funnel_step1",
+                "tut_funnel_step2",
+                "tut_funnel_step3"
+              ]
+            }
           ]
         },
         {
-          "metrics": [
-            "tut_funnel_conv_1_2"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "tut_funnel_conv_1_2"
+              ]
+            }
           ]
         },
         {
-          "metrics": [
-            "tut_funnel_conv_2_3"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "tut_funnel_conv_2_3"
+              ]
+            }
           ]
         }
       ],
       "notes": "Every step measure must count the SAME entity, or the ratios are not shares of one population. A step that can be reached twice still counts its user once — that is what count_distinct is for. A derived metric divides METRICS, so each step is a simple metric first and the conversion { fn: \"div\", args: [{ metric: \"step2\" }, { metric: \"step1\" }] } reads those.",
-      "hack": "A step = event_name + an event_data value, counted as { fn: \"count_distinct\", args: [<entity>], where: [<the step's conditions>] }; a derived metric dividing consecutive steps is the share that reached the next step. Two steps or six is the same payload. This counts WHO reached each step, not the order they did it in or how soon — for the order and a time limit, use a match_recognize pipeline (pipeline_ordered_sequence, conversion_metric_window)."
+      "hack": "A step = event_name + an event_data value, counted as { fn: \"count_distinct\", args: [{ fn: \"case\", cases: [{ when: [<the step's conditions>], then: <entity> }] }] } — the entity where the step holds, nothing elsewhere; a derived metric dividing consecutive steps is the share that reached the next step. Two steps or six is the same payload. This counts WHO reached each step, not the order they did it in or how soon — for the order and a time limit, use a match_recognize pipeline (pipeline_ordered_sequence, conversion_metric_window)."
     },
     {
       "id": "conversion_metric_window",
@@ -540,15 +623,27 @@
                 "name": "back_2d",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "lte",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "secs_to_back"
-                        },
-                        {
-                          "value": 172800
+                          "when": [
+                            {
+                              "fn": "lte",
+                              "args": [
+                                {
+                                  "column": "secs_to_back"
+                                },
+                                {
+                                  "value": 172800
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -559,15 +654,27 @@
                 "name": "back_7d",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "lte",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "secs_to_back"
-                        },
-                        {
-                          "value": 604800
+                          "when": [
+                            {
+                              "fn": "lte",
+                              "args": [
+                                {
+                                  "column": "secs_to_back"
+                                },
+                                {
+                                  "value": 604800
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -609,7 +716,7 @@
         ]
       },
       "notes": "One row per entity from its FIRST base event (rows: one_per_partition), secs_to_back = seconds from it to the next conversion event (NULL when there is none), so the window is measured from the event itself, in seconds — 172800 is 48 hours, not 'two calendar days'. A RETURN is a later session, not the one the launch opens: the conversion step carries a condition (here session_number >= 2) — without it nearly everyone 'returns' minutes after the launch. Every filter (an app, an environment) is a where before the match and holds for BOTH steps. For a window of dates: scan [start, end + the window] (the pipeline's time_range) and keep the base events of [start, end] with a where on first_seen_at after the match — otherwise the conversions after `end` are cut off and the last days read low. To count from ANY base event rather than the first, use rows: \"one_per_match\" and count the distinct entities that converted. Entities whose window has not elapsed yet drag the rate down: end the base range a window before the data ends. Group by a cohort (date_trunc of first_seen_at) or a joined attribute by adding it to the aggregate's group_by.",
-      "hack": "match_recognize over [A, B] per entity gives the time of each step (at_A, at_B), and a compute date_diff of the two the seconds to the conversion; an aggregate with a conditional count per horizon (where secs <= N) gives every horizon in one pass, and a div the rate. Change the events, or put a condition on a step, for any A→B question (level_started → level_completed within 86400). This is not a semantic metric: MetricFlow's conversion metric filters only the base side and scans the conversion side whole."
+      "hack": "match_recognize over [A, B] per entity gives the time of each step (at_A, at_B), and a compute date_diff of the two the seconds to the conversion; an aggregate counting a case per horizon (when secs <= N then 1) gives every horizon in one pass, and a div the rate. Change the events, or put a condition on a step, for any A→B question (level_started → level_completed within 86400). This is not a semantic metric: MetricFlow's conversion metric filters only the base side and scans the conversion side whole."
     },
     {
       "id": "cohort_grid_two_time_axes",
@@ -690,28 +797,38 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "cohort_grid_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "install_date"
-            },
-            {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "cohort_grid_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "install_date"
+                },
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "cohort_grid_buyers"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "install_date"
+              "stage": "metrics",
+              "metrics": [
+                "cohort_grid_buyers"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "install_date"
+                }
+              ]
             }
           ]
         }
@@ -722,7 +839,7 @@
     {
       "id": "boolean_condition_as_measure",
       "task_type": "metric_types",
-      "title": "A condition as a measure (a count with a where)",
+      "title": "A condition as a measure (a count of a case)",
       "when_to_use": "Counting rows that satisfy a condition, or splitting the population by \"did X\" — a behavioural cohort (purchasers vs non-purchasers) without a cohort table.",
       "required_events": [
         "iap_purchase_completed",
@@ -743,15 +860,27 @@
                 "name": "purchases",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "iap_purchase_completed"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "iap_purchase_completed"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -762,15 +891,27 @@
                 "name": "sessions",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "new_session"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "new_session"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -795,24 +936,34 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "behavior_purchases"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "behavior_purchases"
+              ]
+            }
           ]
         },
         {
-          "metrics": [
-            "behavior_sessions"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "behavior_sessions"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         }
       ],
-      "notes": "A count with a where counts ROWS, not entities: for \"how many users did X\" use count_distinct of the user key with the same where, or build the flag per entity in a pipeline first. The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
-      "hack": "A measure whose expr is { fn: \"count\", where: [<conditions>] } counts the rows where the conditions hold, so a flag becomes a measure you can divide (a derived metric with div), segment and put on a time axis. Any \"did X\" population is such a measure plus a div against the total."
+      "notes": "A count of a case counts ROWS, not entities: for \"how many users did X\" use count_distinct over a case with the same conditions that yields the user key (then: { column: <the key> }), or build the flag per entity in a pipeline first. Leave the case's else out: an else would give the other rows a value, and count would count them too (only sum may keep else: 0). The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
+      "hack": "A measure whose expr is { fn: \"count\", args: [{ fn: \"case\", cases: [{ when: [<conditions>], then: { value: 1 } }] }] } counts the rows where the conditions hold — the case is missing on every other row, and count skips it — so a flag becomes a measure you can divide (a derived metric with div), segment and put on a time axis. Any \"did X\" population is such a measure plus a div against the total."
     },
     {
       "id": "agg_chosen_per_question",
@@ -848,15 +999,27 @@
                 "name": "starts",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "level_started"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "level_started"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -867,15 +1030,27 @@
                 "name": "completes",
                 "expr": {
                   "fn": "count",
-                  "where": [
+                  "args": [
                     {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "level_completed"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "level_completed"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "value": 1
+                          }
                         }
                       ]
                     }
@@ -888,18 +1063,25 @@
                   "fn": "average",
                   "args": [
                     {
-                      "property": "daily_level_score_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "level_completed"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "level_completed"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "daily_level_score_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -944,25 +1126,35 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "progression_starts",
-            "progression_completes"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "level_id_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "progression_starts",
+                "progression_completes"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "level_id_of_event_data"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "progression_completion_rate"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "level_id_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "progression_completion_rate"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "level_id_of_event_data"
+                }
+              ]
             }
           ]
         }
@@ -1097,41 +1289,61 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "monetization_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "monetization_revenue"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "monetization_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "product_id_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "monetization_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "product_id_of_event_data"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "monetization_arppu"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "country"
+              "stage": "metrics",
+              "metrics": [
+                "monetization_arppu"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "country"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "monetization_aov"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "monetization_aov"
+              ]
+            }
           ]
         }
       ],
@@ -1237,35 +1449,50 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "ads_ad_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "network_of_additional_info_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "ads_ad_revenue"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "network_of_additional_info_of_event_data"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "ads_impressions"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "placement_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "ads_impressions"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "placement_of_event_data"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "ads_rev_per_imp"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "ad_type_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "ads_rev_per_imp"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "ad_type_of_event_data"
+                }
+              ]
             }
           ]
         }
@@ -1308,18 +1535,25 @@
                   "fn": "sum",
                   "args": [
                     {
-                      "property": "amount_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "currency_income"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "currency_income"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "amount_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -1332,18 +1566,25 @@
                   "fn": "sum",
                   "args": [
                     {
-                      "property": "amount_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "currency_outcome"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "currency_outcome"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "amount_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -1383,30 +1624,45 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "economy_net_coins"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "economy_net_coins"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "economy_coins_in",
-            "economy_coins_out"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "economy_coins_in",
+                "economy_coins_out"
+              ]
+            }
           ]
         },
         {
-          "metrics": [
-            "economy_coins_in"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "events",
-              "property": "source_type_of_event_data"
+              "stage": "metrics",
+              "metrics": [
+                "economy_coins_in"
+              ],
+              "group_by": [
+                {
+                  "source": "events",
+                  "property": "source_type_of_event_data"
+                }
+              ]
             }
           ]
         }
@@ -1439,18 +1695,25 @@
                   "fn": "count_distinct",
                   "args": [
                     {
-                      "column": "player_id_of_internal"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "new_session"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "new_session"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "column": "player_id_of_internal"
+                          }
                         }
                       ]
                     }
@@ -1470,24 +1733,34 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "stickiness_active_users"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "stickiness_active_users"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "stickiness_active_users"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "month"
+              "stage": "metrics",
+              "metrics": [
+                "stickiness_active_users"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "month"
+                }
+              ]
             }
           ]
         }
@@ -1690,18 +1963,25 @@
                   "fn": "sum",
                   "args": [
                     {
-                      "property": "price_in_usd_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "iap_purchase_completed"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "iap_purchase_completed"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "price_in_usd_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -1727,24 +2007,34 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "cumulative_rev_running_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "cumulative_rev_running_revenue"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "cumulative_rev_mtd_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "cumulative_rev_mtd_revenue"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
             }
           ]
         }
@@ -1782,18 +2072,25 @@
                   "fn": "sum",
                   "args": [
                     {
-                      "property": "price_in_usd_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "iap_purchase_completed"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "iap_purchase_completed"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "price_in_usd_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -1806,18 +2103,25 @@
                   "fn": "sum",
                   "args": [
                     {
-                      "property": "revenue_of_event_data"
-                    }
-                  ],
-                  "where": [
-                    {
-                      "fn": "eq",
-                      "args": [
+                      "fn": "case",
+                      "cases": [
                         {
-                          "column": "event_name"
-                        },
-                        {
-                          "value": "ad_finished"
+                          "when": [
+                            {
+                              "fn": "eq",
+                              "args": [
+                                {
+                                  "column": "event_name"
+                                },
+                                {
+                                  "value": "ad_finished"
+                                }
+                              ]
+                            }
+                          ],
+                          "then": {
+                            "property": "revenue_of_event_data"
+                          }
                         }
                       ]
                     }
@@ -1865,20 +2169,30 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "blended_total_revenue"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "month"
+              "stage": "metrics",
+              "metrics": [
+                "blended_total_revenue"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "month"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "blended_iap_revenue",
-            "blended_ad_revenue_cents"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "blended_iap_revenue",
+                "blended_ad_revenue_cents"
+              ]
+            }
           ]
         }
       ],
@@ -1958,8 +2272,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -2121,8 +2434,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -2918,8 +3230,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -3031,8 +3342,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -3426,8 +3736,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -3656,8 +3965,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -3752,8 +4060,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -3866,7 +4173,12 @@
             "stage": "compute",
             "name": "level_id",
             "expr": {
-              "property": "level_id_of_event_data",
+              "fn": "cast",
+              "args": [
+                {
+                  "property": "level_id_of_event_data"
+                }
+              ],
               "type": "int"
             }
           },
@@ -3925,8 +4237,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4115,8 +4426,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4219,7 +4529,12 @@
             "stage": "compute",
             "name": "level_id",
             "expr": {
-              "property": "level_id_of_event_data",
+              "fn": "cast",
+              "args": [
+                {
+                  "property": "level_id_of_event_data"
+                }
+              ],
               "type": "int"
             }
           },
@@ -4297,8 +4612,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4383,8 +4697,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4511,8 +4824,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4662,8 +4974,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4766,8 +5077,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -4919,8 +5229,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5057,8 +5366,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5196,8 +5504,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5377,8 +5684,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5469,8 +5775,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5562,8 +5867,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {
@@ -5763,48 +6067,73 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "ua_spend_cost",
-            "ua_spend_cost_per_click"
-          ]
-        },
-        {
-          "metrics": [
-            "ua_spend_cost"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "acquisition",
-              "column": "media_source"
+              "stage": "metrics",
+              "metrics": [
+                "ua_spend_cost",
+                "ua_spend_cost_per_click"
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "ua_spend_cost"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "ua_spend_cost"
+              ],
+              "group_by": [
+                {
+                  "source": "acquisition",
+                  "column": "media_source"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "ua_spend_max_daily_cost",
-            "ua_spend_avg_daily_cost",
-            "ua_spend_p90_daily_cost"
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "ua_spend_cost"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
+            }
           ]
         },
         {
-          "metrics": [
-            "ua_spend_cost"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "country"
+              "stage": "metrics",
+              "metrics": [
+                "ua_spend_max_daily_cost",
+                "ua_spend_avg_daily_cost",
+                "ua_spend_p90_daily_cost"
+              ]
+            }
+          ]
+        },
+        {
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "ua_spend_cost"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "country"
+                }
+              ]
             }
           ]
         }
@@ -5853,40 +6182,60 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "gov_total_spend"
-          ]
-        },
-        {
-          "metrics": [
-            "gov_total_spend"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "acquisition",
-              "column": "media_source"
+              "stage": "metrics",
+              "metrics": [
+                "gov_total_spend"
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "gov_total_spend"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "gov_total_spend"
+              ],
+              "group_by": [
+                {
+                  "source": "acquisition",
+                  "column": "media_source"
+                }
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "gov_total_spend"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "users",
-              "column": "country"
+              "stage": "metrics",
+              "metrics": [
+                "gov_total_spend"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "gov_total_spend"
+              ],
+              "group_by": [
+                {
+                  "source": "users",
+                  "column": "country"
+                }
+              ]
             }
           ]
         }
@@ -5975,31 +6324,46 @@
       },
       "example_queries": [
         {
-          "metrics": [
-            "mix_launches",
-            "mix_fatal"
-          ]
-        },
-        {
-          "metrics": [
-            "mix_launches",
-            "mix_fatal"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "time": "metric_time",
-              "grain": "day"
+              "stage": "metrics",
+              "metrics": [
+                "mix_launches",
+                "mix_fatal"
+              ]
             }
           ]
         },
         {
-          "metrics": [
-            "mix_fatal"
-          ],
-          "group_by": [
+          "steps": [
             {
-              "source": "crashlytics",
-              "column": "app_version"
+              "stage": "metrics",
+              "metrics": [
+                "mix_launches",
+                "mix_fatal"
+              ],
+              "group_by": [
+                {
+                  "time": "metric_time",
+                  "grain": "day"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "steps": [
+            {
+              "stage": "metrics",
+              "metrics": [
+                "mix_fatal"
+              ],
+              "group_by": [
+                {
+                  "source": "crashlytics",
+                  "column": "app_version"
+                }
+              ]
             }
           ]
         }
@@ -6265,8 +6629,7 @@
             "expr": {
               "property": "breadcrumbs_of_event_data"
             },
-            "name": "crumb",
-            "type": "string"
+            "name": "crumb"
           },
           {
             "stage": "aggregate",
@@ -6347,8 +6710,7 @@
             "stage": "compute",
             "name": "price",
             "expr": {
-              "property": "price_in_usd_of_event_data",
-              "type": "numeric"
+              "property": "price_in_usd_of_event_data"
             }
           },
           {

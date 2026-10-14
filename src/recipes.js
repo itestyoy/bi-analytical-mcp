@@ -18,6 +18,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { pythonReferenceRecipes } from './python-guide.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { currentOf, currentMetrics, currentQueryInput } from './earlier-spelling.js';
+import { propertyTypes } from './pipeline/compute.js';
 
 /**
  * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
@@ -25,10 +26,11 @@ import { currentOf, currentMetrics, currentQueryInput } from './earlier-spelling
  * no tool takes — or its first steps as `stages`, and stages in an earlier spelling; a deployment's file
  * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage respelled
  * as a kept draft's is (src/pipeline/earlier.js; with no columns known, an unnest's `source` is read as
- * an event property, the build's first choice): what the recipe view hands over is always a request the
- * tool accepts as it stands.
+ * an event property, the build's first choice; with the `catalog`, a typed read whose type is the
+ * source's own is the bare read): what the recipe view hands over is always a request the tool accepts
+ * as it stands.
  */
-export function pipelineStartRequest(payload) {
+export function pipelineStartRequest(payload, catalog = null) {
   if (!payload || typeof payload !== 'object') return payload;
   let request = payload;
   if (payload.pipeline && typeof payload.pipeline === 'object') {
@@ -41,7 +43,7 @@ export function pipelineStartRequest(payload) {
     request = { ...rest, steps: stages };
   }
   if (!Array.isArray(request.steps)) return request;
-  const steps = request.steps.map((st) => currentSpelling(st));
+  const steps = request.steps.map((st) => currentSpelling(st, { catalog, source: request.source }));
   return steps.every((st, i) => st === request.steps[i]) ? request : { ...request, steps };
 }
 
@@ -49,10 +51,12 @@ const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 /** A semantic model item of an earlier recipe in today's spelling: a dimension's `as_type` dropped (the
  *  catalog's column type says whether it is a time dimension now), a sum_boolean measure as the count
- *  with its where it computed (sum_boolean summed the scope as a boolean, whatever field it named), and
- *  its measures, conditions and dimensions in the one expression grammar (src/earlier-spelling.js — a
- *  `field` is read as the column of that name, which a property the source stores flat also is). */
-function currentSemanticModel(sm) {
+ *  of the rows its where held for (sum_boolean summed the scope as a boolean, whatever field it named:
+ *  a count of a case now), and its measures, conditions and dimensions in the one expression grammar
+ *  (src/earlier-spelling.js — a `field` is read as the column of that name, which a property the source
+ *  stores flat also is; an aggregate's where is the case it folds, a typed read a cast where its type is
+ *  not the read's own — the `catalog`'s type for the item's source). */
+function currentSemanticModel(sm, catalog = null) {
   if (!isObj(sm)) return sm;
   let out = sm;
   if ((sm.dimensions || []).some((d) => isObj(d) && d.as_type !== undefined)) {
@@ -61,7 +65,7 @@ function currentSemanticModel(sm) {
   if ((sm.measures || []).some((m) => m?.agg === 'sum_boolean')) {
     out = { ...out, measures: sm.measures.map((m) => (m?.agg === 'sum_boolean' ? (({ field: _f, cast: _c, percentile: _p, ...rest }) => ({ ...rest, agg: 'count' }))(m) : m)) };
   }
-  return currentOf(out);
+  return currentOf(out, { propertyType: propertyTypes(catalog, sm.source) });
 }
 
 /**
@@ -72,11 +76,12 @@ function currentSemanticModel(sm) {
  * in the earlier grammar, or name an item's model `from`; a deployment's file is not ours to rewrite, so
  * each is read here as what it said: a model loaded is a `{ source }` item of semantic_models.
  */
-export function semanticRequest(payload) {
+export function semanticRequest(payload, catalog = null) {
   if (!isObj(payload)) return payload;
   const { use_base_models: base, ...rest } = payload;
   let out = base === undefined ? payload : rest;
-  if (Array.isArray(out.semantic_models) && out.semantic_models.some((sm) => currentSemanticModel(sm) !== sm)) out = { ...out, semantic_models: out.semantic_models.map(currentSemanticModel) };
+  const current = (sm) => currentSemanticModel(sm, catalog);
+  if (Array.isArray(out.semantic_models) && out.semantic_models.some((sm) => current(sm) !== sm)) out = { ...out, semantic_models: out.semantic_models.map(current) };
   if (Array.isArray(base) && base.length) {
     const loaded = new Set((out.semantic_models || []).map((sm) => sm?.source));
     out = { ...out, semantic_models: [...(out.semantic_models || []), ...base.filter((k) => !loaded.has(k)).map((source) => ({ source }))] };
@@ -140,19 +145,20 @@ function refSubject(semantic) {
 }
 
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. An example query
- *  written for an earlier version (a metric query's `order_by`, a read's `stages` / `transform`, a
- *  `{ model, attribute }` it groups or filters by) is read as the query it is now — its steps, its refs
- *  (src/earlier-spelling.js currentQueryInput). */
-function readFile(path, origin) {
+ *  written for an earlier version (a metric query's `metrics`, `group_by` and `where` beside its steps,
+ *  its `order_by`, a read's `stages` / `transform`, a `{ model, attribute }` it groups or filters by) is
+ *  read as the query it is now — its steps, a metrics step among them, its refs
+ *  (src/earlier-spelling.js currentQueryInput). `catalog` (when given) types what a typed read reads. */
+function readFile(path, origin, catalog = null) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   return (raw.recipes || []).map((r) => {
-    const semantic = r.semantic_payload ? semanticRequest(r.semantic_payload) : undefined;
+    const semantic = r.semantic_payload ? semanticRequest(r.semantic_payload, catalog) : undefined;
     return {
       ...r,
-      ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload) } : {}),
+      ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload, catalog) } : {}),
       ...(semantic ? { semantic_payload: semantic } : {}),
-      ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic) })) } : {}),
+      ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic), propertyType: propertyTypes(catalog) })) } : {}),
       ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
       origin,
     };
@@ -161,9 +167,10 @@ function readFile(path, origin) {
 
 /**
  * Load the system file and, on top of it, the deployment's own files (in order; a later id wins).
- * `system` and `deployment` are paths; deployment may be a list.
+ * `system` and `deployment` are paths; deployment may be a list. `catalog` (when given) is what an
+ * earlier typed read in a file is read against.
  */
-export function loadRecipes(system, deployment = [], caps = null) {
+export function loadRecipes(system, deployment = [], caps = null, catalog = null) {
   // comma-separated, as documented — a colon belongs to paths ('C:\deploy\…', '/mnt/vol:ro/…')
   const paths = Array.isArray(deployment) ? deployment : String(deployment || '').split(',').map((p) => p.trim()).filter(Boolean);
   const merged = new Map();
@@ -172,8 +179,8 @@ export function loadRecipes(system, deployment = [], caps = null) {
   // instead of read out of a long guide, and they answer to the same capability rules as the rest.
   // Seeded before the files so a system or deployment entry with the same id overrides them.
   for (const r of pythonReferenceRecipes()) merged.set(r.id, r);
-  for (const r of readFile(system, 'system')) merged.set(r.id, r);
-  for (const p of paths) for (const r of readFile(p, 'deployment')) merged.set(r.id, r);
+  for (const r of readFile(system, 'system', catalog)) merged.set(r.id, r);
+  for (const p of paths) for (const r of readFile(p, 'deployment', catalog)) merged.set(r.id, r);
   return new Recipes([...merged.values()], caps);
 }
 

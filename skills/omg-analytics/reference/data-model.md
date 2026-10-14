@@ -42,8 +42,9 @@ BI space filtered by label — this index is a starting map, not the authority.
 ## Using them in the MCP
 1. Read the metric/dimension page for its Calculation (event + param + filters/grain).
 2. Reproduce the metric with `build_semantic_model` (a measure over the right events: the
-   semantic model's `where` on `event_name`, a property value in the measure's own `where`),
-   query with `query_semantic_model`; segment by a `users` column (`{ source: "users", column }`,
-   with a `semantic_models` item `{ source: "users" }`) or an `event_data` dimension the task
-   declares (`{ source: "events", property }`). Prefer governed metrics over ad-hoc aggregates.
+   semantic model's `where` on `event_name`, a property value in a `case` the measure folds),
+   query with `query_semantic_model` (its `metrics` step); segment by a `users` column
+   (`{ source: "users", column }` in that step's `group_by`, with a `semantic_models` item
+   `{ source: "users" }`) or an `event_data` dimension the task declares
+   (`{ source: "events", property }`). Prefer governed metrics over ad-hoc aggregates.
 3. Confirm the exact field name + real values with `semantic_index` before relying on them.

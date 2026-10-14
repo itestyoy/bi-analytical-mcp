@@ -184,9 +184,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   NEITHER fixes an aggregation: a task writes a measure `{ name, expr }` whose
   expression is the aggregate function it chooses per question over that column
   (`{ fn: sum | average | min | max | count | count_distinct | median | percentile,
-  args: [{ column }] }`; the rows where a condition holds are counted by `count` with
-  that `where`) — the same column is summed for one question and read at a p90 for
-  the next. Adding `agg` to a catalog declaration is the OPT-IN exception: it additionally
+  args: [{ column }] }`; the rows where a condition holds are folded by the aggregate
+  over a `case` that yields its argument there — `count` of `{ fn: "case", cases: [{ when:
+  [c], then: { value: 1 } }] }`) — the same column is summed for one question and read at
+  a p90 for the next. Adding `agg` to a catalog declaration is the OPT-IN exception: it additionally
   publishes a governed measure whose function is fixed for everyone (any of dbt's,
   sum_boolean included, validated at catalog load); the free choice over the raw
   column remains.
@@ -307,8 +308,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
 - ONE VOCABULARY PER CONCEPT, IN EVERY TOOL (HARD RULE): an aggregation is a FUNCTION (`fn`:
   `average`, a quantile `percentile` with its `percentile` parameter), the name a step produces is
   `name`, a time bucket is `grain`, a list a tool runs in order is `steps` (one of them: `step`) — the
-  pipeline builder's and a read's, the steps after a metric query, an eventstream's start and its
-  library steps — each item tagged by what it is (a SQL stage by `stage`, a library op by `type`),
+  pipeline builder's and a read's, a metric query's (its metrics step among them), an eventstream's
+  start and its library steps — each item tagged by what it is (a SQL stage by `stage`, a library op by `type`),
   tasks are read with `task_ids` and paged by `offset` / `limit` in every query tool, and a condition,
   a measure and a computed value are ONE EXPRESSION GRAMMAR — `{ fn, args: [expressions], …its parameters }` over
   leaves, nested to any depth. A CONCEPT HAS ONE DEFINITION — built by ONE builder, under ONE name in
@@ -317,7 +318,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   leaf, the rows' and the refs that name a value, one per function shape, `args` recursive through the
   one def), `$defs.stage` (`stageDefs`, src/pipeline/stages.js — titled groups, `STAGE_GROUPS`: SQL over
   rows, over a source's events (match_recognize), on a runtime (python; in the retentioneering tool also
-  the library's ops, the feature's own runtime group)), `$defs.ref` (`refSchema`, src/schema/refs.js —
+  the library's ops, the feature's own runtime group), in the semantic layer (the metrics step, which
+  only a place that names it takes — query_semantic_model's)), `$defs.ref` (`refSchema`, src/schema/refs.js —
   the catalog: `{ source }`, `{ source, event }`, `{ source, column, via? }` a model's column (`via`
   where a place reads one), `{ source, property }` an event property; the semantic layer:
   `{ semantic_model, dimension, grain? }`,
@@ -332,7 +334,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   So what a tool cannot take is refused by its own schema, and its listing carries no form it has no use
   for (every request carries the tool list: test/unit/schema-portability.test.js holds its size). It is
   NEVER SPLIT PER PLACE inside a tool (no second definition beside it): where the places of
-  one tool take different parts (a metric query's where and its steps; an eventstream's start,
+  one tool take different parts (a metric query's steps before its metrics step and after it; an eventstream's start,
   filter_events and its library steps), each is checked when the value is built, as a function's
   placement is, and the refusal names the place and what it takes. A list of
   a table's OWN columns stays a list of names (an aggregate's `group_by`,
@@ -344,19 +346,25 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   is an expression with a boolean value: a comparison (`eq neq gt gte lt lte`, `in not_in` with each
   member its own argument, `between`, `is_null is_not_null`, the text tests — `OPS`, src/conditions.js,
   typed and written by its one `predicateSql`), `and` / `or` / `not` over conditions, a boolean column;
-  every slot that takes conditions — a where stage's `conditions`, an aggregate's `where`, a CASE
-  branch's `when`, a funnel step's `where`, a semantic model's and a metric query's `where`, the
+  every slot that takes conditions — a where stage's `conditions` (a metric query's among them), a CASE
+  branch's `when`, a funnel step's `where`, a semantic model's `where`, the
   retentioneering stages' and filter_events' — is a LIST of them that all hold (`conditionSlot`,
   src/schema-kit.js). A missing value is two-valued everywhere: a comparison with one does not hold
   (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, and a
-  boolean a compute stage stores is never NULL. What each place takes (`PLACES`): a step over a
-  source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field?, type? }`
+  boolean a compute stage stores is never NULL. A VALUE'S TYPE IS WHERE IT IS READ, AND CONVERTING IS
+  `cast`: a column has the warehouse's type, a `{ property }` the type the catalog declares (text where it
+  declares none), a JSON object's `field` (the leaf's, json_field's), an array's element (element_at,
+  array_last, an unnested one) text; another type is `{ fn: "cast", args: [x], type }` (SAFE: what will
+  not convert is missing). Only what MAKES a value says its `type` — `cast`, `case`, `raw` (nothing else
+  knows what its SQL returns); a read never does. What each place takes (`PLACES`): a step over a
+  source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field? }`
   (an event property read where it is stored, while the rows are that source's events), `{ value }` (a
   scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_pipeline_model,
-  the steps after a metric query, a drill — and filter_events, the eventstream's columns) the same
+  the steps after a metrics step, a drill — and filter_events, the eventstream's columns) the same
   without `{ property }` and `raw`; a semantic model's where, dimensions and measures `{ column }` (a
   column, an entity key, a declared amount), `{ property }` on an events source, `{ value }` and
-  `{ now: true }`, no window and no `raw`; a metric query's `where` the refs its group_by takes and
+  `{ now: true }`, no window and no `raw`; a where step before a metric query's metrics step
+  (`metric_where`) the refs its group_by takes and
   `{ value }`, with conditions, logic and scalar functions; a derived metric's `expr` `{ metric }` and
   `{ value }`, with add sub mul div round floor ceil abs coalesce least greatest.
   Where a function may stand is checked when the value is built, and the refusal names the rule: no
@@ -364,15 +372,24 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   aggregate of a measure only when it is grouped by. A MEASURE is ONE form wherever rows are
   aggregated — a pipeline's aggregate stage (a read's alike), a semantic model (`+ label`) —
   `{ name, expr }` (`measureForm`, src/schema-kit.js): in a pipeline any formula over aggregates (a
-  `count` with no args counts rows, an aggregate's `where` folds only the rows it holds for), in a
+  `count` with no args counts rows), in a
   semantic model exactly ONE aggregate of the task's functions (a formula over several is several
-  measures and a derived metric); a pivot's `measure` is such an aggregate expression, each cell's
-  condition (`on` = the value) added to the `where` of every aggregate in it. What a semantic metric
+  measures and a derived metric). A CONDITIONAL AGGREGATE IS AN AGGREGATE OVER A `case` — an aggregate
+  takes no `where`: the rows where `c` holds are counted by `count` of `{ fn: "case", cases: [{ when:
+  [c], then: { value: 1 } }] }`, their revenue is `sum` of the case that yields the price there; the case
+  is missing on every other row, and every aggregate skips a missing value. So its `else` is refused when
+  the value is built, under every aggregate but `sum` (count, count_distinct, average, min, max, median,
+  percentile, … would fold the other rows too, as the else's value) — leave it out (`else: { value:
+  null }` says nothing); `sum` may keep `else: 0`. A pivot's `measure` is such an aggregate expression,
+  each cell folding only its rows the same way — its condition (`on` = the value) a case over the
+  aggregate's argument, or added to every branch of the case already there (`foldWhere`,
+  src/pipeline/compute.js); a semantic measure is written the same way (MetricFlow is handed the case
+  as its expr). What a semantic metric
   reads is named by a string — a simple or cumulative metric's `measure` — or by `{ metric }` leaves:
   a derived metric's `expr` (its inputs read off the leaves; a ratio is `div` of two metrics) — and a
   model is loaded into a task by an item of `semantic_models` (`{ source }` alone loads it for its
   columns), in a declaration and an update alike (an update names its task by `name`). A SORT KEY over a table's rows (the
-  order_by stage — a build's, a read's, the steps after a metric query — and a window's order) is ONE
+  order_by stage — a build's, a read's, the steps after a metrics step — and a window's order) is ONE
   item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
   funnel's) is a column, or `{ entity }` where the rows are a source's (a build, an eventstream's start
@@ -400,15 +417,20 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   where each goes, written quoted by the server — POSITIONAL: a word of its text spelled exactly as a
   column of the step is refused, with no list of words beside it; the rest goes as written, except a
   Jinja opener (`{{`, `{%`, `{#` — dbt would run it; a text holding one is a constant in `args`). It is a
-  build's escape hatch: a read (query_pipeline_model, the steps after a metric query, a drill) takes
+  build's escape hatch: a read (query_pipeline_model, the steps after a metrics step, a drill) takes
   no raw (`PLACES.stored_rows`), and neither query tool's schema holds it. A constant
   is written in the type of the first argument that is not a constant, one rule for every comparison.
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
   every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is
   told this server's (src/validate.js); a whole value in an EARLIER spelling of this server — a condition
   `{ column, op, value }` or a group `{ or: [...] }`, a measure `{ name, agg, column }`, a read's
-  `transform`, a metric query's `order_by` (an order_by step now), a `{ model, attribute }` (a ref
-  now), the `include_*` flags and explore_errors' `detail` (`include`), a semantic model item's `from`
+  `transform`, a metric query's `metrics` / `group_by` / `where` beside its steps (its metrics step,
+  after a where step) and its `order_by` (an order_by step after it), a `{ model, attribute }` (a ref
+  now), a read naming its `type` — `{ property, type }`, json_field / element_at / array_last or an
+  unnest with one (the read, in a `cast` where the type is not the read's own; an unnest of another
+  type, its element under `<name>_element` and a compute casting it under `name`; a kept draft's builds
+  as it did, since its steps are counted) —, an aggregate's
+  `where` (the aggregate over a case), the `include_*` flags and explore_errors' `detail` (`include`), a semantic model item's `from`
   (`source`), an update's `task` (`name`) — is refused with the value converted, never accepted (a
   field only renamed — `stages`, `stage`, a model column written `property` — is told its name:
   `steps`, `step`, `column`), and what a store kept in one is carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
@@ -433,15 +455,20 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
   `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
   pipeline materialize) or a query
-  (`query_semantic_model({ context_id, metrics…, steps? })`, `query_pipeline_model({ context_id,
-  steps })` — a read in `steps` of the pipeline's own stages, those that keep it one table: where,
+  (`query_semantic_model({ context_id, steps })`, `query_pipeline_model({ context_id, steps })` — a
+  QUERY IS ITS STEPS on both sides. A metric query's hold ONE metrics step `{ stage: "metrics",
+  metrics, group_by? }` — what the semantic layer computes (`STAGE_PLACES.metric_scope`, its own group of
+  `$defs.stage`); before it only where steps, the rows its metrics fold (their leaves what group_by names
+  — `PLACES.metric_where` —, every one ANDed into MetricFlow's where); after it a read
+  (`STAGE_PLACES.metric_result`) over its result's columns as the caller names them, a where there
+  filtering the result (a having — one naming a dimension is refused: the result's column, or "put it
+  before the metrics step"). A read in `steps` is of the pipeline's own stages, those that keep it one table: where,
   compute, aggregate, pivot, unpivot, order_by, limit, sample, project — of the stored table, or of a
-  metric query's result over its columns as the caller names them (the query's `where` filters the
-  rows a metric folds, a where step the result: a having); a join, an unnest, a
+  metric query's result; a join, an unnest, a
   funnel or a python step is a build from the task) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — dry_run, on either side: its SQL after the steps and its `output_columns` — which waits for the context's build alone). A metric query with no steps, or
-  with a lone order_by step MetricFlow orders as asked (its ORDER BY writes no NULLS), runs as `mf
-  query`; any other steps run over the SQL MetricFlow compiles for it, its columns renamed to the
+  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order, except a query only compiled — dry_run, on either side: its SQL after the steps and its `output_columns` — which waits for the context's build alone). A metric query with no step after its
+  metrics step, or a lone order_by step there MetricFlow orders as asked (its ORDER BY writes no NULLS), runs as `mf
+  query`; any other steps after it run over the SQL MetricFlow compiles for it, its columns renamed to the
   caller's names, rendered by the one read compiler (`renderRead`, src/pipeline.js) and run through
   the dbt client's `show` — the same answer, paging and KEPT_ROWS either way, and `materialize: true`
   stores the result after the steps. A query tool also takes a
@@ -727,11 +754,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
-  query_semantic_model({ context_id: "<semantic model>" }) — `{ semantic_model, dimension, grain? }`,
+  query_semantic_model({ context_id: "<semantic model>", steps }) — `{ semantic_model, dimension, grain? }`,
   `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
   the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
-  one spelling per item — and `{ entity }` in group_by / where: what a dimension is and
-  where it lives (the steps after the query name the result column a group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
+  one spelling per item — and `{ entity }` in the metrics step's group_by and a where step before it:
+  what a dimension is and where it lives (the steps after the metrics step name the result column a
+  group_by item gives, as in every context). MetricFlow makes every join; what it needs is its own name for the
   item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
   with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
   RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's

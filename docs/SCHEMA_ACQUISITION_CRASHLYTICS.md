@@ -552,7 +552,7 @@ MetricFlow умеет соединять только по уникальном�
 Расход по стране установки на день расхода — управляемый путь, окно применяется само:
 
 ```json
-{ "metrics": ["ua_cost"], "group_by": [{ "model": "users", "attribute": "country" }] }
+{ "steps": [{ "stage": "metrics", "metrics": ["ua_cost"], "group_by": [{ "source": "users", "column": "country" }] }] }
 ```
 
 То же самое через pipeline, с явным окном:

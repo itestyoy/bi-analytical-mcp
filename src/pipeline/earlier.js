@@ -13,10 +13,15 @@
 // sample's percent is a share; project's `columns` is keep; limit's `n` is limit; and a python function
 // body written as nested arrays of lines (a nested array the block under the line before it) is its
 // text. A funnel's `filter` and `metrics` have no spelling here: such a kept draft builds as it did
-// (src/match-recognize.js). A step in the current spelling passes through unchanged.
+// (src/match-recognize.js). A typed read is resolved against the source's catalog (the type a property
+// is read as now), and an aggregate's where is the case it folds now; a kept unnest naming its element's
+// `type` builds as it did — split into an unnest and a cast, as a new call is shown, it would shift the
+// indexes and checkpoints the draft counts its steps by. A step in the current spelling passes through
+// unchanged.
 
 import { CROSS_PATH_SPELLING as SPELLING } from '../validate.js';
 import { currentConditions, currentExpression, currentMeasure, isEarlierMeasure, currentUnnest } from '../earlier-spelling.js';
+import { propertyTypes } from './compute.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -153,16 +158,18 @@ function currentStage(st, ctx) {
     return { ...rest, limit };
   }
   if (st.stage === 'python' && (st.functions || []).some((f) => Array.isArray(f?.body))) return { ...st, functions: st.functions.map((f) => (Array.isArray(f?.body) ? { ...f, body: bodyText(f.body).join('\n') } : f)) };
-  // what a stage holds, in the one grammar — the same value when it already is
+  // what a stage holds, in the one grammar — the same value when it already is; a typed property read
+  // keeps its type only where the source's catalog reads the property as another
+  const opts = { propertyType: propertyTypes(ctx.catalog, ctx.source) };
   if (st.stage === 'unnest') return currentUnnest(st);
-  if (st.stage === 'where' && Array.isArray(st.conditions)) return { ...st, conditions: currentConditions(st.conditions) };
-  if (st.stage === 'aggregate' && Array.isArray(st.measures)) return { ...st, measures: st.measures.map((m) => currentMeasure(m)) };
-  if (st.stage === 'compute' && st.expr !== undefined) return { ...st, expr: currentExpression(st.expr) };
-  if (st.stage === 'pivot' && st.measure !== undefined) return { ...st, measure: isEarlierMeasure(st.measure) ? currentMeasure(st.measure) : currentExpression(st.measure) };
+  if (st.stage === 'where' && Array.isArray(st.conditions)) return { ...st, conditions: currentConditions(st.conditions, opts) };
+  if (st.stage === 'aggregate' && Array.isArray(st.measures)) return { ...st, measures: st.measures.map((m) => currentMeasure(m, opts)) };
+  if (st.stage === 'compute' && st.expr !== undefined) return { ...st, expr: currentExpression(st.expr, opts) };
+  if (st.stage === 'pivot' && st.measure !== undefined) return { ...st, measure: isEarlierMeasure(st.measure) ? currentMeasure(st.measure, opts) : currentExpression(st.measure, opts) };
   if (st.stage === 'match_recognize' && Array.isArray(st.steps)) {
     // a step's condition on `property` reads a column of the rows when there is one — as it did
     const subject = (name) => (ctx.cols?.has(name) ? 'column' : 'property');
-    return { ...st, steps: st.steps.map((x) => (isObj(x) && x.where !== undefined ? { ...x, where: currentConditions(x.where, { subject }) } : x)) };
+    return { ...st, steps: st.steps.map((x) => (isObj(x) && x.where !== undefined ? { ...x, where: currentConditions(x.where, { ...opts, subject }) } : x)) };
   }
   return st;
 }

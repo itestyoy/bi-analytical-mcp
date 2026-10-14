@@ -8,8 +8,8 @@
 // constants and the current time; no raw — its SQL would reach MetricFlow unchecked — and no window), and
 // a derived metric at PLACES.derived_metric (other metrics and numbers, in arithmetic). What is the
 // semantic layer's own is only what MetricFlow is handed: a measure is ONE aggregate (dbt's `agg` and the
-// `expr` it folds, the scope baked in), a derived metric a SQL expression over the stored names of the
-// metrics it reads.
+// `expr` it folds — a conditional one's a case, as written — with the model's where baked in as a case
+// too), a derived metric a SQL expression over the stored names of the metrics it reads.
 
 import { isNumericType } from './dialects/base.js';
 import { getDialect } from './dialects/index.js';
@@ -139,33 +139,34 @@ function applyScope(valueExpr, scope) {
   return `CASE WHEN ${scope} THEN ${valueExpr} END`;
 }
 
-/** The type of what a measure folds when the catalog says it: an event property's, or a declared amount's. */
+/** The type of what a measure folds when the catalog says it: an event property's (a field of one is
+ *  text), or a declared amount's. */
 function argumentType(catalog, modelKey, arg) {
   if (!isObj(arg) || arg.fn !== undefined) return null;
-  if (arg.property !== undefined) return arg.type ?? (arg.field !== undefined ? 'string' : catalog.propertyFor(modelKey, arg.property)?.spec?.type ?? 'string');
+  if (arg.property !== undefined) return arg.field !== undefined ? 'string' : catalog.propertyFor(modelKey, arg.property)?.spec?.type ?? 'string';
   if (arg.column !== undefined) return catalog.aggregatableField(modelKey, arg.column)?.type ?? null;
   return null;
 }
 
 /**
  * A measure declaration { name, expr, label? } → a dbt measure (name, agg, expr, ...). `expr` is ONE
- * aggregate of the task's (the one writer holds the rule: one at the top, its argument and its where row
- * expressions); MetricFlow is handed that aggregate's function and the argument it folds, with the
- * model's where AND the aggregate's own baked in as the scope.
+ * aggregate of the task's (the one writer holds the rule: one at the top, its argument a row expression —
+ * a case where it folds only the rows a condition holds for); MetricFlow is handed that aggregate's
+ * function and the argument it folds, with the model's where baked in as the scope.
  */
 function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
   const field = 'measures.expr';
   const at = `measure '${decl.name}'`;
   const e = decl.expr;
-  // what the aggregate folds and the rows it folds are values of each row
-  if (isAggregateCall(e)) checkLeaves(catalog, modelKey, [...(e.args || []), ...(e.where || [])], field, at);
+  // what the aggregate folds is a value of each row
+  if (isAggregateCall(e)) checkLeaves(catalog, modelKey, e.args || [], field, at);
   else checkLeaves(catalog, modelKey, e, field);
   const { d, opts } = modelWriter(catalog, modelKey);
   attempt(field, () => exprSql(d, null, e, at, { ...opts, context: 'measure', aggregates: [...TASK_MEASURE_AGGS] }));
-  // the model's where AND the aggregate's own — a funnel step is a measure whose where names the event
-  // and a property value; a count of the rows where a condition holds is a count with that where
-  const scope = [smScope, conditionsOf(catalog, modelKey, e.where, `${at} where`, field)].filter(Boolean).join(' AND ') || null;
+  // the model's where (a measure that folds only some rows says which in its own case: a funnel step's
+  // users are a count_distinct over a case naming the event and a property value)
+  const scope = smScope || null;
   const [arg] = e.args || [];
   let agg = e.fn;
   let value;
@@ -173,10 +174,14 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     agg = 'sum'; // a count of the rows (the only aggregate without an argument), as sum(1) so a scope folds cleanly
     value = '1';
   } else {
-    // a property or an amount the catalog types as something else is read as a number first
-    const type = argumentType(catalog, modelKey, arg);
-    if (NUMERIC_AGGS.has(e.fn) && type && type !== 'unknown' && !isNumericType(type)) {
-      fail(`${at}: ${JSON.stringify(arg)} is ${type}, and ${e.fn} folds numbers — read it as one: { fn: "${e.fn}", args: [{ fn: "cast", args: [${JSON.stringify(arg)}], type: "numeric" }] }`, field);
+    // a property or an amount the catalog types as something else is read as a number first (of a
+    // conditional aggregate, each value its case yields)
+    const yields = isObj(arg) && arg.fn === 'case' && Array.isArray(arg.cases) ? [...arg.cases.map((cs) => cs?.then), ...(arg.else !== undefined ? [arg.else] : [])] : [arg];
+    const [bad, type] = yields.map((x) => [x, argumentType(catalog, modelKey, x)]).find(([, t]) => t && t !== 'unknown' && !isNumericType(t)) || [];
+    if (NUMERIC_AGGS.has(e.fn) && bad) {
+      fail(bad === arg
+        ? `${at}: ${JSON.stringify(arg)} is ${type}, and ${e.fn} folds numbers — read it as one: { fn: "${e.fn}", args: [{ fn: "cast", args: [${JSON.stringify(arg)}], type: "numeric" }] }`
+        : `${at}: ${JSON.stringify(bad)}, a value its case yields, is ${type}, and ${e.fn} folds numbers — read it as one there: { fn: "cast", args: [${JSON.stringify(bad)}], type: "numeric" }`, field);
     }
     value = attempt(field, () => exprSql(d, null, arg, `${at} ${e.fn} args[0]`, opts).sql);
   }
@@ -321,7 +326,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
     // a model with no primary entity has nothing MetricFlow could address its dimensions through
     if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.source: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows are joined in a pipeline instead: build_pipeline_model with a join stage { stage: 'join', with: '${modelKey}', … }. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.source');
     // an item's where scopes the measures declared beside it — with none, it would scope nothing
-    if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or put each measure's own condition in its aggregate's where; { source: '${modelKey}' } alone loads the model for its columns`, 'semantic_models.where');
+    if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or fold each measure over a case of its own condition ({ fn: "count", args: [{ fn: "case", cases: [{ when: [...], then: { value: 1 } }] }] }); { source: '${modelKey}' } alone loads the model for its columns`, 'semantic_models.where');
     usedModels.add(modelKey);
     // Each semantic model scopes its OWN measures: its where is baked into every measure expr below.
     const scope = conditionsOf(catalog, modelKey, sm.where, `${modelKey} where`, 'semantic_models.where');

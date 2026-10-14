@@ -39,8 +39,8 @@ export function field(doc, node, name) {
 }
 
 /** What a union says of field `name` ONCE, beside its forms (src/pipeline/compute.js exprSchema: what
- *  an expression's `args` and an aggregate's `where` hold, while each form says only how many) — or
- *  undefined where the union says nothing of it there. */
+ *  an expression's `args` hold, while each form says only how many) — or undefined where the union says
+ *  nothing of it there. */
 export function beside(doc, node, name) {
   const n = deref(doc, node);
   return n?.properties && name in n.properties ? deref(doc, n.properties[name]) : undefined;

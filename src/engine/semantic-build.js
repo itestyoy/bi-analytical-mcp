@@ -39,13 +39,13 @@ export const semanticBuildMethods = {
    * The model a reference resolves onto must be LOADED in this context: a task built from one
    * source does not load another's semantic model, so MetricFlow would reject the entity. The
    * model is taken from the reference the caller wrote — the compiled path is not read back; `said`
-   * is how the reference is shown (users.country).
+   * is how the reference is shown (users.country), `at` where it stands (steps[1] group_by[0]).
    */
-  _checkModelLoaded(ctx, model, said, field = 'group_by') {
+  _checkModelLoaded(ctx, model, said, field = 'group_by', at = null) {
     if (!model || !this.catalog.models[model]) return; // already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
-      `'${said}' needs model '${model}', which this context does not read. `
+      `${at ? `${at}: ` : ''}'${said}' needs model '${model}', which this context does not read. `
         + `Load it: ${loadModelCall(ctx.id, model)}.`,
       { stage: 'validate', field },
     );
@@ -146,15 +146,15 @@ export const semanticBuildMethods = {
       groupable,
       ...(afterLoading.length ? {
         groupable_after_loading: afterLoading,
-        groupable_after_loading_note: `These columns are reachable in the catalog but this context does not read their model — load it before naming them in group_by/where: ${loadModelCall(ctx.id, afterLoading[0].source)}.`,
+        groupable_after_loading_note: `These columns are reachable in the catalog but this context does not read their model — load it before naming them in a group_by or a where: ${loadModelCall(ctx.id, afterLoading[0].source)}.`,
       } : {}),
       parse,
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
-      next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
+      next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`,
       recommendations: [
-        `Bound every query with time_range. Group or filter by a ref from \`groupable\`, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
+        `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
         `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
@@ -248,7 +248,7 @@ export const semanticBuildMethods = {
       return {
         context_id: ctx.id, semantic_models: models, files: [file], ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
-        next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
+        next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [...] }] } }) — \`metrics\` above is the current full list.`,
       };
     }, { input });
     return this._taskStarted(taskId, { context_id: ctx.id });

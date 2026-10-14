@@ -53,14 +53,17 @@ escape hatch, a build's — a read's schema has none —, its columns structured
 the server.)
 
 What a stage holds — a condition, a measure, a computed value — is ONE expression grammar:
-`{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property, field?, type? }`,
-`{ value }`, `{ now: true }`), nested to any depth. A condition is an expression with a boolean value
+`{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property, field? }`,
+`{ value }`, `{ now: true }`), nested to any depth. A value has the type of what it is read from (a
+property the catalog's declared type, a JSON field or an array element text) and is converted by one
+function, `cast`. A condition is an expression with a boolean value
 (`eq`, `in`, `between`, `is_null`, a text test, `and` / `or` / `not`); a `where` is a list of them that
 all hold; a measure is `{ name, expr }` whose expression folds rows (`sum`, `count`, `percentile` with
-its `percentile`, a formula over several, an aggregate's own `where` for a conditional count). Every
+its `percentile`, a formula over several, an aggregate over a `case` for a conditional one — the case
+missing on the rows it leaves out, so no `else` except a `sum`'s `else: 0`). Every
 tool that takes an expression carries ONE definition of it, `$defs.expr`, built by one builder
 (`exprSchema`) for the tool's places: what a PLACE takes (a step over a source's rows, a read of stored
-rows, a semantic model, a metric query's where, a derived metric) is one table, `PLACES`, and a tool's
+rows, a semantic model, a where before a metric query's metrics step, a derived metric) is one table, `PLACES`, and a tool's
 definition holds the union of what its places take (`TOOL_PLACES`, `src/schema.js`) — of the leaves,
 the rows' and the refs that name a value (`{ source, column }`, `{ source, property }`,
 `{ semantic_model, dimension }`, `{ entity }`, `{ time }`, `{ metric }`), and of the functions — and
@@ -92,16 +95,17 @@ Stage = {
 | `scan` (implicit source) | `FROM` | the events fact or users dim (catalog model) | rows of the source |
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
 | `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (the `{ property }` leaf, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), a condition (stored as a boolean), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
-| `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
+| `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows; the element is text, converted by `cast` | **expands** |
 | `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
-| `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one aggregate expression (`measure`) per value, each cell's condition added to the `where` of its aggregates | **collapses** to group keys |
+| `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one aggregate expression (`measure`) per value, each cell folding only its rows — its condition a `case` over the aggregates' argument | **collapses** to group keys |
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name_column, value_column) rows; the result is `keep` + those two | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
 | `project` | `\|> SELECT` | keep a column set (`keep`) or drop some (`drop`) | unchanged |
 | `sample` | `\|> TABLESAMPLE` | keep a `share` of the rows (0 < share ≤ 1) for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; DuckDB row-level random()) | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
+| `metrics` | (MetricFlow) | a metric query's step — its metrics broken down by `group_by`, computed by the semantic layer; `query_semantic_model` alone takes it, `where` steps before it and the read stages after it | one row per `group_by` combination |
 
 **Implemented**: the registry is `src/pipeline/stages.js` (the functions of the one expression
 grammar are one table in `src/pipeline/compute.js`, the pieces every stage is written with in
@@ -109,7 +113,8 @@ grammar are one table in `src/pipeline/compute.js`, the pieces every stage is wr
 in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `compute`, `unnest`, `join`,
 `aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
 `match_recognize` (`src/match-recognize.js`) and `python` (`src/python-model.js`), which
-register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax. A stage
+register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax — and `metrics`, a
+metric query's step, which MetricFlow runs (it has no SQL of its own here). A stage
 declares what the machinery needs to know about it (`available` on this warehouse,
 `keepsSourceRows`, the next-step hints it `recommend`s), so nothing outside the registry
 names a stage.
@@ -179,7 +184,8 @@ with `getDialect(name)` (`src/dialects/index.js`). The same op IR lowers two way
 - **DuckDB → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
   `SELECT … FROM p{i-1}`. `unnest` → `CROSS JOIN LATERAL jsonb_array_elements*`;
   `aggregate` → `GROUP BY`; `unpivot` → a `UNION ALL` of one branch per folded column.
-  `pivot` is the aggregate stage's conditional aggregates on both (`sum(CASE WHEN on = v THEN val END)`).
+  `pivot` is the aggregate stage's conditional aggregates on both — each cell its aggregate over a case
+  (`sum(CASE WHEN on = v THEN val END)`).
   Semantics match the BigQuery pipe lowering step-for-step — one meaning on both warehouses: a week
   is the ISO week (Monday start), `date_part` dow is ISO (Monday 1 … Sunday 7), `date_diff` counts
   whole units elapsed, and NULLs sort last unless a sort key says first.
@@ -195,8 +201,9 @@ with the YAML config header. Two consumption modes, unchanged:
 
 1. **Semantic layer on top.** A MetricFlow semantic model is declared over the
    pipeline's output (shared `user` entity → joins to `dim_users` at query time).
-   Metrics/dimensions are queried via `query_semantic_model`, whose `steps` re-slice the
-   metric result in the same read stages (a where step on a metric is a having). This is
+   Metrics/dimensions are queried via `query_semantic_model`, a query of `steps`: where steps,
+   one `metrics` step, then the same read stages re-slicing the metric result (a where step on a
+   metric is a having). This is
    how the `match_recognize` pipeline is consumed today.
 2. **Direct materialization.** `query_semantic_model(materialize:true)` stores a
    result (after its steps) as a table named after its task; a pipeline started from that task

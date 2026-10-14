@@ -56,7 +56,7 @@ test('user attribute is rejected on the fact directly, accepted via a users-join
 
 test('pivot: a value is a literal whatever it holds; the column it names must be an identifier', () => {
   const pivot = (value) => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'pivot', group_by: [], on: 'event_name', measure: { fn: 'sum', args: [{ column: 'price' }] }, values: [value] },
   ]);
   assert.ok(pivot({ value: "iap'); drop", name: 'iap' }).columns.has('iap'));
@@ -65,7 +65,7 @@ test('pivot: a value is a literal whatever it holds; the column it names must be
 
 test('percentile needs its `percentile` in (0,1); compute validates operands', () => {
   const p90 = (params) => renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'p', expr: { fn: 'percentile', args: [{ column: 'price' }], ...params } }] },
   ]);
   assert.throws(() => p90({}), /percentile needs `percentile`/);
@@ -78,7 +78,7 @@ test('percentile needs its `percentile` in (0,1); compute validates operands', (
 
 test('date_diff / stat functions render on both dialects', () => {
   const stages = [
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'compute', name: 'age', expr: { fn: 'date_diff', args: [{ column: 'device_time' }, { now: true }], unit: 'day' } },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'm', expr: { fn: 'median', args: [{ column: 'price' }] } }] },
   ];

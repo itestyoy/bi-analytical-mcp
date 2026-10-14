@@ -16,6 +16,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { stageAt, STAGE_PLACES } from '../../src/pipeline.js';
+import { PLACES } from '../../src/pipeline/compute.js';
 import { REFS, REF_PLACES, VALUE_REFS, refAt, refKind, refForms, refColumns, relationshipsTo } from '../../src/schema/refs.js';
 import { settle } from '../helpers/settle.js';
 // the stages registered beside the core's (a funnel, a python model), as a server has them
@@ -39,6 +40,28 @@ test('a build takes every stage, a read the ones that keep it one table — the 
   // a step that names no stage, or one there is not, is said so at its place
   assert.match(message(() => stageAt('read', { limit: 3 }, 'steps[0]')), /^steps\[0\]: a read takes .* — this step names no `stage`$/);
   assert.match(message(() => stageAt('read', { stage: 'nope' }, 'steps[0]')), /there is no 'nope' stage/);
+  // the semantic layer's step (a metric query's metrics) is no stage over a table's rows: only a place
+  // that names it takes it — not a build's "every stage", not a read; it makes no table, so the refusal
+  // says where it belongs instead of "build it from the task"
+  const semantic = /a metrics step is what the semantic layer computes, one per metric query \(query_semantic_model\)$/;
+  assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), /^steps\[0\]: a pipeline build takes every stage over a table's rows — /);
+  assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), semantic);
+  assert.match(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), /^steps\[0\]: a read takes /);
+  assert.match(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), semantic);
+  assert.doesNotMatch(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), /makes a new table/);
+});
+
+// A METRIC QUERY'S PLACES: up to its metrics step, where steps and the metrics step (metric_scope); after
+// it, what a read takes, over the result (metric_result) — the read's list, and a stage it leaves out is
+// built from the stored result.
+test('a metric query takes where steps and its metrics step up to it, and a read\'s steps after it', () => {
+  assert.deepEqual(STAGE_PLACES.metric_scope.stages, ['where', 'metrics']);
+  assert.deepEqual(STAGE_PLACES.metric_result.stages, STAGE_PLACES.read.stages);
+  for (const stage of ['where', 'metrics']) assert.equal(message(() => stageAt('metric_scope', { stage }, 'steps[0]')), null, stage);
+  for (const stage of STAGE_PLACES.read.stages) assert.equal(message(() => stageAt('metric_result', { stage }, 'steps[1]')), null, stage);
+  assert.match(message(() => stageAt('metric_scope', { stage: 'limit' }, 'steps[0]')), /^steps\[0\]: a step up to the metrics step takes where, metrics — a limit stage is not one of them$/);
+  assert.match(message(() => stageAt('metric_result', { stage: 'join' }, 'steps[2]')), /^steps\[2\]: a step after the metrics step takes where, .* — a join stage makes a new table: store the result \(materialize: true\) and build from its task/);
+  assert.match(message(() => stageAt('metric_result', { stage: 'metrics' }, 'steps[2]')), /^steps\[2\]: a step after the metrics step takes .* — a metrics step is what the semantic layer computes, one per metric query/);
 });
 
 test('a feature checks a place of its own with stageAt and refAt, in the shape of the core\'s tables', () => {
@@ -131,26 +154,31 @@ models:
   assert.deepEqual([...viaForm.properties.via.enum].sort(), ['referrer', 'user']);
 });
 
-// The tools read the places in the call, before anything runs: a metric query's group_by and where in a
-// task's context, a pipeline step over a source's rows. A tool's definitions hold what its places take
-// together (src/schema.js TOOL_PLACES): what none of them takes is no form there, refused by the schema;
-// what one place of the tool takes and another does not is refused at the other's place, naming it.
-test('a metric query refuses in the call what its group_by and where do not take, naming the place', async () => {
+// The tools read the places in the call, before anything runs: a metric query's group_by and its where
+// steps in a task's context, a pipeline step over a source's rows. A tool's definitions hold what its
+// places take together (src/schema.js TOOL_PLACES): what none of them takes is no form there, refused by
+// the schema; what one place of the tool takes and another does not is refused at the other's place,
+// naming it.
+test('a metric query refuses in the call what its group_by and its where steps do not take, naming the place', async () => {
   const e = engine();
   const { context_id } = await e.build_semantic_model({ name: 'plc', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
-  const query = (extra) => e.query_semantic_model({ context_id, metrics: ['plc_n'], ...extra });
+  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['plc_n'], ...extra });
+  const query = (...steps) => e.query_semantic_model({ context_id, steps });
+  const where = (...conditions) => ({ stage: 'where', conditions });
   // a source, an event, a metric: no ref the tool's group_by takes, so no form of its $defs.ref
   for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'plc_n' }]) {
-    await assert.rejects(() => query({ group_by: [ref] }), (err) => err.stage === 'validate' && /^invalid input: .*`group_by\.0`/.test(err.message), JSON.stringify(ref));
+    await assert.rejects(() => query(metrics({ group_by: [ref] })), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.group_by\.0`/.test(err.message), JSON.stringify(ref));
   }
-  // a metric in the where: no leaf any place of the tool takes
-  await assert.rejects(() => query({ where: [{ fn: 'gt', args: [{ metric: 'plc_n' }, { value: 1 }] }] }), (err) => err.stage === 'validate' && /^invalid input: .*`where\.0\.args\.0`/.test(err.message));
-  // a column of the rows and an aggregate: the steps' (a read of the result), refused at the where's place
-  for (const [where, said] of [
-    [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }, /\{ column \} is not what a metric query's where takes/],
-    [{ fn: 'gt', args: [{ fn: 'count' }, { value: 1 }] }, /count is not what a metric query's where takes/],
+  // a metric in a where step: no leaf any place of the tool takes
+  await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'plc_n' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.conditions\.0\.args\.0`/.test(err.message));
+  // a column of the rows and an aggregate: the steps' after the metrics step (a read of the result),
+  // refused at the place of a where before it
+  const at = PLACES.metric_where.what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const [cond, said] of [
+    [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }, new RegExp(`\\{ column \\} is not what ${at} takes`)],
+    [{ fn: 'gt', args: [{ fn: 'count' }, { value: 1 }] }, new RegExp(`count is not what ${at} takes`)],
   ]) {
-    await assert.rejects(() => query({ where: [where] }), (err) => err.field === 'where' && /^where\[0\] /.test(err.message) && said.test(err.message) && /a condition on a metric's value is a where step after the query/.test(err.message), JSON.stringify(where));
+    await assert.rejects(() => query(where(cond), metrics()), (err) => err.field === 'steps' && /^steps\[0\] conditions\[0\] /.test(err.message) && said.test(err.message) && err.message.includes(PLACES.metric_where.hint), JSON.stringify(cond));
   }
 });
 

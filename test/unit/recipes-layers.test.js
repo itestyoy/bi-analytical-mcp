@@ -103,6 +103,23 @@ test('every shipped pipeline_payload is a build_pipeline_model start request the
   }
 });
 
+// …and every shipped example query is a metric query the tool accepts beside a context — its steps,
+// a metrics step among them — whatever spelling the file holds it in.
+test('every shipped example query is a query_semantic_model start the tool accepts beside a context', async () => {
+  await import('../../src/engine.js');
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const validators = makeValidators(buildSchemas(loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {})));
+  const queries = loadRecipes(SYSTEM).list.flatMap((r) => (r.example_queries || []).map((q) => [r.id, q]));
+  assert.ok(queries.length > 10, 'the shipped set has example queries');
+  for (const [id, q] of queries) {
+    const res = validateInput(validators.query_semantic_model, { context_id: 'abcdef123456', ...q });
+    assert.equal(res.ok, true, `${id}: ${(res.errors || []).join(' | ')}`);
+    assert.equal(q.steps.filter((st) => st.stage === 'metrics').length, 1, `${id}: one metrics step`);
+  }
+});
+
 // A deployment's file is not ours to rewrite: one written for an earlier version carries the
 // one-call shape { name, pipeline: { source, time_range?, stages } }, which no tool takes — or a start
 // request naming its first steps `stages`. Each is served as the start request it stands for, its
@@ -153,9 +170,10 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   // an item's model, written `from` then, is its `source`; a model loaded for its columns is a { source } item
   assert.deepEqual(s.semantic_models.map((m) => m.source), ['events', 'users'], 'a model loaded for its columns is a { source } item');
   assert.ok(s.semantic_models.every((m) => m.from === undefined), 'no item keeps the earlier `from`');
-  // a dimension named by field is the column; a sum_boolean measure the count of its scope; a measure an expression
+  // a dimension named by field is the column; a sum_boolean measure the count of its scope — a count over a
+  // case, as a measure that folds only some rows is written now; a measure an expression
   assert.deepEqual(s.semantic_models[0].dimensions, [{ column: 'event_name' }]);
-  assert.deepEqual(s.semantic_models[0].measures, [{ name: 'launches', expr: { fn: 'count', args: [], where: [firstLaunch] } }, { name: 'rows', expr: { fn: 'count', args: [] } }]);
+  assert.deepEqual(s.semantic_models[0].measures, [{ name: 'launches', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [firstLaunch], then: { value: 1 } }] }] } }, { name: 'rows', expr: { fn: 'count', args: [] } }]);
   // a ratio is the derived metric dividing its sides; a derived metric's text over aliases the expression over the metrics
   assert.deepEqual(s.metrics.find((m) => m.name === 'share'), { name: 'share', type: 'derived', expr: { fn: 'div', args: [{ metric: 'launches' }, { metric: 'rows' }] } });
   assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: { fn: 'sub', args: [{ metric: 'rows' }, { metric: 'launches' }] } });
@@ -167,21 +185,40 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   assert.deepEqual(again, today);
 });
 
-// An example query written for an earlier version ranks with the metric query's `order_by`, which the
-// tool refuses now: it is served with that order as an order_by step, and one written today as it is.
-test('a deployment recipe\'s example query with a metric order_by is served with an order_by step', () => {
+// An example query written for an earlier version names its metrics, group_by and where beside its steps
+// and ranks with the metric query's `order_by`, which the tool refuses now: it is served as the steps it
+// is — a where step, the metrics step, its steps, an order_by step — and one written today as it is.
+test('a deployment recipe\'s example query with metrics, group_by, where and order_by beside its steps is served as steps', () => {
   const keys = [{ key: 'x', direction: 'desc' }];
-  const today = { metrics: ['x'], group_by: [{ time: 'metric_time', grain: 'day' }], steps: [{ stage: 'limit', limit: 3 }] };
-  const mine = deploymentFile([{ id: 'old_query', task_type: 't', title: 'old', when_to_use: '', hack: '', example_queries: [{ metrics: ['x'], order_by: keys }, today] }]);
-  const [old, kept] = loadRecipes(SYSTEM, mine).get('old_query').example_queries;
-  assert.deepEqual(old, { metrics: ['x'], steps: [{ stage: 'order_by', keys }] });
+  const daily = { stage: 'metrics', metrics: ['x'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const limit = { stage: 'limit', limit: 3 };
+  const recent = { fn: 'gt', args: [{ time: 'metric_time', grain: 'day' }, { value: '2026-01-01' }] };
+  const today = { steps: [daily, limit] };
+  const written = [{ metrics: ['x'], order_by: keys }, today, { metrics: ['x'], group_by: daily.group_by, where: [recent], steps: [limit], order_by: keys }];
+  const mine = deploymentFile([{ id: 'old_query', task_type: 't', title: 'old', when_to_use: '', hack: '', example_queries: written }]);
+  const [old, kept, all] = loadRecipes(SYSTEM, mine).get('old_query').example_queries;
+  assert.deepEqual(old, { steps: [{ stage: 'metrics', metrics: ['x'] }, { stage: 'order_by', keys }] });
   assert.deepEqual(kept, today, 'a query in today\'s spelling is served as written');
+  assert.deepEqual(all, { steps: [{ stage: 'where', conditions: [recent] }, daily, limit, { stage: 'order_by', keys }] });
+});
+
+// …and a pipeline step or a measure that folded some rows with an aggregate's `where` is served as the
+// aggregate over a case it is now.
+test('a deployment recipe\'s aggregate where is served as the aggregate over a case', () => {
+  const tutorial = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] };
+  const pipeline_payload = { action: 'start', name: 'old_where', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count', where: [tutorial] } }] }] };
+  const semantic_payload = { name: 'old_where', semantic_models: [{ source: 'events', measures: [{ name: 'paid', expr: { fn: 'sum', args: [{ column: 'price_in_usd_of_event_data' }], where: [tutorial] } }] }], metrics: [{ name: 'paid', type: 'simple', measure: 'paid' }] };
+  const mine = deploymentFile([{ id: 'old_where', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload, semantic_payload }]);
+  const served = loadRecipes(SYSTEM, mine).get('old_where');
+  assert.deepEqual(served.pipeline_payload.steps[0].measures[0].expr, { fn: 'count', args: [{ fn: 'case', cases: [{ when: [tutorial], then: { value: 1 } }] }] });
+  assert.deepEqual(served.semantic_payload.semantic_models[0].measures[0].expr, { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [tutorial], then: { column: 'price_in_usd_of_event_data' } }] }] });
 });
 
 // An example query that names what it groups and filters by as { model, attribute } — the ref an earlier
 // version took — is served with the one ref, read off the recipe's own declaration: a model's column is
 // { source, column }, a payload property it declared a dimension { source, property }, a dimension it
-// computed { semantic_model: [model], dimension }; its include_plan is the one list `include`.
+// computed { semantic_model: [model], dimension } — in its metrics step and a where step before it; its
+// include_plan is the one list `include`.
 test('a deployment recipe\'s example query with { model, attribute } refs is served with the one ref', () => {
   const semantic_payload = {
     name: 'refs',
@@ -196,9 +233,11 @@ test('a deployment recipe\'s example query with { model, attribute } refs is ser
   const mine = deploymentFile([{ id: 'old_refs', task_type: 't', title: 'old', when_to_use: '', hack: '', semantic_payload, example_queries: [old] }]);
   const [served] = loadRecipes(SYSTEM, mine).get('old_refs').example_queries;
   assert.deepEqual(served, {
-    metrics: ['n'], dry_run: true, include: ['plan'],
-    group_by: [{ source: 'users', column: 'country' }, { source: 'events', property: 'level_id_of_event_data' }, { semantic_model: ['events'], dimension: 'late' }],
-    where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }],
+    dry_run: true, include: ['plan'],
+    steps: [
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] },
+      { stage: 'metrics', metrics: ['n'], group_by: [{ source: 'users', column: 'country' }, { source: 'events', property: 'level_id_of_event_data' }, { semantic_model: ['events'], dimension: 'late' }] },
+    ],
   });
 });
 

@@ -1,7 +1,8 @@
-// A METRIC QUERY'S WHERE → MetricFlow `--where` clauses. The where is the one expression (src/pipeline/
-// compute.js) at its place — PLACES.metric_where: what the query's group_by names, as it names it (the
-// refs of src/schema/refs.js: { source, column, via? }, { source, property }, { semantic_model, dimension,
-// grain? }, { entity }, { time: 'metric_time', grain }) and constants, with the conditions, the logic and
+// A METRIC QUERY'S WHERE STEPS (before its metrics step) → MetricFlow `--where` clauses. Their conditions
+// are the one expression (src/pipeline/compute.js) at its place — PLACES.metric_where: what the metrics
+// step's group_by names, as it names it (the refs of src/schema/refs.js: { source, column, via? },
+// { source, property }, { semantic_model, dimension, grain? }, { entity }, { time: 'metric_time', grain })
+// and constants, with the conditions, the logic and
 // the scalar functions of a dimension's value. The query resolves each reference to the MetricFlow item it
 // names; this module writes that item as the Jinja wrapper MetricFlow's where takes (Dimension /
 // TimeDimension / Entity), every name in it checked to be an identifier path, and everything around it —
@@ -64,7 +65,8 @@ function assertName(n) {
  * A where's `--where` clauses, one per item of the list (all of them hold). `resolve(ref, at, kind)` turns
  * a reference into the field it names (renderField's shapes) or throws with why it names none; a time
  * axis or a time dimension is compared as a moment. What the place does not take — a column of the rows,
- * a metric, an aggregate, a window — the one writer refuses, naming what a metric query's where takes.
+ * a metric, an aggregate, a window — the one writer refuses, naming what a where before the metrics step
+ * takes.
  * `dialect` is the warehouse's dialect name.
  */
 export function whereSql(dialect, list, resolve, at = 'where') {

@@ -96,9 +96,9 @@ export function timeRange(description) {
 export const SCALAR = { anyOf: [{ type: 'string', title: 'a string' }, { type: 'number', title: 'a number' }, { type: 'boolean', title: 'a boolean' }, { type: 'null', title: 'null' }] };
 
 /**
- * A CONDITION SLOT — what every `where` is, wherever it sits (a where stage's `conditions`, an
- * aggregate's `where`, a CASE branch's `when`, a funnel step's, a semantic model's, a metric query's,
- * the retentioneering filter's): a list of expressions of the place's own grammar (`ref`, its
+ * A CONDITION SLOT — what every `where` is, wherever it sits (a where stage's `conditions` — a metric
+ * query's among them —, a CASE branch's `when`, a funnel step's, a semantic model's, the
+ * retentioneering filter's): a list of expressions of the place's own grammar (`ref`, its
  * `$defs` entry) that ALL hold, each a boolean — a condition function, and / or / not, a boolean
  * column. Any boolean there is is one item: an or of ands nests inside it as functions do.
  */

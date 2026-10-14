@@ -53,6 +53,12 @@ const show = (stages) => backend.show(BASE, renderPipeline(stageCatalog, 'duckdb
 /** The warehouse's own count of rows, read with SQL written here by hand. */
 const truth = async (sql) => num((await wh.query(sql)).rows[0].n);
 
+// A CONDITIONAL AGGREGATE IS AN AGGREGATE OVER A CASE: the rows where every condition of `when` holds
+// are counted by a count of a case that yields 1 there, and a value of theirs summed by a sum of a case
+// that yields it there — nothing on any other row, which every aggregate skips.
+const rowsWhere = (...when) => ({ fn: 'count', args: [{ fn: 'case', cases: [{ when, then: { value: 1 } }] }] });
+const sumWhere = (expr, ...when) => ({ fn: 'sum', args: [{ fn: 'case', cases: [{ when, then: expr }] }] });
+
 /** A scratch DuckDB database for a dialect check. Opening one points DUCKDB_PATH at it; the engine's dbt keeps reading the fixture warehouse. */
 async function scratchWarehouse(t) {
   const keep = process.env.DUCKDB_PATH;
@@ -165,10 +171,11 @@ test('pipeline where starts_with / contains: iap_purchase_* events', opts, async
 });
 
 // pivot: each listed value of `on` a column of its own, holding the measure over that value's rows —
-// the aggregate stage's conditional measures, so a count counts rows (not cells) on every warehouse
+// the measure over a case of them, as the aggregate stage folds some rows, so a count counts rows (not
+// cells) on every warehouse
 const IAP_BY_COUNTRY = [
   { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-  { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+  { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
   { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
 ];
 const COUNTRIES = [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }];
@@ -183,23 +190,30 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   assert.equal(num(row.br), 25);
 });
 
-test('pipeline pivot: a count per cell is the rows of that value — the aggregate stage\'s count by country, 8 in all; a formula per cell is the grouped formula', opts, async (t) => {
+test('pipeline pivot: a count per cell is the rows of that value — the aggregate stage\'s count by country, 8 in all; a formula per cell is the grouped formula, and so is a sum over a case', opts, async (t) => {
   if (skip(t)) return;
   const sum = { fn: 'sum', args: [{ column: 'price' }] };
   const payersOf = { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] };
-  const grouped = await show([...IAP_BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'payers', expr: payersOf }, { name: 'revenue', expr: sum }] }]);
+  // a conditional sum — the prices above 5, a sum over a case — whose cell adds its value to the case's own condition
+  const above5 = sumWhere({ column: 'price' }, { fn: 'gt', args: [{ column: 'price' }, { value: 5 }] });
+  const grouped = await show([...IAP_BY_COUNTRY, { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'payers', expr: payersOf }, { name: 'revenue', expr: sum }, { name: 'above5', expr: above5 }] }]);
   const pivoted = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { fn: 'count' }, values: COUNTRIES }]);
   const payers = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: payersOf, values: COUNTRIES }]);
-  // a formula over aggregates in each cell — revenue per payer: the cell's value is added to the where
-  // of BOTH aggregates in it, so each country's cell is its own revenue over its own payers
+  // a formula over aggregates in each cell — revenue per payer: the cell's value is the condition of
+  // BOTH aggregates in it (each folds a case of its rows), so each country's cell is its own revenue over
+  // its own payers
   const arppu = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: { fn: 'div', args: [sum, payersOf] }, values: COUNTRIES }]);
-  assert.equal(grouped.ok && pivoted.ok && payers.ok && arppu.ok, true, JSON.stringify([grouped, pivoted, payers, arppu].find((x) => !x.ok)));
+  const conditional = await show([...IAP_BY_COUNTRY, { stage: 'pivot', on: 'country', measure: above5, values: COUNTRIES }]);
+  assert.equal(grouped.ok && pivoted.ok && payers.ok && arppu.ok && conditional.ok, true, JSON.stringify([grouped, pivoted, payers, arppu, conditional].find((x) => !x.ok)));
   const by = Object.fromEntries(grouped.rows.map((x) => [String(x.country), x]));
   for (const { value, name } of COUNTRIES) {
     assert.equal(num(pivoted.rows[0][name]), num(by[value].n), `${value}: rows`);
     assert.equal(num(payers.rows[0][name]), num(by[value].payers), `${value}: payers`);
     assert.ok(Math.abs(num(arppu.rows[0][name]) - num(by[value].revenue) / num(by[value].payers)) < 1e-9, `${value}: revenue per payer ${arppu.rows[0][name]}`);
+    assert.equal(num(conditional.rows[0][name] ?? 0), num(by[value].above5 ?? 0), `${value}: the prices above 5, a sum over a case`);
   }
+  // the purchases above 5 by the country valid at each (u1's 10 in the US, u5's 20 in BR, the GB 10s, …)
+  assert.deepEqual(COUNTRIES.map((c) => num(conditional.rows[0][c.name] ?? 0)), [30, 20, 20], '[pivot of a sum over a case] US 30 / GB 20 / BR 20');
   assert.equal(num(by.US.revenue), 35, 'the US revenue the US cell divides');
   assert.equal(COUNTRIES.reduce((a, c) => a + num(pivoted.rows[0][c.name]), 0), 8); // the 8 purchases, one cell each
   assert.ok(COUNTRIES.some((c) => num(pivoted.rows[0][c.name]) > 1), 'a cell holds more than one row — a count of cells would read 1');
@@ -226,15 +240,19 @@ test('pipeline pivot: a numeric column pivots by number, a missing value is a co
 // ONE ungrouped aggregate over the 8 IAP prices [5,5,5,10,10,10,20,20] carries what were four
 // tests: the statistical aggregates, compute arithmetic, a constant column, and approx_count_distinct
 // (HLL++: BigQuery APPROX_COUNT_DISTINCT; DuckDB exact) — and, as measures of the same stage, a
-// formula over two aggregates (revenue per payer) and counts with a condition each: a comparison, a
-// membership of three members, and a range whose value and bound are both expressions.
+// formula over two aggregates (revenue per payer), counts with a condition each — a count over a case
+// that yields 1 where it holds: a comparison, a membership of three members, and a range whose value and
+// bound are both expressions — and a sum with a condition, a sum over a case that yields the price there
+// (with no else, and with sum's else: 0).
 const IAP_PRICES = [5, 5, 5, 10, 10, 10, 20, 20];
-test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7, ARPPU 85/7 and conditional counts', opts, async (t) => {
+test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7, ARPPU 85/7, conditional counts and conditional sums', opts, async (t) => {
   if (skip(t)) return;
   const price = { column: 'price' };
+  const over10 = { fn: 'gt', args: [price, { value: 10 }] };
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    // a numeric property, read as the catalog declares it (no cast)
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     // compute: scalar arithmetic over a derived column
     { stage: 'compute', name: 'double_price', expr: { fn: 'mul', args: [{ column: 'price' }, { value: 2 }] } },
     // compute const: a literal numeric column
@@ -247,26 +265,34 @@ test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev 
       { name: 'p25', expr: { fn: 'percentile', args: [{ column: 'price' }], percentile: 0.25 } },
       { name: 'd', expr: { fn: 'sum', args: [{ column: 'double_price' }] } },
       { name: 's', expr: { fn: 'sum', args: [{ column: 'price' }] } },
+      // the numeric property summed where it is stored, with no cast: the catalog says it is a number
+      { name: 's_property', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } },
       { name: 'rows', expr: { fn: 'sum', args: [{ column: 'one' }] } },
       { name: 'payers', expr: { fn: 'approx_count_distinct', args: [{ column: 'player_id_of_internal' }] } },
       { name: 'exact', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } },
       // revenue per payer: a formula over two aggregates, in one measure
       { name: 'arppu', expr: { fn: 'div', args: [{ fn: 'sum', args: [price] }, { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] }] } },
       // the rows a condition holds for, counted
-      { name: 'over_10', expr: { fn: 'count', where: [{ fn: 'gt', args: [price, { value: 10 }] }] } },
-      { name: 'listed', expr: { fn: 'count', where: [{ fn: 'in', args: [price, { value: 5 }, { value: 20 }, { value: 7 }] }] } },
+      { name: 'over_10', expr: rowsWhere(over10) },
+      { name: 'listed', expr: rowsWhere({ fn: 'in', args: [price, { value: 5 }, { value: 20 }, { value: 7 }] }) },
       // price*2 between 15 and price+15: the prices from 7.5 to 15
-      { name: 'mid', expr: { fn: 'count', where: [{ fn: 'between', args: [{ fn: 'mul', args: [price, { value: 2 }] }, { value: 15 }, { fn: 'add', args: [price, { value: 15 }] }] }] } },
+      { name: 'mid', expr: rowsWhere({ fn: 'between', args: [{ fn: 'mul', args: [price, { value: 2 }] }, { value: 15 }, { fn: 'add', args: [price, { value: 15 }] }] }) },
+      // …and their prices summed: nothing on the other rows, or 0 there (sum's else)
+      { name: 'over_10_revenue', expr: sumWhere(price, over10) },
+      { name: 'over_10_or_0', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [over10], then: price }], else: { value: 0 } }] } },
     ] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   const row = r.rows[0];
-  // the formula and the conditional counts, against the 8 prices
+  // the formula and the conditional counts and sums, against the 8 prices
   assert.ok(Math.abs(num(row.arppu) - 85 / 7) < 1e-9, `[formula measure] revenue per payer 85/7, got ${row.arppu}`);
   assert.equal(num(row.over_10), IAP_PRICES.filter((p) => p > 10).length, '[conditional count] price > 10: the two 20s');
   assert.equal(num(row.listed), IAP_PRICES.filter((p) => [5, 20, 7].includes(p)).length, '[in, three members] 5, 20 or 7: three 5s and two 20s');
   assert.equal(num(row.mid), IAP_PRICES.filter((p) => 2 * p >= 15 && 2 * p <= p + 15).length, '[between over expressions] the three 10s');
   assert.equal(num(row.mid), 3, '[between over expressions] the three 10s');
+  const above10 = IAP_PRICES.filter((p) => p > 10).reduce((a, p) => a + p, 0);
+  assert.equal(num(row.over_10_revenue), above10, '[conditional sum] the two 20s: 40');
+  assert.equal(num(row.over_10_or_0), above10, '[conditional sum, else 0] the same 40');
   // 'pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5'
   assert.equal(num(row.n), 8, '[statistical aggregates] n');
   assert.equal(num(row.med), 10, '[statistical aggregates] median');
@@ -276,6 +302,8 @@ test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev 
   // 'pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)'
   assert.equal(num(row.d), 170, '[compute arithmetic] sum(price*2)');
   assert.equal(num(row.s), 85, '[compute arithmetic] sum(price)');
+  const revenue = await truth("select sum(price_in_usd_of_event_data) as n from fct_analytics_events where event_name = 'iap_purchase_completed'");
+  assert.deepEqual([num(row.s_property), num(row.s)], [revenue, revenue], '[a numeric property, no cast] summed directly and through its column: the warehouse\'s revenue');
   // 'pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)'
   assert.equal(num(row.rows), 8, '[compute const] the constant column sums to the row count');
   // 'pipeline approx_count_distinct: distinct payers = 7 (exact on DuckDB)': u1,u3,u5,u7,u9,u10,u11
@@ -325,7 +353,7 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'compute', name: 'tier', expr: { fn: 'case', cases: [{ when: [{ fn: 'lt', args: [{ column: 'price' }, { value: 10 }] }], then: { value: 'low' } }], else: { value: 'high' } } },
     { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
@@ -360,7 +388,7 @@ test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset',
 test('pipeline where operands: price>=10 (a constant) and device_time<now → 5 rows summing 70', opts, async (t) => {
   if (skip(t)) return;
   const r = await show([
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'where', conditions: [
       { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] },
       { fn: 'gte', args: [{ column: 'price' }, { value: 10 }] }, // column vs constant
@@ -378,7 +406,7 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'player_id_of_internal' }, { value: 'u1' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'compute', name: 'day', expr: { fn: 'unix_date', args: [{ column: 'device_time' }] } },
     { stage: 'compute', name: 'roll', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } } } },
     { stage: 'order_by', keys: [{ key: 'day', direction: 'asc' }] },
@@ -395,7 +423,7 @@ test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum =
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data' } },
     { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }, { name: 'n', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', expr: { fn: 'hll_merge', args: [{ column: 'sk' }] } }, { name: 'naive', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
   ]);
@@ -409,7 +437,7 @@ test('pipeline HLL hll_merge_partial→hll_extract: staged merge then extract = 
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data' } },
     { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', expr: { fn: 'hll_merge_partial', args: [{ column: 'sk' }] } }] },
     { stage: 'compute', name: 'total', expr: { fn: 'hll_extract', args: [{ column: 'merged' }] } },
@@ -426,8 +454,9 @@ test('pipeline unnest struct + json_field: reward item/qty extracted together', 
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
     { stage: 'unnest', expr: { property: 'rewards' }, name: 'rw' },
-    { stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item', type: 'string' } },
-    { stage: 'compute', name: 'qty', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'qty', type: 'int' } },
+    // a field of the element is text; the quantity is cast to a number
+    { stage: 'compute', name: 'item', expr: { fn: 'json_field', args: [{ column: 'rw' }], field: 'item' } },
+    { stage: 'compute', name: 'qty', expr: { fn: 'cast', args: [{ fn: 'json_field', args: [{ column: 'rw' }], field: 'qty' }], type: 'int' } },
     { stage: 'aggregate', group_by: ['item'], measures: [{ name: 'grants', expr: { fn: 'count' } }, { name: 'total_qty', expr: { fn: 'sum', args: [{ column: 'qty' }] } }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -444,7 +473,7 @@ test('pipeline compute string/const: concat + upper labels group correctly (P1=3
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data', type: 'string' } },
+    { stage: 'compute', name: 'pid', expr: { property: 'product_id_of_event_data' } },
     { stage: 'compute', name: 'label', expr: { fn: 'concat', args: [{ column: 'pid' }, { value: '_iap' }] } },
     { stage: 'compute', name: 'up', expr: { fn: 'upper', args: [{ column: 'label' }] } },
     { stage: 'aggregate', group_by: ['up'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
@@ -589,7 +618,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35; IAP reven
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_column: 'metric', value_column: 'value' },
@@ -617,7 +646,7 @@ test('pipeline unpivot: exactly keep + name/value columns, one row per value —
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }, { value: 'first_launch' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'compute', name: 'session', expr: { fn: 'cast', args: [{ column: 'session_number' }], type: 'numeric' } },
     { stage: 'unpivot', keep: ['event_id', 'event_name'], columns: ['price', 'session'], name_column: 'metric', value_column: 'amount' },
   ]);
@@ -646,7 +675,7 @@ test('a table-wide statistic is ONE row, and its numbers scale the rows as liter
   if (skip(t)) return;
   const perPlayer = [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
     { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
   ];
 
@@ -727,8 +756,8 @@ test('a where keeps a row when any argument of an or holds, beside the condition
 // ONE ungrouped aggregate over events carries what four tests each built a whole-table pipeline for,
 // every figure held to the warehouse's own count of the same rows (SQL written here by hand):
 //   - a CASE branch takes the same conditions: an or in `when` flags the rows either event names;
-//   - an aggregate measure takes a where of its own: a conditional count and sum beside the
-//     unconditional one, in one pass;
+//   - a conditional count and sum — each an aggregate over a case whose `when` takes the same
+//     conditions — beside the unconditional one, in one pass;
 //   - a missing value: neq holds only where the value is there and differs, not(eq) wherever eq does
 //     not hold — the rows with no level id too;
 //   - a text column of the warehouse compared with a boolean matches the ways text spells the flag,
@@ -757,21 +786,21 @@ test('one ungrouped aggregate over events carrying every condition and expressio
     { stage: 'aggregate', measures: [
       { name: 'flagged', expr: { fn: 'sum', args: [{ column: 'flag' }] } },
       { name: 'n', expr: { fn: 'count' } },
-      { name: 'n_tut', expr: { fn: 'count', where: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }] }] } },
-      { name: 's_early', expr: { fn: 'sum', args: [{ column: 'session_number' }], where: [{ fn: 'lte', args: [{ column: 'session_number' }, { value: 2 }] }] } },
-      { name: 'neq_l1', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] }] } },
-      { name: 'not_l1', expr: { fn: 'count', where: [{ fn: 'not', args: [level1] }] } },
-      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
-      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
+      { name: 'n_tut', expr: rowsWhere({ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }] }) },
+      { name: 's_early', expr: sumWhere({ column: 'session_number' }, { fn: 'lte', args: [{ column: 'session_number' }, { value: 2 }] }) },
+      { name: 'neq_l1', expr: rowsWhere({ fn: 'neq', args: [{ column: 'level_id_of_event_data' }, { value: 1 }] }) },
+      { name: 'not_l1', expr: rowsWhere({ fn: 'not', args: [level1] }) },
+      { name: 'yes', expr: rowsWhere({ fn: 'eq', args: [{ column: 'bundle_id' }, { value: true }] }) },
+      { name: 'no', expr: rowsWhere({ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }) },
       { name: 'twice_sum', expr: { fn: 'sum', args: [{ column: 'twice' }] } },
     ] },
   ]);
   const row = rows[0];
   // 'a CASE branch takes the same conditions: an or in `when` flags the rows either event names'
   assert.equal(num(row.flagged), flagged, '[CASE or] the flagged rows');
-  // 'an aggregate measure takes a where of its own: a conditional count and sum beside the unconditional one, in one pass'
-  assert.ok(tutorials > 0 && tutorials < all, '[measure where] the condition keeps some rows, not all');
-  assert.deepEqual([num(row.n), num(row.n_tut), num(row.s_early)], [all, tutorials, early], '[measure where] count, conditional count, conditional sum');
+  // 'a conditional count and sum — an aggregate over a case — beside the unconditional one, in one pass'
+  assert.ok(tutorials > 0 && tutorials < all, '[aggregate over a case] the condition keeps some rows, not all');
+  assert.deepEqual([num(row.n), num(row.n_tut), num(row.s_early)], [all, tutorials, early], '[aggregate over a case] count, conditional count, conditional sum');
   // a missing level id: neq drops it, not(eq) keeps it — the two differ by exactly the rows with none
   assert.ok(noLevel > 0 && otherLevel > 0, '[missing value] the fixture has rows with no level id, and other levels');
   assert.deepEqual([num(row.neq_l1), num(row.not_l1)], [otherLevel, notLevel1], '[missing value] neq vs not(eq)');
@@ -817,34 +846,41 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
 });
 
 // One semantic build serves both sides of the governed grammar (each was a build of its own): a
-// measure's where and a metric query's where.
-test('a semantic measure\'s where and a metric query\'s where take or and the text operators', opts, async (t) => {
+// measure over a case, and a where step before a metric query's metrics step.
+test('a semantic measure over a case and a where step before the metrics step take or and the text operators', opts, async (t) => {
   if (skip(t)) return;
+  const level = { property: 'level_id_of_event_data' };
   const built = await engine.build_semantic_model({
     name: 'cond_sem',
     semantic_models: [{ source: 'events', dimensions: [{ column: 'event_name' }], measures: [
-      { name: 'picked', expr: { fn: 'count', where: [{ fn: 'or', args: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: 1 }] }, { fn: 'gte', args: [{ property: 'level_id_of_event_data' }, { value: 3 }] }] }] } },
+      { name: 'picked', expr: rowsWhere({ fn: 'or', args: [{ fn: 'eq', args: [level, { value: 1 }] }, { fn: 'gte', args: [level, { value: 3 }] }] }) },
+      // the level ids of the same rows summed: a numeric property, read as the catalog declares it
+      { name: 'picked_levels', expr: sumWhere(level, { fn: 'or', args: [{ fn: 'eq', args: [level, { value: 1 }] }, { fn: 'gte', args: [level, { value: 3 }] }] }) },
       { name: 'rows', expr: { fn: 'count' } },
     ] }],
-    metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }, { name: 'rows', type: 'simple', measure: 'rows' }],
+    metrics: [{ name: 'picked', type: 'simple', measure: 'picked' }, { name: 'picked_levels', type: 'simple', measure: 'picked_levels' }, { name: 'rows', type: 'simple', measure: 'rows' }],
   });
   assert.ok(built.context_id, JSON.stringify(built.error || built));
 
-  // 'a measure's where takes an or: the count is the rows either condition holds for'
+  // 'a measure over a case takes an or: the count is the rows either condition holds for, the sum their level ids'
   const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
-  assert.ok(picked > 0, '[measure where] the fixture has such rows');
-  const r = await engine.query_semantic_model({ context_id: built.context_id, metrics: ['cond_sem_picked'], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  const pickedLevels = await truth('select sum(level_id_of_event_data) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
+  assert.ok(picked > 0 && pickedLevels > picked, '[measure over a case] the fixture has such rows, some above level 1');
+  const r = await engine.query_semantic_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['cond_sem_picked', 'cond_sem_picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].cond_sem_picked), picked, '[measure where] the rows either condition holds for');
+  assert.deepEqual([num(r.rows[0].cond_sem_picked), num(r.rows[0].cond_sem_picked_levels)], [picked, pickedLevels], '[count / sum over a case] the rows either condition holds for, and their level ids');
 
-  // 'a metric query's where names what it compares as group_by does, and takes the text operators and or too'
+  // 'a where step before the metrics step names what it compares as group_by does, and takes the text operators and or too'
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
   const w = await engine.query_semantic_model({
-    context_id: built.context_id, metrics: ['cond_sem_rows'], time_range: { start: '2020-01-01', end: '2030-12-31' },
-    where: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }],
+    context_id: built.context_id, time_range: { start: '2020-01-01', end: '2030-12-31' },
+    steps: [
+      { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }] },
+      { stage: 'metrics', metrics: ['cond_sem_rows'] },
+    ],
   });
   assert.equal(w.ok, true, JSON.stringify(w.error));
-  assert.equal(num(w.rows[0].cond_sem_rows), named, '[query where] the rows the or of text operators keeps');
+  assert.equal(num(w.rows[0].cond_sem_rows), named, '[where before the metrics step] the rows the or of text operators keeps');
 });
 
 test('a time window whose bounds carry their own offset is those instants, whatever timezone is named beside them', opts, async (t) => {
@@ -911,8 +947,8 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
   const truthy = await truth("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')");
   const counts = [
     { stage: 'aggregate', measures: [
-      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ value: true }, { column: 'bundle_id' }] }] } },
-      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }] } },
+      { name: 'yes', expr: rowsWhere({ fn: 'eq', args: [{ value: true }, { column: 'bundle_id' }] }) },
+      { name: 'no', expr: rowsWhere({ fn: 'neq', args: [{ column: 'bundle_id' }, { value: true }] }) },
     ] },
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
@@ -939,8 +975,8 @@ test('a joined text column, under the name the join gave it, is compared with a 
   const { rows } = await condPipe([
     { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'activity_test' }] },
     { stage: 'aggregate', measures: [
-      { name: 'yes', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'activity_test' }, { value: true }] }] } },
-      { name: 'no', expr: { fn: 'count', where: [{ fn: 'neq', args: [{ column: 'activity_test' }, { value: true }] }] } },
+      { name: 'yes', expr: rowsWhere({ fn: 'eq', args: [{ column: 'activity_test' }, { value: true }] }) },
+      { name: 'no', expr: rowsWhere({ fn: 'neq', args: [{ column: 'activity_test' }, { value: true }] }) },
     ] },
   ]);
   assert.ok(all > 0, 'the fixture joins users to events');
@@ -1331,7 +1367,7 @@ test('pipeline time_range: single date-only day is not collapsed to a midnight i
 // carries no event columns — exactly the case worth proving.
 const CP_STEPS = [
   { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
-  { stage: 'compute', name: 'score', expr: { property: 'daily_level_score_of_event_data', type: 'numeric' } },
+  { stage: 'compute', name: 'score', expr: { property: 'daily_level_score_of_event_data' } },
   { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'levels', expr: { fn: 'count' } }, { name: 'total_score', expr: { fn: 'sum', args: [{ column: 'score' }] } }] },
   { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 2 }] }] },
 ];
@@ -1502,7 +1538,7 @@ async function pipeRows(...steps) {
 test('1. unnest a JSON string array: 20 breadcrumbs, level_start 4 / net_retry 4 / gc_pause 3', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb' },
     { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   const by = mapCol(rows, 'crumb', 'n');
@@ -1571,7 +1607,8 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
   const frames = await pipeRows(
     { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'frame' },
     { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
-    { stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } },
+    // a field of the element is text: the line number is cast to one
+    { stage: 'compute', name: 'line', expr: { fn: 'cast', args: [{ fn: 'json_field', args: [{ column: 'frame' }], field: 'line' }], type: 'int' } },
     { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } },
     { stage: 'project', keep: ['crash_id', 'file', 'line', 'in_app'] },
   );
@@ -1636,12 +1673,14 @@ test('8. a { property, field } read of a JSON object: wifi 8 / cellular 5', opts
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 8, cellular: 5 });
 });
 
-// 9. …and a NUMERIC field of the object is a number once asked for as one: it sums and maxes.
+// 9. …and a NUMERIC field of the object is a number once cast to one: it sums and maxes. A field
+//    reads text whichever way it is read — the property's ({ property, field }) or json_field over
+//    the column that holds the object — and `cast` converts it.
 test('9. json_field with a cast over the object column: coins 5205, top level 31', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } },
-    { stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } },
+    { stage: 'compute', name: 'coins', expr: { fn: 'cast', args: [{ property: 'custom_keys_of_event_data', field: 'coins' }], type: 'int' } },
+    { stage: 'compute', name: 'level', expr: { fn: 'cast', args: [{ fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level' }], type: 'int' } },
     { stage: 'aggregate', measures: [
       { name: 'n', expr: { fn: 'count' } },
       { name: 'coins', expr: { fn: 'sum', args: [{ column: 'coins' }] } },
@@ -1691,7 +1730,7 @@ test('10. json_parse_array then element_at / array_last: first vs last breadcrum
 test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 3 / BR 1', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
-    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb' },
     { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
@@ -1727,7 +1766,7 @@ test('13. an array and an object together: 20 breadcrumbs split wifi 13 / cellul
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'network', expr: { property: 'custom_keys_of_event_data', field: 'network' } },
-    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' },
+    { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb' },
     { stage: 'aggregate', group_by: ['network'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   assert.deepEqual(mapCol(rows, 'network', 'n'), { wifi: 13, cellular: 7 });
@@ -1815,13 +1854,16 @@ test('a filter value that is a Jinja expression is compared as the literal text,
 // players reached tutorial step_1.
 test('governed path: a Jinja filter value is literal, a Jinja label neither runs nor breaks dbt parse', opts, async (t) => {
   if (skip(t)) return;
+  // the distinct players of the tutorial events at a step: count_distinct over a case that yields the
+  // player there
+  const playersAt = (step) => ({ fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: step }] }], then: { column: 'player_id_of_internal' } }] }] });
   const out = await engine.build_semantic_model({
     name: 'jtut',
-    semantic_models: [{ source: 'events', measures: [{ name: 's1', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: 'step_1' }] }] }, label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: '{{ "step_1" }}' }] }] } }] }],
+    semantic_models: [{ source: 'events', measures: [{ name: 's1', expr: playersAt('step_1'), label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: playersAt('{{ "step_1" }}') }] }],
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['jtut_s1', 'jtut_sj'] });
+  const r = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['jtut_s1', 'jtut_sj'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(Number(r.rows[0].jtut_s1), 8, 'the control: 8 players at step_1');
   assert.equal(Number(r.rows[0].jtut_sj ?? 0), 0, 'evaluated, the Jinja value would have counted the same 8');

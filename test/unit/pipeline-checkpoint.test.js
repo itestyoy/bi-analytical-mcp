@@ -389,7 +389,7 @@ test('a draft started from a semantic query run with materialize: true has its t
   const e = flagEngine(flagRunner());
   const created = await e.build_semantic_model({ name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
-  const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], group_by: [{ source: 'events', column: 'event_name' }], materialize: true });
+  const stored = await e.query_semantic_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['task_cnt'], group_by: [{ source: 'events', column: 'event_name' }] }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');
   const from = await e.build_pipeline_model({ action: 'start', name: 'slice', from_task: stored.task_id, include: ['columns'] });
   assert.deepEqual(from.available_columns, [{ name: 'task_cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);

@@ -23,7 +23,7 @@ import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { eachSchema, transportSchema } from '../../src/schema/transport.js';
 import { PLACES } from '../../src/pipeline/compute.js';
-import { STAGE_PLACES } from '../../src/pipeline.js';
+import { STAGE_PLACES, stageDef } from '../../src/pipeline.js';
 import { REF_PLACES, refKind } from '../../src/schema/refs.js';
 import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema, startPlace } from '../../src/retentioneering/schema.js';
 import { buildToolDefs } from '../../src/mcp-surface.js';
@@ -262,8 +262,8 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   const stepsField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.steps).find(Boolean));
   assert.equal(deref(bnm, stepField), bnm.$defs.stage, 'the step field points at it');
   assert.equal(deref(bnm, stepsField.items), bnm.$defs.stage, 'and so does every item of the list of steps');
-  // the read steps are the one stage definition in both query tools, built for a read's place: a pipeline
-  // read's, and the steps after a metric query
+  // the steps are the one stage definition in both query tools, built for their places: a pipeline read's,
+  // and a metric query's — its where steps, its metrics step and the read after it
   for (const tool of ['query_pipeline_model', 'query_semantic_model']) {
     const s = schemas[tool];
     const steps = deref(s, forms(s, s).map((f) => f.properties?.steps).find(Boolean));
@@ -295,15 +295,20 @@ test('each tool schema holds one expr, one stage and one ref where it takes them
       assert.equal(concept in defs, (takes[name] || []).includes(concept), `${name}: $defs.${concept} ${(takes[name] || []).includes(concept) ? 'missing' : 'unexpected'}`);
     }
   }
-  // the stage is grouped by what a step needs — SQL over rows, over a source's events, on a runtime — and
-  // each group's forms are tagged by `stage`; a tool's holds the groups its places take (a group left
-  // empty is left out): the retentioneering tool's start takes SQL stages that keep the rows events, and
-  // its library's ops are its runtime group
+  // the stage is grouped by what a step needs — SQL over rows, over a source's events, on a runtime, in
+  // the semantic layer — and each group's forms are tagged by `stage`; a tool's holds the groups its
+  // places take (a group left empty is left out): a metric query's steps are a read's and its metrics
+  // step, which no other tool offers; the retentioneering tool's start takes SQL stages that keep the rows
+  // events, and its library's ops are its runtime group
   const groups = (schema) => deref(schema, schema.$defs.stage).anyOf.map((g) => deref(schema, g).title);
   const SQL = 'SQL over rows — needs a table';
   const RUNTIME = 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows';
+  const SEMANTIC = 'in the semantic layer — needs MetricFlow';
   assert.deepEqual(groups(all.build_pipeline_model), [SQL, 'over a source\'s events — needs the rows still that source\'s events']);
-  for (const tool of ['query_pipeline_model', 'query_semantic_model']) assert.deepEqual(groups(all[tool]), [SQL], `${tool}: a read's stages are SQL over rows`);
+  assert.deepEqual(groups(all.query_pipeline_model), [SQL], 'a read\'s stages are SQL over rows');
+  assert.deepEqual(groups(all.query_semantic_model), [SQL, SEMANTIC], 'a metric query\'s: a read\'s, and its metrics step');
+  const semanticGroup = deref(all.query_semantic_model, all.query_semantic_model.$defs.stage).anyOf.map((g) => deref(all.query_semantic_model, g)).find((g) => g.title === SEMANTIC);
+  assert.deepEqual(forms(all.query_semantic_model, semanticGroup).flatMap((f) => pinned(all.query_semantic_model, f, 'stage')), ['metrics']);
   assert.deepEqual(groups(all.build_retentioneering_model), [SQL, RUNTIME]);
   // the ref is grouped by what it names: the catalog, the semantic layer — a tool's holding what its places take
   const refGroups = (schema) => deref(schema, schema.$defs.ref).anyOf.map((g) => deref(schema, g).title.split(':')[0]);
@@ -359,7 +364,9 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
           assert.ok(name === 'build_retentioneering_model' && pinned(doc, f, 'type').length, `${name}: a step tagged by no stage (${f.title})`);
           continue;
         }
-        assert.ok(stage.some((p) => !p.stages || p.stages.includes(s)), `${name}: the ${s} stage — no place of the tool takes it`);
+        // (a place that lists no stages takes every stage over a table's rows; the semantic layer's only
+        // where a place names it)
+        assert.ok(stage.some((p) => (p.stages ? p.stages.includes(s) : stageDef(s)?.group !== 'semantic')), `${name}: the ${s} stage — no place of the tool takes it`);
       }
       for (const f of defs.ref ? forms(doc, defs.ref) : []) {
         assert.ok(ref.some((p) => p.takes.includes(kindOf(f))), `${name}: the ref ${f.title} — no place of the tool takes it`);
@@ -419,10 +426,11 @@ test('the card declaration (display) is structural: each kind is a closed branch
   const { displayProblems } = await import('../../src/display-check.js');
   assert.match(displayProblems({ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, ['d', 'a', 'b', 'c']).join(' | '), /declare a single y/, 'a split with two value columns');
   // the declaration lives on display_model_result alone: no other tool takes one
-  assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
+  const metrics = [{ stage: 'metrics', metrics: ['m'] }];
+  assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', steps: metrics, display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
-  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_ids with a query');
+  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', steps: metrics }).ok, false, 'task_ids with a query');
   assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], steps: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with steps');
   // a read is only compiled at its start, never at a read of its task
   assert.equal(validateInput(validators.query_pipeline_model, { context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');

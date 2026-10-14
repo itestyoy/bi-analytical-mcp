@@ -81,7 +81,8 @@ test('a step stored by an earlier version is built in this version\'s spelling �
   const columns = (stages) => [...built(stages).columns.entries()].map(([k, v]) => `${k}:${v.type}`);
   // each pair: what an earlier version stored, and the step written today — the kept one is read as
   // today's (what the render reports, and what a draft shows), and builds the same columns
-  const price = { fn: 'gte', args: [{ property: 'price_in_usd_of_event_data', type: 'numeric' }, val(1)] };
+  // (a kept typed read is the property alone where the catalog reads it as that type, a cast where it named another)
+  const price = { fn: 'gte', args: [{ property: 'price_in_usd_of_event_data' }, val(1)] };
   const funnel = (extra, where) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'], where }], ...extra });
   const priceThen = { left: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' }, op: 'gte', value: 1 };
   for (const [earlier, today] of [
@@ -98,7 +99,9 @@ test('a step stored by an earlier version is built in this version\'s spelling �
     [{ stage: 'match_recognize', mode: 'ordered', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }, { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] }],
     // a measure: `fn` before `agg`, `q` before `percentile`, then `agg` + `column` — an expression now
     [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'avg', column: 'session_number' }, { name: 'p', fn: 'percentile', q: 0.9, column: 'session_number' }] }, { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'average', args: [col('session_number')] } }, { name: 'p', expr: { fn: 'percentile', args: [col('session_number')], percentile: 0.9 } }] }],
-    [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ left: col('event_name'), op: 'eq', value: 'tutorial' }] }, { name: 's', agg: 'sum', column: 'session_number' }] }, { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [], where: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }] } }, { name: 's', expr: { fn: 'sum', args: [col('session_number')] } }] }],
+    [{ stage: 'aggregate', measures: [{ name: 'n', agg: 'count', where: [{ left: col('event_name'), op: 'eq', value: 'tutorial' }] }, { name: 's', agg: 'sum', column: 'session_number' }] }, { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }], then: val(1) }] }] } }, { name: 's', expr: { fn: 'sum', args: [col('session_number')] } }] }],
+    // an aggregate's where: the case it folds now
+    [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [col('session_number')], where: [{ fn: 'gt', args: [col('session_number'), val(1)] }] } }] }, { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: col('session_number') }] }] } }] }],
     // a pivot: agg + value_column + values as names, then a measure { agg, column } — the aggregate expression now
     [{ stage: 'pivot', on: 'event_name', fn: 'avg', value_column: 'session_number', values: ['tutorial'] }, { stage: 'pivot', on: 'event_name', measure: { fn: 'average', args: [col('session_number')] }, values: [{ value: 'tutorial', name: 'tutorial' }] }],
     [{ stage: 'pivot', on: 'event_name', agg: 'sum', value_column: 'session_number', values: ['Tutorial', '7'] }, { stage: 'pivot', on: 'event_name', measure: { fn: 'sum', args: [col('session_number')] }, values: [{ value: 'Tutorial', name: 'Tutorial' }, { value: '7', name: '_7' }] }],
@@ -108,12 +111,16 @@ test('a step stored by an earlier version is built in this version\'s spelling �
     [{ stage: 'where', conditions: [{ left: col('session_number'), op: 'gt', value: 1, right: col('session_number') }, { or: [{ left: col('event_name'), op: 'eq', value: 'tutorial' }, { column: 'session_number', op: 'is_null' }] }] }, { stage: 'where', conditions: [{ fn: 'gt', args: [col('session_number'), col('session_number')] }, { fn: 'or', args: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }, { fn: 'is_null', args: [col('session_number')] }] }] }],
     [{ stage: 'where', conditions: [{ column: 'session_number', op: 'gt', right: { value: 1 } }, { left: { fn: 'length', args: [col('event_name')] }, op: 'gt', value: 9, right: { value: 3 } }, { column: 'session_number', op: 'in', value: [1, 2] }, { and: [{ column: 'event_name', op: 'neq', value: 'x' }] }] }, { stage: 'where', conditions: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, val(3)] }, { fn: 'in', args: [col('session_number'), val(1), val(2)] }, { fn: 'neq', args: [col('event_name'), val('x')] }] }],
     [{ stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ left: col('session_number'), op: 'gt', value: 1 }], then: val('more') }], else: val('one') } }, { stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: val('more') }], else: val('one') } }],
-    // an event property read by a function of its own, and the array functions naming `property` — a leaf and args now
-    [{ stage: 'compute', name: 'p', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }],
+    // an event property read by a function of its own, and the array functions naming `property` — a leaf and args now;
+    // a read that named its type: the read alone where it yields that type now, a cast where it is another
+    [{ stage: 'compute', name: 'p', expr: { fn: 'event_property', property: 'price_in_usd_of_event_data', type: 'numeric' } }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }],
+    [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'int' } }, { stage: 'compute', name: 'p', expr: { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' } }],
+    [{ stage: 'compute', name: 'j', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'int' } }, { stage: 'compute', name: 'j', expr: { fn: 'cast', args: [{ fn: 'json_field', args: [col('event_name')], field: 'a' }], type: 'int' } }],
+    [{ stage: 'compute', name: 'j', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'string' } }, { stage: 'compute', name: 'j', expr: { fn: 'json_field', args: [col('event_name')], field: 'a' } }],
     [{ stage: 'compute', name: 'n', expr: { fn: 'array_length', property: 'words_collected' } }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', args: [{ property: 'words_collected' }] } }],
     [{ stage: 'compute', name: 'c', expr: { fn: 'array_contains', property: 'words_collected', item: 'cat' } }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', args: [{ property: 'words_collected' }, val('cat')] } }],
     // a derive stage is the compute stage reading the same event property — a column of its own, or a key of the payload
-    [{ stage: 'derive', name: 'p', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } }],
+    [{ stage: 'derive', name: 'p', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' }, { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }],
     [{ stage: 'derive', name: 'n', op: 'array_length', source: 'words_collected' }, { stage: 'compute', name: 'n', expr: { fn: 'array_length', args: [{ property: 'words_collected' }] } }],
     [{ stage: 'derive', name: 'c', op: 'contains', source: 'words_collected', value: 'cat' }, { stage: 'compute', name: 'c', expr: { fn: 'array_contains', args: [{ property: 'words_collected' }, val('cat')] } }],
     // an unnest naming its array as a field of its own — its expr now
@@ -252,6 +259,35 @@ test('a condition is a function: an earlier spelling is refused with the value w
     { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, val(3)] },
     { fn: 'not', args: [{ fn: 'and', args: [{ fn: 'in', args: [col('event_name'), val('a'), val('b')] }, { fn: 'between', args: [col('session_number'), val(1), val(3)] }] }] },
   ]) assert.ok(await add(c), JSON.stringify(c));
+});
+
+// A READ NAMES NO TYPE, AN AGGREGATE NO WHERE: a new call written the earlier way is refused with the value
+// written today — a typed read as the read cast to its type (the type dropped where the read yields it:
+// text out of a JSON document or an array), an aggregate's where as the case it folds, an unnest naming its
+// element's type as the unnest and a compute stage casting the element (in a list of steps, where the two
+// fit; a lone step has no one value it is now: its `type` is refused as a field no unnest takes, and the
+// two steps it is are said, to put where it stood).
+test('a typed read, an aggregate\'s where and a typed unnest are refused with the value written today', async () => {
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
+  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'typed', source: 'events' });
+  const add = (...steps) => e.build_pipeline_model({ action: 'add_steps', context_id, steps });
+  const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
+  const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
+  for (const [earlier, today] of [
+    [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'int' } }, { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' }],
+    [{ stage: 'compute', name: 'p', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'numeric' } }, { fn: 'cast', args: [{ fn: 'json_field', args: [col('event_name')], field: 'a' }], type: 'numeric' }],
+    [{ stage: 'compute', name: 'p', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'string' } }, { fn: 'json_field', args: [col('event_name')], field: 'a' }],
+    [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [isTut] } }] }, { fn: 'count', args: [{ fn: 'case', cases: [{ when: [isTut], then: val(1) }] }] }],
+    [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'average', args: [col('session_number')], where: [isTut] } }] }, { fn: 'average', args: [{ fn: 'case', cases: [{ when: [isTut], then: col('session_number') }] }] }],
+  ]) await assert.rejects(() => add(earlier), shown(today), JSON.stringify(earlier));
+  const unnest = { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' };
+  await assert.rejects(() => add({ ...unnest, type: 'int' }, { stage: 'limit', limit: 5 }), shown([{ ...unnest, name: 'w_element' }, { stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } }, { stage: 'limit', limit: 5 }]));
+  await assert.rejects(() => add({ ...unnest, type: 'string' }), shown(unnest));
+  // alone, it is said as the two steps it is, to put where it stood
+  await assert.rejects(() => e.build_pipeline_model({ action: 'insert_step', context_id, index: 1, step: { ...unnest, type: 'int' } }), (err) => /unexpected property 'type'/.test(err.message)
+    && err.message.includes(`${JSON.stringify({ ...unnest, name: 'w_element' })} in its place, then ${JSON.stringify({ stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } })} after it`));
+  // what is written today is taken
+  assert.equal((await add({ stage: 'compute', name: 'p', expr: { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' } }, unnest, { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [isTut], then: val(1) }] }] } }] })).steps_count, 3);
 });
 
 test('a pivot names a column per value, never twice or as a group key; its measure is an aggregate expression; unpivot keeps or folds a column, not both', () => {

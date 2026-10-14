@@ -217,8 +217,8 @@ test('a group-by path onto an unloaded FACT is refused with the fix: an item { s
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }),
-    (err) => err.field === 'group_by' && /needs model 'crashlytics'.*semantic_models: \[\{ source: 'crashlytics' \}\]/s.test(err.message),
+    () => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    (err) => err.field === 'steps' && /needs model 'crashlytics'.*semantic_models: \[\{ source: 'crashlytics' \}\]/s.test(err.message),
   );
 });
 
@@ -235,16 +235,17 @@ test('a group-by column or via the model does not have is refused, listing the r
     semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
-  const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, metrics: [metric], group_by: [ref] });
+  // (the metrics step's group_by: a refusal names it as the query numbers its steps)
+  const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, steps: [{ stage: 'metrics', metrics: [metric], group_by: [ref] }] });
   await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'users', column: 'shoe_size' }),
-    /`group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
+    /`steps\.0\.group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
   assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
   await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', column: 'session_number' }),
-    (err) => /`group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop()), 'the session key is not a groupable column of the events source');
+    (err) => /`steps\.0\.group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop()), 'the session key is not a groupable column of the events source');
   await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { semantic_model: ['users'], dimension: 'country' }),
-    (err) => err.field === 'group_by' && /'users\.country' is a column of 'users', named where it lives in the catalog — write \{ source: 'users', column: 'country' \}/.test(err.message));
+    (err) => err.field === 'steps' && /^steps\[0\] group_by\[0\]: 'users\.country' is a column of 'users', named where it lives in the catalog — write \{ source: 'users', column: 'country' \}/.test(err.message));
   await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', property: 'level_id_of_event_data' }),
-    (err) => err.field === 'group_by' && /is not a dimension of this context — declare it one: build_semantic_model\(.*dimensions: \[\{ property: 'level_id_of_event_data' \}\]/.test(err.message));
+    (err) => err.field === 'steps' && /is not a dimension of this context — declare it one: build_semantic_model\(.*dimensions: \[\{ property: 'level_id_of_event_data' \}\]/.test(err.message));
   // a dimension the task computes is named by its semantic model and its name
   const computed = await e.build_semantic_model({
     name: 'evc',
@@ -254,7 +255,7 @@ test('a group-by column or via the model does not have is refused, listing the r
   const ctx = e.ctxs.get(computed.context_id);
   assert.equal(e._taskRef(ctx, { semantic_model: ['users'], dimension: 'is_us' }).column, 'users_is_us');
   await assert.rejects(() => groupBy(e, computed.context_id, 'evc_n', { semantic_model: ['users'], dimension: 'is_eu' }),
-    (err) => err.field === 'group_by' && /'users\.is_eu' is not a dimension this context computed on 'users'/.test(err.message));
+    (err) => err.field === 'steps' && /'users\.is_eu' is not a dimension this context computed on 'users'/.test(err.message));
   // the crash source OWNS ad_funnel here (type: unique): ad_funnel is a relationship onto it, 'session' is not
   const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
   const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
@@ -269,7 +270,7 @@ test('a group-by column or via the model does not have is refused, listing the r
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { source: 'crashlytics', column: 'app_version', via: 'session' }),
-    /`group_by.0.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
+    /`steps\.0\.group_by\.0\.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
 });
 
 // The relationship a model OWNS is reported as owned — its governed path ends here — not as

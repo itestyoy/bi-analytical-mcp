@@ -33,7 +33,7 @@ Fast entrypoint for the external surface: one HTTP endpoint serving the Model Co
 | Tool | Role |
 |------|------|
 | `semantic_index` | The catalog: overview, a source's events and properties, models, search, guides, recipes |
-| `build_semantic_model` / `query_semantic_model` / `preview_semantic_model` | The governed side: named metrics, their queries (tasks; `steps` re-slice a metric result in the pipeline's read stages), inspection |
+| `build_semantic_model` / `query_semantic_model` / `preview_semantic_model` | The governed side: named metrics, their queries (tasks; a query is `steps` — where steps, one `metrics` step, then the pipeline's read stages re-slicing its result), inspection |
 | `build_pipeline_model` / `query_pipeline_model` | The pipeline side: one-off tables built step by step (`steps`, each a stage), read back in steps of the same stages (where, compute, aggregate, …) |
 | `display_model_result` / `drill_result` | Draw a model result as a card (once); a drawn card's drill-down read |
 | `experiment` | A/B statistics over numbers the caller brings |

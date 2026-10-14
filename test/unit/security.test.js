@@ -22,7 +22,7 @@ test('a task is addressed by its id alone — no table name or path reaches a re
 });
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
   for (const tool of ['query_semantic_model', 'delete_context.context', 'context.describe']) {
-    const base = tool === 'query_semantic_model' ? { metrics: ['m'] } : {};
+    const base = tool === 'query_semantic_model' ? { steps: [{ stage: 'metrics', metrics: ['m'] }] } : {};
     assert.equal(v(tool, { ...base, context_id: '../../../etc/passwd' }).ok, false, `${tool} should reject traversal`);
     assert.equal(v(tool, { ...base, context_id: 'a/b' }).ok, false, `${tool} should reject slashes`);
   }
@@ -63,14 +63,15 @@ test('a read takes no raw SQL, and no raw SQL carries a Jinja opener', () => {
   assert.throws(() => renderRead(catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], nested), /steps\[0\]: .*raw is not what a read of stored rows takes .*from_task/);
   const raw = [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: "{{ run_query('drop table users') }}" } }];
   assert.throws(() => renderRead(catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], raw), /raw is not what a read of stored rows takes/);
-  // the read tools' schemas refuse it in the call, at any depth — a pipeline read's steps, and the steps
-  // after a metric query and its where — while a build's takes it
-  for (const [path, steps] of [['steps.0.measures.0.expr.args.0', nested], ['steps.0.expr', raw]]) {
-    const fn = new RegExp(`\`${path.replace(/\./g, '\\.')}\\.fn\` must be one of`);
-    assert.match(v('query_pipeline_model', { context_id: 'abcdef123456', steps }).errors.join(' | '), fn, path);
-    assert.match(v('query_semantic_model', { context_id: 'abcdef123456', metrics: ['m'], steps }).errors.join(' | '), fn, path);
+  // the read tools' schemas refuse it in the call, at any depth — a pipeline read's steps, and a metric
+  // query's steps after its metrics step and its where steps before it — while a build's takes it
+  const metrics = { stage: 'metrics', metrics: ['m'] };
+  for (const [at, steps] of [['measures.0.expr.args.0', nested], ['expr', raw]]) {
+    const fn = (i) => new RegExp(`\`steps\\.${i}\\.${at.replace(/\./g, '\\.')}\\.fn\` must be one of`);
+    assert.match(v('query_pipeline_model', { context_id: 'abcdef123456', steps }).errors.join(' | '), fn(0), at);
+    assert.match(v('query_semantic_model', { context_id: 'abcdef123456', steps: [metrics, ...steps] }).errors.join(' | '), fn(1), at);
   }
-  assert.match(v('query_semantic_model', { context_id: 'abcdef123456', metrics: ['m'], where: [{ fn: 'eq', args: [{ fn: 'raw', sql: '1' }, { value: 1 }] }] }).errors.join(' | '), /`where\.0\.args\.0\.fn` must be one of/);
+  assert.match(v('query_semantic_model', { context_id: 'abcdef123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'raw', sql: '1' }, { value: 1 }] }] }, metrics] }).errors.join(' | '), /`steps\.0\.conditions\.0\.args\.0\.fn` must be one of/);
   assert.equal(v('build_pipeline_model', { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } }] }).ok, true, 'raw is a build\'s');
   const build = (sql) => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql, args: [{ column: 'event_name' }] } }], { physicalCols: new Set(['event_name']) });
   for (const sql of ["upper({1}) || '{{ env_var(\"X\") }}'", '{% if true %}{1}{% endif %}', '{1} {# a note #}']) assert.throws(() => build(sql), /may not hold \{\{, \{% or \{#/, sql);

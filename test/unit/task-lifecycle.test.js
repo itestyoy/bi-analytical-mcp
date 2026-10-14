@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { STAGE_PLACES } from '../../src/pipeline.js';
+import { PLACES } from '../../src/pipeline/compute.js';
 import { isStartedTask, taskResult, one } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
@@ -35,6 +37,10 @@ function orderedRunner() {
 
 const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tasks-')) }), runner });
 const TASK = { name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
+// a metric query is its steps: these metrics steps, and the steps a test puts before or after one
+const CNT = { stage: 'metrics', metrics: ['task_cnt'] };
+const CNT2 = { stage: 'metrics', metrics: ['task_cnt2'] };
+const DAILY = { ...CNT, group_by: [{ time: 'metric_time', grain: 'day' }] };
 const tick = () => new Promise((r) => { setTimeout(r, 5); });
 
 test('a call that starts work answers with its task only, and a query on the same context waits for the parse', async () => {
@@ -45,7 +51,7 @@ test('a call that starts work answers with its task only, and a query on the sam
   assert.deepEqual(Object.keys(created).sort(), ['context_id', 'next', 'read_with', 'task_id']);
   assert.equal(created.read_with, 'query_semantic_model', 'it names the tool that reads it back');
   // the declaration was taken in the call: a query validates against it right away…
-  const queried = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const queried = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   assert.ok(isStartedTask(queried));
   for (let i = 0; i < 10; i += 1) await tick();
   // …and runs only once the parse is done
@@ -61,7 +67,7 @@ test('a call that starts work answers with its task only, and a query on the sam
 test('a mistake is refused IN the call — no task is started for it', async () => {
   const e = engine(orderedRunner());
   const created = await e.build_semantic_model(TASK);
-  await assert.rejects(() => e.query_semantic_model({ context_id: created.context_id, metrics: ['no_such_metric'] }), /unknown metric/);
+  await assert.rejects(() => e.query_semantic_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['no_such_metric'] }] }), /unknown metric/);
   assert.equal(e._listTasks().tasks.length, 1, 'only the declaration\'s task exists');
 });
 
@@ -70,7 +76,7 @@ test('a query tool\'s read pages what the task holds, reads only its own side, a
   const e = engine(runner);
   const created = await e.build_semantic_model(TASK);
   runner.parses.shift()();
-  const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const q = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await taskResult(e, q.task_id);
   // a result held in memory pages WITHIN the rows its query returned
   const within = await one(e.query_semantic_model({ task_ids: [q.task_id], limit: 1 }));
@@ -94,11 +100,11 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   await taskResult(e, created.task_id);
   // finished, but a declaration stores no table; nor does a query held in memory
   await assert.rejects(() => start(created.task_id), /no stored table/);
-  const inMemory = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const inMemory = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await taskResult(e, inMemory.task_id);
   await assert.rejects(() => start(inMemory.task_id), /materialize:true/);
   // a stored one starts a draft that reads its table, as step 0
-  const stored = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'], materialize: true });
+  const stored = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT], materialize: true });
   const done = await taskResult(e, stored.task_id);
   assert.equal(done.table, `qr_${stored.task_id}`);
   await assert.rejects(() => start(stored.task_id, { time_range: { start: '2024-01-01' } }), /time_range/);
@@ -119,13 +125,13 @@ test('display_model_result draws a model\'s rows once — and nothing else; an e
   await taskResult(e, created.task_id);
   await assert.rejects(() => e.display_model_result({ task_id: created.task_id }), /no rows to draw/);
   const kpi = { kind: 'kpi', values: [{ column: 'task_cnt' }] };
-  const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const q = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await taskResult(e, q.task_id);
   const drawn = await e.display_model_result({ task_id: q.task_id, display: kpi });
   assert.equal(drawn.drawn, true);
   await assert.rejects(() => e.display_model_result({ task_id: q.task_id, display: kpi }), /shown already/);
   // two calls at once for one task: one card
-  const q2 = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const q2 = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await taskResult(e, q2.task_id);
   const both = await Promise.allSettled([e.display_model_result({ task_id: q2.task_id, display: kpi }), e.display_model_result({ task_id: q2.task_id, display: kpi })]);
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']);
@@ -243,51 +249,88 @@ function tailRunner(rows) {
   return r;
 }
 
-test('the steps after a metric query are checked against the result\'s columns, in the call — a batch at the query that names one', async () => {
+test('the steps after the metrics step are checked against the result\'s columns, in the call — a batch at the query that names one', async () => {
   const e = engine(tailRunner([]));
   const { context_id } = await e.build_semantic_model(TASK);
-  const daily = { metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const daily = (...after) => ({ steps: [DAILY, ...after] });
   const before = e._listTasks().tasks.length;
+  // (a refusal names the step as the query numbers it: the metrics step is steps[0])
   for (const key of ['nonsense', 'metric_time__day', 'metric_time']) {
-    await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps: [{ stage: 'order_by', keys: [{ key }] }] }),
-      (err) => err.field === 'steps' && new RegExp(`^steps\\[0\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, task_cnt\\)`).test(err.message), key);
+    await assert.rejects(() => e.query_semantic_model({ context_id, ...daily({ stage: 'order_by', keys: [{ key }] }) }),
+      (err) => err.field === 'steps' && new RegExp(`^steps\\[1\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, task_cnt\\)`).test(err.message), key);
   }
   // a column a step makes is there for the steps after it, and gone after an aggregate that drops it
-  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps: [{ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'task_cnt' }] } }] }, { stage: 'order_by', keys: [{ key: 'metric_time_day' }] }] }),
-    (err) => err.field === 'steps' && /^steps\[1\]: .*unknown column 'metric_time_day' at this stage \(available: total\)/.test(err.message));
-  await assert.rejects(() => e.query_semantic_model({ context_id, queries: [daily, { ...daily, steps: [{ stage: 'order_by', keys: [{ key: 'nonsense' }] }] }] }),
-    (err) => err.field === 'queries[1].steps' && /^queries\[1\]: steps\[0\]: .*unknown column 'nonsense'/.test(err.message));
-  // the earlier order_by is refused with the step it is now
-  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, order_by: [{ key: 'task_cnt', direction: 'desc' }] }),
-    (err) => err.message.includes(JSON.stringify({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] })));
-  // the steps are a read: what makes a new table and raw SQL are no form of the tool's definitions (built
-  // for its places: the where's and the steps'), refused by its schema; a ref — the where's — passes the
-  // schema and is refused at the read's place
+  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily({ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'task_cnt' }] } }] }, { stage: 'order_by', keys: [{ key: 'metric_time_day' }] }) }),
+    (err) => err.field === 'steps' && /^steps\[2\]: .*unknown column 'metric_time_day' at this stage \(available: total\)/.test(err.message));
+  await assert.rejects(() => e.query_semantic_model({ context_id, queries: [daily(), daily({ stage: 'order_by', keys: [{ key: 'nonsense' }] })] }),
+    (err) => err.field === 'queries[1].steps' && /^queries\[1\]: steps\[1\]: .*unknown column 'nonsense'/.test(err.message));
+  // the earlier metrics, group_by and order_by are refused with the steps they are now
+  await assert.rejects(() => e.query_semantic_model({ context_id, metrics: ['task_cnt'], group_by: DAILY.group_by, order_by: [{ key: 'task_cnt', direction: 'desc' }] }),
+    (err) => err.message.includes(`write ${JSON.stringify({ context_id, steps: [DAILY, { stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] }] })}`));
+  // the steps after it are a read: what makes a new table and raw SQL are no form of the tool's
+  // definitions (built for its places: the where steps', the metrics step's and the read's), refused by
+  // its schema; a ref — a where step's before the metrics step — passes the schema and is refused after it
   for (const [steps, said] of [
-    [[{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }], /^invalid input: .*`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/],
-    [[{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'task_cnt' }] } }], /^invalid input: .*`steps\.0\.expr\.fn` must be one of/],
+    [[{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }], /^invalid input: .*`steps\.1\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project, metrics/],
+    [[{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'task_cnt' }] } }], /^invalid input: .*`steps\.1\.expr\.fn` must be one of/],
   ]) {
-    await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps }), (err) => err.stage === 'validate' && said.test(err.message), JSON.stringify(steps));
+    await assert.rejects(() => e.query_semantic_model({ context_id, ...daily(...steps) }), (err) => err.stage === 'validate' && said.test(err.message), JSON.stringify(steps));
   }
-  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }] }),
-    (err) => err.field === 'steps' && /\{ source, column \} is not what a read of stored rows takes/.test(err.message) && /from_task/.test(err.message));
+  await assert.rejects(() => e.query_semantic_model({ context_id, ...daily({ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }) }),
+    (err) => err.field === 'steps' && /^steps\[1\]: a where after the metrics step reads the result's columns — \{ source: 'users', column: 'country' \} is a dimension the result does not carry: put it before the metrics step/.test(err.message));
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
+});
+
+// WHERE A STEP OF A METRIC QUERY STANDS (STAGE_PLACES.metric_scope / metric_result): one metrics step;
+// before it only where steps, over what group_by names (PLACES.metric_where) — they filter the rows the
+// metrics fold, every one of them; after it the read steps over the result's columns. Each is checked in
+// the call, and the refusal names the step and where it goes.
+test('a metric query has one metrics step, only where steps before it, and the result\'s columns after it', async () => {
+  const e = engine(tailRunner([]));
+  const users = { ...TASK, name: 'usr', semantic_models: [...TASK.semantic_models, { source: 'users' }] };
+  const { context_id } = await e.build_semantic_model(users);
+  const query = (...steps) => e.query_semantic_model({ context_id, steps });
+  const byCountry = { stage: 'metrics', metrics: ['usr_cnt'], group_by: [{ source: 'users', column: 'country' }] };
+  const where = (...conditions) => ({ stage: 'where', conditions });
+  const is = (ref, value) => ({ fn: 'eq', args: [ref, { value }] });
+  const refused = (said) => (err) => err.field === 'steps' && err.stage === 'validate' && said.test(err.message);
+  // (each place's own words, as the tables say them)
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const scope = STAGE_PLACES.metric_scope;
+  const before = e._listTasks().tasks.length;
+  // no metrics step, or two
+  await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none\. This context defines: usr_cnt/));
+  await assert.rejects(() => query(byCountry, { stage: 'limit', limit: 3 }, byCountry), refused(/^steps\[2\]: a metric query has one metrics step, and steps\[0\] is one — list every metric in it, or make the other a query of its own/));
+  // a step the result takes, before the metrics step: it goes after it
+  for (const st of [{ stage: 'order_by', keys: [{ key: 'usr_cnt' }] }, { stage: 'compute', name: 'x', expr: { value: 1 } }, { stage: 'limit', limit: 1 }]) {
+    await assert.rejects(() => query(st, byCountry), refused(new RegExp(`^steps\\[0\\]: ${esc(scope.what)} takes ${scope.stages.join(', ')} — an? ${st.stage} stage works on the metrics' result: put it after the metrics step`)), st.stage);
+  }
+  // a where before it names what group_by names, not a column of the result
+  await assert.rejects(() => query(where({ fn: 'gt', args: [{ column: 'usr_cnt' }, { value: 1 }] }), byCountry), refused(new RegExp(`^steps\\[0\\] conditions\\[0\\] .*\\{ column \\} is not what ${esc(PLACES.metric_where.what)} takes`)));
+  // a where after it reads the result's columns: a dimension the result carries is its column there, one it does not goes before the metrics step
+  await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'country' }, 'US'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'country' \} is its column 'users_country' there \(\{ column: 'users_country' \}\); or put the where before the metrics step/));
+  await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'platform' }, 'ios'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'platform' \} is a dimension the result does not carry: put it before the metrics step/));
+  // a metric the context does not offer is named at its step
+  await assert.rejects(() => query({ stage: 'metrics', metrics: ['nope'] }), refused(/^steps\[0\]: unknown metric in context: 'nope'/));
+  assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
+  // what is taken: several where steps before it (all of them hold), a where after it on the result's column
+  assert.ok(isStartedTask(await query(where(is({ source: 'users', column: 'platform' }, 'ios')), where({ fn: 'neq', args: [{ source: 'users', column: 'country' }, { value: 'DE' }] }), byCountry)));
+  assert.ok(isStartedTask(await query(byCountry, where(is({ column: 'users_country' }, 'US')), { stage: 'order_by', keys: [{ key: 'usr_cnt', direction: 'desc' }] })));
 });
 
 test('a metric query answers in the caller\'s names whatever its steps — ordered by an order_by step, approximate after a sample', async () => {
   const rows = [{ metric_time_day: '2026-01-02', task_cnt: 7 }, { metric_time_day: '2026-01-01', task_cnt: 3 }];
   const e = engine(tailRunner(rows));
   const { context_id } = await e.build_semantic_model(TASK);
-  const daily = { context_id, metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }] };
-  const read = async (extra) => taskResult(e, (await e.query_semantic_model({ ...daily, ...extra })).task_id);
+  const read = async (after, extra = {}) => taskResult(e, (await e.query_semantic_model({ context_id, steps: [DAILY, ...after], ...extra })).task_id);
   const desc = { stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] };
   for (const [steps, ordered] of [
-    [undefined, false],
+    [[], false],
     [[desc], true],
     [[{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }, desc, { stage: 'limit', limit: 10 }], true],
     [[desc, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }], false],
   ]) {
-    const out = await read(steps ? { steps } : {});
+    const out = await read(steps);
     assert.equal(out.status, 'done', JSON.stringify(out.error || {}));
     assert.deepEqual(out.rows, rows, JSON.stringify(steps));
     assert.deepEqual(out.columns.map((c) => c.name), ['metric_time_day', 'task_cnt'], JSON.stringify(steps));
@@ -295,10 +338,10 @@ test('a metric query answers in the caller\'s names whatever its steps — order
     assert.equal(out.page.ordered, ordered ? undefined : false, JSON.stringify(steps));
     assert.equal(out.sampled, undefined);
   }
-  const sampled = await read({ steps: [{ stage: 'sample', share: 0.5 }] });
+  const sampled = await read([{ stage: 'sample', share: 0.5 }]);
   assert.deepEqual([sampled.status, sampled.sampled, typeof sampled.sampling], ['done', true, 'object'], 'with the note a sampled read carries');
   // a query only compiled: the SQL after its steps, and the columns it answers with — a read of it, paged or not
-  const dry = await e.query_semantic_model({ ...daily, steps: [{ stage: 'compute', name: 'per_day', expr: { fn: 'div', args: [{ column: 'task_cnt' }, { value: 2 }] } }], dry_run: true });
+  const dry = await e.query_semantic_model({ context_id, steps: [DAILY, { stage: 'compute', name: 'per_day', expr: { fn: 'div', args: [{ column: 'task_cnt' }, { value: 2 }] } }], dry_run: true });
   const compiled = await taskResult(e, dry.task_id);
   assert.deepEqual([compiled.status, compiled.dry_run, typeof compiled.sql], ['done', true, 'string']);
   assert.deepEqual(compiled.output_columns.map((c) => c.name), ['metric_time_day', 'task_cnt', 'per_day']);
@@ -307,7 +350,7 @@ test('a metric query answers in the caller\'s names whatever its steps — order
   const paged = await one(e.query_semantic_model({ task_ids: [dry.task_id], offset: 0, limit: 5 }));
   assert.deepEqual([paged.status, paged.output_columns], ['done', compiled.output_columns]);
   // stored, the table is the result after its steps
-  const stored = await read({ steps: [desc], materialize: true });
+  const stored = await read([desc], { materialize: true });
   assert.deepEqual([stored.status, stored.table], ['done', `qr_${stored.task_id}`]);
 });
 
@@ -321,9 +364,9 @@ test('a metric query\'s values read the same whether MetricFlow or the steps\' S
   } };
   const e = engine(runner);
   const { context_id } = await e.build_semantic_model(TASK);
-  const read = async (extra) => taskResult(e, (await e.query_semantic_model({ context_id, metrics: ['task_cnt'], group_by: [{ time: 'metric_time', grain: 'day' }], ...extra })).task_id);
-  const byMetricFlow = await read({ steps: [{ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] }] });
-  const bySql = await read({ steps: [{ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc', nulls: 'first' }] }] });
+  const read = async (after) => taskResult(e, (await e.query_semantic_model({ context_id, steps: [DAILY, after] })).task_id);
+  const byMetricFlow = await read({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] });
+  const bySql = await read({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc', nulls: 'first' }] });
   assert.deepEqual([byMetricFlow.rows, bySql.rows], [iso, iso]);
 });
 
@@ -542,11 +585,11 @@ test('a batch answers with its task_ids only; its members run side by side, and 
   const runner = heldQueries();
   const e = engine(runner);
   const created = await e.build_semantic_model(TWO);
-  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ steps: [CNT] }, { steps: [CNT2] }] });
   assert.deepEqual(Object.keys(batch).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
   assert.equal(batch.read_with, 'query_semantic_model');
   assert.equal(new Set(batch.task_ids).size, 2, 'one task per query');
-  const later = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const later = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await until(() => runner.held.length === 2);
   for (let i = 0; i < 10; i += 1) await tick();
   // both members started before either finished; the later query has not started
@@ -574,8 +617,8 @@ test('one mistake refuses the whole batch, naming the query — and nothing in i
   const created = await e.build_semantic_model(TASK);
   const before = e._listTasks().tasks.length;
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['no_such_metric'] }] }),
-    (err) => err.field.startsWith('queries[1]') && /queries\[1\]: unknown metric/.test(err.message),
+    () => e.query_semantic_model({ context_id: created.context_id, queries: [{ steps: [CNT] }, { steps: [{ stage: 'metrics', metrics: ['no_such_metric'] }] }] }),
+    (err) => err.field.startsWith('queries[1]') && /queries\[1\]: steps\[0\]: unknown metric/.test(err.message),
   );
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for the batch');
 });
@@ -584,15 +627,15 @@ test('a batch takes any number of queries, and each mode takes only its own fiel
   const e = engine(orderedRunner());
   const created = await e.build_semantic_model(TASK);
   const ctx = created.context_id;
-  const q = { metrics: ['task_cnt'] };
+  const q = { steps: [CNT] };
   const many = await e.query_semantic_model({ context_id: ctx, queries: Array.from({ length: 12 }, () => q) });
   assert.equal(new Set(many.task_ids).size, 12, 'one task per query, however many');
-  await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q], metrics: ['task_cnt'] }), 'a query field beside queries');
+  await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q], steps: [CNT] }), 'a query field beside queries');
   await assert.rejects(() => e.query_semantic_model({ queries: [q] }), 'a batch names its context');
   // a read pages each stored result: offset/limit are a read's own; a cancel takes neither
   await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id], cancel: true, offset: 1 }), 'a cancel does not page');
   await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id, created.task_id] }), 'the same task twice');
-  await assert.rejects(() => e.query_pipeline_model({ context_id: ctx, queries: [{ metrics: ['task_cnt'] }] }), 'a pipeline query has no metrics');
+  await assert.rejects(() => e.query_pipeline_model({ context_id: ctx, queries: [{ steps: [CNT] }] }), 'a pipeline query has no metrics step');
   // a task of the other side is refused before any wait
   await assert.rejects(() => e.query_pipeline_model({ task_ids: [created.task_id] }), /query_semantic_model/);
 });
@@ -602,7 +645,7 @@ test('a protocol task follows a batch read until every member is done', async ()
   const runner = heldQueries();
   const e = engine(runner);
   const created = await e.build_semantic_model(TWO);
-  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ steps: [CNT] }, { steps: [CNT2] }] });
   await until(() => runner.held.length === 2);
   const followed = runToCompletion(e, 'query_semantic_model', { request: { task_ids: batch.task_ids } });
   runner.held.shift()();
@@ -645,8 +688,8 @@ test('a running query is cancelled at once: its process is stopped, a read says 
   runner.query = (dir, opts) => { signals.push(currentSignal()); return q0(dir, opts); };
   const e = engine(runner);
   const created = await e.build_semantic_model(TWO);
-  const first = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
-  const second = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt2'] });
+  const first = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
+  const second = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT2] });
   await until(() => runner.held.length === 1);
   const out = await one(e.query_semantic_model({ task_ids: [first.task_id], cancel: true }));
   assert.deepEqual([out.cancelled, out.status], [true, 'cancelled']);
@@ -668,8 +711,8 @@ test('a queued task that is cancelled never starts a process; a batch is cancell
   const runner = heldQueries();
   const e = engine(runner);
   const created = await e.build_semantic_model(TWO);
-  const first = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
-  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  const first = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ steps: [CNT] }, { steps: [CNT2] }] });
   await until(() => runner.held.length === 1);
   const out = await e.query_semantic_model({ task_ids: batch.task_ids, cancel: true });
   assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
@@ -688,7 +731,7 @@ test('a cancel under a protocol task is answered at once, not after the task', a
   const runner = heldQueries();
   const e = engine(runner);
   const created = await e.build_semantic_model(TWO);
-  const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const q = await e.query_semantic_model({ context_id: created.context_id, steps: [CNT] });
   await until(() => runner.held.length === 1);
   const t0 = Date.now();
   const { raw } = await runToCompletion(e, 'query_semantic_model', { request: { task_ids: [q.task_id], cancel: true } });

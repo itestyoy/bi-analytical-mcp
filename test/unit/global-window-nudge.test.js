@@ -37,7 +37,7 @@ const engine = (dialect) => {
 };
 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] };
-const DERIVE = { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } };
+const DERIVE = { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } };
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();

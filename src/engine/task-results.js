@@ -24,11 +24,11 @@ export const taskResultMethods = {
    * card drawn once the answer is gone). The table is the durable result: a read
    * (query_semantic_model({ request: { task_ids, offset, limit } })) pages it to its last row, after the
    * in-memory answer is gone too, a card drills into it, and a pipeline can start from it (from_task).
-   * A query with read `steps` stores what they leave: the result, under the caller's names, read by
-   * them (renderRead) — `columns` the result's columns as the steps name them, each with its type where
-   * it is known ([{ name, type }]; by name alone otherwise).
+   * A query with read steps after its metrics step (`steps`) stores what they leave: the result, under
+   * the caller's names, read by them (renderRead) — `columns` the result's columns as the steps name them,
+   * each with its type where it is known ([{ name, type }]; by name alone otherwise).
    */
-  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename), { columns = null } = {}) {
+  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename), { columns = null, steps = [] } = {}) {
     const dir = this.ctxs.dir(ctx.id);
     // The TABLE is the deliverable here, so it holds the whole result. `limit` is how many of its rows
     // the task keeps as its answer, read back below; baking it into the query would persist only those
@@ -43,17 +43,18 @@ export const taskResultMethods = {
     // says so, as the same query unstored does)
     let stored = projected;
     let ordered = false;
-    if (input.steps?.length) {
+    if (steps.length) {
       const named = columns || [...(full.groupBy || []).map((g) => rename.get(g) ?? g), ...full.metrics].map((name) => ({ name, type: 'unknown' }));
       let read;
-      try { read = renderRead(this.catalog, `(\n${projected}\n) AS _metrics`, named, input.steps); } catch (e) { return { ok: false, error: { stage: 'read', message: e.message } }; }
+      try { read = renderRead(this.catalog, `(\n${projected}\n) AS _metrics`, named, steps); } catch (e) { return { ok: false, error: { stage: 'read', message: e.message } }; }
       stored = read.sql;
       ordered = read.ordered;
     }
     const table = `${RESULT_MODEL_PREFIX}${id}`;
     const kept = input.limit ?? KEPT_ROWS;
     this.jobs.setTable(id, table, { keptRows: kept });
-    const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, time_range: input.time_range, ...(input.steps?.length ? { steps: input.steps } : {}) });
+    // (the query as it was written: its steps — the metrics step among them — and its window)
+    const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, steps: input.steps, time_range: input.time_range });
     this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${stored}\n`);
     const r = await this.runner.run(dir, table);
     if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: speak(this._sqlRunMessage(r.stdout, r.stderr)) } };

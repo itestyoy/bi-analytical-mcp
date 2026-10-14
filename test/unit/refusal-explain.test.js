@@ -28,9 +28,9 @@ test('a mode left unnamed is refused as the mode the fields belong to, with the 
 
 test('a deep and / or tree is checked, and refused, in time that grows with its size', () => {
   const e = engine();
-  // one tree of each level's grammar: a metric query's where over a dimension, a pipeline where over a column
+  // one tree of each level's grammar: a metric query's where step over a dimension, a pipeline where over a column
   const levels = [
-    ['query_semantic_model', { source: 'users', column: 'country' }, (where) => ({ context_id: 'abc123', metrics: ['x'], where })],
+    ['query_semantic_model', { source: 'users', column: 'country' }, (conditions) => ({ context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
     ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
@@ -67,23 +67,28 @@ test('a read\'s condition is the one grammar over the stored table\'s columns, a
   const property = (() => { try { renderRead(e.catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]); return null; } catch (err) { return err.message; } })();
   assert.match(property, /steps\[0\]: .*\{ property \} is not what a read of stored rows takes — it takes \{ column \}, \{ value \}, \{ now: true \}/);
   assert.match(property, /from_task/);
-  // a field a condition does not read, in a measure's where, is refused under the condition's own title
-  assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }] } }] }]), /`steps\.0\.measures\.0\.expr\.where\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
+  // a field a condition does not read, in the case a measure folds, is refused under the condition's own title
+  assert.match(read([{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }], value: 2 }], then: { value: 1 } }] }] } }] }]), /`steps\.0\.measures\.0\.expr\.args\.0\.cases\.0\.when\.0` has an unexpected property 'value' — fn: eq \| neq \| gt \| gte \| lt \| lte — args \[a, b\] \(a condition\) takes fn, args/);
 });
 
-test('a window aggregate takes no where, and a function that is no window takes no over — the refusal names the form', () => {
+test('an aggregate takes no where — over a window as folding rows — and a function that is no window takes no over — the refusal names the form', () => {
   const e = engine();
   const add = (stage) => refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', steps: [stage] });
-  assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
+  const isOne = { fn: 'eq', args: [{ column: 'a' }, { value: 1 }] };
+  assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [isOne] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
+  // folding rows, a where is the earlier spelling of the case the aggregate folds: refused with it
+  const folded = add({ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'a' }], where: [isOne] } }] });
+  assert.ok(folded.includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'sum', args: [{ fn: 'case', cases: [{ when: [isOne], then: { column: 'a' } }] }] })}`), folded);
   assert.match(add({ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'a' }, { value: 1 }], over: {} }] }), /must be exactly one of: fn: eq \| neq \| gt \| gte \| lt \| lte/);
 });
 
 test('a query is started without an offset: paging is the read\'s, by row numbers of the result', () => {
   const e = engine();
-  assert.match(refusal(e, 'query_semantic_model', { context_id: 'abc123', metrics: ['x'], offset: 10 }), /unexpected property 'offset'/);
+  const metrics = [{ stage: 'metrics', metrics: ['x'] }];
+  assert.match(refusal(e, 'query_semantic_model', { context_id: 'abc123', steps: metrics, offset: 10 }), /unexpected property 'offset'/);
   assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', offset: 10 }), /unexpected property 'offset'/);
   assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', queries: [{ limit: 5, offset: 10 }] }), /unexpected property 'offset'/);
   // a start's limit is the rows its task keeps; a read's offset/limit page them
-  assert.equal(refusal(e, 'query_semantic_model', { context_id: 'abc123', metrics: ['x'], limit: 10 }), null);
+  assert.equal(refusal(e, 'query_semantic_model', { context_id: 'abc123', steps: metrics, limit: 10 }), null);
   assert.equal(refusal(e, 'query_semantic_model', { task_ids: ['abc123abc123'], offset: 100, limit: 10 }), null);
 });

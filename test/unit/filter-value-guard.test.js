@@ -137,13 +137,17 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   const country = { source: 'users', column: 'country' };
-  await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ fn: 'eq', args: [country, { value: 'de' }] }] }),
-    /different casing.*'DE'/s,
-  );
+  // (a metric query filters the rows its metrics fold in where steps before its metrics step)
+  const query = (...conditions) => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['vguard_n'] }] });
+  await assert.rejects(() => query({ fn: 'eq', args: [country, { value: 'de' }] }), /different casing.*'DE'/s);
   // …and inside or / not, a member of an in
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: [{ fn: 'or', args: [{ fn: 'eq', args: [country, { value: 'US' }] }, { fn: 'not', args: [{ fn: 'in', args: [country, { value: 'de' }, { value: 'US' }] }] }] }] }),
+    () => query({ fn: 'or', args: [{ fn: 'eq', args: [country, { value: 'US' }] }, { fn: 'not', args: [{ fn: 'in', args: [country, { value: 'de' }, { value: 'US' }] }] }] }),
+    /different casing.*'DE'/s,
+  );
+  // …and in every where step before the metrics step, the second as the first
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }, { stage: 'where', conditions: [{ fn: 'neq', args: [country, { value: 'de' }] }] }, { stage: 'metrics', metrics: ['vguard_n'] }] }),
     /different casing.*'DE'/s,
   );
 });

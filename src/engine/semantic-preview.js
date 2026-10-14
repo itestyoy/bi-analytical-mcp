@@ -165,7 +165,7 @@ export const semanticPreviewMethods = {
       metrics,
       // what a query of THIS context names a cut by
       ...(project ? {} : { groupable }),
-      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
+      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [{ stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
       validate_with: `preview_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
     };
   },

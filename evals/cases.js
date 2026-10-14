@@ -43,7 +43,7 @@ export const CASES = [
       source: 'events',
       steps: [
         { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
         { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       column: 'revenue',
@@ -84,7 +84,7 @@ export const CASES = [
     ref: {
       source: 'crashlytics',
       steps: [
-        { stage: 'compute', name: 'fatal', expr: { property: 'is_fatal_of_event_data', type: 'string' } },
+        { stage: 'compute', name: 'fatal', expr: { property: 'is_fatal_of_event_data' } },
         { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'fatal' }, { value: 'true' }] }] },
         { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
       ],
@@ -136,8 +136,8 @@ export const CASES = [
       source: 'events',
       steps: [
         { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-        { stage: 'compute', name: 'product', expr: { property: 'product_id_of_event_data', type: 'string' } },
-        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+        { stage: 'compute', name: 'product', expr: { property: 'product_id_of_event_data' } },
+        { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
         { stage: 'aggregate', group_by: ['product'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }] },
       ],
       key: 'product',

@@ -165,13 +165,16 @@ after(async () => { backend?.close?.(); engine?.valueIndex?.close?.(); if (wh) a
 test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / month marginals, resolved paths, freshness', opts, async (t) => {
   if (skip(t)) return;
   const r = await q(evUsersCtx, {
-    metrics: ['aeu_evts'],
-    group_by: [
-      { source: 'users', column: 'country' },
-      { source: 'events', column: 'bundle_id' },
-      { source: 'events', property: 'ad_type_of_event_data' },
-      { time: 'metric_time', grain: 'month' },
-    ],
+    steps: [{
+      stage: 'metrics',
+      metrics: ['aeu_evts'],
+      group_by: [
+        { source: 'users', column: 'country' },
+        { source: 'events', column: 'bundle_id' },
+        { source: 'events', property: 'ad_type_of_event_data' },
+        { time: 'metric_time', grain: 'month' },
+      ],
+    }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const res = r.group_by_resolved || {};
@@ -205,8 +208,12 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   if (skip(t)) return;
   const country = { source: 'users', column: 'country' };
   const bundle = { source: 'events', column: 'bundle_id' };
-  // a comparison of the reference with its constants, each its own argument (an in lists several)
-  const filtered = (ref, op, values) => ({ metrics: ['aeu_evts'], where: [{ fn: op, args: [ref, ...[].concat(values).map((value) => ({ value }))] }] });
+  // a where step before the metrics step: a comparison of the reference with its constants, each its
+  // own argument (an in lists several)
+  const filtered = (ref, op, values, group_by) => ({ steps: [
+    { stage: 'where', conditions: [{ fn: op, args: [ref, ...[].concat(values).map((value) => ({ value }))] }] },
+    { stage: 'metrics', metrics: ['aeu_evts'], ...(group_by ? { group_by } : {}) },
+  ] });
   // the guard reads the keys the REAL indexer wrote: (users, country) and (events, bundle_id)
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'gb')), /different casing.*'GB'/s, '11: a wrong-cased country on users.country is rejected with the real casing');
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'in', ['GB', 'us'])), /different casing/, '13: an IN list is checked value by value');
@@ -214,7 +221,7 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'De')), /different casing.*'DE'/s, '15: the guard applies to the structured reference too');
   await assert.rejects(() => q(evUsersCtx, filtered(bundle, 'eq', 'COM.OMG.COLORFIT')), /different casing.*'com\.omg\.colorfit'/s, "16: the source's own attribute is guarded against its own indexed values");
   // …and the correctly cased values answer
-  const r = await q(evUsersCtx, { ...filtered(country, 'in', ['GB', 'US', 'DE']), group_by: [country] });
+  const r = await q(evUsersCtx, filtered(country, 'in', ['GB', 'US', 'DE'], [country]));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, r.group_by_resolved['users.country'], 'aeu_evts');
   assert.equal(by.GB, 57, `3/12: a where addressed by source + column keeps GB's 57 events (${JSON.stringify(by)})`);
@@ -231,8 +238,7 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
 test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labelled on both sides', opts, async (t) => {
   if (skip(t)) return;
   const r = await q(ownerCtx, {
-    metrics: ['aown_evts'],
-    group_by: [{ source: 'crashlytics', column: 'app_version' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }],
+    steps: [{ stage: 'metrics', metrics: ['aown_evts'], group_by: [{ source: 'crashlytics', column: 'app_version' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   }, ownerEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 7. an attribute of an owned FACT is reached through the relationship the source declares
@@ -293,7 +299,7 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],
   });
   assert.equal(c.parse.ok, true, `26/33: the surviving measures and the renamed source parse: ${JSON.stringify(c.parse)}`);
-  const r = await q(c.context_id, { metrics: ['agr_cost', 'agr_total_spend', 'agr_n'] }, eng);
+  const r = await q(c.context_id, { steps: [{ stage: 'metrics', metrics: ['agr_cost', 'agr_total_spend', 'agr_n'] }] }, eng);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(Math.abs(num(r.rows[0].agr_cost) - 17.5) < 1e-6, `24: the real amount still sums to 17.50 (${r.rows[0].agr_cost})`);
   assert.ok(Math.abs(num(r.rows[0].agr_total_spend) - 17.5) < 1e-6, `26: the surviving governed measure answers 17.50 (${r.rows[0].agr_total_spend})`);
@@ -310,7 +316,7 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
 
 test('S6 (F/N). clicks is both an amount and an attribute; a spend task joined to installs is as fresh as spend', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ source: 'acquisition', column: 'clicks' }] }, bothEngine);
+  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ source: 'acquisition', column: 'clicks' }] }] }, bothEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 28. cost grouped by the clicks VALUE: 9 clicks cost 5.25, 8 clicks 4.25, 0 clicks 0
   const by = mapCol(r.rows, r.group_by_resolved['acquisition.clicks'], 'aclk_cost');
@@ -351,8 +357,7 @@ test('S9 (J/N). the crash source in a two-source task: device_model and event_na
   assert.deepEqual([...new Set(s.column_matches.filter((d) => d.column === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users'], '39: device_model is found on users and on crashlytics');
   const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((row) => [row.event_name, Number(row.n)]));
   const r = await q(evCrashCtx, {
-    metrics: ['aboth_reports'],
-    group_by: [{ source: 'crashlytics', column: 'device_model' }, { source: 'crashlytics', column: 'event_name' }],
+    steps: [{ stage: 'metrics', metrics: ['aboth_reports'], group_by: [{ source: 'crashlytics', column: 'device_model' }, { source: 'crashlytics', column: 'event_name' }] }],
     time_range: { start: '2020-01-01', end: '2030-12-31' },
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -360,7 +365,7 @@ test('S9 (J/N). the crash source in a two-source task: device_model and event_na
   // 49d. a metric grouped by the event name the schema offers as an attribute: the counts the warehouse holds
   assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.event_name'], 'aboth_reports'), truth, '49d: reports per crash event, as the warehouse holds them');
   // 49. two events sources: per-source freshness, headline = the staler (crashes, 2026-01-08)
-  const f = await q(evCrashCtx, { metrics: ['aboth_launches', 'aboth_reports'] });
+  const f = await q(evCrashCtx, { steps: [{ stage: 'metrics', metrics: ['aboth_launches', 'aboth_reports'] }] });
   assert.equal(f.ok, true, JSON.stringify(f.error));
   assert.deepEqual([...f.provenance.source].sort(), ['crashlytics', 'events'], '49: both sources contribute measures');
   assert.equal(dayOf(f.provenance.data_freshness_by_source.events), '2026-01-09', '49: events are current through 2026-01-09');

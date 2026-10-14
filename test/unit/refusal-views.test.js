@@ -58,7 +58,7 @@ test('a field the value gives at its own level still decides first', () => {
 test('a batch of queries with one bad item is refused at that item, not as a single query', () => {
   const e = engine();
   for (const tool of ['query_semantic_model', 'query_pipeline_model']) {
-    const item = tool === 'query_semantic_model' ? { metrics: ['x'] } : { steps: [{ stage: 'limit', limit: 5 }] };
+    const item = tool === 'query_semantic_model' ? { steps: [{ stage: 'metrics', metrics: ['x'] }] } : { steps: [{ stage: 'limit', limit: 5 }] };
     const msg = refusal(e, tool, { context_id: 'abc123', queries: [{ ...item, bogus: 1 }, item] });
     assert.match(msg, /`queries\.0` has an unexpected property 'bogus'/, tool);
     assert.doesNotMatch(msg, /unexpected property 'queries'/, tool);
@@ -118,7 +118,7 @@ test('stages and stage are told their name, steps and step, where the form takes
     ['build_pipeline_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
     ['build_pipeline_model', { action: 'insert_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
     ['query_pipeline_model', { context_id: 'abc123', stages: [limit] }, 'stages'],
-    ['query_semantic_model', { context_id: 'abc123', metrics: ['x'], stages: [limit] }, 'stages'],
+    ['query_semantic_model', { context_id: 'abc123', stages: [{ stage: 'metrics', metrics: ['x'] }, limit] }, 'stages'],
   ]) {
     const msg = refusal(e, tool, input);
     assert.match(msg, new RegExp(`request has an unexpected property '${field}' — here that field is called '${field === 'stages' ? 'steps' : 'step'}'`), `${tool} ${JSON.stringify(input)}`);

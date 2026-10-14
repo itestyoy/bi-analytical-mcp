@@ -1,7 +1,8 @@
 // ONE COMPARISON — written the same way wherever the server writes one: a condition function of the
 // expression grammar (src/pipeline/compute.js FNS: eq … between, in / not_in, the text tests, the null
-// tests) at every level — a pipeline stage, a funnel step, an aggregate's where, a semantic measure's
-// scope, a MetricFlow where, a retentioneering filter — and a bound a scan puts on a table. The
+// tests) at every level — a pipeline stage, a funnel step, a CASE's branch (a conditional aggregate's
+// too), a semantic model's scope, a MetricFlow where, a retentioneering filter — and a bound a scan puts
+// on a table. The
 // arguments arrive WRITTEN (a quoted column, a JSON read, a Jinja Dimension, a function's SQL) with
 // what is known of each: its type, whether the warehouse said so, whether it is a constant. This module
 // chooses the operator's SQL and writes the constants, through the dialect's one literal writer, in

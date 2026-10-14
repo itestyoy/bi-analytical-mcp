@@ -471,7 +471,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }),
+    () => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
     (err) => {
       assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
       assert.match(err.message, /relationships/, 'and says where to look');

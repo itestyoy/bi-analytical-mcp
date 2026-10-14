@@ -134,7 +134,7 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] });
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.e2e_mon_revenue)]));
   assert.equal(by.US, 35);
@@ -154,7 +154,9 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   if (skip(t)) return;
   const upd = await engine.build_semantic_model({ action: 'update',
     context_id: S.semCtx,
-    semantic_models: [{ source: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] } }] }],
+    // the distinct players of the purchases: count_distinct over a case that yields the player on a
+    // purchase and nothing on any other row
+    semantic_models: [{ source: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }], then: { column: 'player_id_of_internal' } }] }] } }] }],
     metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
   });
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
@@ -171,9 +173,11 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
   const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers', ...names] });
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers', ...names] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].e2e_mon_payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
+  const [payers] = (await wh.query(`select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'iap_purchase_completed'`)).rows;
+  assert.equal(num(r.rows[0].e2e_mon_payers), num(payers.n), '[count_distinct over a case] the warehouse\'s distinct payers');
   // Provenance #1: real data_freshness (latest event time) + an open-ended window flags
   // staleness (the tail past the latest data is empty/partial).
   assert.equal(r.provenance.tier, 'governed_metric');
@@ -183,7 +187,7 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);
 
   // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
-  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 

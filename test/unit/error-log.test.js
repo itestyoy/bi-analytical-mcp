@@ -19,7 +19,7 @@ const payload = (r) => JSON.parse(r.result.content[0].text);
 
 test('a refused call is kept with its arguments, and explore_errors reads it back — newest first, filtered, one in full', async () => {
   const engine = makeEngine({ recipes: false });
-  const bad = { context_id: 'ctx_nope', metrics: ['x'] };
+  const bad = { context_id: 'ctx_nope', steps: [{ stage: 'metrics', metrics: ['x'] }] };
   assert.equal((await runTool(engine, 'query_semantic_model', { request: bad })).result.isError, true);
   assert.equal((await runTool(engine, 'no_such_tool', { request: { a: 1 } })).result.isError, true);
   await runTool(engine, 'time', { request: { seconds: 0 } }); // a call that works is not an error

@@ -20,7 +20,7 @@ stage's `description` in the tool schema for the authoritative contract.
 ### Revenue by country
 ```jsonc
 [ {stage:"where",  conditions:[{fn:"eq", args:[{column:"event_name"}, {value:"iap_purchase_completed"}]}]},
-  {stage:"compute", name:"price", expr:{ property:"price_in_usd_of_event_data", type:"numeric" }},
+  {stage:"compute", name:"price", expr:{ property:"price_in_usd_of_event_data" }},   // numeric, as the catalog declares it
   {stage:"join",   with:"users", via:"user", attrs:[{ column: "country" }]},   // `via` = the relationship the schema declares; add
   //                                                                 between:{column:"device_time",from:…,to:…} if the
   //                                                                 install record is slowly-changing (validity window)
@@ -31,7 +31,7 @@ stage's `description` in the tool schema for the authoritative contract.
 ### Price distribution (median / percentiles / spread)
 ```jsonc
 [ {stage:"where",  conditions:[{fn:"eq", args:[{column:"event_name"}, {value:"iap_purchase_completed"}]}]},
-  {stage:"compute", name:"price", expr:{ property:"price_in_usd_of_event_data", type:"numeric" }},
+  {stage:"compute", name:"price", expr:{ property:"price_in_usd_of_event_data" }},   // numeric, as the catalog declares it
   {stage:"aggregate", measures:[
      {name:"med", expr:{fn:"median", args:[{column:"price"}]}},
      {name:"p90", expr:{fn:"percentile", args:[{column:"price"}], percentile:0.9}},
@@ -43,10 +43,12 @@ stage's `description` in the tool schema for the authoritative contract.
 [ …where+compute(price)…,
   {stage:"aggregate", group_by:["country"], measures:[
      {name:"arppu", expr:{fn:"div", args:[{fn:"sum", args:[{column:"price"}]}, {fn:"count_distinct", args:[{column:"appsflyer_id"}]}]}},
-     {name:"big_purchases", expr:{fn:"count", where:[{fn:"gte", args:[{column:"price"}, {value:20}]}]}}]} ]
+     {name:"big_purchases", expr:{fn:"count", args:[{fn:"case", cases:[{when:[{fn:"gte", args:[{column:"price"}, {value:20}]}], then:{value:1}}]}]}}]} ]
 ```
 `|> AGGREGATE SUM(price) / NULLIF(COUNT(DISTINCT appsflyer_id), 0) AS arppu, COUNT(CASE WHEN price >= 20 THEN 1 END) AS big_purchases GROUP BY country`
-— a `count` with no args counts rows; an aggregate's `where` folds only the rows it holds for.
+— a `count` with no args counts rows; a conditional one counts a `case` that is 1 where the condition
+holds and missing elsewhere (no `else` — count would count the else's rows too; only `sum` may keep
+`else: 0`).
 
 ### Revenue pivoted to per-country columns (dashboard matrix)
 ```jsonc
@@ -55,8 +57,8 @@ stage's `description` in the tool schema for the authoritative contract.
    values:[{value:"US",name:"us"}, {value:"GB",name:"gb"}, {value:"BR",name:"br"}]} ]
 ```
 `|> AGGREGATE SUM(CASE WHEN country = 'US' THEN price END) AS us, …` — `measure` is an aggregate
-expression; each value's condition (`on` equals it) is added to the `where` of every aggregate in
-it, and the column is named by the value's `name`.
+expression; each value's condition (`on` equals it) folds every aggregate in it over only that
+value's rows (a `case` over its argument), and the column is named by the value's `name`.
 
 ### Days-since-install (retention-day building block)
 ```jsonc
@@ -137,11 +139,11 @@ then merge the trailing-N days' sketches.
           {name:"purchase",event_name:["iap_purchase_completed"]}]},
   {stage:"aggregate", measures:[
      {name:"started",   expr:{fn:"count"}},
-     {name:"converted", expr:{fn:"count", where:[{column:"reached_purchase"}]}}]} ]
+     {name:"converted", expr:{fn:"count", args:[{fn:"case", cases:[{when:[{column:"reached_purchase"}], then:{value:1}}]}]}}]} ]
 ```
 Lowers to a per-user CTE chain (DuckDB) / `|> MATCH_RECOGNIZE` (BigQuery); a `join`
 with users before the `aggregate` slices the conversion by a user attribute. A boolean
-column (`reached_purchase`) stands in a condition slot as it is.
+column (`reached_purchase`) stands in a condition slot — a case branch's `when` — as it is.
 
 ---
 
@@ -153,5 +155,5 @@ consumes them, and put a post-aggregate `where` after `aggregate` to filter on a
 computed measure. A built table is read later in the same stages:
 `query_pipeline_model({ request: { context_id, steps: [...] } })` runs where, compute,
 aggregate, pivot, unpivot, order_by, limit, sample and project over it, storing nothing
-(`dry_run: true` returns that read's SQL instead); a metric query takes the same `steps` over
-its result (`query_semantic_model`).
+(`dry_run: true` returns that read's SQL instead); a metric query takes the same steps over
+its result, after its `metrics` step (`query_semantic_model`).

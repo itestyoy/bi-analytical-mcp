@@ -31,11 +31,12 @@ export function statAccuracyNote(catalog) {
 export const EXPR = { $ref: '#/$defs/expr' };
 
 /**
- * ONE TYPE WORD — what a value is read or converted as: cast's, an event property's or a JSON / array
- * read's, an unnested element's, a raw expression's result, a CASE's.
+ * ONE TYPE WORD — what a value is converted to: cast's, a raw expression's result, a CASE's. A value
+ * that is read (a column, an event property, a JSON field, an array element) has the type of what it is
+ * read from, and is converted by cast.
  */
 export const TYPES = ['int', 'numeric', 'float', 'string'];
-export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a JSON/array read, an unnested element or a raw expression yields, a CASE result.' };
+export const TYPE = { enum: TYPES, description: 'The type: what cast converts to (SAFE — a value that will not convert becomes NULL rather than failing the query), what a raw expression yields, a CASE\'s result.' };
 
 /**
  * ONE SORT KEY — the order_by stage's keys (a build's, a read's, the steps after a metric query) and a

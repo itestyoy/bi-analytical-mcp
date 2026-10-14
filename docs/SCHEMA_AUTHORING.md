@@ -34,10 +34,10 @@
   `({ source, event })`, `({ source, column })` для колонки модели, `({ source, property })` для
   свойства события. Значит поле описывается так, чтобы текст был полезен
   тому, кто уже пришёл именно за этим полем.
-- **Агент никогда не пишет путь соединения.** Колонка адресуется только тем, где она лежит:
-  `group_by: [{ source: 'users', column: 'country' }]`,
-  `where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }]`,
-  `steps: [{ stage: 'order_by', keys: [{ key: 'users_country' }] }]` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
+- **Агент никогда не пишет путь соединения.** Колонка адресуется только тем, где она лежит — в
+  `group_by` шага метрик `{ stage: 'metrics', metrics: [...], group_by: [{ source: 'users', column: 'country' }] }`
+  и в шаге `where` перед ним `{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }`;
+  шаги после него читают колонку результата: `{ stage: 'order_by', keys: [{ key: 'users_country' }] }` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —
   `groupable_columns` в обзоре и `groupable` в ответе `build_semantic_model`. Колонки результата
@@ -483,7 +483,7 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 
 ```js
 // одна строка на элемент — «на каком шаге ломалось»
-{ stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb', type: 'string' }
+{ stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb' }   // элемент — текст
 //   → 20 строк; group_by crumb: level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, …
 
 // длина массива, не меняя грань
@@ -534,7 +534,7 @@ BigQuery): по умолчанию она получила бы `native`, поэ
 // несколько полей — элемент целиком, потом json_field по каждому
 { stage: 'unnest',  expr: { property: 'stack_frames_of_event_data' }, name: 'frame' }
 { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } }
-{ stage: 'compute', name: 'line', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'line', type: 'int' } }
+{ stage: 'compute', name: 'line', expr: { fn: 'cast', args: [{ fn: 'json_field', args: [{ column: 'frame' }], field: 'line' }], type: 'int' } }
 { stage: 'compute', name: 'in_app', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'in_app' } }
 //   → where in_app = false: 3 кадра (все три — Engine.cs); true: 13
 
@@ -572,9 +572,9 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 { stage: 'compute', name: 'network', expr: { property: 'custom_keys_of_event_data', field: 'network' } }
 //   → wifi 8 / cellular 5
 
-// один ключ с приведением типа — для сумм
-{ stage: 'compute', name: 'coins', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'coins', type: 'int' } }
-{ stage: 'compute', name: 'level', expr: { fn: 'json_field', args: [{ column: 'custom_keys_of_event_data' }], field: 'level', type: 'int' } }
+// один ключ с приведением типа — для сумм: прочитанное поле — текст, тип меняет cast
+{ stage: 'compute', name: 'coins', expr: { fn: 'cast', args: [{ property: 'custom_keys_of_event_data', field: 'coins' }], type: 'int' } }
+{ stage: 'compute', name: 'level', expr: { fn: 'cast', args: [{ property: 'custom_keys_of_event_data', field: 'level' }], type: 'int' } }
 //   → sum(coins) 5205; max(level) 31; median(level) 12
 ```
 
@@ -628,7 +628,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 |---|---|---|
 | массив скаляров, плоская колонка | `array: { items, encoding? }` | `unnest` · `array_length` · `array_contains` · `json_parse_array` + `element_at` / `array_last` |
 | массив объектов, плоская колонка | `array: { fields: {…}, encoding? }` | `unnest` с `field` · `unnest` целиком + `json_field` · `array_length` |
-| JSON-объект, плоская колонка | ничего особого + `description` с формой | `{ property, field }` · `json_field` с `type` |
+| JSON-объект, плоская колонка | ничего особого + `description` с формой | `{ property, field }` (текст; другой тип — `{ fn: "cast", args: [{ property, field }], type }`) · `json_field` по колонке с JSON |
 | массив / объект внутри blob | `properties` под `is_event_data` | те же функции и стадии: `{ property }` = имя ключа (и в `expr` у `unnest`) |
 | настоящий ARRAY / REPEATED (BigQuery) | `array: { …, encoding: native }` | те же стадии без парсинга |
 
@@ -715,7 +715,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ source }` без мер подключает модель ради её колонок), `metrics` |
 | `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, steps }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
-| `example_queries` | для `semantic_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
+| `example_queries` | для `semantic_payload` | `[{ steps: [{ stage: "metrics", metrics, group_by? }, …] }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
 | `experiment` | для A/B | `{ action: 'analyze', metric, group_field, arm }` — сопоставление колонок результата → группа `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, arm: { n }, expected_ratio? }` → `experiment({ action: 'check_split' })`. Файл развёртывания с прежними плоскими ключами `<поле>_field` (`n_field`, `sumY_field`, `sumNum_field` …) читается как такой `arm` | см. таблицу ниже |
 | `approach` | для приёма | форма, которая работает | одна строка кода в обратных кавычках + чем она является; только в рецепте-приёме |
 | `instead_of` | для приёма | форма, которая падает, и почему | называйте класс ошибки (`NullIndexError`, `OrderRequiredError`) или в чём тихая неправильность |
@@ -780,11 +780,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
     ]
   },
   "example_queries": [
-    { "metrics": ["rev_segment_revenue"], "group_by": [{ "source": "users", "column": "country" }] },
-    { "metrics": ["rev_segment_arppu"],   "group_by": [{ "source": "users", "column": "acquisition_type" }] }
+    { "steps": [{ "stage": "metrics", "metrics": ["rev_segment_revenue"], "group_by": [{ "source": "users", "column": "country" }] }] },
+    { "steps": [{ "stage": "metrics", "metrics": ["rev_segment_arppu"],   "group_by": [{ "source": "users", "column": "acquisition_type" }] }] }
   ],
   "notes": "User attributes come through the declared events.user → users.user relationship; no join is written.",
-  "hack": "Any measure + group_by { source: 'users', column: '<attr>' } makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
+  "hack": "Any measure + a metrics step's group_by { source: 'users', column: '<attr>' } makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
 }
 ```
 

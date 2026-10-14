@@ -9,11 +9,12 @@ ready payload + the reusable technique (`hack`). Report the tier (governed metri
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)
 Governed metric path. Define once, query by time grain.
 1. `build_semantic_model` — a measure `{ name, expr: { fn: "count_distinct", args: [{ column: <player key> }] } }`,
-   scoped to the relevant event by the semantic model's `where` (or the measure expression's own `where`);
+   scoped to the relevant event by the semantic model's `where` (or by a `case` the measure folds:
+   `args: [{ fn: "case", cases: [{ when: [<the event>], then: { column: <player key> } }] }]`);
    or use the governed *Cumulative Sessions* / *Session Duration* definitions.
-2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
-   series `steps: [{ stage: "order_by", keys: [{ key: "metric_time_day" }] }]` (a key is a
-   result column's name — the time axis at a day is the column `metric_time_day`).
+2. `query_semantic_model` — `steps: [{ stage: "metrics", metrics: [<name>], group_by: [{ time: "metric_time", grain: "day" }] }]`;
+   for a series an order_by step after it, `{ stage: "order_by", keys: [{ key: "metric_time_day" }] }`
+   (a key is a result column's name — the time axis at a day is the column `metric_time_day`).
 - **Gotcha:** "last week/month" = last **complete** period; DAU ≤ MAU; distinct players,
   not rows. Sessions follow AppsFlyer logic ([Cumulative Sessions](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4503207971)).
 

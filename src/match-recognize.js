@@ -21,7 +21,7 @@ import { getDialect } from './dialects/index.js';
 import { comparison } from './conditions.js';
 import { strEnum, conditionSlot } from './schema-kit.js';
 import { partitionItem, partitionColumn } from './pipeline/sql.js';
-import { conditionListSql, eachNode } from './pipeline/compute.js';
+import { conditionListSql, eachNode, propertyTypes } from './pipeline/compute.js';
 import { currentConditions } from './earlier-spelling.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -48,11 +48,12 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
 
 /**
  * A kept draft's prefilter conditions in this version's grammar: each named a `property` — an event
- * property of the source when it has one, else one of its columns, as the earlier build read it.
+ * property of the source when it has one, else one of its columns, as the earlier build read it; a
+ * property read as a type of its own is cast to it where the catalog reads it as another.
  */
 function prefilterConditions(catalog, source, where) {
   const props = catalog.getModel(source).properties || {};
-  return currentConditions(where || [], { subject: (name) => (props[name] ? 'property' : 'column') });
+  return currentConditions(where || [], { subject: (name) => (props[name] ? 'property' : 'column'), propertyType: propertyTypes(catalog, source) });
 }
 
 /**
@@ -404,7 +405,7 @@ function matchRecognizeSchema(catalog) {
   };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (an aggregate counting where a step was reached — { fn: "count", where: [{ column: "reached_<step>" }] } — and compute date_diff). Filter the events before it with a where stage.',
+    description: 'An ordered funnel / path: matches the steps in order within each partition (per user by default), ordered by `order_by`. Out: the partition_by column(s), then for each step reached_<step> (boolean) and at_<step> (when), completed, furthest_step_name, first_seen_at (= the first step\'s time), and each capture. A conversion or the time between two steps is computed from those by the stages after (an aggregate counting where a step was reached — { fn: "count", args: [{ fn: "case", cases: [{ when: [{ column: "reached_<step>" }], then: { value: 1 } }] }] } — and compute date_diff). Filter the events before it with a where stage.',
     properties: {
       stage: { enum: ['match_recognize'] },
       partition_by: {

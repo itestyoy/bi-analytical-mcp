@@ -8,7 +8,7 @@ import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
 import { rankFuzzy } from './fuzzy.js';
-import { currentOf, isEarlierInclude, isEarlierRef } from './earlier-spelling.js';
+import { currentOf as currentOfValue, isEarlierInclude, isEarlierRef, isTypedUnnest, untypedUnnest } from './earlier-spelling.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -570,10 +570,13 @@ function replacedAt(value, segs, node) {
  * more, are readings too — without them. A dimension a task computed is a name the schema cannot know,
  * so that reading is said only where the column reading misses on more than a misspelt name (one the
  * column's values come near: that column is meant). Never an alias: the value is refused all the same.
+ * `opts` reaches every converter (`propertyType`: what a property is read as, so a typed read whose type
+ * is the catalog's is shown without it rather than cast to it).
  * → Map(path → the value as it is now)
  */
-function earlierSpellings(validator, input, errors) {
+function earlierSpellings(validator, input, errors, opts = {}) {
   const found = new Map();
+  const currentOf = (v, o = {}) => currentOfValue(v, { ...opts, ...o });
   // nothing in the input converts, under either reading of a name: no spot of it is an earlier
   // spelling, and trying each refused spot would revalidate the whole input for nothing
   if (currentOf(input) === input && currentOf(input, { subject: () => 'property' }) === input) return found;
@@ -602,13 +605,20 @@ function earlierSpellings(validator, input, errors) {
         const asColumn = scored.find((x) => x.c === column);
         if (asColumn && misspeltName(validator, asColumn.input, at)) best = asColumn;
       }
-      if (best.count < before) { found.set(at, best.c); working = best.input; break; }
+      if (best.count < before) {
+        // a conversion found inside this one that this one takes further (a batch's queries, one item
+        // of which only the request's reading converts) was partial: this one says it whole
+        for (const [f, v] of [...found]) if (f !== at && within(f, at) && JSON.stringify(valueAt(best.input, f)) !== JSON.stringify(v)) found.delete(f);
+        found.set(at, best.c); working = best.input; break;
+      }
     }
   }
   return found;
 }
 
-export function validateInput(validator, input) {
+/** An input checked against its tool's schema → { ok } or { ok: false, errors }. `opts` reaches the
+ *  converters of an earlier spelling (earlierSpellings: `propertyType`). */
+export function validateInput(validator, input, opts = {}) {
   const ok = validator(input);
   if (ok) return { ok: true };
   // every union read as the branch the input meant, each error as a sentence, de-duplicated
@@ -619,7 +629,7 @@ export function validateInput(validator, input) {
   // a value of an earlier spelling is refused as that, with its conversion, instead of field by field —
   // and what the input still lacks is read off it as it is now: a misspelt name inside the converted
   // value is said (the earlier spelling's own complaints are not)
-  const earlier = earlierSpellings(validator, input, explained);
+  const earlier = earlierSpellings(validator, input, explained, opts);
   for (const [path, now] of earlier) {
     const msg = `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(now)}`;
     seen.add(msg); errors.push(msg);
@@ -630,6 +640,13 @@ export function validateInput(validator, input) {
   for (const e of rest) {
     const msg = describe(e, earlier.size ? { ...ctx, input: now } : ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
+  }
+  // a typed unnest standing alone (an edit_step / insert_step `step`) has no one value it is now: in a
+  // list of steps it is two (untypedUnnest), so it is said as those two, to put where it stood
+  for (const path of new Set(rest.map((e) => e.instancePath))) {
+    const v = valueAt(now, path);
+    const two = isTypedUnnest(v) ? untypedUnnest(v) : [];
+    if (two.length === 2) errors.push(`${fieldRef(path)}: an unnest takes no type — its element is read as it is stored; converting it is a step of its own, so this is two steps now: ${JSON.stringify(two[0])} in its place, then ${JSON.stringify(two[1])} after it`);
   }
   if (errors.length === 0) errors.push('input did not match the expected shape');
   return { ok: false, errors };

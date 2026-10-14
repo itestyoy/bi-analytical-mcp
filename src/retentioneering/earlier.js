@@ -36,7 +36,8 @@ import { ES_COLUMNS } from './names.js';
 import { ToolError } from '../validate.js';
 import { READ_PAGE } from '../schema/fields.js';
 import { NAME_RE } from '../pipeline/sql.js';
-import { currentCondition, currentConditions, isEarlierCondition } from '../earlier-spelling.js';
+import { currentCondition, currentConditions, currentExpression, isEarlierCondition } from '../earlier-spelling.js';
+import { propertyTypes } from '../pipeline/compute.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 /** An earlier group of conditions: { or: [...] } or { and: [...] }. */
@@ -154,6 +155,10 @@ function fromFields(spec, catalog) {
   const own = source && catalog?.models?.[source] ? { event: catalog.eventNameColumn(source), time: catalog.getModel(source).time?.column, columns: new Set(catalog.modelColumns(source).map((c) => c.name)) } : { columns: new Set() };
   const eventColumn = named.event ?? own.event;
   const timeColumn = named.time ?? own.time;
+  // a property is read as the type the source's catalog declares: a typed read, the read alone where
+  // that is its type, else a cast of it (src/earlier-spelling.js, as a new call is told)
+  const propertyType = propertyTypes(catalog, source);
+  const asProperty = { ...AS_PROPERTY, propertyType };
   const stages = [];
   const made = new Set();
   /** A column a compute stage makes — once. */
@@ -162,7 +167,7 @@ function fromFields(spec, catalog) {
     return name;
   };
   /** An event property as a column: the source's own where it is stored under its name, else read. */
-  const propertyColumn = (property, name, type) => (name === property && own.columns.has(property) ? property : compute(name, { property, ...(type ? { type } : {}) }));
+  const propertyColumn = (property, name, type) => (name === property && own.columns.has(property) ? property : compute(name, currentExpression({ property, ...(type ? { type } : {}) }, { propertyType })));
 
   // the events kept and dropped
   const oneOf = (fn, list) => ({ fn, args: [{ column: eventColumn }, ...list.map((value) => ({ value }))] });
@@ -173,7 +178,7 @@ function fromFields(spec, catalog) {
   const onSegment = (c) => (isGroup(c) ? (c.or || c.and).some(onSegment) : isObj(c) && c.property === undefined && segmentNames.has(c.column));
   const early = where.filter((c) => !onSegment(c));
   const late = where.filter(onSegment);
-  if (early.length) stages.push({ stage: 'where', conditions: currentConditions(early, AS_PROPERTY) });
+  if (early.length) stages.push({ stage: 'where', conditions: currentConditions(early, asProperty) });
 
   // events made from an event's parameters (split), then several merged under one name (groups): a
   // CASE column each, the event column from then on
@@ -185,11 +190,12 @@ function fromFields(spec, catalog) {
     const cases = [];
     for (const rule of rules) {
       if (rule.cases) {
-        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...currentConditions(cs.when ?? cs.where ?? [], AS_PROPERTY)], then: { value: cs.name } });
+        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...currentConditions(cs.when ?? cs.where ?? [], asProperty)], then: { value: cs.name } });
         if (rule.else !== undefined) cases.push({ when: [isEvent(rule.event)], then: { value: rule.else } });
         continue;
       }
-      const by = { fn: 'cast', args: [rule.by?.column !== undefined ? { column: rule.by.column } : { property: rule.by?.property, type: 'string' }], type: 'string' };
+      // (the parameter as text: the cast converts it, whatever the catalog types it as)
+      const by = { fn: 'cast', args: [rule.by?.column !== undefined ? { column: rule.by.column } : { property: rule.by?.property }], type: 'string' };
       for (const [value, name] of Object.entries(rule.names || {})) cases.push({ when: [isEvent(rule.event), { fn: 'eq', args: [by, { value }] }], then: { value: name } });
       // any other value names <event>_<value>; an event without the parameter keeps its name
       cases.push({ when: [isEvent(rule.event), { fn: 'is_not_null', args: [by] }], then: { fn: 'concat', args: [{ value: `${rule.event}_` }, by] } });
@@ -216,7 +222,7 @@ function fromFields(spec, catalog) {
     stages.push(joinStage(catalog, source, seg, name, timeColumn));
     return name;
   });
-  if (late.length) stages.push({ stage: 'where', conditions: currentConditions(late, AS_PROPERTY) });
+  if (late.length) stages.push({ stage: 'where', conditions: currentConditions(late, asProperty) });
 
   const outColumns = { ...named, ...(event !== eventColumn ? { event } : {}) };
   // (a start of that spelling had no steps of its own: any there come after what its fields said)

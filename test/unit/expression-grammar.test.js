@@ -5,8 +5,9 @@
 // it. What a PLACE takes of it is one table (PLACES), read for a tool's definition and checked as the
 // value is built, and the refusal names the place and what it takes; the one writer holds
 // the rules of WHERE each kind may stand too — an aggregate only where a measure is written, a window
-// only in a compute stage, a condition slot only booleans, a missing value only through is_null. What a
-// store holds in an earlier spelling is carried over by one table of converters
+// only in a compute stage, a condition slot only booleans, a missing value only through is_null. A value
+// is of the type of what it is read from, and cast converts it; a conditional aggregate folds a case. What
+// a store holds in an earlier spelling is carried over by one table of converters
 // (src/earlier-spelling.js), each leaving today's spelling as it is.
 //
 // Schema, input-validation and conversion checks — no generated SQL is read; the numbers each
@@ -19,14 +20,16 @@ import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { renderPipeline } from '../../src/pipeline.js';
-import { FNS, PLACES, exprSchema, exprSql, conditionListSql } from '../../src/pipeline/compute.js';
+import { FNS, PLACES, exprSchema, exprSql, conditionListSql, propertyTypes } from '../../src/pipeline/compute.js';
 import { getDialect } from '../../src/dialects/index.js';
 import {
   currentCondition, currentConditions, currentExpression, currentMeasure, currentDimension, currentUnnest,
   transformStages, currentOf, currentQueryInput, isEarlierCondition, isEarlierMeasure,
   isEarlierRef, currentRef, isEarlierInclude, currentInclude,
+  isTypedRead, isEarlierAggregate, isTypedUnnest, untypedUnnest, isEarlierMetricQuery,
 } from '../../src/earlier-spelling.js';
-import { beside, forms, pinned } from '../helpers/schema-nav.js';
+import { beside, deref, forms, pinned } from '../helpers/schema-nav.js';
+import { stageBranch } from '../helpers/stage-schema.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -39,9 +42,11 @@ const col = (column) => ({ column });
 const val = (value) => ({ value });
 const where = (...conditions) => ({ stage: 'where', conditions });
 const measure = (expr, groupBy = []) => ({ stage: 'aggregate', group_by: groupBy, measures: [{ name: 'm', expr }] });
+/** A CASE of one branch: `then` where the conditions hold, `other` (when given) on every other row. */
+const caseOf = (when, then, other) => ({ fn: 'case', cases: [{ when, then }], ...(other !== undefined ? { else: other } : {}) });
 
 /** The expression definition a schema carries: its leaves (the forms with no `fn`), the functions it
- *  offers, and what its arguments and a conditional aggregate's where are. */
+ *  offers, what its arguments are, and every field a form or the union beside them names. */
 function exprDef(doc, node = doc.$defs?.expr) {
   const all = forms(doc, node);
   return {
@@ -49,10 +54,12 @@ function exprDef(doc, node = doc.$defs?.expr) {
     fns: new Set(all.flatMap((f) => pinned(doc, f, 'fn'))),
     // what an argument of it is: the same definition, said beside its forms
     argsRef: beside(doc, node, 'args')?.items?.$ref,
-    // …and a conditional aggregate's where
-    whereRef: beside(doc, node, 'where')?.items?.$ref,
+    fields: new Set([...all.flatMap((f) => Object.keys(f.properties || {})), ...Object.keys(deref(doc, node)?.properties || {})]),
   };
 }
+
+/** The fields of the form a function is offered in (the first: an aggregate's that folds rows). */
+const formOf = (doc, fn, node = doc.$defs?.expr) => forms(doc, node).find((f) => pinned(doc, f, 'fn').includes(fn));
 
 test('every tool that takes an expression carries the one definition, $defs.expr, built for its places, its arguments referring back to it', () => {
   // the definition with no place named (an internal caller's): every leaf of the rows, every ref that
@@ -72,7 +79,8 @@ test('every tool that takes an expression carries the one definition, $defs.expr
     assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn))).sort(), `${tool}: the functions its places take`);
     assert.equal(forms(doc, doc.$defs.expr).some((f) => f.properties?.over), places.some((p) => PLACES[p].windows), `${tool}: a window's form only where a place takes one`);
     assert.equal(l.argsRef, '#/$defs/expr', `${tool}: its arguments are the one expression`);
-    assert.equal(l.whereRef, '#/$defs/expr', `${tool}: and so is an aggregate's where`);
+    // a conditional aggregate folds a case: no aggregate takes a where of its own, beside the forms or in one
+    assert.equal(l.fields.has('where'), false, `${tool}: no aggregate's where`);
     assert.ok(!l.fns.has('event_property'), `${tool}: an event property is a leaf`);
     for (const gone of ['read_expr', 'metric_expr', 'eventstream_expr']) assert.equal(doc.$defs[gone], undefined, `${tool}: no ${gone}`);
   }
@@ -86,17 +94,60 @@ test('every tool that takes an expression carries the one definition, $defs.expr
   // a semantic declaration: its rows' leaves and { metric } (a derived metric's), no raw, no window, no sketch
   assert.deepEqual(of('build_semantic_model').leaves, [...one.leaves.slice(0, 4), '{ metric }']);
   for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) assert.ok(!of('build_semantic_model').fns.has(fn), `a semantic declaration takes no ${fn}`);
-  // a metric query: what its where names (group_by's refs) and the steps' rows — no metric, no event property, no raw
+  // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — no metric, no event property, no raw
   const sq = of('query_semantic_model').leaves;
   for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_semantic_model: ${leaf}`);
   for (const leaf of ['{ metric }', 'an event property — { property }']) assert.ok(!sq.includes(leaf), `query_semantic_model: no ${leaf}`);
   assert.ok(!of('query_semantic_model').fns.has('raw'));
 });
 
+// A VALUE'S TYPE IS WHAT IT IS READ FROM, AND ONE FUNCTION CONVERTS IT (cast): an event property is read
+// as the type the catalog declares, a field of one and what json_field / element_at / array_last take
+// out as text — none of them names a type. Only what makes a value of a type it says names one: cast,
+// case, raw. An aggregate folds the rows its argument has a value on, and takes no where of its own.
+test('a read names no type — cast converts; only cast, case and raw say a type; an aggregate takes no where', () => {
+  for (const tool of ['build_pipeline_model', 'build_semantic_model']) {
+    const doc = schemas[tool];
+    const leaf = forms(doc, doc.$defs.expr).find((f) => f.title === 'an event property — { property }');
+    assert.deepEqual(Object.keys(leaf.properties).sort(), ['field', 'property'], `${tool}: { property, field? }`);
+    for (const fn of ['cast', 'case']) assert.ok(formOf(doc, fn).properties.type, `${tool}: ${fn} says its type`);
+    for (const fn of ['sum', 'count', 'percentile']) assert.equal(formOf(doc, fn).properties.where, undefined, `${tool}: ${fn} takes no where`);
+  }
+  const build = schemas.build_pipeline_model;
+  assert.ok(formOf(build, 'raw').properties.type, 'raw says what its SQL yields');
+  for (const fn of ['json_field', 'element_at', 'array_last']) assert.equal(formOf(build, fn).properties.type, undefined, `${fn} reads text`);
+  assert.equal(forms(build, stageBranch(build, 'unnest')).some((f) => f.properties?.type), false, 'an unnest reads its element as it is');
+  // what a property is read as is the catalog's type, text where it declares none — per source, or the
+  // type every events source declaring the name agrees on
+  const of = propertyTypes(catalog, 'events');
+  assert.equal(of('price_in_usd_of_event_data'), 'numeric');
+  assert.equal(of('result_of_event_data'), 'string');
+  assert.equal(of('no_such_property'), undefined);
+  assert.equal(propertyTypes(catalog)('anr_duration_of_event_data'), 'numeric', 'crashlytics alone declares it');
+  assert.equal(propertyTypes(null)('price_in_usd_of_event_data'), undefined, 'no catalog: not known');
+  // the columns a read makes carry those types: a numeric property a number, a text one text until cast
+  const PAYLOAD = new Set([...COLS, 'price_in_usd_of_event_data', 'result_of_event_data']);
+  const built = renderPipeline(catalog, catalog.dialect, 'events', [
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
+    { stage: 'compute', name: 'result', expr: { property: 'result_of_event_data' } },
+    { stage: 'compute', name: 'result_n', expr: { fn: 'cast', args: [{ property: 'result_of_event_data' }], type: 'int' } },
+  ], { physicalCols: PAYLOAD });
+  assert.deepEqual(['price', 'result', 'result_n'].map((c) => built.columns.get(c).type), ['numeric', 'string', 'int']);
+  // a call that names the type is refused with the read as it is now: the property alone where the catalog
+  // reads it as that type (the converter asked, opts.propertyType), cast where it is another or not known
+  const step = (expr, opts) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr }] }, opts);
+  const shown = (r, now) => assert.ok(r.errors.join(' ').includes(`\`steps.0.expr\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
+  const price = { property: 'price_in_usd_of_event_data' };
+  shown(step({ ...price, type: 'numeric' }, { propertyType: propertyTypes(catalog) }), price);
+  shown(step({ ...price, type: 'int' }, { propertyType: propertyTypes(catalog) }), { fn: 'cast', args: [price], type: 'int' });
+  shown(step({ ...price, type: 'numeric' }), { fn: 'cast', args: [price], type: 'numeric' });
+});
+
 // What a place takes of the one expression is ONE table (PLACES), read by the writer as it builds a value:
 // a leaf, a function or a window the place does not take is refused there, naming the place and what it
 // takes — a pipeline step over a source's rows, a read of stored rows (a read, the steps after a metric
-// query, a card's drill), a semantic model, a metric query's where, a derived metric.
+// query's metrics step, a card's drill), a semantic model, a where step before the metrics step, a
+// derived metric.
 test('each place takes what its row in PLACES says, and a refusal names the place and what it takes', () => {
   const d = getDialect('duckdb');
   const cols = new Map([['a', { type: 'numeric' }], ['s', { type: 'string' }], ['t', { type: 'time' }]]);
@@ -158,7 +209,7 @@ test('a function takes its own arguments and parameters, and nothing else', () =
   for (const stage of [
     where({ fn: 'between', args: [col('a'), val(1), val(3)] }, { fn: 'in', args: [col('a'), val(1)] }, { fn: 'not', args: [{ fn: 'is_null', args: [col('a')] }] }),
     measure({ fn: 'count' }),
-    measure({ fn: 'percentile', args: [col('a')], percentile: 0.9, where: [{ fn: 'gt', args: [col('a'), val(0)] }] }),
+    measure({ fn: 'percentile', args: [caseOf([{ fn: 'gt', args: [col('a'), val(0)] }], col('a'))], percentile: 0.9 }),
     { stage: 'compute', name: 'x', expr: { fn: 'sum', args: [col('a')], over: { partition_by: ['b'], order_by: [{ key: 'c' }], frame: { mode: 'rows', preceding: 6 } } } },
   ]) assert.equal(step(stage).ok, true, `${JSON.stringify(stage)}: ${step(stage).errors?.join(' | ')}`);
 });
@@ -172,14 +223,38 @@ test('an aggregate folds rows only where a measure is written; a window stands o
   // a window in a measure, and as an aggregate's argument: computed into a column first
   assert.throws(() => render([measure({ fn: 'sum', args: [col('session_number')], over: OVER })]), /a measure folds a group's rows into one value, and a window \(sum with over\) keeps every row/);
   assert.throws(() => render([measure({ fn: 'sum', args: [{ fn: 'row_number', over: OVER }] })]), /a window function \(row_number.*\) cannot be an aggregate's argument/);
-  // …and in a conditional aggregate's where, which is a condition slot
-  assert.throws(() => render([measure({ fn: 'count', where: [{ fn: 'gt', args: [{ fn: 'row_number', over: OVER }, val(1)] }] })]), /window function \(row_number with over\) cannot stand in a condition/);
+  // …and in the conditions of the case a conditional aggregate folds, which are a condition slot
+  assert.throws(() => render([measure({ fn: 'count', args: [caseOf([{ fn: 'gt', args: [{ fn: 'row_number', over: OVER }, val(1)] }], val(1))] })]), /window function \(row_number with over\) cannot stand in a condition/);
   // the ways that are: a window in a compute stage, folded after it
   const ok = render([
     { stage: 'compute', name: 'nth', expr: { fn: 'row_number', over: OVER } },
-    measure({ fn: 'sum', args: [col('nth')], where: [{ fn: 'gt', args: [col('nth'), val(1)] }] }),
+    measure({ fn: 'sum', args: [caseOf([{ fn: 'gt', args: [col('nth'), val(1)] }], col('nth'))] }),
   ]);
   assert.equal(ok.columns.get('m').type, 'numeric');
+});
+
+// A CONDITIONAL AGGREGATE FOLDS A CASE: a value on the rows where the condition holds, missing on the
+// others, which every aggregate skips. An else gives those rows a value, and then every aggregate but sum
+// folds them too — a count counts them, an average averages their 0s — so it is refused where the value is
+// built, saying to leave the else out; sum may keep else: 0 (adding nothing), and an else of null is none.
+test('an aggregate over a case with an else is refused, but for sum — the rule named where it is built', () => {
+  const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
+  const trap = (fn) => new RegExp(`${fn} over a case with an else folds every row.*leave the else out.*Only sum may keep one, else: 0`, 's');
+  for (const fn of ['count', 'count_distinct', 'approx_count_distinct', 'average', 'min', 'max', 'median', 'stddev', 'variance']) {
+    assert.throws(() => render([measure({ fn, args: [caseOf([isTut], col('session_number'), val(0))] })]), trap(fn), fn);
+  }
+  assert.throws(() => render([measure({ fn: 'percentile', args: [caseOf([isTut], col('session_number'), val(0))], percentile: 0.5 })]), trap('percentile'));
+  // over a window alike, and in a pivot's cell, whose own condition is folded in beside the caller's
+  assert.throws(() => render([{ stage: 'compute', name: 'x', expr: { fn: 'count', args: [caseOf([isTut], val(1), val(0))], over: OVER } }]), trap('count'));
+  const pivot = (m) => render([{ stage: 'pivot', on: 'event_name', group_by: ['player_id_of_internal'], measure: m, values: [{ value: 'tutorial', name: 'tut' }, { value: null, name: 'none' }] }]);
+  assert.throws(() => pivot({ fn: 'count', args: [caseOf([isTut], val(1), val(0))] }), trap('count'));
+  // what is not: a sum with else 0 (folding or over a window), an else of null, a case with no else
+  assert.equal(render([measure({ fn: 'sum', args: [caseOf([isTut], col('session_number'), val(0))] })]).columns.get('m').type, 'numeric');
+  assert.ok(render([{ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [caseOf([isTut], val(1), val(0))], over: OVER } }]).columns.has('x'));
+  assert.equal(render([measure({ fn: 'count', args: [caseOf([isTut], val(1), val(null))] })]).columns.get('m').type, 'int');
+  assert.equal(render([measure({ fn: 'count', args: [caseOf([isTut], val(1))] })]).columns.get('m').type, 'int');
+  assert.deepEqual([...pivot({ fn: 'sum', args: [caseOf([isTut], col('session_number'), val(0))] }).columns.keys()], ['player_id_of_internal', 'tut', 'none']);
+  assert.ok(pivot({ fn: 'count', args: [caseOf([{ fn: 'gt', args: [col('session_number'), val(1)] }], val(1))] }).columns.has('tut'));
 });
 
 test('a measure is aggregates combined: a column outside them is a group_by column, and one aggregate at least', () => {
@@ -198,9 +273,9 @@ test('a condition slot takes booleans: a comparison, logic, a boolean column —
   assert.throws(() => render([where(col('session_number'))]), notACondition);
   assert.throws(() => render([where({ fn: 'add', args: [col('session_number'), val(1)] })]), notACondition);
   assert.throws(() => render([where(val(1))]), notACondition);
-  // a CASE's when and a conditional aggregate's where are condition slots too
+  // a CASE's when is a condition slot too — the case a conditional aggregate folds alike
   assert.throws(() => render([{ stage: 'compute', name: 'k', expr: { fn: 'case', cases: [{ when: [col('session_number')], then: val(1) }] } }]), notACondition);
-  assert.throws(() => render([measure({ fn: 'count', where: [col('session_number')] })]), notACondition);
+  assert.throws(() => render([measure({ fn: 'count', args: [caseOf([col('session_number')], val(1))] })]), notACondition);
   // and / or / not take conditions
   assert.throws(() => render([where({ fn: 'and', args: [{ fn: 'eq', args: [col('event_name'), val('x')] }, val(3)] })]), /and takes conditions/);
   assert.throws(() => render([where({ fn: 'not', args: [col('session_number')] })]), /not takes conditions/);
@@ -248,24 +323,52 @@ test('every earlier spelling converts to the one grammar — and a value in toda
     assert.equal(currentOf(today), today, `${JSON.stringify(today)} is kept by identity`);
   }
   assert.deepEqual(currentConditions([{ column: 'a', op: 'gt', value: 1 }]), [{ fn: 'gt', args: [col('a'), val(1)] }]);
-  // an expression: the event_property function, the array functions naming their property, a list constant, nested ones
+  // an expression: the event_property function, the array functions naming their property, a list constant,
+  // a typed read (cast where its type is not what the read yields now), an aggregate's where (the case it
+  // folds now), nested ones
   for (const [earlier, today] of [
-    [{ fn: 'event_property', property: 'p', field: 'f', type: 'numeric' }, { property: 'p', field: 'f', type: 'numeric' }],
+    [{ fn: 'event_property', property: 'p', field: 'f', type: 'numeric' }, { fn: 'cast', args: [{ property: 'p', field: 'f' }], type: 'numeric' }],
+    [{ fn: 'event_property', property: 'p', field: 'f', type: 'string' }, { property: 'p', field: 'f' }],
     [{ fn: 'array_length', property: 'items' }, { fn: 'array_length', args: [{ property: 'items' }] }],
     [{ fn: 'array_contains', property: 'items', item: 'cat' }, { fn: 'array_contains', args: [{ property: 'items' }, val('cat')] }],
     [{ fn: 'not_in', args: [col('a'), { value: ['x', 'y'] }] }, { fn: 'not_in', args: [col('a'), val('x'), val('y')] }],
     [{ fn: 'case', cases: [{ when: [{ column: 'a', op: 'eq', value: 1 }], then: { fn: 'event_property', property: 'p' } }], else: val(0) }, { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('a'), val(1)] }], then: { property: 'p' } }], else: val(0) }],
-    [{ fn: 'count', where: [{ column: 'a', op: 'in', value: [1, 2] }] }, { fn: 'count', where: [{ fn: 'in', args: [col('a'), val(1), val(2)] }] }],
+    [{ fn: 'json_field', args: [col('j')], field: 'f', type: 'int' }, { fn: 'cast', args: [{ fn: 'json_field', args: [col('j')], field: 'f' }], type: 'int' }],
+    [{ fn: 'json_field', args: [col('j')], field: 'f', type: 'string' }, { fn: 'json_field', args: [col('j')], field: 'f' }],
+    [{ fn: 'element_at', args: [col('a')], index: 2, type: 'numeric' }, { fn: 'cast', args: [{ fn: 'element_at', args: [col('a')], index: 2 }], type: 'numeric' }],
+    [{ fn: 'array_last', args: [col('a')], type: 'string' }, { fn: 'array_last', args: [col('a')] }],
+    [{ fn: 'count', where: [{ column: 'a', op: 'in', value: [1, 2] }] }, { fn: 'count', args: [caseOf([{ fn: 'in', args: [col('a'), val(1), val(2)] }], val(1))] }],
+    [{ fn: 'sum', args: [col('x')], where: [{ fn: 'gt', args: [col('a'), val(0)] }] }, { fn: 'sum', args: [caseOf([{ fn: 'gt', args: [col('a'), val(0)] }], col('x'))] }],
+    [{ fn: 'sum', args: [col('x')], where: [] }, { fn: 'sum', args: [col('x')] }],
+    [{ fn: 'div', args: [{ fn: 'count', args: [], where: [{ fn: 'is_null', args: [col('a')] }] }, { fn: 'count' }] }, { fn: 'div', args: [{ fn: 'count', args: [caseOf([{ fn: 'is_null', args: [col('a')] }], val(1))] }, { fn: 'count' }] }],
   ]) {
     assert.deepEqual(currentExpression(earlier), today, JSON.stringify(earlier));
     assert.deepEqual(currentExpression(today), today, `${JSON.stringify(today)} is today's`);
   }
-  // a measure: `fn` before `agg`, `q` before `percentile`, a cast before a function, a pivot's without its name
+  // a typed event property: the leaf alone where its type is the catalog's (opts.propertyType), a cast to
+  // any other — and a cast where the catalog is not known
+  const typed = { property: 'price_in_usd_of_event_data', type: 'numeric' };
+  const propertyType = propertyTypes(catalog, 'events');
+  assert.ok(isTypedRead(typed) && isTypedRead({ fn: 'json_field', args: [col('j')], field: 'f', type: 'int' }));
+  assert.equal(isTypedRead({ property: 'p' }), false);
+  assert.equal(isTypedRead({ fn: 'cast', args: [col('a')], type: 'int' }), false, 'cast says what it makes');
+  assert.deepEqual(currentExpression(typed, { propertyType }), { property: 'price_in_usd_of_event_data' });
+  assert.deepEqual(currentExpression({ ...typed, type: 'int' }, { propertyType }), { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' });
+  assert.deepEqual(currentExpression(typed), { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'numeric' });
+  assert.deepEqual(currentOf([where({ fn: 'gt', args: [typed, val(1)] })], { propertyType }), [where({ fn: 'gt', args: [{ property: 'price_in_usd_of_event_data' }, val(1)] })]);
+  // an aggregate's where: only one folding rows took it; a window's is refused as a window's (by the writer)
+  assert.ok(isEarlierAggregate({ fn: 'count', where: [] }));
+  const windowed = { fn: 'sum', args: [col('x')], over: {}, where: [{ fn: 'gt', args: [col('a'), val(0)] }] };
+  assert.equal(isEarlierAggregate(windowed), false);
+  assert.deepEqual(currentExpression(windowed), windowed);
+  // a measure: `fn` before `agg`, `q` before `percentile`, a cast before a function, its where a case, a
+  // pivot's without its name
   for (const [earlier, today] of [
     [{ name: 'n', agg: 'count' }, { name: 'n', expr: { fn: 'count', args: [] } }],
     [{ name: 'r', agg: 'sum', column: 'price' }, { name: 'r', expr: { fn: 'sum', args: [col('price')] } }],
     [{ name: 'a', fn: 'avg', column: 'x' }, { name: 'a', expr: { fn: 'average', args: [col('x')] } }],
-    [{ name: 'p', fn: 'quantile', q: 0.5, field: 'x', cast: 'numeric', where: [{ field: 'e', op: 'eq', value: 'a' }], label: 'P' }, { name: 'p', expr: { fn: 'percentile', args: [{ fn: 'cast', args: [col('x')], type: 'numeric' }], percentile: 0.5, where: [{ fn: 'eq', args: [col('e'), val('a')] }] }, label: 'P' }],
+    [{ name: 'p', fn: 'quantile', q: 0.5, field: 'x', cast: 'numeric', where: [{ field: 'e', op: 'eq', value: 'a' }], label: 'P' }, { name: 'p', expr: { fn: 'percentile', args: [caseOf([{ fn: 'eq', args: [col('e'), val('a')] }], { fn: 'cast', args: [col('x')], type: 'numeric' })], percentile: 0.5 }, label: 'P' }],
+    [{ name: 'c', agg: 'count', where: [{ column: 'e', op: 'eq', value: 'a' }] }, { name: 'c', expr: { fn: 'count', args: [caseOf([{ fn: 'eq', args: [col('e'), val('a')] }], val(1))] } }],
     [{ agg: 'sum', column: 'x' }, { fn: 'sum', args: [col('x')] }],
   ]) {
     assert.ok(isEarlierMeasure(earlier), JSON.stringify(earlier));
@@ -285,12 +388,24 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   assert.deepEqual(currentUnnest({ stage: 'unnest', column: 'arr', name: 'i', field: 'id' }), { stage: 'unnest', expr: col('arr'), name: 'i', field: 'id' });
   const unnestToday = { stage: 'unnest', expr: { property: 'items' }, name: 'i' };
   assert.equal(currentUnnest(unnestToday), unnestToday);
+  // …and one naming its element's type: text said nothing; another is the element read under
+  // `<name>_element` and a compute stage casting it under its name — two steps, so in a list of steps
+  const typedUnnest = { stage: 'unnest', expr: { property: 'items' }, name: 'i', type: 'int' };
+  assert.ok(isTypedUnnest(typedUnnest));
+  assert.equal(isTypedUnnest(unnestToday), false);
+  assert.deepEqual(untypedUnnest({ ...typedUnnest, type: 'string' }), [unnestToday]);
+  const split = [{ stage: 'unnest', expr: { property: 'items' }, name: 'i_element' }, { stage: 'compute', name: 'i', expr: { fn: 'cast', args: [col('i_element')], type: 'int' } }];
+  assert.deepEqual(untypedUnnest(typedUnnest), split);
+  assert.deepEqual(untypedUnnest({ stage: 'unnest', property: 'items', name: 'i', type: 'int' }), split, 'its array named the earlier way too');
+  const limit = { stage: 'limit', limit: 5 };
+  assert.deepEqual(currentOf([typedUnnest, limit]), [...split, limit]);
+  assert.deepEqual(currentOf({ ...typedUnnest, type: 'string' }), unnestToday, 'on its own, a text element drops its type');
   // a read's transform is its steps
   assert.deepEqual(currentOf({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', steps: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   assert.deepEqual(transformStages({}), []);
-  // a metric query's order_by is the order_by step after its steps
+  // a metric query is its steps: its metrics a metrics step, its order_by the order_by step after it
   const keys = [{ key: 'revenue', direction: 'desc' }];
-  assert.deepEqual(currentOf({ context_id: 'abcdef123456', metrics: ['revenue'], order_by: keys, limit: 5 }), { context_id: 'abcdef123456', metrics: ['revenue'], limit: 5, steps: [{ stage: 'order_by', keys }] });
+  assert.deepEqual(currentOf({ context_id: 'abcdef123456', metrics: ['revenue'], order_by: keys, limit: 5 }), { context_id: 'abcdef123456', limit: 5, steps: [{ stage: 'metrics', metrics: ['revenue'] }, { stage: 'order_by', keys }] });
   // a field only renamed is the refusal's hint (here that field is called 'steps'), not a conversion
   const named = { context_id: 'abcdef123456', stages: [{ stage: 'limit', limit: 5 }] };
   assert.equal(currentOf(named), named);
@@ -352,37 +467,61 @@ test('a { model, attribute } ref, a `from`, an update\'s `task` and the include 
 });
 
 // A QUERY'S INPUT KEPT WITH ITS TASK is read back in today's spelling (src/earlier-spelling.js
-// currentQueryInput): a read's steps were its `stages` (its `transform` before that), and a metric
-// query's `order_by` is the order_by step after its steps — a batch's queries alike, and the same object
-// when nothing in it is of an earlier spelling.
-test('a stored query input is carried over as steps: stages, transform and a metric query\'s order_by', () => {
+// currentQueryInput): a read's steps were its `stages` (its `transform` before that); a metric query is its
+// steps — its `metrics` and `group_by` its metrics step, its `where` a where step before it, its steps and
+// its `order_by` (an order_by step) after it — a batch's queries alike, what its steps hold in the one
+// grammar, and the same object when nothing in it is of an earlier spelling.
+test('a stored query input is carried over as steps: stages, transform, a metric query\'s metrics, group_by, where and order_by', () => {
   const limit = { stage: 'limit', limit: 3 };
+  const dau = { stage: 'metrics', metrics: ['dau'] };
   // a pipeline read
   assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', stages: [limit] }), { context_id: 'abcdef123456', steps: [limit] });
   assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', steps: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
-  // a metric query: its order_by after the steps it already had
+  // a metric query: its metrics step, then the steps it already had, then its order_by
   const keys = [{ key: 'metric_time_day', direction: 'desc' }];
-  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: keys }), { metrics: ['dau'], steps: [{ stage: 'order_by', keys }] });
-  assert.deepEqual(currentQueryInput({ metrics: ['dau'], steps: [limit], order_by: keys }), { metrics: ['dau'], steps: [limit, { stage: 'order_by', keys }] });
-  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: [] }), { metrics: ['dau'] }, 'an empty order_by orders nothing');
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'] }), { steps: [dau] });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: keys }), { steps: [dau, { stage: 'order_by', keys }] });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], steps: [limit], order_by: keys }), { steps: [dau, limit, { stage: 'order_by', keys }] });
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], order_by: [], group_by: [], where: [] }), { steps: [dau] }, 'an empty list says nothing');
   // a batch: each query alike, the ones already in today's spelling kept by identity
-  const today = { metrics: ['dau'], steps: [limit] };
+  const today = { steps: [dau, limit] };
   const batch = currentQueryInput({ context_id: 'abcdef123456', queries: [today, { metrics: ['dau'], order_by: keys }, { stages: [limit] }] });
   assert.equal(batch.queries[0], today);
-  assert.deepEqual(batch.queries.slice(1), [{ metrics: ['dau'], steps: [{ stage: 'order_by', keys }] }, { steps: [limit] }]);
-  // what it grouped and filtered by, as { model, attribute }, is the ref it names; its plan, `include`
+  assert.deepEqual(batch.queries.slice(1), [{ steps: [dau, { stage: 'order_by', keys }] }, { steps: [limit] }]);
+  // what it grouped by is its metrics step's group_by and what it filtered by a where step before it, each
+  // { model, attribute } the ref it names; its plan, `include`
   const country = { model: 'users', attribute: 'country' };
+  const byCountry = { source: 'users', column: 'country' };
   assert.deepEqual(currentQueryInput({ metrics: ['dau'], group_by: [country, { time: 'metric_time', grain: 'day' }], where: [{ fn: 'eq', args: [country, val('US')] }], dry_run: true, include_plan: true }), {
-    metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'day' }], where: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, val('US')] }], dry_run: true, include: ['plan'],
+    dry_run: true, include: ['plan'],
+    steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [byCountry, val('US')] }] }, { ...dau, group_by: [byCountry, { time: 'metric_time', grain: 'day' }] }],
   });
-  assert.deepEqual(currentQueryInput({ metrics: ['dau'], group_by: [{ model: 'events', attribute: 'p' }] }, { subject: () => 'property' }), { metrics: ['dau'], group_by: [{ source: 'events', property: 'p' }] });
-  assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', queries: [{ metrics: ['dau'], group_by: [country] }] }).queries, [{ metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }] }]);
+  assert.deepEqual(currentQueryInput({ metrics: ['dau'], group_by: [{ model: 'events', attribute: 'p' }] }, { subject: () => 'property' }), { steps: [{ ...dau, group_by: [{ source: 'events', property: 'p' }] }] });
+  assert.deepEqual(currentQueryInput({ context_id: 'abcdef123456', queries: [{ metrics: ['dau'], group_by: [country] }] }).queries, [{ steps: [{ ...dau, group_by: [byCountry] }] }]);
+  // what its steps hold, in the one grammar: a ref in a metrics step or a where step, an aggregate's where after it
+  const isUS = { fn: 'eq', args: [byCountry, val('US')] };
+  assert.deepEqual(currentQueryInput({ steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, val('US')] }] }, { ...dau, group_by: [country] }] }), { steps: [{ stage: 'where', conditions: [isUS] }, { ...dau, group_by: [byCountry] }] });
+  const counted = { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [{ fn: 'gt', args: [col('dau'), val(1)] }] } }] };
+  assert.deepEqual(currentQueryInput({ steps: [dau, counted] }).steps[1].measures[0].expr, { fn: 'count', args: [caseOf([{ fn: 'gt', args: [col('dau'), val(1)] }], val(1))] });
   // today's spelling is the same object
-  for (const v of [today, { context_id: 'abcdef123456' }, { task_ids: ['abcdef123456'], offset: 0, limit: 10 }, { context_id: 'abcdef123456', queries: [today] }, { metrics: ['dau'], group_by: [{ source: 'users', column: 'country' }], include: ['plan'] }]) assert.equal(currentQueryInput(v), v, JSON.stringify(v));
+  for (const v of [today, { context_id: 'abcdef123456' }, { task_ids: ['abcdef123456'], offset: 0, limit: 10 }, { context_id: 'abcdef123456', queries: [today] }, { steps: [{ stage: 'where', conditions: [isUS] }, { ...dau, group_by: [byCountry] }], include: ['plan'] }]) assert.equal(currentQueryInput(v), v, JSON.stringify(v));
   // a window's order_by is not a metric query's (no metrics beside it)
   assert.equal(currentQueryInput(OVER), OVER);
   const windowed = { stage: 'compute', name: 'n', expr: { fn: 'row_number', over: OVER } };
   assert.equal(currentOf(windowed), windowed);
+});
+
+// A METRIC QUERY OF AN EARLIER FORM is told by its metrics named outside its steps — where a query stands
+// (a kept input, a batch's item) that alone says it; anywhere else a field of a query beside them, so a
+// list an update removes ({ remove: { metrics: [...] } }) or a derived metric's inputs are never one.
+test('an earlier metric query is its metrics outside its steps, beside a query\'s field — never a removal or a step', () => {
+  assert.ok(isEarlierMetricQuery({ metrics: ['dau'] }, true));
+  assert.equal(isEarlierMetricQuery({ metrics: ['dau'] }), false, 'by itself, a list of names');
+  for (const k of ['context_id', 'group_by', 'where', 'order_by', 'steps', 'time_range', 'limit', 'materialize', 'dry_run']) assert.ok(isEarlierMetricQuery({ metrics: ['dau'], [k]: k === 'limit' ? 5 : [] }), k);
+  assert.equal(isEarlierMetricQuery({ stage: 'metrics', metrics: ['dau'] }, true), false, 'a metrics step is today\'s');
+  assert.equal(isEarlierMetricQuery({ metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }, true), false, 'a declaration\'s metrics are objects');
+  const update = { action: 'update', context_id: 'abcdef123456', name: 'ret', remove: { metrics: ['n'] } };
+  assert.equal(currentOf(update), update);
 });
 
 test('currentOf converts what is old anywhere in a value, keeps what is not by identity, and leaves the libraries\' own grammars alone', () => {
@@ -404,15 +543,38 @@ test('currentOf converts what is old anywhere in a value, keeps what is not by i
 test('a stage stored in an earlier spelling builds as today\'s; one written today builds as it is', () => {
   const kept = [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['tutorial', 'first_launch'] }, { or: [{ column: 'session_number', op: 'gt', value: 1 }, { column: 'session_number', op: 'is_null' }] }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }, { name: 's', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'gt', value: 2 }] }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', agg: 'count' }, { name: 's', agg: 'sum', column: 'session_number', where: [{ column: 'session_number', op: 'gt', value: 2 }] }, { name: 'f', expr: { fn: 'count', args: [], where: [{ fn: 'eq', args: [col('event_name'), val('tutorial')] }] } }] },
   ];
   const today = [
     where({ fn: 'in', args: [col('event_name'), val('tutorial'), val('first_launch')] }, { fn: 'or', args: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'is_null', args: [col('session_number')] }] }),
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count', args: [] } }, { name: 's', expr: { fn: 'sum', args: [col('session_number')], where: [{ fn: 'gt', args: [col('session_number'), val(2)] }] } }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count', args: [] } }, { name: 's', expr: { fn: 'sum', args: [caseOf([{ fn: 'gt', args: [col('session_number'), val(2)] }], col('session_number'))] } }, { name: 'f', expr: { fn: 'count', args: [caseOf([{ fn: 'eq', args: [col('event_name'), val('tutorial')] }], val(1))] } }] },
   ];
   const built = render(kept);
   assert.deepEqual(kept.map((s) => built.current.get(s)), today);
   assert.deepEqual([...built.columns.entries()], [...render(today).columns.entries()]);
   const again = render(today);
   for (const s of today) assert.equal(again.current.get(s), s, 'today\'s spelling is kept by identity');
+});
+
+// A KEPT TYPED READ is read against the catalog of the draft's source: the property alone where it is
+// read as that type now, a cast where it named another — so it builds to the column of the type it had.
+// A kept unnest naming its element's type is not split (a draft counts its steps): it builds as it did.
+test('a kept typed read builds as the catalog\'s type or a cast to its own; a kept typed unnest builds as it did', () => {
+  // (words_collected is a key of the payload)
+  const PAYLOAD = new Set([...COLS, 'price_in_usd_of_event_data', 'result_of_event_data', 'event_data']);
+  const build = (stages) => renderPipeline(catalog, catalog.dialect, 'events', stages, { physicalCols: PAYLOAD });
+  const kept = [
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data', type: 'numeric' } },
+    { stage: 'compute', name: 'result', expr: { fn: 'event_property', property: 'result_of_event_data', type: 'int' } },
+  ];
+  const built = build(kept);
+  assert.deepEqual(kept.map((s) => built.current.get(s)), [
+    { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
+    { stage: 'compute', name: 'result', expr: { fn: 'cast', args: [{ property: 'result_of_event_data' }], type: 'int' } },
+  ]);
+  assert.deepEqual([built.columns.get('price').type, built.columns.get('result').type], ['numeric', 'int']);
+  const unnest = { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w', type: 'int' };
+  const kept2 = build([unnest, { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
+  assert.equal(kept2.current.get(unnest), unnest, 'one step, as it was');
+  assert.deepEqual([...kept2.columns.entries()], [['w', { type: 'int' }], ['n', { type: 'int' }]]);
 });

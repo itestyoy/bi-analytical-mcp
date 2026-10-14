@@ -39,16 +39,18 @@ before(async () => {
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-const q = (input) => engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], ...input });
+const q = (input) => engine.query_semantic_model({ context_id: ctxId, ...input });
+/** The revenue metrics step, broken down by `group_by` when one is given. */
+const revenue = (group_by) => ({ stage: 'metrics', metrics: ['mon_revenue'], ...(group_by ? { group_by } : {}) });
 const byCountry = [{ source: 'users', column: 'country' }];
-const paying = [{ fn: 'in', args: [{ source: 'users', column: 'country' }, { value: 'US' }, { value: 'GB' }, { value: 'BR' }] }];
+const paying = { stage: 'where', conditions: [{ fn: 'in', args: [{ source: 'users', column: 'country' }, { value: 'US' }, { value: 'GB' }, { value: 'BR' }] }] };
 
 // ONE UNGROUPED TASK carries what a single-row result is asked: started at once and read back; the
 // declarations a single row cannot take refused (refused is not drawn); then drawn, once, as a KPI.
 test('one ungrouped revenue task: started at once and read back with show_to_user; a missing-column funnel and a single-value pie refused; then drawn as a KPI tile of 85', opts, async (t) => {
   if (skip(t)) return;
   // [a metric query answers with its task at once; the same tool, given the task_id, waits for it and returns the warehouse's rows]
-  const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  const started = await engine.raw.query_semantic_model({ context_id: ctxId, steps: [revenue()] });
   assert.ok(isStartedTask(started), JSON.stringify(started));
   assert.match(started.task_id, /^[a-f0-9]{12}$/);
   const done = await one(engine.query_semantic_model({ task_ids: [started.task_id] }));
@@ -79,7 +81,7 @@ test('one ungrouped revenue task: started at once and read back with show_to_use
 // the card draws exactly that — and the card's numbers are the warehouse's.
 test('one revenue-by-country task: its grouping, a refused KPI over many rows, the bar drawn in row order, a second draw refused, a read that draws nothing', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc' }] }] });
+  const done = await q({ steps: [revenue(byCountry), { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc' }] }] });
   // [a query task keeps its grouping and the caller-facing column names]
   const by = Object.fromEntries(done.rows.map((r) => [String(r.users_country), Number(r.mon_revenue)]));
   assert.deepEqual([by.US, by.GB, by.BR], [35, 25, 25], '[grouping] revenue by country');
@@ -100,7 +102,7 @@ test('one revenue-by-country task: its grouping, a refused KPI over many rows, t
   assert.equal(m.chart.bars[2].label, 'US');
   // [an order_by step puts NULLs where it says] the same sort with NULLs first — MetricFlow's own ORDER BY
   // names no place for them, so it is written over its SQL — leads with the country that has no revenue
-  const nullFirst = await q({ group_by: byCountry, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc', nulls: 'first' }] }] });
+  const nullFirst = await q({ steps: [revenue(byCountry), { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'asc', nulls: 'first' }] }] });
   const revenueOf = (r) => (r.mon_revenue == null ? null : Number(r.mon_revenue));
   assert.deepEqual(nullFirst.rows.map(revenueOf), [null, 25, 25, 35], '[nulls first] the country with none, then ascending');
   assert.equal(String(nullFirst.rows[0].users_country), String(done.rows[3].users_country), '[nulls first] the country the default order put last');
@@ -116,7 +118,7 @@ test('one revenue-by-country task: its grouping, a refused KPI over many rows, t
 test('a query that FAILS in the warehouse is a task that ended in error', opts, async (t) => {
   if (skip(t)) return;
   // a filter on a value the warehouse cannot compare fails in the warehouse
-  const done = await q({ where: [{ fn: 'eq', args: [{ time: 'metric_time' }, { value: 'not-a-date' }] }] }).catch((e) => ({ refused: e }));
+  const done = await q({ steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ time: 'metric_time' }, { value: 'not-a-date' }] }] }, revenue()] }).catch((e) => ({ refused: e }));
   if (done.refused) return; // refused before running is fine too
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');
@@ -124,7 +126,7 @@ test('a query that FAILS in the warehouse is a task that ended in error', opts, 
 
 test('a declared funnel follows the declared steps, not the column names', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry, where: paying, steps: [{ stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] }] });
+  const done = await q({ steps: [paying, revenue(byCountry), { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] }] });
   const card = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'funnel', steps: { label_column: 'users_country', value_column: 'mon_revenue' } } });
   const m = buildViewModel('display_model_result', card);
   assert.equal(m.kind, 'funnel');
@@ -135,7 +137,7 @@ test('a declared funnel follows the declared steps, not the column names', opts,
 
 test('a declared pie carries each country\'s share of the warehouse total', opts, async (t) => {
   if (skip(t)) return;
-  const done = await q({ group_by: byCountry, where: paying });
+  const done = await q({ steps: [paying, revenue(byCountry)] });
   const m = buildViewModel('display_model_result', await engine.display_model_result({ task_id: done.task_id, display: { kind: 'pie', label_column: 'users_country', value_column: 'mon_revenue' } }));
   assert.equal(m.chart.type, 'pie');
   assert.equal(m.chart.total, 85);
@@ -150,7 +152,7 @@ test('a declared pie carries each country\'s share of the warehouse total', opts
 test('a result that is gone — forgotten, expired or deleted — is result_gone, not "Error"', opts, async (t) => {
   if (skip(t)) return;
   // held in memory, then forgotten (what a restart or the hour does)
-  const done = await q({});
+  const done = await q({ steps: [revenue()] });
   assert.equal(Number(done.rows[0].mon_revenue), 85);
   engine.raw._taskResults.delete(done.task_id);
   const forgotten = await one(engine.query_semantic_model({ task_ids: [done.task_id] }));
@@ -159,7 +161,7 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
   // a task this server never ran
   await assert.rejects(one(engine.query_semantic_model({ task_ids: ['ffffffffffff'] })), (e) => e.code === 'result_gone');
   // a materialized result whose table definition was deleted
-  const built = await q({ materialize: true });
+  const built = await q({ steps: [revenue()], materialize: true });
   assert.equal(Number(built.rows[0].mon_revenue), 85);
   engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
   const deleted = await one(engine.query_semantic_model({ task_ids: [built.task_id], limit: 10 }));
@@ -181,9 +183,9 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', fn: 'sum', label: 'Revenue' }] };
   const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
   // a drill-down reads a stored result: a result held in memory is refused
-  const inMemory = await q({ group_by: groupBy });
+  const inMemory = await q({ steps: [revenue(groupBy)] });
   await assert.rejects(engine.display_model_result({ task_id: inMemory.task_id, display }), /materialize/);
-  const stored = await q({ group_by: groupBy, materialize: true });
+  const stored = await q({ steps: [revenue(groupBy)], materialize: true });
   const top = await engine.display_model_result({ task_id: stored.task_id, display });
   assert.equal(top.drawn, true, JSON.stringify(top.error || top.warnings));
   const m = buildViewModel('display_model_result', top);
@@ -207,7 +209,7 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
 test('a pivot value folds its level with a median: each country is the median of its stored rows', opts, async (t) => {
   if (skip(t)) return;
   const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
-  const stored = await q({ group_by: groupBy, materialize: true });
+  const stored = await q({ steps: [revenue(groupBy)], materialize: true });
   const rows = (await one(engine.query_semantic_model({ task_ids: [stored.task_id], limit: 1000 }))).rows;
   const median = (xs) => { const v = xs.filter((x) => x !== null && x !== undefined).map(Number).sort((a, b) => a - b); const h = Math.floor(v.length / 2); return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
   const truth = {};
@@ -227,7 +229,7 @@ test('a drillable bar is drawn folded over its drill level, and a bar drills int
   if (skip(t)) return;
   const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }] } };
   const groupBy = [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }];
-  const stored = await q({ group_by: groupBy, materialize: true });
+  const stored = await q({ steps: [revenue(groupBy)], materialize: true });
   // a drill level the chart already draws is refused (and nothing is drawn)
   await assert.rejects(engine.display_model_result({ task_id: stored.task_id, display: { ...display, drill: { levels: [{ column: 'users_country' }] } } }), (e) => e.field === 'display');
   const top = await engine.display_model_result({ task_id: stored.task_id, display });

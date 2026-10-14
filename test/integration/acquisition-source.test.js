@@ -86,7 +86,7 @@ const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
 // takes all eight metrics in one call); each check is named by the question it answers.
 test('every aggregation the task chose over the marked amounts, in one ungrouped query: cost / impressions / clicks, max / mean / p90, the mean per-row cost per click, CPC', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks', 'uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost', 'uacq_avg_cost_per_click', 'uacq_cpc'] });
+  const r = await q({ steps: [{ stage: 'metrics', metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks', 'uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost', 'uacq_avg_cost_per_click', 'uacq_cpc'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
 
@@ -123,7 +123,7 @@ test('every aggregation the task chose over the marked amounts, in one ungrouped
 // split is the unwindowed one.
 test('grouped by an attribute of the same source: cost by media_source; and the declared time axis drives metric_time on a non-events source', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: [{ source: 'acquisition', column: 'media_source' }, { time: 'metric_time', grain: 'day' }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
+  const r = await q({ steps: [{ stage: 'metrics', metrics: ['uacq_cost'], group_by: [{ source: 'acquisition', column: 'media_source' }, { time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = marginal(r.rows, (row) => String(row[r.group_by_resolved['acquisition.media_source']]), 'uacq_cost');
   assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
@@ -208,13 +208,13 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // (test/helpers/recipe-coverage.js).
   const out = await engine.build_semantic_model(recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'] });
+  const r = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
 
   // it groups like any other measure — by the source's own attribute, and through a declared
   // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
-  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] });
+  const g = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'gov_total_spend');
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);

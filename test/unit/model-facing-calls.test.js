@@ -179,7 +179,18 @@ test('a stage\'s fields, where a text lists them, are the fields the stage takes
 test('no text teaches a form the server retired', async () => {
   const texts = (await surfaces()).flatMap((s) => s.texts);
   const docs = OPERATOR_DOCS.map((f) => [f, readFileSync(join(ROOT, f), 'utf8')]);
+  // (an aggregate's name; what may stand between a field and the next, one level of braces deep; a quote or none)
+  const AGG = '(?:sum|average|min|max|count|count_distinct|approx_count_distinct|median|percentile|stddev|variance)';
+  const NEST = '(?:[^{}\\n]|\\{[^{}\\n]*\\})*?';
+  const Q = '["\']?';
   const RETIRED = [
+    // a value is of the type it is read from, cast converts it; a conditional aggregate folds a case; a
+    // metric query is its steps
+    ['an aggregate\'s where, now the aggregate over a case', new RegExp(`\\bfn${Q}\\s*:\\s*["']${AGG}["']\\s*,${NEST}\\bwhere${Q}\\s*:\\s*\\[`)],
+    ['a property read as a type it names, now the catalog\'s type, cast to another', new RegExp(`\\{\\s*${Q}property${Q}\\s*:\\s*["'][^"'\\n]*["']\\s*(?:,\\s*${Q}field${Q}\\s*:\\s*["'][^"'\\n]*["']\\s*)?,\\s*${Q}type${Q}\\s*:`)],
+    ['json_field / element_at / array_last read as a type they name, now text, cast to another', new RegExp(`\\bfn${Q}\\s*:\\s*["'](?:json_field|element_at|array_last)["']\\s*,${NEST}\\btype${Q}\\s*:`)],
+    ['an unnest naming its element\'s type, now the element, cast where it is read', new RegExp(`${Q}stage${Q}\\s*:\\s*["']unnest["']\\s*,${NEST}\\btype${Q}\\s*:`)],
+    ['a metric query\'s metrics beside its context or its group_by / where / steps, now its metrics step', new RegExp(`\\bcontext_id(?:${Q}\\s*:\\s*[^,{}\\n]+)?\\s*,\\s*${Q}metrics${Q}\\s*[:,}]|\\{\\s*${Q}metrics${Q}\\s*:\\s*\\[\\s*["'][^\\]\\n]*\\]\\s*,\\s*${Q}(?:group_by|where|order_by|steps|time_range)${Q}\\s*:`)],
     ['the derive stage, folded into compute', /["'`/]derive\b|\bderive\s+(stage|column)\b|\bstage\s*["']?\s*:\s*["']?derive\b/i],
     ['an aggregate named avg, spelled average here', /\b(?:agg|fn)["']?\s*:\s*["']avg["']/], // a text may still SAY that avg is spelled average
     ['the add_step action, now add_steps with a list', /\badd_step\b/],

@@ -101,7 +101,7 @@ export async function makeEngine(opts = {}) {
       dialect: catalog.dialect,
       python: !!catalog.pythonRuntime?.available,
       runtime: frameProfile(catalog.pythonRuntime, catalog.pythonRuntime?.config || {}).key,
-    })
+    }, catalog)
     : undefined;
   const ctxs = new ContextManager({
     baseProjectDir,

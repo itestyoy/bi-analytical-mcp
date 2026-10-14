@@ -88,8 +88,9 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
   assert.equal(q({ context_id: 'abcdef123456', queries: [{ steps: [{ stage: 'limit', limit: 3 }] }, { limit: 5 }] }).ok, true);
 });
 
-// The steps after a metric query are the same read, over the SQL MetricFlow compiled for it (a
-// subquery relation whose columns carry the caller's names, each typed where it is known): a step
+// The steps after a metric query's metrics step are the same read (STAGE_PLACES.metric_result takes the
+// read's stages), over the SQL MetricFlow compiled for it (a subquery relation whose columns carry the
+// caller's names, each typed where it is known): a step
 // naming a column the result does not have — MetricFlow's own spelling of one included — is refused
 // with the result's columns.
 test('a read runs over a query as over a table: its steps over the result\'s columns, refused with them', () => {

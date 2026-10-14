@@ -26,7 +26,7 @@
 // The run has ONE fixture cache (MCP_TEST_FIXTURE_CACHE, test/integration/warehouse-harness.js): the
 // fixture warehouse buildWarehouse() makes is built once, by the first file that asks for it, and
 // copied into each file. It lives as long as the run, so no run reads what an earlier one built.
-// The run has ONE temporary directory (test/helpers/run-temp.js), every file's TMPDIR and the cache's
+// The run has ONE temporary directory (test/helpers/temp-dir.js), every file's TMPDIR and the cache's
 // home, removed when the run ends — with everything the files and the processes under them made there.
 // The report is node's own — spec on a terminal, TAP otherwise — and the exit code is 1 when a test failed.
 
@@ -36,7 +36,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { run } from 'node:test';
 import { spec, tap } from 'node:test/reporters';
 import { fileURLToPath } from 'node:url';
-import { runTempDir } from '../test/helpers/run-temp.js';
+import { runTempDir } from '../test/helpers/temp-dir.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const INTEGRATION = join(ROOT, 'test', 'integration');

@@ -3,16 +3,14 @@
 // before whatever is wrong inside them, so an item's extra field never reads as "`views` is not a field".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'refusal-views-')) }) });
+const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: tempDir('refusal-views') }) });
 const refusal = (e, tool, input) => { try { e._validate(tool, input); return null; } catch (err) { return err.message; } };
 
 test('semantic_index({ views }): an item with a field its view does not take is refused at that item', async () => {

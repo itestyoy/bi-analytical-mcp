@@ -5,6 +5,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ValueIndex } from '../../src/value-index.js';
 import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed observability/lifecycle test: a STUB runner returns canned rows by SQL SHAPE (no
 // warehouse, no generated-SQL assertions). The indexer issues COMBINED scans per batch — one
@@ -348,9 +349,8 @@ test('a combined top-k that reads nothing is counted exactly and noted once per 
 test('semantic_index({ status })/({ run }) surface the full batch fallback reason', async () => {
   const { ContextManager } = await import('../../src/context-manager.js');
   const { Engine } = await import('../../src/engine.js');
-  const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
   const catalog = loadCatalog(CATALOG, {});
-  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rn-')) }) }));
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('rn') }) }));
   const runner = { show: async (_d, sql) => {
     // combined cardinality fails with the REAL dbt error on stderr (no node "Command failed" wrapper).
     if (/ AS d0/.test(sql)) return { ok: false, error: 'dbt exited with code 1', stderr: 'Database Error\n  permission denied on column foo' };

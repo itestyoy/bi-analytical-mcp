@@ -18,8 +18,7 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -32,6 +31,7 @@ import { servicesFor } from '../../src/mcp-surface.js';
 import { createRetentioneeringFeature } from '../../src/retentioneering/index.js';
 import { forms, fieldNames } from '../helpers/schema-nav.js';
 import { stageBranch, stageNames } from '../helpers/stage-schema.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const CATALOG = join(ROOT, 'test/integration/fixtures/catalog.yml');
@@ -62,7 +62,7 @@ async function surface([deployment, { python, feature }]) {
   // a dbt client that is never asked to run anything here — the feature needs only that it exists
   const features = feature ? [createRetentioneeringFeature({ runner: { pythonModelsOn: () => true } })] : [];
   const engine = new Engine({
-    catalog, recipes, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'calls-')) }),
+    catalog, recipes, contextManager: new ContextManager({ workspaceRoot: tempDir('calls') }),
     features, featureStatus: features.map((f) => ({ id: f.id, available: true })),
   });
   const services = servicesFor(engine);

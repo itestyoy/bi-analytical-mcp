@@ -6,8 +6,6 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
@@ -18,6 +16,7 @@ import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 // 10-min budget: before() awaits a FULL real indexer pass (37 targets × ~3 mf round-trips
@@ -32,11 +31,11 @@ const valOf = (arr, v) => arr.find((x) => x.value === v);
 before(async () => {
   if (!HAS_DBT) return;
   wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied (warehouse-harness.js)
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'vi-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('vi'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   // A temp-file value index so the index is real SQLite (not just the engine's default).
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
+  const dbPath = join(tempDir('vi-db'), 'value-index.sqlite');
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath, recipes }));
   index = engine.valueIndex;
@@ -45,7 +44,7 @@ before(async () => {
   await indexer.refresh();
 }, opts);
 
-after(async () => { backend?.close?.(); index?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop(); });
 
 // Verify the EXACT property names against the fixture catalog via semantic_index.
 test('exact property names: ad_finished + level_completed carry the *_of_event_data props', opts, async (t) => {

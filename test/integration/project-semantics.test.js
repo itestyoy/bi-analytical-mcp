@@ -5,8 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import yaml from 'js-yaml';
@@ -19,6 +18,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { deref, field } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project');
@@ -84,7 +84,7 @@ before(async () => {
   // models and metrics, so every number below holds on both
   if (backend.semanticSpec === 'latest') declareProjectLayer(); else declareLegacyLayer();
   await runModels(BASE, THIN_VIEWS);
-  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-')), timeSpineDialect: 'duckdb' });
+  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('projsem'), timeSpineDialect: 'duckdb' });
   // what the server does at start, before the tools are served
   loaded = await loadProjectSemantics({ runner: backend, contextManager: ctxs });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend, project: loaded }));
@@ -517,7 +517,7 @@ test('validate names the metric and the dimension whose column the warehouse doe
   // there. dbt parses it (the expression is the warehouse's to judge), MetricFlow compiles it, the run
   // fails. (A model of its own keeps the validation small: what failed all at once is re-run one item
   // at a time, and here that is two metrics and three dimensions.)
-  const broken = join(mkdtempSync(join(tmpdir(), 'projsem-broken-')), 'project');
+  const broken = join(tempDir('projsem-broken'), 'project');
   cpSync(BASE, broken, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
   const core = join(broken, 'models', 'core');
   writeFileSync(join(core, 'fct_project_broken.sql'), "{{ config(materialized='view') }}\nselect * from {{ ref('fct_player_acquisition') }}\n");
@@ -554,7 +554,7 @@ test('validate names the metric and the dimension whose column the warehouse doe
   }
   writeFileSync(file, yaml.dump(doc, { lineWidth: 120, noRefs: true }));
   await runModels(broken, ['fct_project_broken']);
-  const ctxs2 = new ContextManager({ baseProjectDir: broken, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem2-')), timeSpineDialect: 'duckdb' });
+  const ctxs2 = new ContextManager({ baseProjectDir: broken, workspaceRoot: tempDir('projsem2'), timeSpineDialect: 'duckdb' });
   const loaded2 = await loadProjectSemantics({ runner: backend, contextManager: ctxs2 });
   assert.ok(loaded2?.layer, JSON.stringify(loaded2));
   const engine2 = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs2, runner: backend, project: loaded2 });
@@ -657,7 +657,7 @@ test('a preview refuses what the context does not have, naming what it does', op
 
 test('nothing is keyed on a name: files moved and renamed, a semantic model and its metrics renamed — served under the new names, the same numbers', opts, async (t) => {
   if (skip(t)) return;
-  const other = join(mkdtempSync(join(tmpdir(), 'projsem-renamed-')), 'project');
+  const other = join(tempDir('projsem-renamed'), 'project');
   cpSync(BASE, other, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
   // the layer's files in another folder, under other names
   const from = join(other, 'models', 'core');
@@ -700,7 +700,7 @@ test('nothing is keyed on a name: files moved and renamed, a semantic model and 
     writeFileSync(modelsFile, yaml.dump(modelsDoc, { lineWidth: 120, noRefs: true }));
   }
   // (the events semantic model stays where it was, on the project's own entry)
-  const ctxs3 = new ContextManager({ baseProjectDir: other, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem3-')), timeSpineDialect: 'duckdb' });
+  const ctxs3 = new ContextManager({ baseProjectDir: other, workspaceRoot: tempDir('projsem3'), timeSpineDialect: 'duckdb' });
   const loaded3 = await loadProjectSemantics({ runner: backend, contextManager: ctxs3 });
   assert.ok(loaded3?.layer, JSON.stringify(loaded3));
   assert.deepEqual(loaded3.contexts.sort(), ['paid_spend_daily', EV]);
@@ -753,7 +753,7 @@ test('a query is addressed by what and where, and nothing handed back spells Met
 
 /** A copy of the project with `extra` models (name → { sql, entry }) added under models/roles. */
 function projectWith(extra) {
-  const dir = join(mkdtempSync(join(tmpdir(), 'projsem-roles-')), 'project');
+  const dir = join(tempDir('projsem-roles'), 'project');
   cpSync(BASE, dir, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
   const roles = join(dir, 'models', 'roles');
   mkdirSync(roles, { recursive: true });
@@ -811,7 +811,7 @@ const channelsKeyedBy = (keys) => ({
 /** Build `models` of a copy into the warehouse (new names only: the shared views are left alone). */
 const runModels = (dir, models) => execFileP(DBT_BIN, ['run', '--select', ...models], { cwd: dir, env: { ...process.env, DBT_PROFILES_DIR: dir, DBT_PROJECT_DIR: dir, DUCKDB_PATH: wh.path }, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 async function loadedFrom(dir) {
-  const cm = new ContextManager({ baseProjectDir: dir, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-roles-ws-')), timeSpineDialect: 'duckdb' });
+  const cm = new ContextManager({ baseProjectDir: dir, workspaceRoot: tempDir('projsem-roles-ws'), timeSpineDialect: 'duckdb' });
   const out = await loadProjectSemantics({ runner: backend, contextManager: cm });
   assert.ok(out?.layer, JSON.stringify(out));
   const eng = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: cm, runner: backend, project: out }));

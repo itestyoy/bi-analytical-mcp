@@ -11,42 +11,44 @@
 // has before any question: the built warehouse, and the value index, built once (a sync of the
 // background indexer) into a template store that each case's store starts as a copy of.
 
-import { copyFileSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { copyFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { makeEngine } from '../src/server.js';
 import { loadSettings } from '../src/settings.js';
 import { BackgroundIndexer } from '../src/value-indexer.js';
 import { buildWarehouse, connectMcp, fixtureProject } from '../test/integration/warehouse-harness.js';
 import { settleMcp } from '../test/helpers/settle.js';
 import { HAS_DBT } from '../test/helpers/dbt-env.js';
-import { runTempDir } from '../test/helpers/run-temp.js';
+import { removeTempDir, runTempDir, tempDir } from '../test/helpers/temp-dir.js';
 
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
 
-/** A production engine over the fixture project, with its store at `dbPath`. */
-function engineOver(base, dbPath) {
+/** A production engine over the fixture project, with its workspace and its store at `dbPath`. */
+function engineOver(base, workspaceRoot, dbPath) {
   return makeEngine({
     // the process's settings, with the deployment's paths pointed at the fixture; nothing reset
     env: { ...process.env, DBT_PROFILES_DIR: base, MCP_DB_RESET: '' },
     catalogPath: CATALOG,
     baseProjectDir: base,
-    workspaceRoot: mkdtempSync(join(tmpdir(), 'eval-ws-')),
+    workspaceRoot,
     dbPath,
   });
 }
 
 /**
  * The built warehouse and the indexed template store — what every case starts from. `caseWorld()`
- * then gives one case its own engine and client; `close()` releases the warehouse.
+ * then gives one case its own engine and client; `close()` releases the warehouse. Each world's
+ * directories go when it closes, the rest with `close()` (test/helpers/temp-dir.js).
  */
 export async function startEval() {
   if (!HAS_DBT) throw new Error('the eval runs on the fixture warehouse: build the dbt environments first (npm run dbt:env -- create)');
   runTempDir(); // every world's workspace and store, removed with it when the eval ends
   const base = fixtureProject('dbt_project');
   const wh = await buildWarehouse(base);
-  const template = join(mkdtempSync(join(tmpdir(), 'eval-store-')), 'mcp.sqlite');
-  const indexing = await engineOver(base, template);
+  const storeDir = tempDir('eval-store');
+  const template = join(storeDir, 'mcp.sqlite');
+  const indexingWorkspace = tempDir('eval-ws');
+  const indexing = await engineOver(base, indexingWorkspace, template);
   try {
     const S = loadSettings();
     // one sync of the indexer production starts in the background, with the same settings — the
@@ -58,18 +60,24 @@ export async function startEval() {
     }).refresh();
   } finally {
     indexing.close();
+    removeTempDir(indexingWorkspace);
   }
   return {
     wh,
     /** One case's world: a production engine on a copy of the template store, and a client on it. */
     async caseWorld() {
-      const dbPath = join(mkdtempSync(join(tmpdir(), 'eval-case-')), 'mcp.sqlite');
+      const workspace = tempDir('eval-ws');
+      const caseDir = tempDir('eval-case');
+      const dbPath = join(caseDir, 'mcp.sqlite');
       copyFileSync(template, dbPath);
-      const engine = await engineOver(base, dbPath);
+      const engine = await engineOver(base, workspace, dbPath);
       const conn = await connectMcp(engine, 'bi-analytical-eval');
-      return { client: conn.client, async close() { await conn.close(); engine.close(); } };
+      return {
+        client: conn.client,
+        async close() { await conn.close(); engine.close(); removeTempDir(workspace); removeTempDir(caseDir); },
+      };
     },
-    async close() { await wh.stop(); },
+    async close() { await wh.stop(); removeTempDir(storeDir); removeTempDir(dirname(base)); },
   };
 }
 

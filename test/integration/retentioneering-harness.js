@@ -9,8 +9,6 @@
 // gets a copy of it.
 
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -20,6 +18,7 @@ import { createRetentioneeringFeature } from '../../src/retentioneering/index.js
 import { settle, one } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 export const ENV = dbtEnv('retentioneering');
 export const opts = { timeout: 900000 };
@@ -70,9 +69,9 @@ export async function openWorld() {
   const wh = await buildWarehouse(BASE, { dbtBin: ENV.dbtBin });
   const runner = createDbt({ environment: ENV, profilesDir: BASE, timeout: 600000 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-ctx-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('rete-ctx'), timeSpineDialect: 'duckdb' });
   const engine = settle(new Engine({
-    catalog, contextManager: ctxs, runner, dbPath: join(mkdtempSync(join(tmpdir(), 'rete-db-')), 'x.sqlite'),
+    catalog, contextManager: ctxs, runner, dbPath: join(tempDir('rete-db'), 'x.sqlite'),
     // a task holds 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
     // eventstream's are: a page past them is read from the stored table, and every such read is proved
     // by the numbers

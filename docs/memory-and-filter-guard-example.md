@@ -172,13 +172,13 @@ where result_of_event_data = 'Organic'  →  action = add_steps  ✅
 ## Скрипт для воспроизведения
 
 ```js
-import { mkdtempSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { join } from 'node:path';
 import { loadCatalog } from './src/catalog.js';
 import { ContextManager } from './src/context-manager.js';
 import { Engine } from './src/engine.js';
+import { tempDir } from './test/helpers/temp-dir.js'; // удаляется, когда скрипт завершается
 
 const CAT = './test/integration/fixtures/catalog.yml';
-const ctx = () => new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'demo-')) });
+const ctx = () => new ContextManager({ workspaceRoot: tempDir('demo') });
 
 // Стаб мультиязычного эмбеддера: RU+EN-синонимы → одна ось (как настоящая модель — в одно пространство).
 function stub() {

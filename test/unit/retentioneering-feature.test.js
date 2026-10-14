@@ -4,11 +4,10 @@
 // path is test/integration/retentioneering.test.js (the analyses) and retentioneering-steps.test.js (an
 // eventstream's steps, a start's spec). These are surface and input-validation checks.
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -25,6 +24,7 @@ import { CONFIG_ERRORS } from '../../src/retentioneering/checker.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { deref, field, fieldNames, forms, formWhere, pinned } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
 function sharedSources() {
@@ -38,12 +38,19 @@ const TOOLS = ['build_retentioneering_model', 'query_retentioneering_model', 'di
 // a dbt client that is never asked to run anything here — the surface needs only that it exists
 const RUNNER = { pythonModelsOn: () => true };
 
-const engine = (features = []) => settle(new Engine({
-  catalog: loadCatalog(CATALOG, {}),
-  contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-u-')) }),
-  dbPath: join(mkdtempSync(join(tmpdir(), 'rete-u-db-')), 'x.sqlite'),
-  features, featureStatus: features.map((f) => ({ id: f.id, available: true })),
-}));
+// each engine holds its store's file open: closed when the file ends, before its directory goes
+const engines = [];
+after(() => { for (const e of engines) e.close(); });
+const engine = (features = []) => {
+  const e = settle(new Engine({
+    catalog: loadCatalog(CATALOG, {}),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('rete-u') }),
+    dbPath: join(tempDir('rete-u-db'), 'x.sqlite'),
+    features, featureStatus: features.map((f) => ({ id: f.id, available: true })),
+  }));
+  engines.push(e);
+  return e;
+};
 const on = () => engine([createRetentioneeringFeature({ runner: RUNNER })]);
 
 test('off by default: only an explicit yes turns the feature on', () => {
@@ -390,7 +397,7 @@ test('the view draws and nothing else — no server call, no network — and its
   ];
   for (const file of sources) assert.equal(readFileSync(file, 'utf8').match(REACHES_OUT), null, file);
   const { build } = await import('vite');
-  const out = mkdtempSync(join(tmpdir(), 'rete-view-build-'));
+  const out = tempDir('rete-view-build');
   await build({ configFile: new URL('../../src/apps/retentioneering-view/vite.config.js', import.meta.url).pathname, build: { outDir: out, emptyOutDir: true }, logLevel: 'silent' });
   assert.ok(existsSync(RUNTIME_ASSETS.retentioneeringView.path));
   assert.equal(readFileSync(join(out, 'retentioneering-view.html'), 'utf8'), readFileSync(RUNTIME_ASSETS.retentioneeringView.path, 'utf8'), 'rebuild the view: npm run build:app');

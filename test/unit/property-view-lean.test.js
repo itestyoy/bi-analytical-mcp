@@ -1,13 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // P0 token-leanness of semantic_index({ property }): by default the per-event coverage shows ONLY
 // the events that carry the property (applies:true); the always-NULL events are omitted with a
@@ -16,7 +14,7 @@ import { settle } from '../helpers/settle.js';
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'lean-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('lean') }) }));
 }
 
 test('event_coverage is carriers-only by default, with an omitted count + include coverage drill', async () => {

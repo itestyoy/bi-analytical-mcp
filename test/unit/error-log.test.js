@@ -4,8 +4,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeEngine } from '../helpers/mcp-http.js';
 import { runTool } from '../../src/mcp-surface.js';
@@ -14,6 +12,7 @@ import { ErrorLog } from '../../src/error-log.js';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const payload = (r) => JSON.parse(r.result.content[0].text);
 
@@ -78,20 +77,20 @@ test('explore_errors reads a time window as every time_range is read: a date-onl
 });
 
 test('what a start could not serve is the first thing in the log, and the log outlives a restart', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'errlog-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('errlog'), 'mcp.sqlite');
   const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'), {});
-  const start = () => new Engine({ catalog, dbPath, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'errlog-ws-')) }), project: { error: 'the project did not parse' } });
+  const start = () => new Engine({ catalog, dbPath, contextManager: new ContextManager({ workspaceRoot: tempDir('errlog-ws') }), project: { error: 'the project did not parse' } });
   const a = start();
   assert.deepEqual(a.explore_errors({ source: 'startup' }).errors.map((e) => e.stage), ['project_semantic_layer']);
   a.close?.();
   // a second start adds its own, and the first one's is still there — even with MCP_DB_RESET
-  const b = new Engine({ catalog, dbPath, resetDb: true, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'errlog-ws-')) }), project: { error: 'the project did not parse' } });
+  const b = new Engine({ catalog, dbPath, resetDb: true, contextManager: new ContextManager({ workspaceRoot: tempDir('errlog-ws') }), project: { error: 'the project did not parse' } });
   assert.equal(b.explore_errors({ source: 'startup' }).total, 2);
   b.close?.();
 });
 
 test('the log is bounded by age and by count', () => {
-  for (const store of [openStore({}), openStore({ dbPath: join(mkdtempSync(join(tmpdir(), 'errlog-')), 'x.sqlite') })]) {
+  for (const store of [openStore({}), openStore({ dbPath: join(tempDir('errlog'), 'x.sqlite') })]) {
     const log = new ErrorLog({ store, retentionDays: 0, maxRows: 3 });
     for (let i = 0; i < 5; i += 1) log.record({ source: 'tool', tool: 't', message: `m${i}` });
     log.prune();
@@ -99,6 +98,7 @@ test('the log is bounded by age and by count', () => {
     store.errors.add({ at: Date.now() - 40 * 86400000, source: 'tool', message: 'old' });
     new ErrorLog({ store, retentionDays: 30, maxRows: 0 });
     assert.equal(log.list({ search: 'old' }).total, 0, store.kind);
+    store.close();
   }
 });
 

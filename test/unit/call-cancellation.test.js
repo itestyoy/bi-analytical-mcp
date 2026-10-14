@@ -16,15 +16,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { createDbt } from '../../src/dbt/index.js';
 import { runProcess, runWithInput } from '../../src/dbt/process.js';
 import { withSignal, detached, currentSignal, releasableSignal } from '../../src/request-context.js';
+import { tempDir, tempRoot } from '../helpers/temp-dir.js';
 
 function sleepyDbt(seconds = 10) {
-  const dir = mkdtempSync(join(tmpdir(), 'fake-dbt-'));
+  const dir = tempDir('fake-dbt');
   const bin = join(dir, 'dbt');
   writeFileSync(bin, `#!/bin/sh\nsleep ${seconds}\necho done\n`);
   chmodSync(bin, 0o755);
@@ -76,7 +76,7 @@ test('a releasable signal forwards a cancellation only until it is released', ()
 
 /** A "dbt" that leaves a model file and its bytecode in its TMPDIR, says where that was, then sleeps. */
 function leavingDbt(seconds) {
-  const dir = mkdtempSync(join(tmpdir(), 'fake-dbt-'));
+  const dir = tempDir('fake-dbt');
   const bin = join(dir, 'dbt');
   writeFileSync(bin, `#!/bin/sh\n: "\${TMPDIR:?}"\nmkdir -p "$TMPDIR/__pycache__"\ntouch "$TMPDIR/tmpmodel.py" "$TMPDIR/__pycache__/tmpmodel.cpython-311.pyc"\necho "$TMPDIR" > "$PWD/tmpdir.txt"\nsleep ${seconds}\n`);
   chmodSync(bin, 0o755);
@@ -93,7 +93,7 @@ test('a process has a temporary directory of its own, removed with what it left 
   const r = await createDbt({ version: 1, dbtBin: bin }).run(dir);
   assert.equal(r.ok, true);
   const own = used();
-  assert.ok(own && !relative(tmpdir(), own).startsWith('..') && own !== tmpdir(), `a directory of its own under the server's: ${own}`);
+  assert.ok(own && !relative(tempRoot(), own).startsWith('..') && own !== tempRoot(), `a directory of its own under the server's: ${own}`);
   assert.equal(existsSync(own), false, 'removed, with the model file and its bytecode');
 });
 
@@ -112,9 +112,9 @@ test('a process killed by a cancellation has its temporary directory removed too
 });
 
 test('a process fed on stdin, one that cannot start, and one refused before it starts leave no temporary directory', async () => {
-  // os.tmpdir() reads TMPDIR on every call: here, a directory this test alone writes to
+  // the temporary directory is read from TMPDIR on every call: here, one this test alone writes to
   const saved = process.env.TMPDIR;
-  const base = mkdtempSync(join(tmpdir(), 'own-tmp-'));
+  const base = tempDir('own-tmp');
   process.env.TMPDIR = base;
   try {
     const fed = await runWithInput('/bin/sh', ['-c', 'cat >/dev/null; mkdir -p "$TMPDIR/__pycache__"; touch "$TMPDIR/tmpm.py" "$TMPDIR/__pycache__/tmpm.cpython-311.pyc"; echo "$TMPDIR"'], 'x');

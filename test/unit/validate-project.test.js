@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalogFromProject, validateDbtProject } from '../../src/catalog.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const SCHEMA = `version: 2
 models:
@@ -24,7 +24,7 @@ const MACRO = '{% macro mcp_relation_columns(model_name) %}{% endmacro %}\n';
 
 // A complete-ish project; `opts` lets each test omit a required component.
 function project({ macro = true, factSql = true, usersSeed = true } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'vproj-'));
+  const dir = tempDir('vproj');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: t\nprofile: t\nmodel-paths: ["models"]\nseed-paths: ["seeds"]\nmacro-paths: ["macros"]\n');
   mkdirSync(join(dir, 'models'), { recursive: true });
   writeFileSync(join(dir, 'models', 'schema.yml'), SCHEMA);

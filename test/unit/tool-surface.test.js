@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
@@ -15,12 +14,13 @@ import { stageBranch } from '../helpers/stage-schema.js';
 import { settle, stepNotes } from '../helpers/settle.js';
 import { deref, field } from '../helpers/schema-nav.js';
 import { mcp } from '../helpers/catalog-doc.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
 }
 
 // Advertised tool surface: the folded/rudimentary tools are gone; the merged ones present.
@@ -200,7 +200,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
 // Without recipes configured, the recipe view + overview list are simply absent.
 test('semantic_index recipe view is absent when no recipes configured', async () => {
   const catalog = loadCatalog(CATALOG, {});
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'norec-')) }) }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('norec') }) }));
   const overview = await e.semantic_index();
   assert.equal(overview.recipes, undefined);
   await assert.rejects(() => e.semantic_index({ recipe: 'x' }), /recipes are not configured|invalid input/);
@@ -261,9 +261,9 @@ test('a group-by column or via the model does not have is refused, listing the r
   const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
   mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
   mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
-  const at = join(mkdtempSync(join(tmpdir(), 'surf-own-')), 'catalog.yml');
+  const at = join(tempDir('surf-own'), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
-  const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const own = await owner.build_semantic_model({
     name: 'own',
     semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
@@ -329,7 +329,7 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
   for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
-  const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const g2 = await plain.semantic_index({ guide: true });
   assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
 });

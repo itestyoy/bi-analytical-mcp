@@ -10,15 +10,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderPipeline } from '../../src/pipeline.js';
 import { resolveTimeRange } from '../../src/time-range.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -202,7 +200,7 @@ test('a value picked from several is typed as its arguments are, and compared in
 });
 
 test('a whole-table window in a CASE gets the global-window nudge; a raw OVER () in a where is refused like a structured window', async () => {
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const caseWindow = { stage: 'compute', name: 'above', expr: { fn: 'case', cases: [{ when: [{ fn: 'gt', args: [col('session_number'), val(1)] }], then: { fn: 'average', args: [col('session_number')], over: {} } }], else: val(0), type: 'numeric' } };
   assert.match(e.advisor.globalWindowWarnings(caseWindow).join(' '), /Global analytic window: the window function 'average' has no partition_by/);
   // in a condition a window is not a cost but an error, partitioned or not
@@ -237,7 +235,7 @@ test('a measure is typed by its aggregate: the earliest or latest of a column is
 });
 
 test('a condition is a function: an earlier spelling is refused with the value written today; a field a function does not read is refused', async () => {
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'cond', source: 'events' });
   const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
   const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
@@ -269,7 +267,7 @@ test('a condition is a function: an earlier spelling is refused with the value w
 // is are said, to put where it stood — the one thing said of it, never a value that still names a type —
 // its element named `name` or, before that, `as`).
 test('a typed read, an aggregate\'s where and a typed unnest are refused with the value written today', async () => {
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'typed', source: 'events' });
   const add = (...steps) => e.build_pipeline_model({ action: 'add_steps', context_id, steps });
   const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);

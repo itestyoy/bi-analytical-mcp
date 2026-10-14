@@ -1,14 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ValueIndex } from '../../src/value-index.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Persistence: a dbPath-backed index survives a close + reopen (the data is a file on
 // disk). Skips cleanly if node:sqlite is unavailable (then it is an in-memory fallback).
 test('ValueIndex persists to a file on disk across reopen', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-persist-')), 'value-index.sqlite');
+  const dbPath = join(tempDir('vi-persist'), 'value-index.sqlite');
   const a = new ValueIndex({ dbPath });
   if (!a.persistent) { a.close(); return; } // node:sqlite not available here → nothing to assert
   const runId = a.startRun();

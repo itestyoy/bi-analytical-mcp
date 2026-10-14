@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -9,6 +8,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { openStore } from '../../src/store.js';
 import { settle, taskResult } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data tests: a CHECKPOINT's invalidation is draft STATE (positional — we own the
 // edit sequence), stage availability is an input-validation guard, and the file/reference
@@ -19,7 +19,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('cp') }) }));
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
@@ -302,7 +302,7 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
     async show() { return { ok: true, rows: [], columns: [] }; },
     async relationColumns() { return { ok: true, columns: Object.entries(dtypes).map(([name, dtype]) => ({ name, dtype })) }; },
   };
-  const e = new Engine({ catalog: loadCatalog(CATALOG, {}), runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) });
+  const e = new Engine({ catalog: loadCatalog(CATALOG, {}), runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot: tempDir('cp') }) });
   const textFlag = /'is_clicked_of_event_data' is a text column in the warehouse/;
   const flag = { column: 'is_clicked_of_event_data' };
   const ordered = { stage: 'where', conditions: [{ fn: 'gt', args: [flag, { value: true }] }] };
@@ -347,7 +347,7 @@ function flagRunner({ tables = true } = {}) {
     },
   };
 }
-const flagEngine = (runner, { workspaceRoot = mkdtempSync(join(tmpdir(), 'cp-')), store } = {}) => new Engine({
+const flagEngine = (runner, { workspaceRoot = tempDir('cp'), store } = {}) => new Engine({
   catalog: loadCatalog(CATALOG, {}), runner, ...(store ? { store } : {}),
   contextManager: new ContextManager({ baseProjectDir: '/tmp/cp-text-flag', workspaceRoot }),
 });
@@ -404,7 +404,7 @@ test('a draft started from a semantic query run with materialize: true has its t
 });
 
 test('after a restart, a draft started from a build\'s task has its table\'s column types from the warehouse', async () => {
-  const workspaceRoot = mkdtempSync(join(tmpdir(), 'cp-'));
+  const workspaceRoot = tempDir('cp');
   const store = openStore({ dbPath: join(workspaceRoot, 'store.sqlite') });
   const e = flagEngine(flagRunner(), { workspaceRoot, store });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });
@@ -415,4 +415,5 @@ test('after a restart, a draft started from a build\'s task has its table\'s col
   const from = await e2.build_pipeline_model({ action: 'start', name: 'flg_from', from_task: task, include: ['columns'] });
   assert.deepEqual(from.available_columns.find((c) => c.name === 'is_clicked_of_event_data'), { name: 'is_clicked_of_event_data', type: 'string' });
   await assert.rejects(() => e2.build_pipeline_model({ action: 'add_steps', context_id: from.context_id, steps: [flagOrdered] }), TEXT_FLAG);
+  store.close();
 });

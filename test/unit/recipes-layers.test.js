@@ -9,16 +9,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRecipes } from '../../src/recipes.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const SYSTEM = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 
 const deploymentFile = (recipes) => {
-  const f = join(mkdtempSync(join(tmpdir(), 'rec-')), 'mine.json');
+  const f = join(tempDir('rec'), 'mine.json');
   writeFileSync(f, JSON.stringify({ recipes }));
   return f;
 };
@@ -276,7 +276,7 @@ test('a deployment recipe with the earlier flat experiment block is served with 
   const { settle } = await import('../helpers/settle.js');
   const { armFrom } = await import('../helpers/experiment-arm.js');
   const catalog = loadCatalog(fileURLToPath(new URL('../../config/catalog.yml', import.meta.url)), { dialect: 'duckdb' });
-  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-ab-')) }) }));
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('rec-ab') }) }));
 
   const old = {
     proportion: { action: 'analyze', metric: 'proportion', group_field: 'g', n_field: 'n', conversions_field: 'conv' },
@@ -340,7 +340,7 @@ for (const r of loadRecipes(SYSTEM).list.filter((x) => !x.reference && x.require
     const { Engine } = await import('../../src/engine.js');
     const { settle } = await import('../helpers/settle.js');
     const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
-    const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rec-tool-')) }) }));
+    const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('rec-tool') }) }));
     for (const call of r.tool_calls) {
       const res = engine[call.tool](call.args);
       assert.equal(res.ok, true, `${r.id}: tool ${call.tool} failed: ${JSON.stringify(res)}`);

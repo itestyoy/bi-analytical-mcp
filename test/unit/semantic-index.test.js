@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data test: semantic_index's OPERATIONAL views ({status}/{run}) report
 // registry state (sync-run log + job list) read from SQLite/in-memory stores — no
 // warehouse, no generated SQL asserted. Plus the strict view contract (input validation).
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'di-')) }) }));
+const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('di') }) }));
 
 test('semantic_index({ status }): idle state before any sync', async () => {
   const e = engine();
@@ -96,7 +96,7 @@ test('semantic_index: strict view contract (exactly one view, scoped params)', a
 test('semantic_index({ source, property }): order_by is a list of { key, direction? } read in turn', async () => {
   for (const sqlite of [false, true]) {
     const e = sqlite
-      ? settle(new Engine({ catalog: loadCatalog(CATALOG, {}), dbPath: join(mkdtempSync(join(tmpdir(), 'di-db-')), 'x.sqlite'), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'di-')) }) }))
+      ? settle(new Engine({ catalog: loadCatalog(CATALOG, {}), dbPath: join(tempDir('di-db'), 'x.sqlite'), contextManager: new ContextManager({ workspaceRoot: tempDir('di') }) }))
       : engine();
     e.valueIndex.upsertProperty('events', 'result_of_event_data', {
       distinctCount: 4, totalCount: 20,
@@ -189,7 +189,7 @@ const SECOND_SOURCE = `  - name: fct_crash
 `;
 
 function engineFor(yaml) {
-  const dir = mkdtempSync(join(tmpdir(), 'srcarg-'));
+  const dir = tempDir('srcarg');
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   return settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));

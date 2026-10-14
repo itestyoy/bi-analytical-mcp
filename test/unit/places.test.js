@@ -8,8 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -19,13 +18,14 @@ import { stageAt, stageDef, renderPipeline, STAGE_PLACES } from '../../src/pipel
 import { PLACES } from '../../src/pipeline/compute.js';
 import { REFS, REF_PLACES, VALUE_REFS, refAt, refKind, refForms, refColumns, relationshipsTo } from '../../src/schema/refs.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 // the stages registered beside the core's (a funnel, a python model), as a server has them
 import '../../src/match-recognize.js';
 import '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
-const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'places-')) }) }));
+const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('places') }) }));
 const message = (f) => { try { f(); return null; } catch (e) { return e.message; } };
 
 test('a build takes every stage, a read the ones that keep it one table — the others are named with where they are built', () => {
@@ -142,7 +142,7 @@ test('the ref is one closed form per source: its columns an enum, via only where
   assert.ok(forms.source_property.find((f) => f.properties.source.const === 'events').properties.property.enum.includes('result_of_event_data'));
   assert.ok(!forms.source_property.some((f) => f.properties.source.const === 'users'), 'a model with no events has no event property');
   // several relationships onto one model: via is offered, with the ones there are
-  const dir = mkdtempSync(join(tmpdir(), 'places-via-'));
+  const dir = tempDir('places-via');
   writeFileSync(join(dir, 'catalog.yml'), `version: 2
 models:
   - name: fct_events

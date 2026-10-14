@@ -8,8 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDbt } from '../../src/dbt/index.js';
 import { MetricFlowServer, metricflowServer, mfOutcome } from '../../src/dbt/metricflow-server.js';
@@ -17,6 +16,7 @@ import { runWarm, warehouseTurns } from '../../src/dbt/process.js';
 import { withSignal } from '../../src/request-context.js';
 import { assetPath } from '../../src/runtime-assets.js';
 import { dbtEnv, TEST_ENV } from '../helpers/dbt-env.js';
+import { tempDir, tempRoot } from '../helpers/temp-dir.js';
 
 /**
  * A stand-in server: one answer per request line, under the request's id. `op` says what it does —
@@ -47,7 +47,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
 `;
 
 function standin() {
-  const dir = mkdtempSync(join(tmpdir(), 'mfs-'));
+  const dir = tempDir('mfs');
   const script = join(dir, 'standin.mjs');
   writeFileSync(script, STANDIN);
   return { dir, script };
@@ -149,7 +149,7 @@ test('a process that ends without answering, or cannot start, is a failure with 
     assert.deepEqual([r.ok, r.exit, r.cancelled], [false, { code: 3, signal: null }, undefined]);
     assert.ok((await s.request({ op: 'echo' })).ok, 'and the next request is served');
   } finally { s.close(); }
-  const missing = await new MetricFlowServer(join(tmpdir(), 'no-such-python'), { script: 'x.py' }).request({ op: 'echo' });
+  const missing = await new MetricFlowServer(join(tempRoot(), 'no-such-python'), { script: 'x.py' }).request({ op: 'echo' });
   assert.deepEqual([missing.ok, missing.started, missing.cancelled], [false, false, undefined]);
   // a spawn that throws (here: not a command at all) is answered the same way
   const thrown = await new MetricFlowServer(42, { script: 'x.py' }).request({ op: 'echo' });
@@ -194,7 +194,7 @@ test('an idle process does not keep its parent alive', async () => {
 });
 
 test('a metric query takes the warehouse\'s turn like a dbt process: on DuckDB one after another', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mfturn-'));
+  const dir = tempDir('mfturn');
   const log = join(dir, 'log');
   writeFileSync(log, '');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: p\nprofile: p\n');
@@ -218,12 +218,12 @@ test('a metric query takes the warehouse\'s turn like a dbt process: on DuckDB o
 });
 
 test('the MetricFlow Python is the one the client was given; the one beside its `mf` only when none was', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'mfpy-'));
+  const dir = tempDir('mfpy');
   writeFileSync(join(dir, 'python'), '');
   const mfBin = join(dir, 'mf');
   assert.equal(createDbt({ version: 1, dbtBin: 'dbt', mfBin, pythonBin: '/given/python' }).metricflowPython, '/given/python');
   assert.equal(createDbt({ version: 1, dbtBin: 'dbt', mfBin }).metricflowPython, join(dir, 'python'));
-  assert.equal(createDbt({ version: 1, dbtBin: 'dbt', mfBin: join(tmpdir(), 'nowhere', 'mf') }).metricflowPython, null);
+  assert.equal(createDbt({ version: 1, dbtBin: 'dbt', mfBin: join(tempRoot(), 'nowhere', 'mf') }).metricflowPython, null);
 });
 
 // The real script, when the MetricFlow environment is built (dbtEnv: a refused or stale one fails the
@@ -235,8 +235,8 @@ test('python/mf_server.py answers every request on its own channel and runs only
   const lines = [
     JSON.stringify({ id: 1, op: 'nope' }),
     'not json',
-    JSON.stringify({ id: 2, op: 'mf', argv: ['validate-configs'], cwd: tmpdir(), env: {} }),
-    JSON.stringify({ id: 3, op: 'mf', argv: [], cwd: tmpdir(), env: {} }),
+    JSON.stringify({ id: 2, op: 'mf', argv: ['validate-configs'], cwd: tempRoot(), env: {} }),
+    JSON.stringify({ id: 3, op: 'mf', argv: [], cwd: tempRoot(), env: {} }),
   ];
   const out = await new Promise((resolve, reject) => {
     const child = execFile(MF_PYTHON, [assetPath('mfServer')], { timeout: 120000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));

@@ -4,10 +4,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { WarmProcess, jsonLineReader } from '../../src/warm-process.js';
+import { tempDir, tempRoot } from '../helpers/temp-dir.js';
 
 /**
  * One answer per request line, under the request's id. `op`: echo (its pid), big (an answer of `size`
@@ -33,7 +33,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
 `;
 
 function standin() {
-  const dir = mkdtempSync(join(tmpdir(), 'warm-'));
+  const dir = tempDir('warm');
   const script = join(dir, 'standin.mjs');
   writeFileSync(script, STANDIN);
   return script;
@@ -86,7 +86,7 @@ test('a process that cannot start is gone at once, with why — the spawn throwi
   assert.equal(thrown.alive, false);
   const r1 = await thrown.ask({ id: 1, op: 'echo' });
   assert.deepEqual([r1.ok, r1.started], [false, false]);
-  const missing = new WarmProcess(join(tmpdir(), 'no-such-binary'), []);
+  const missing = new WarmProcess(join(tempRoot(), 'no-such-binary'), []);
   const r2 = await missing.ask({ id: 1, op: 'echo' });
   assert.deepEqual([r2.ok, r2.started], [false, false]);
   assert.equal((await missing.exited).error.code, 'ENOENT');

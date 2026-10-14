@@ -11,8 +11,7 @@
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
@@ -22,6 +21,7 @@ import { warehouseTurns } from '../../src/dbt/process.js';
 import { makeMcpServer } from '../../src/server.js';
 // the Python of the environment that carries the DuckDB module (MetricFlow's, see src/dbt/environments.js)
 import { DBT_BIN, PY_BIN } from '../helpers/dbt-env.js';
+import { removeTempDir, tempDir } from '../helpers/temp-dir.js';
 
 // Runs the statements in one connection and prints the last one's rows as JSON (dates and decimals
 // as strings, like the rows dbt hands back).
@@ -55,14 +55,14 @@ function run(path, statements) {
  */
 export function fixtureProject(name) {
   const src = join(process.cwd(), 'test', 'integration', 'fixtures', name);
-  const dst = join(mkdtempSync(join(tmpdir(), `fx-${name}-`)), name);
+  const dst = join(tempDir(`fx-${name}`), name);
   cpSync(src, dst, { recursive: true, filter: (p) => !/\/(target|logs)(\/|$)/.test(p.slice(src.length)) });
   return dst;
 }
 
 /** A fresh database file; DUCKDB_PATH points at it for everything this process starts. */
 export async function startWarehouse() {
-  const dir = mkdtempSync(join(tmpdir(), 'duckdb-'));
+  const dir = tempDir('duckdb');
   const path = join(dir, 'warehouse.duckdb');
   process.env.DUCKDB_PATH = path;
   return {
@@ -72,7 +72,7 @@ export async function startWarehouse() {
     async query(sql) { return { rows: await run(path, [sql]) }; },
     /** Run statements (separated by `;`) for their effect. */
     async exec(sql) { await run(path, sql.split(/;\s*(?:\n|$)/).map((s) => s.trim()).filter(Boolean)); },
-    async stop() { rmSync(dir, { recursive: true, force: true }); },
+    async stop() { removeTempDir(dir); },
   };
 }
 
@@ -160,7 +160,9 @@ async function builtOnce(dir, build) {
     if (takeLock(lock)) {
       // it may have been published (or failed) between the look above and the lock
       if (existsSync(dir) || existsSync(failed)) { rmSync(lock, { recursive: true, force: true }); continue; }
-      const work = mkdtempSync(`${dir}.build-`);
+      const work = `${dir}.build-${process.pid}`; // the lock's holder alone builds: one per process
+      rmSync(work, { recursive: true, force: true });
+      mkdirSync(work);
       try {
         await build(work);
         try { renameSync(work, dir); } catch (e) { if (!existsSync(dir)) throw e; } // a builder that took over a lock thought dead published first

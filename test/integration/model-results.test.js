@@ -8,8 +8,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
@@ -20,6 +19,7 @@ import { settle, isStartedTask, taskResult, one, startAndBuild } from '../helper
 import { armFrom } from '../helpers/experiment-arm.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { DATA_TESTED } from '../helpers/recipe-coverage.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -45,7 +45,7 @@ before(async () => {
   if (!HAS_DBT) return;
   wh = await buildWarehouse(BASE);
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'results-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('results'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
@@ -853,7 +853,7 @@ for (const r of RUN_HERE) {
 test('a deployment recipe in the earlier { name, pipeline } shape is served as a start request that builds', opts, async (t) => {
   if (!HAS_DBT) return t.skip('dbt/mf not installed');
   const shipped = recipes.get('experiment_conversion').pipeline_payload;
-  const file = join(mkdtempSync(join(tmpdir(), 'rp-old-')), 'mine.json');
+  const file = join(tempDir('rp-old'), 'mine.json');
   writeFileSync(file, JSON.stringify({ recipes: [{ id: 'my_conversion', task_type: 'experiment', title: 'mine', when_to_use: '', hack: '', pipeline_payload: { name: 'my_conversion', pipeline: { source: shipped.source, stages: shipped.steps } } }] }));
   const served = loadRecipes(join(process.cwd(), 'config', 'recipes.json'), file).get('my_conversion').pipeline_payload;
   const out = await startAndBuild(engine, served);

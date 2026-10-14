@@ -2,17 +2,15 @@
 // time a refusal takes grows with the call's size, not with every branch tried at every level.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderRead } from '../../src/pipeline.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'refusal-')) }) });
+const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: tempDir('refusal') }) });
 const refusal = (e, tool, input) => { try { e._validate(tool, input); return null; } catch (err) { return err.message; } };
 
 test('a mode left unnamed is refused as the mode the fields belong to, with the modes there are', () => {

@@ -7,17 +7,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { loadCatalog } from '../../src/catalog.js';
 import { mcp } from '../helpers/catalog-doc.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** Write a catalog YAML and load it. */
 function load(models) {
-  const file = join(mkdtempSync(join(tmpdir(), 'joinkey-')), 'catalog.yml');
+  const file = join(tempDir('joinkey'), 'catalog.yml');
   writeFileSync(file, `version: 2\nmodels:\n${models}`);
   return loadCatalog(file, {});
 }
@@ -329,7 +329,7 @@ test('a key part takes column + grain, and nothing else', () => {
     const d = yaml.load(readFileSync(fixture, 'utf8'));
     const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
     mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
-    const at = join(mkdtempSync(join(tmpdir(), 'badpart-')), 'catalog.yml');
+    const at = join(tempDir('badpart'), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
     return loadCatalog(at, {});
   };

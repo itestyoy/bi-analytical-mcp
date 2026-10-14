@@ -9,8 +9,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotStages } from '../../src/apps/result-view-model.js';
@@ -22,6 +21,7 @@ import { renderRead } from '../../src/pipeline.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 import { defineTool, toolRegistry } from '../../src/tools/define.js';
 import { fieldNames } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
 function sharedSources() {
@@ -175,7 +175,7 @@ test('an experiment is its own process: card: true draws its A/B test card, equa
 
 test('the checked-in view is the build of its sources (npm run build:app)', async () => {
   const { build } = await import('vite');
-  const out = mkdtempSync(join(tmpdir(), 'view-build-'));
+  const out = tempDir('view-build');
   await build({ configFile: new URL('../../src/apps/result-view/vite.config.js', import.meta.url).pathname, build: { outDir: out, emptyOutDir: true }, logLevel: 'silent' });
   assert.equal(readFileSync(join(out, 'mcp-app.html'), 'utf8'), readFileSync(RESULT_VIEW_FILE, 'utf8'), 'rebuild the view: npm run build:app');
 });

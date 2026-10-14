@@ -9,8 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -20,9 +19,10 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
 import { deref, field, forms, pinned } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const engineFor = (yaml) => {
-  const dir = mkdtempSync(join(tmpdir(), 'snd-'));
+  const dir = tempDir('snd');
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   const catalog = loadCatalog(file, {});
@@ -113,7 +113,7 @@ test('no shipped or degenerate catalog produces an empty enum or choice anywhere
     .map((p) => fileURLToPath(new URL(`../../${p}`, import.meta.url)))
     .map((p) => loadCatalog(p, {}));
   const degenerate = [NO_RELATIONSHIPS, NO_DIMENSIONS, NO_EVENT_NAMES].map((y) => {
-    const f = join(mkdtempSync(join(tmpdir(), 'snd-')), 'catalog.yml');
+    const f = join(tempDir('snd'), 'catalog.yml');
     writeFileSync(f, y);
     return loadCatalog(f, {});
   });

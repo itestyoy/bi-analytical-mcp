@@ -13,8 +13,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
@@ -24,6 +23,7 @@ import { Engine } from '../../src/engine.js';
 import { settle, readTable } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { fixtureProject } from './warehouse-harness.js';
+import { tempDir, tempRoot } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
@@ -39,7 +39,7 @@ const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt-v1 not installed (
 let engine; let work;
 before(async () => {
   if (!HAS) return;
-  work = mkdtempSync(join(tmpdir(), 'pystage-duck-'));
+  work = tempDir('pystage-duck');
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
@@ -217,12 +217,12 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
 test('python stage: a run leaves no model file or bytecode in the temporary directory', opts, async (t) => {
   if (skip(t)) return;
   const left = () => [
-    ...readdirSync(tmpdir()).filter((n) => /^tmp\w*\.py$/.test(n)),
-    ...(existsSync(join(tmpdir(), '__pycache__')) ? readdirSync(join(tmpdir(), '__pycache__')).filter((n) => /^tmp\w*\..*\.pyc$/.test(n)) : []),
+    ...readdirSync(tempRoot()).filter((n) => /^tmp\w*\.py$/.test(n)),
+    ...(existsSync(join(tempRoot(), '__pycache__')) ? readdirSync(join(tempRoot(), '__pycache__')).filter((n) => /^tmp\w*\..*\.pyc$/.test(n)) : []),
   ];
   const had = new Set(left());
   const r = await engine._buildPipeline({ name: 'seg_tmp', pipeline: { source: 'events', stages: [AGG, PY] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
   assert.equal(r.rows.length, 4);
-  assert.deepEqual(left().filter((n) => !had.has(n)), [], `left in ${tmpdir()}`);
+  assert.deepEqual(left().filter((n) => !had.has(n)), [], `left in ${tempRoot()}`);
 });

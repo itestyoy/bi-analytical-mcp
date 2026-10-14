@@ -4,9 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readdirSync, existsSync } from 'node:fs';
+import { writeFileSync, readdirSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
@@ -14,11 +13,12 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 import { settle, isStartedTask, taskResult, stepEffect } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
-  contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+  contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
   ...over,
 }));
 
@@ -81,7 +81,7 @@ models:
       - { name: cost, data_type: numeric, config: { meta: { mcp: { measure: true } } } }
 `;
   const load = (yaml) => {
-    const f = join(mkdtempSync(join(tmpdir(), 'rev-')), 'catalog.yml');
+    const f = join(tempDir('rev'), 'catalog.yml');
     writeFileSync(f, yaml);
     return loadCatalog(f, {});
   };
@@ -114,7 +114,7 @@ test('a pipeline build never holds its call: even a lone python model returns a 
   };
   const e = settle(new Engine({
     catalog: loadCatalog(CATALOG, {}),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
     runner, pythonBin: PY,
   }));
   const py = {
@@ -166,7 +166,7 @@ models:
       - { name: user_id, data_type: string, config: { meta: { mcp: { entity: { name: user, type: primary } } } } }
       - { name: country, data_type: string }
 `;
-  const dir = mkdtempSync(join(tmpdir(), 'blob-'));
+  const dir = tempDir('blob');
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   const e = settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));
@@ -192,7 +192,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
   const e = settle(new Engine({
     catalog: loadCatalog(CATALOG, {}),
     recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
   }));
   const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
   const joinStage = out.pipeline_payload.steps.find((s) => s.stage === 'join' && s.with === 'users');
@@ -287,7 +287,7 @@ test('groupable and the example only name models this context loaded', async () 
 test('the resolved submission method is written into the model, not just reported', async () => {
   const { resolvePythonRuntime } = await import('../../src/catalog.js');
   const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
-  const dir = mkdtempSync(join(tmpdir(), 'prof-'));
+  const dir = tempDir('prof');
   writeFileSync(join(dir, 'profiles.yml'), [
     'p:', '  target: prod', '  outputs:', '    prod:',
     '      type: bigquery', '      project: x', '      dataset: bi',
@@ -347,7 +347,7 @@ test('the resolved submission method is written into the model, not just reporte
 // the runtime disagree (a Colab notebook holding PySpark, or a 403 on dataproc.batches.create).
 test('the submission is read from dbt_project.yml first, and its source is reported', async () => {
   const { resolvePythonRuntime, submissionFromProject } = await import('../../src/catalog.js');
-  const dir = mkdtempSync(join(tmpdir(), 'proj-'));
+  const dir = tempDir('proj');
   // a profile whose settings IMPLY bigframes, and nothing declaring it
   writeFileSync(join(dir, 'profiles.yml'), [
     'p:', '  target: prod', '  outputs:', '    prod:',
@@ -390,7 +390,7 @@ test('the submission is read from dbt_project.yml first, and its source is repor
 // defined as a dimension"), so `dbt parse` fails for EVERY context that merely loads the model.
 // Input-validation guard on what is rendered: the axis must be a dimension this model emits.
 const spendCatalog = (axisMeta) => {
-  const file = join(mkdtempSync(join(tmpdir(), 'aggtime-')), 'catalog.yml');
+  const file = join(tempDir('aggtime'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
@@ -429,7 +429,7 @@ test('a time axis opted out of grouping is not named as agg_time_dimension', () 
 // The role IS the source's identity. A duplicate used to overwrite, so every tool enum, the value
 // index and every join path then described a table nobody meant — with no warning anywhere.
 test('two models declaring the same role are refused, naming both', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'dup-')), 'catalog.yml');
+  const file = join(tempDir('dup'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events
@@ -490,7 +490,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
 // literal is verified. A name carried by BOTH produced two index targets with one key: the later
 // scan overwrote the earlier, so the view rendered one field's spec over the other's numbers.
 test('a name that is both a payload property and a groupable column is refused', () => {
-  const file = join(mkdtempSync(join(tmpdir(), 'clash-')), 'catalog.yml');
+  const file = join(tempDir('clash'), 'catalog.yml');
   writeFileSync(file, `version: 2
 models:
   - name: fct_events

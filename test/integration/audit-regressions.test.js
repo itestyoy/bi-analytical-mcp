@@ -35,8 +35,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
@@ -48,6 +47,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
@@ -79,7 +79,7 @@ function variant(mutate, extra = {}) {
   const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
   const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
   mutate(M, doc);
-  const at = join(mkdtempSync(join(tmpdir(), 'aud-')), 'catalog.yml');
+  const at = join(tempDir('aud'), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
   const cat = loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
@@ -103,14 +103,14 @@ async function pipeRows(source, steps, eng = engine) {
 before(async () => {
   if (!HAS_DBT) return;
   wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
-  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'duckdb' });
+  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('aud-ws'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
 
   // MCP_DB_RESET over a store that already holds a value: the engine opens its store with reset,
   // the production path, so the index starts empty (S7 asserts the seeded value is gone and the
   // scan filled the real ones).
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite');
+  const dbPath = join(tempDir('aud-db'), 'vi.sqlite');
   const seeded = new ValueIndex({ dbPath });
   seeded.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
   seeded.close();
@@ -158,7 +158,7 @@ before(async () => {
   bothCtx = bt.context_id;
 }, opts);
 
-after(async () => { backend?.close?.(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop(); });
 
 // ═══════════ S1. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES — ONE QUERY, EVERY SPLIT ═══════════
 

@@ -7,9 +7,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -18,12 +15,13 @@ import { renderPipeline } from '../../src/pipeline.js';
 import '../../src/match-recognize.js';
 import { deref, field } from '../helpers/schema-nav.js';
 import { stageBranch } from '../helpers/stage-schema.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
 
 function engine() {
-  return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mro-')) }) });
+  return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('mro') }) });
 }
 
 // What the warehouse says the events relation holds (a stub of its column listing): each column in
@@ -159,7 +157,7 @@ test('at_<step> and first_seen_at are of the sequence axis\'s type: a moment by 
 
 test('between_steps is the one choice of what lies between steps: any by default, none only where the warehouse matches adjacent events', async () => {
   const choices = (options) => {
-    const e = new Engine({ catalog: loadCatalog(CATALOG, options), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mro-')) }) });
+    const e = new Engine({ catalog: loadCatalog(CATALOG, options), contextManager: new ContextManager({ workspaceRoot: tempDir('mro') }) });
     const bpm = e.schemas.build_pipeline_model;
     return deref(bpm, field(bpm, stageBranch(bpm, 'match_recognize'), 'between_steps'));
   };

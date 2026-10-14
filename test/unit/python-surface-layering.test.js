@@ -19,9 +19,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -31,6 +28,7 @@ import { pythonAuthoringGuide, mlClassesText } from '../../src/python-guide.js';
 import { buildGuide } from '../../src/guide.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -39,7 +37,7 @@ const FACTS = JSON.parse(readFileSync(fileURLToPath(new URL('../../config/bigfra
 const engine = () => {
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
-  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'layer-')) }) }));
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('layer') }) }));
 };
 const stageDescription = (e) => stageBranch(e.schemas.build_pipeline_model, 'python').description;
 

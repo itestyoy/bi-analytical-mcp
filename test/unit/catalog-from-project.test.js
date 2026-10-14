@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog, loadCatalogFromProject } from '../../src/catalog.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Build a throwaway dbt project: dbt_project.yml + schema YAML(s) under models/.
 function project(schemaFiles) {
-  const dir = mkdtempSync(join(tmpdir(), 'proj-'));
+  const dir = tempDir('proj');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: test\nprofile: test\nmodel-paths: ["models"]\n');
   const mdir = join(dir, 'models');
   mkdirSync(mdir, { recursive: true });
@@ -98,7 +98,7 @@ test('a key the loader does not read is refused at load, on a model and on a col
 });
 
 test('a catalog file that is not a dbt model-schema YAML is refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cat-'));
+  const dir = tempDir('cat');
   try {
     writeFileSync(join(dir, 'catalog.json'), JSON.stringify({ models: { events: { dbt_model: 'fct_events' } } }));
     writeFileSync(join(dir, 'registry.yml'), 'models:\n  events: { dbt_model: fct_events }\n');

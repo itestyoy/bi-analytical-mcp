@@ -9,15 +9,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { renderPipeline } from '../../src/pipeline.js';
 import { resolveTimeRange } from '../../src/time-range.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const catalog = loadCatalog(CATALOG, {});
@@ -93,7 +91,7 @@ test('a value picked from several is typed as its arguments are, and compared in
 });
 
 test('a whole-table window in a CASE\'s condition gets the global-window nudge; a raw OVER () in a where is refused like a structured window', async () => {
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const caseWindow = { stage: 'compute', name: 'above', expr: { fn: 'case', cases: [{ when: [{ left: { fn: 'average', args: [{ column: 'session_number' }], over: {} }, op: 'gt', value: 1 }], then: { value: 1 } }], else: { value: 0 }, type: 'int' } };
   assert.match(e.advisor.globalWindowWarnings(caseWindow).join(' '), /Global analytic window: the window function 'average' has no partition_by/);
   // in a where a window is not a cost but an error, partitioned or not

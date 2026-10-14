@@ -1,16 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../../src/store.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // The vector store behind semantic memory search. With a real SQLite file the backend loads
 // sqlite-vec (a vec0 KNN table, cosine metric); if the extension is unavailable it falls back
 // to in-SQL cosine. EITHER way the repository contract (vectorPut/vectorIds/vectorSearch)
 // returns the same shape + ordering — proven here on real stored vectors (no mocks).
 test('sqlite memory vector store: KNN ordering + model isolation + delete', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vecstore-'));
+  const dir = tempDir('vecstore');
   const store = openStore({ dbPath: join(dir, 'vec.sqlite') });
   try {
     assert.equal(store.kind, 'sqlite', 'a real db path selects the sqlite backend');

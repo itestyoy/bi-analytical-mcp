@@ -8,8 +8,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
@@ -22,6 +20,7 @@ import { toCallToolResult } from '../../src/mcp-surface.js';
 import { settle, one } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { fixtureProject, startWarehouse } from './warehouse-harness.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const ENV = dbtEnv('retentioneering');
@@ -40,9 +39,9 @@ before(async () => {
   await execFileP(ENV.dbtBin, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 1 << 26 });
   const runner = createDbt({ environment: ENV, profilesDir: BASE, timeout: 600000 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-ctx-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('rete-ctx'), timeSpineDialect: 'duckdb' });
   engine = settle(new Engine({
-    catalog, contextManager: ctxs, runner, dbPath: join(mkdtempSync(join(tmpdir(), 'rete-db-')), 'x.sqlite'),
+    catalog, contextManager: ctxs, runner, dbPath: join(tempDir('rete-db'), 'x.sqlite'),
     // a read keeps 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
     // eventstream's are, and every whole read is proved by the numbers
     features: [createRetentioneeringFeature({ runner, keptRows: 7 })], featureStatus: [{ id: 'retentioneering', available: true }],

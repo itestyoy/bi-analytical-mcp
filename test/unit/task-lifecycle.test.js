@@ -8,14 +8,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { isStartedTask, taskResult, one } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 
@@ -33,7 +32,7 @@ function orderedRunner() {
   return r;
 }
 
-const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tasks-')) }), runner });
+const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('tasks') }), runner });
 const TASK = { name: 'task', semantic_models: [{ from: 'events', measures: [{ name: 'cnt', agg: 'count' }] }], metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }] };
 const tick = () => new Promise((r) => { setTimeout(r, 5); });
 
@@ -208,7 +207,7 @@ test('a name that is not a tool is refused as unknown — no old name dispatches
 
 test('the tool that started a task is persisted with it, so its side survives a restart', async () => {
   const { JobManager } = await import('../../src/jobs.js');
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'jobs-')), 'jobs.sqlite');
+  const dbPath = join(tempDir('jobs'), 'jobs.sqlite');
   const a = new JobManager({ dbPath });
   const id = a.create({ tool: 'query_pipeline_model', contextId: 'c1' });
   a.ready(id);
@@ -220,7 +219,7 @@ test('the tool that started a task is persisted with it, so its side survives a 
 
 test('a drawn pivot keeps opening after a restart, and whatever envelope the host puts on its read', async () => {
   const { runTool } = await import('../../src/mcp-surface.js');
-  const root = mkdtempSync(join(tmpdir(), 'drawn-'));
+  const root = tempDir('drawn');
   const make = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: root, registryPath: join(root, 'registry.json') }), runner, dbPath: join(root, 'mcp.sqlite') });
   const rows = { ok: true, columns: [{ name: 'event_name' }, { name: 'n' }], rows: [{ event_name: 'level_completed', n: 3 }] };
   const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
@@ -344,7 +343,7 @@ test('run as a batch member, a dbt command writes to a target directory of its o
   const { chmodSync, writeFileSync, mkdirSync, existsSync, readdirSync } = await import('node:fs');
   const { createDbt } = await import('../../src/dbt/index.js');
   const { isolatedTarget } = await import('../../src/request-context.js');
-  const dir = mkdtempSync(join(tmpdir(), 'iso-'));
+  const dir = tempDir('iso');
   const project = join(dir, 'project');
   mkdirSync(join(project, 'target'), { recursive: true });
   writeFileSync(join(project, 'target', 'partial_parse.msgpack'), 'cache');

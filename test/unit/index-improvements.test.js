@@ -1,18 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine(extra = {}) {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'idx-')) }), ...extra }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('idx') }), ...extra }));
 }
 
 // п.2 RECALL: the index keeps only top-N values, so a property with more distinct values
@@ -59,8 +58,8 @@ test('memory record refuses a near-miss name inside its source, suggesting the r
 // п.5 DURABILITY: a dedicated memory db keeps findings across engine instances (the
 // mechanism behind surviving container restarts when pointed at a persistent volume).
 test('memoryDbPath persists findings across engine instances', async () => {
-  const memDb = join(mkdtempSync(join(tmpdir(), 'memdb-')), 'memory.sqlite');
-  const ws = () => new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'idx-')) });
+  const memDb = join(tempDir('memdb'), 'memory.sqlite');
+  const ws = () => new ContextManager({ workspaceRoot: tempDir('idx') });
   const cat = () => loadCatalog(CATALOG, {});
 
   const e1 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));

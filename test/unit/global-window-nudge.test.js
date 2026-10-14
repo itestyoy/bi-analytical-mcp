@@ -15,9 +15,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -27,12 +24,13 @@ import { pipelineStageSchema } from '../../src/pipeline.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { getDialect } from '../../src/dialects/index.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (dialect) => {
   const catalog = loadCatalog(CATALOG, dialect ? { dialect } : {});
   if (dialect) catalog.dialect = dialect;
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'win-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('win') }) }));
 };
 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', agg: 'sum', column: 'price' }] };

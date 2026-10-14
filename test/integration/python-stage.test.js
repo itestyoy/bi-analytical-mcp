@@ -11,8 +11,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
@@ -22,6 +21,7 @@ import { Engine } from '../../src/engine.js';
 import { settle, readTable } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { fixtureProject } from './warehouse-harness.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
@@ -37,7 +37,7 @@ const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt-v1 not installed (
 let engine; let work;
 before(async () => {
   if (!HAS) return;
-  work = mkdtempSync(join(tmpdir(), 'pystage-duck-'));
+  work = tempDir('pystage-duck');
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });

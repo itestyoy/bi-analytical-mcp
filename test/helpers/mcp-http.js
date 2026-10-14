@@ -5,9 +5,6 @@
 // (time, experiment, semantic_index) compute in-process.
 
 import { createServer } from 'node:http';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { loadCatalog } from '../../src/catalog.js';
@@ -17,6 +14,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { assetPath } from '../../src/runtime-assets.js';
 import { createApp } from '../../src/server.js';
 import { createServices } from '../../src/mcp-surface.js';
+import { tempDir } from './temp-dir.js';
 
 export const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 export const V = '2026-07-28';
@@ -31,7 +29,7 @@ export function makeEngine({ recipes = true } = {}) {
   return new Engine({
     catalog,
     recipes: recipes ? loadRecipes(assetPath('systemRecipes'), '', { dialect: catalog.dialect, python: false }) : undefined,
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mcp-http-')) }),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('mcp-http') }),
   });
 }
 

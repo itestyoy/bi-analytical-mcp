@@ -10,8 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +19,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { graceMsFromEnv, MAX_BUILD_GRACE_SECONDS } from '../../src/server.js';
 import { isStartedTask, taskResult, one } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is the minutes-long build
@@ -63,7 +63,7 @@ const untilHeld = async (runner) => { for (let i = 0; i < 400 && !runner.held.le
 const finishTask = async (e, started, runner, ok = true) => { await untilHeld(runner); runner.finish(ok); return taskResult(e, started.task_id); };
 
 function engine(runner, { workspaceRoot, registryPath } = {}) {
-  const ctxs = new ContextManager({ workspaceRoot: workspaceRoot || mkdtempSync(join(tmpdir(), 'cpb-')), registryPath });
+  const ctxs = new ContextManager({ workspaceRoot: workspaceRoot || tempDir('cpb'), registryPath });
   return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, runner, pythonBin: PY });
 }
 
@@ -163,7 +163,7 @@ test('a build that FAILED is no prefix: the task says so, and the next materiali
 
 test('a build whose builder is gone does not wedge the draft: the restart retires it and rebuilds', async (t) => {
   if (skipNoPy(t)) return;
-  const workspaceRoot = mkdtempSync(join(tmpdir(), 'cpb-'));
+  const workspaceRoot = tempDir('cpb');
   const registryPath = join(workspaceRoot, 'registry.json');
   const runner = heldRunner();
   const e = engine(runner, { workspaceRoot, registryPath });
@@ -279,7 +279,7 @@ test('the operator cannot configure a window longer than the ceiling', () => {
 test('an Engine with no configured window uses the default enrichment window', () => {
   const e = new Engine({
     catalog: loadCatalog(CATALOG, {}),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace3-')) }),
+    contextManager: new ContextManager({ workspaceRoot: tempDir('grace3') }),
   });
   assert.equal(e.queryTimeoutMs, 20000);
 });

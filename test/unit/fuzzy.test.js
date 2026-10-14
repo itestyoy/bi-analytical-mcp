@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { rankFuzzy } from '../../src/fuzzy.js';
 import { ValueIndex } from '../../src/value-index.js';
@@ -10,6 +7,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // ── rankFuzzy adapter (over Fuse.js) ──────────────────────────────────────────
 test('rankFuzzy: exact tier first (score 1), then fuzzy by score; gate + tiebreak', () => {
@@ -58,7 +56,7 @@ test('ValueIndex.searchValues: exact substring tier, then fuzzy fallback on a ty
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'fz-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('fz') }) }));
 }
 
 test('semantic_index({ search }) is fuzzy by default over property names', async () => {

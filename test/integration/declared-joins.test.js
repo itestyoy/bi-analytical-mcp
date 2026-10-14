@@ -43,8 +43,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
@@ -54,6 +53,7 @@ import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.
 import { mcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -82,7 +82,7 @@ before(async () => {
   wh = await buildWarehouse(BASE);
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('mcpit-join'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
@@ -127,7 +127,7 @@ before(async () => {
   M.fct_crashlytics_events.columns.push({ name: 'ghost_tracking_id', data_type: 'string' });
   mcp(M.fct_crashlytics_events).entities.ad_funnel.variants.ghost = { key: ['ghost_tracking_id', 'player_id_of_internal'] };
 
-  const phantomPath = join(mkdtempSync(join(tmpdir(), 'phantom-')), 'catalog.yml');
+  const phantomPath = join(tempDir('phantom'), 'catalog.yml');
   writeFileSync(phantomPath, yaml.dump(doc));
   phantom = loadCatalog(phantomPath, { profilesDir: BASE, projectDir: BASE });
   // every phantom declaration survives the LOAD — only the warehouse knows they are not there
@@ -153,7 +153,7 @@ before(async () => {
   const OM = Object.fromEntries(od.models.map((x) => [x.name, x]));
   mcp(OM.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
   mcp(OM.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
-  const ownerPath = join(mkdtempSync(join(tmpdir(), 'owner-')), 'catalog.yml');
+  const ownerPath = join(tempDir('owner'), 'catalog.yml');
   writeFileSync(ownerPath, yaml.dump(od));
   ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
   ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
@@ -181,7 +181,7 @@ before(async () => {
     }
     mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: crashKey } };
     mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: eventKey };
-    const at = join(mkdtempSync(join(tmpdir(), 'owned-')), 'catalog.yml');
+    const at = join(tempDir('owned'), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
     return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
   };
@@ -1444,14 +1444,14 @@ const perDayCatalog = (grain) => {
     player_day: { type: 'unique', key: ['player_id_of_internal', day('spend_date')] },
   };
   mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', day('device_time')] };
-  const at = join(mkdtempSync(join(tmpdir(), `perday-${grain || 'raw'}-`)), 'catalog.yml');
+  const at = join(tempDir(`perday-${grain || 'raw'}`), 'catalog.yml');
   writeFileSync(at, yaml.dump(d));
   return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
 };
 
 /** Join events → acquisition through `player_day` on the given catalog and count what matched. */
 async function perDayMatches(catalog) {
-  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'duckdb' }), runner: backend }));
+  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('perday-ctx'), timeSpineDialect: 'duckdb' }), runner: backend }));
   const s = await eng.build_pipeline_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
   const j = await eng.build_pipeline_model({
     action: 'add_step',
@@ -1489,7 +1489,7 @@ test('35. a key part takes column + grain, and nothing else', opts, async (t) =>
     const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
     const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
     mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
-    const at = join(mkdtempSync(join(tmpdir(), 'badpart-')), 'catalog.yml');
+    const at = join(tempDir('badpart'), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
     return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
   };

@@ -31,8 +31,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import yaml from 'js-yaml';
@@ -46,6 +45,7 @@ import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -72,7 +72,7 @@ function variant(mutate, extra = {}) {
   const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
   const M = Object.fromEntries(doc.models.map((x) => [x.name, x]));
   mutate(M, doc);
-  const at = join(mkdtempSync(join(tmpdir(), 'aud-')), 'catalog.yml');
+  const at = join(tempDir('aud'), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
   const cat = loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
@@ -99,10 +99,10 @@ before(async () => {
   const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'duckdb' });
+  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('aud-ws'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
-  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(tempDir('aud-db'), 'vi.sqlite') }));
   // The value index is REAL: a full pass over the warehouse, awaited, so the guard and the
   // coverage views below answer from measured data.
   const indexer = new BackgroundIndexer({ catalog, runner: backend, index: engine.valueIndex, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
@@ -147,7 +147,7 @@ before(async () => {
   ({ engine: renamedEngine } = variant((M) => { mcp(M.fct_analytics_events).role = 'analytics'; }));
 }, opts);
 
-after(async () => { backend?.close?.(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop(); });
 
 // ═══════════ A. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES ═══════════
 
@@ -418,17 +418,19 @@ test('30. the model view lists clicks both as an attribute and as an amount', op
 
 test('32. reset() over a fresh store leaves an empty index that the scan then fills', opts, async (t) => {
   if (skip(t)) return;
-  const path = join(mkdtempSync(join(tmpdir(), 'aud-reset-')), 'vi.sqlite');
-  let index = new ValueIndex({ store: openStore({ dbPath: path }) });
+  const path = join(tempDir('aud-reset'), 'vi.sqlite');
+  let store = openStore({ dbPath: path });
+  let index = new ValueIndex({ store });
   index.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
-  index.close();
-  index = new ValueIndex({ store: openStore({ dbPath: path, reset: true }) });
+  store.close();
+  store = openStore({ dbPath: path, reset: true });
+  index = new ValueIndex({ store });
   assert.equal(index.stats('users', 'country'), null, 'wiped');
   const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   await bi.refresh();
   const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
   assert.deepEqual(vals, { US: 4, GB: 4, DE: 3, BR: 2 });
-  index.close();
+  store.close();
 });
 
 // ═══════════ H. NO ANCHOR ═══════════

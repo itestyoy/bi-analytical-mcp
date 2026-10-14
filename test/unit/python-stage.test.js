@@ -6,8 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import { Engine } from '../../src/engine.js';
 import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js';
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -28,7 +28,7 @@ const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 
 const engine = () => {
-  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
+  const ctxs = new ContextManager({ workspaceRoot: tempDir('pystage') });
   return settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY }));
 };
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', agg: 'count' }, { name: 'revenue', agg: 'sum', column: 'price_in_usd_of_event_data' }] };
@@ -173,7 +173,7 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
 
 test('python stage: a package the runtime lacks goes to dbt\'s packages config; operator extras are literal', async (t) => {
   if (skipNoPy(t)) return;
-  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
+  const ctxs = new ContextManager({ workspaceRoot: tempDir('pystage') });
   const e = settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } }));
   const st = { ...PY_STAGE, imports: [{ package: 'sklearn', submodule: 'cluster', names: ['KMeans'] }, { package: 'scipy', submodule: 'stats' }, { package: 'numpy', as: 'np' }] };
   const r = await e._buildPipeline(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
@@ -192,7 +192,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
-  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
+  const ctxs = new ContextManager({ workspaceRoot: tempDir('pystage') });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
   const pkgEnum = () => stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
@@ -265,7 +265,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
 test('python stage: offered only where the dbt profile can run Python models; refused elsewhere with the reason', async () => {
   const { resolvePythonRuntime } = await import('../../src/catalog.js');
   // a profile whose adapter runs no dbt Python models (redshift), and the duckdb one, which does
-  const PG = mkdtempSync(join(tmpdir(), 'rsprof-'));
+  const PG = tempDir('rsprof');
   writeFileSync(join(PG, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: redshift\n      host: x\n');
   const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url)); // duckdb profile
   const noEnv = { };
@@ -277,7 +277,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
   assert.equal(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODELS: 'off' } }).available, false, '…or off');
   assert.equal(resolvePythonRuntime({ profilesDir: '/nonexistent', env: noEnv }).available, false);
   // a BigQuery profile: only with a submission set up
-  const bq = (out) => { const dir = mkdtempSync(join(tmpdir(), 'bqprof-')); writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n${Object.entries(out).map(([k, v]) => `      ${k}: ${v}`).join('\n')}\n`); return resolvePythonRuntime({ profilesDir: dir, env: noEnv }); };
+  const bq = (out) => { const dir = tempDir('bqprof'); writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n${Object.entries(out).map(([k, v]) => `      ${k}: ${v}`).join('\n')}\n`); return resolvePythonRuntime({ profilesDir: dir, env: noEnv }); };
   assert.equal(bq({ project: 'x' }).available, false);
   assert.match(bq({ project: 'x' }).reason, /submission_method \(bigframes \| serverless \| cluster\)/);
   // method_declared says whether the profile SAID the submission or the settings only implied it —
@@ -296,7 +296,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
   try {
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
-    const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
     const stagesPg = stageNames(ePg.schemas.build_pipeline_model);
     assert.ok(!stagesPg.includes('python'), `no python stage on redshift: ${stagesPg.join(', ')}`);
     assert.ok(!ePg.schemas.build_pipeline_model.$defs?.py_block, 'and no py_block definition either');
@@ -308,7 +308,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     assert.match(ov.python_models.reason, /redshift/);
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
-    const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
     assert.ok(stageNames(eDuck.schemas.build_pipeline_model).includes('python'));
     assert.ok(eDuck.schemas.build_pipeline_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
@@ -345,7 +345,7 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {
     const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
-    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
     const py = stageBranch(e.schemas.build_pipeline_model, 'python');
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
@@ -377,12 +377,12 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   assert.match(spark.ml, /pyspark\.ml/);
   assert.ok(!spark.guide.includes('bigframes'), 'no BigFrames rules on Spark');
   // and they land in the live schema for a BigQuery bigframes profile
-  const dir = mkdtempSync(join(tmpdir(), 'bqprof-'));
+  const dir = tempDir('bqprof');
   writeFileSync(join(dir, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n      project: x\n      submission_method: bigframes\n      gcs_bucket: b\n      compute_region: us-central1\n');
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {
     const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
-    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
     const py = stageBranch(e.schemas.build_pipeline_model, 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
     assert.match(py.description, /Rules for bigframes/);
@@ -398,21 +398,21 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
 // are rendered in another dialect's syntax against it. That is a fact about the deployment — it is
 // reported, not assumed away.
 test('an adapter with no SQL dialect of its own is reported, not silently rendered as another', async () => {
-  const SNOW = mkdtempSync(join(tmpdir(), 'sfprof-'));
+  const SNOW = tempDir('sfprof');
   writeFileSync(join(SNOW, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: snowflake\n      account: x\n');
   const saved = process.env.WAREHOUSE_DIALECT; delete process.env.WAREHOUSE_DIALECT;
   try {
     const catalog = loadCatalog(CATALOG, { profilesDir: SNOW, projectDir: SNOW });
     assert.equal(catalog.dialect, 'duckdb', 'SQL is written in a dialect this server knows');
     assert.deepEqual(catalog.dialectFallback, { profile_type: 'snowflake', rendering_as: 'duckdb', explicit: false });
-    const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }), pythonBin: PY }));
+    const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('dialect') }), pythonBin: PY }));
     const overview = await e.semantic_index({});
     assert.match(overview.dialect_note || '', /snowflake.*rendered as duckdb SQL/);
     // and a profile the server DOES write SQL for says nothing
     const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url));
     const pg = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     assert.equal(pg.dialectFallback, null);
-    assert.equal((await settle(new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) })).semantic_index({})).dialect_note, undefined);
+    assert.equal((await settle(new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: tempDir('dialect') }) })).semantic_index({})).dialect_note, undefined);
   } finally { if (saved === undefined) delete process.env.WAREHOUSE_DIALECT; else process.env.WAREHOUSE_DIALECT = saved; }
 });
 
@@ -504,7 +504,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide-')) }), pythonBin: PY }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pyguide') }), pythonBin: PY }));
 
   const g = await e.semantic_index({ guide: 'python' });
   assert.equal(g.runtime, 'bigframes');
@@ -525,7 +525,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
   // a deployment that runs no python models says so instead of showing another runtime's guide
   const plain = loadCatalog(CATALOG, {});
   plain.pythonRuntime = { available: false, reason: 'no runtime' };
-  const e2 = settle(new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide2-')) }) }));
+  const e2 = settle(new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: tempDir('pyguide2') }) }));
   const none = await e2.semantic_index({ guide: 'python' });
   assert.match(none.note, /runs no python models/);
   assert.equal(none.examples, undefined);
@@ -537,7 +537,7 @@ test('the stage description itself carries the runtime rules and the right form 
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pydesc') }), pythonBin: PY }));
   const py = stageBranch(e.schemas.build_pipeline_model, 'python');
 
   // every rule of the guide is represented in the description…
@@ -576,7 +576,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pyrec') }), recipes, pythonBin: PY }));
 
   const py = stageBranch(e.schemas.build_pipeline_model, 'python');
   const entries = recipes.entriesRequiring('python_models');
@@ -629,7 +629,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // a deployment with no python recipes says nothing about them
   const bare = loadCatalog(CATALOG, {});
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e2 = settle(new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY }));
+  const e2 = settle(new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: tempDir('pyrec2') }), pythonBin: PY }));
   const py2 = stageBranch(e2.schemas.build_pipeline_model, 'python');
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
@@ -752,7 +752,7 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('sqlfirst') }), pythonBin: PY }));
   const py = stageBranch(e.schemas.build_pipeline_model, 'python');
   assert.match(py.description, /What belongs here/);
   assert.match(py.description, /table it reads is prepared in SQL stages/);

@@ -666,3 +666,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   args. Correctness is proven by the NUMBERS returned, not by the query text.
 - Only non-data checks allowed: input-validation guards (bad input rejected) and
   context lifecycle (files/registry).
+- A test or an eval makes a temporary directory only with `tempDir(prefix)` (test/helpers/temp-dir.js):
+  it goes when the process that made it ends — for a test file, when the file ends, after its
+  after() hooks — so a store or an engine on a file in it is closed there. Runs that left theirs
+  behind once filled a disk; test/unit/temp-dir.test.js holds test/ and evals/ to it.

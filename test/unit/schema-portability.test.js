@@ -14,9 +14,6 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas } from '../../src/schema.js';
@@ -27,6 +24,7 @@ import { buildToolDefs } from '../../src/mcp-surface.js';
 import { Engine } from '../../src/engine.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { deref, forms, pinned } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const PRODUCTION = fileURLToPath(new URL('../../config/catalog.yml', import.meta.url));
@@ -39,7 +37,7 @@ const allSchemas = (path) => {
   const c = loadCatalog(path, {});
   return { ...buildSchemas(c), build_retentioneering_model: transportSchema(eventstreamSchema(c)), query_retentioneering_model: transportSchema(pathQuerySchema()), display_retentioneering_result: transportSchema(pathDisplaySchema()) };
 };
-const listed = (path) => buildToolDefs(new Engine({ catalog: loadCatalog(path, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'portable-')) }) }));
+const listed = (path) => buildToolDefs(new Engine({ catalog: loadCatalog(path, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('portable') }) }));
 
 // the constructs outside what every host's API takes — anywhere in a schema, not only at its root
 const NOT_PORTABLE = ['oneOf', 'allOf', 'not', 'if', 'then', 'else', 'dependentRequired', 'dependentSchemas', 'discriminator'];

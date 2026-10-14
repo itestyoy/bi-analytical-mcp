@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data test: this asserts a NUDGE/recommendation (a UX affordance surfaced in the
 // pipeline response), not query correctness and not generated SQL text. A key-only join to an
@@ -45,11 +45,11 @@ models:
 `;
 
 function engine() {
-  const dir = mkdtempSync(join(tmpdir(), 'scdjoin-'));
+  const dir = tempDir('scdjoin');
   const path = join(dir, 'catalog.yml');
   writeFileSync(path, SCD_CATALOG);
   const catalog = loadCatalog(path, {});
-  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'scdjoin-ws-')) }) }));
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('scdjoin-ws') }) }));
 }
 
 const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.test(r) && /SCD-2/.test(r));

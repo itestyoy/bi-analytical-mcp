@@ -16,14 +16,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const GRACE = 200; // the grace under test — a real deployment's is 20s, capped at 30s
@@ -44,8 +42,8 @@ function hangingRunner() {
 function engineWith(runner) {
   const catalog = loadCatalog(CATALOG, {});
   const ctxs = new ContextManager({
-    workspaceRoot: mkdtempSync(join(tmpdir(), 'deadline-ws-')),
-    baseProjectDir: mkdtempSync(join(tmpdir(), 'deadline-proj-')),
+    workspaceRoot: tempDir('deadline-ws'),
+    baseProjectDir: tempDir('deadline-proj'),
   });
   return settle(new Engine({ catalog, contextManager: ctxs, runner, queryTimeoutMs: GRACE }));
 }

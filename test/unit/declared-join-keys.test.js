@@ -7,14 +7,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** Write a catalog YAML and load it. */
 function load(models) {
-  const file = join(mkdtempSync(join(tmpdir(), 'joinkey-')), 'catalog.yml');
+  const file = join(tempDir('joinkey'), 'catalog.yml');
   writeFileSync(file, `version: 2\nmodels:\n${models}`);
   return loadCatalog(file, {});
 }

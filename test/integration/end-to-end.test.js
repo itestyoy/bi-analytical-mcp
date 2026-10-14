@@ -25,8 +25,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
@@ -38,6 +36,7 @@ import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, readTable, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -74,11 +73,11 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'e2e-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('e2e'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   // A temp-file value index so semantic_index reports a REAL persisted SQLite index.
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'e2e-db-')), 'value-index.sqlite');
+  const dbPath = join(tempDir('e2e-db'), 'value-index.sqlite');
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath }));
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
@@ -86,7 +85,7 @@ before(async () => {
   await indexer.refresh();
 }, opts);
 
-after(async () => { backend?.close?.(); index?.close(); if (wh) await wh.stop(); });
+after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop(); });
 
 // ───────────────────────── 1. DISCOVERY ─────────────────────────
 test('1a. semantic_index overview lists models + event names (no column dump)', opts, async (t) => {

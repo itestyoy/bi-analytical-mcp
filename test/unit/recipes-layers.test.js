@@ -7,16 +7,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadRecipes } from '../../src/recipes.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const SYSTEM = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 
 const deploymentFile = (recipes) => {
-  const f = join(mkdtempSync(join(tmpdir(), 'rec-')), 'mine.json');
+  const f = join(tempDir('rec'), 'mine.json');
   writeFileSync(f, JSON.stringify({ recipes }));
   return f;
 };

@@ -4,15 +4,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDbt, detectDbtMajor } from '../../src/dbt/index.js';
 import { warehouseOf } from '../../src/dbt/warehouse.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 /** A project dir with a profile of `type` (and a DuckDB path read from DUCKDB_PATH). */
 function project(type) {
-  const dir = mkdtempSync(join(tmpdir(), 'dbtc-'));
+  const dir = tempDir('dbtc');
   writeFileSync(join(dir, 'dbt_project.yml'), 'name: p\nprofile: p\n');
   writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: ${type}\n      path: "{{ env_var('DUCKDB_PATH') }}"\n`);
   return dir;
@@ -32,11 +32,11 @@ test('the warehouse is read from the project\'s profile: DuckDB takes turns by i
   assert.deepEqual(w, { adapter: 'duckdb', singleWriter: true, turn: '/data/a.duckdb' });
   const bq = project('bigquery');
   assert.deepEqual(warehouseOf(bq, bq, {}), { adapter: 'bigquery', singleWriter: false, turn: null });
-  assert.deepEqual(warehouseOf(mkdtempSync(join(tmpdir(), 'none-')), undefined, {}).adapter, null, 'no profile: unknown, no turn');
+  assert.deepEqual(warehouseOf(tempDir('none'), undefined, {}).adapter, null, 'no profile: unknown, no turn');
 });
 
 test('on a single-writer warehouse the client runs one process at a time; elsewhere they run together', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'turns-'));
+  const dir = tempDir('turns');
   const log = join(dir, 'log');
   writeFileSync(log, '');
   // each process notes when it starts and ends, and takes a moment in between
@@ -54,9 +54,9 @@ test('on a single-writer warehouse the client runs one process at a time; elsewh
 });
 
 test('the client is chosen by the dbt major version: 1.x before 1.12 reads the legacy semantic YAML, 1.12 and v2 the latest; others are refused', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'ver-'));
+  const dir = tempDir('ver');
   const v1 = bin(dir, 'echo "Core:"; echo "  - installed: 1.11.11"');
-  const v112 = join(mkdtempSync(join(tmpdir(), 'ver112-')), 'dbt');
+  const v112 = join(tempDir('ver112'), 'dbt');
   writeFileSync(v112, '#!/bin/sh\necho "Core:"; echo "  - installed: 1.12.5"\n', { mode: 0o755 });
   const v2 = bin(dir, 'echo "dbt 2.0.6"');
   assert.equal(detectDbtMajor(v1), 1);
@@ -74,7 +74,7 @@ test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFl
   const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
   const { environmentBuild, INSTALLER } = await import('../../src/dbt/environment-specs.js');
   const { mkdirSync } = await import('node:fs');
-  const dir = mkdtempSync(join(tmpdir(), 'envs-'));
+  const dir = tempDir('envs');
   // a venv with these executables, each answering --version for its dbt, marked as built by
   // `dbt-env create` from its spec as it is now
   const venv = (name, bins, version) => {

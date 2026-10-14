@@ -1,8 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
@@ -13,12 +10,13 @@ import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 import { settle } from '../helpers/settle.js';
 import { deref, field } from '../helpers/schema-nav.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
 }
 
 // Advertised tool surface: the folded/rudimentary tools are gone; the merged ones present.
@@ -197,7 +195,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
 // Without recipes configured, the recipe view + overview list are simply absent.
 test('semantic_index recipe view is absent when no recipes configured', async () => {
   const catalog = loadCatalog(CATALOG, {});
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'norec-')) }) }));
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('norec') }) }));
   const overview = await e.semantic_index();
   assert.equal(overview.recipes, undefined);
   await assert.rejects(() => e.semantic_index({ recipe: 'x' }), /recipes are not configured|invalid input/);
@@ -266,7 +264,7 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   assert.ok(!g.routing_triggers.some((x) => /crash/.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
   for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
-  const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) }));
+  const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const g2 = await plain.semantic_index({ guide: true });
   assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
 });

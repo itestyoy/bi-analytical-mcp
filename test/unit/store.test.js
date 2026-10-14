@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore, registerStoreBackend, storeBackends, MemoryBackend } from '../../src/store.js';
 import { JobManager } from '../../src/jobs.js';
 import { ValueIndex } from '../../src/value-index.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // The store is a swappable repository layer; the managers contain no SQL. These tests
 // exercise the contract + the backend registry (no warehouse, allowed lifecycle checks).
@@ -18,7 +17,7 @@ test('openStore falls back to the in-memory backend without a path', () => {
 });
 
 test('one shared store backs BOTH the job registry and the value index (separate tables)', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('store'), 'mcp.sqlite');
   const store = openStore({ dbPath });
   if (!store.persistent) return; // no node:sqlite here
 
@@ -41,7 +40,7 @@ test('one shared store backs BOTH the job registry and the value index (separate
 });
 
 test('a database an earlier server wrote is brought to the declared tables: columns added, a cache keyed otherwise rebuilt, the rest kept', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-old-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('store-old'), 'mcp.sqlite');
   const old = new DatabaseSync(dbPath);
   old.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
   old.exec("INSERT INTO jobs VALUES ('j1', 'c1', 't1', 'ready', NULL, 1, 2)");
@@ -69,7 +68,7 @@ test('a database an earlier server wrote is brought to the declared tables: colu
 });
 
 test('a table that is not a cache, keyed otherwise than declared, is refused naming both keys', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-key-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('store-key'), 'mcp.sqlite');
   const old = new DatabaseSync(dbPath);
   old.exec('CREATE TABLE memory (note TEXT PRIMARY KEY, targets TEXT)');
   old.close();
@@ -78,7 +77,7 @@ test('a table that is not a cache, keyed otherwise than declared, is refused nam
 });
 
 test('a table MCP_DB_RESET wipes, keyed otherwise, is refused naming the reset — and rebuilt under it, the kept tables kept', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-reset-key-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('store-reset-key'), 'mcp.sqlite');
   const old = new DatabaseSync(dbPath);
   old.exec('CREATE TABLE jobs (context_id TEXT PRIMARY KEY, status TEXT)');
   old.exec('CREATE TABLE memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER)');
@@ -110,8 +109,9 @@ test('openStore throws on an unknown backend name', () => {
 });
 
 test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-reset-')), 'mcp.sqlite');
-  const probe = new ValueIndex({ store: openStore({ dbPath }) });
+  const dbPath = join(tempDir('store-reset'), 'mcp.sqlite');
+  const probe = openStore({ dbPath });
+  probe.close();
   if (!probe.persistent) return; // no node:sqlite here
 
   // seed a persistent store with a job + indexed values + a run.
@@ -136,16 +136,18 @@ test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => 
 
 test('a task stored before tasks recorded their tool is refused by either side, as gone', async () => {
   const { TaskRunner } = await import('../../src/task-runner.js');
-  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-notool-')), 'mcp.sqlite');
+  const dbPath = join(tempDir('store-notool'), 'mcp.sqlite');
   const old = new DatabaseSync(dbPath);
   old.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
   old.exec("INSERT INTO jobs VALUES ('aaaaaaaaaaaa', 'c1', 't1', 'ready', NULL, 1, 2)");
   old.close();
-  const jobs = new JobManager({ store: openStore({ dbPath }) });
+  const store = openStore({ dbPath });
+  const jobs = new JobManager({ store });
   const sides = { query_semantic_model: 'semantic', query_pipeline_model: 'pipeline' };
   const runner = new TaskRunner({ jobs, ctxs: null, sideOf: (tool) => sides[tool] || null, readers: { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' } });
   for (const side of ['semantic', 'pipeline']) assert.throws(() => runner.forSide('aaaaaaaaaaaa', side), (e) => /records no tool that started it/.test(e.message) && e.code === 'result_gone');
   // a task whose tool is no longer served (its feature off) says so, not that it records none
   const off = jobs.create({ contextId: 'c2', tool: 'query_retentioneering_model' });
   assert.throws(() => runner.forSide(off, 'semantic'), /started by query_retentioneering_model, which this server does not serve now/);
+  store.close();
 });

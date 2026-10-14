@@ -16,8 +16,6 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -26,6 +24,7 @@ import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.
 import { settleMcp } from '../helpers/settle.js';
 import { forms, pinned } from '../helpers/schema-nav.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -45,7 +44,7 @@ before(async () => {
   wh = await buildWarehouse(BASE);
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpe2e-')), timeSpineDialect: 'duckdb' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('mcpe2e'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   const engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 

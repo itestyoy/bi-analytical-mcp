@@ -1,19 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { compileDeclaration } from '../../src/compile.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { settle } from '../helpers/settle.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 // Allowed non-data tests: these assert the CATALOG METADATA CONTRACT — units,
 // event semantics, partition hints and error fields are structured catalog facts
 // surfaced to the AI (not generated SQL/YAML), so the discovery layer is honest.
 const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'duckdb' });
-const engine = () => settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dm-')) }) }));
+const engine = () => settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('dm') }) }));
 
 test('overview surfaces event_semantics + partition_column for the events fact', async () => {
   const out = await engine().semantic_index({});

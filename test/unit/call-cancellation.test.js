@@ -12,14 +12,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { createDbt } from '../../src/dbt/index.js';
 import { withSignal, detached, currentSignal, releasableSignal } from '../../src/request-context.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 function sleepyDbt(seconds = 10) {
-  const dir = mkdtempSync(join(tmpdir(), 'fake-dbt-'));
+  const dir = tempDir('fake-dbt');
   const bin = join(dir, 'dbt');
   writeFileSync(bin, `#!/bin/sh\nsleep ${seconds}\necho done\n`);
   chmodSync(bin, 0o755);

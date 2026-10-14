@@ -4,8 +4,7 @@
 // warehouse's turn like every dbt process does (one process at a time holds a DuckDB file).
 
 import { execFile } from 'node:child_process';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
@@ -14,6 +13,7 @@ import { warehouseTurns } from '../../src/dbt/process.js';
 import { makeMcpServer } from '../../src/server.js';
 // the Python of the environment that carries the DuckDB module (MetricFlow's, see src/dbt/environments.js)
 import { DBT_BIN, PY_BIN } from '../helpers/dbt-env.js';
+import { removeTempDir, tempDir } from '../helpers/temp-dir.js';
 
 // Runs the statements in one connection and prints the last one's rows as JSON (dates and decimals
 // as strings, like the rows dbt hands back).
@@ -47,14 +47,14 @@ function run(path, statements) {
  */
 export function fixtureProject(name) {
   const src = join(process.cwd(), 'test', 'integration', 'fixtures', name);
-  const dst = join(mkdtempSync(join(tmpdir(), `fx-${name}-`)), name);
+  const dst = join(tempDir(`fx-${name}`), name);
   cpSync(src, dst, { recursive: true, filter: (p) => !/\/(target|logs)(\/|$)/.test(p.slice(src.length)) });
   return dst;
 }
 
 /** A fresh database file; DUCKDB_PATH points at it for everything this process starts. */
 export async function startWarehouse() {
-  const dir = mkdtempSync(join(tmpdir(), 'duckdb-'));
+  const dir = tempDir('duckdb');
   const path = join(dir, 'warehouse.duckdb');
   process.env.DUCKDB_PATH = path;
   return {
@@ -64,7 +64,7 @@ export async function startWarehouse() {
     async query(sql) { return { rows: await run(path, [sql]) }; },
     /** Run statements (separated by `;`) for their effect. */
     async exec(sql) { await run(path, sql.split(/;\s*(?:\n|$)/).map((s) => s.trim()).filter(Boolean)); },
-    async stop() { rmSync(dir, { recursive: true, force: true }); },
+    async stop() { removeTempDir(dir); },
   };
 }
 

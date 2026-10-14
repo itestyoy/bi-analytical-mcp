@@ -7,14 +7,15 @@
 //
 // Runs on dbt 1.x (the dbt-v1 environment: dbt-duckdb + pandas) — dbt v2 runs no Python models on DuckDB, so this
 // file alone stays on 1.x while the rest of the suite runs on v2. Skipped when the venv is absent.
-// One lifecycle check beside the rows: a Python model run leaves nothing in the temporary directory
-// (src/dbt/process.js gives each dbt process one of its own).
+// One lifecycle check beside the rows: a Python model run leaves no model file or bytecode behind
+// (src/dbt/process.js gives each dbt process a temporary directory of its own; the dbt client writes
+// no bytecode).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -23,7 +24,7 @@ import { Engine } from '../../src/engine.js';
 import { settle, readTable } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 import { fixtureProject } from './warehouse-harness.js';
-import { tempDir, tempRoot } from '../helpers/temp-dir.js';
+import { tempDir } from '../helpers/temp-dir.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
@@ -41,6 +42,9 @@ before(async () => {
   if (!HAS) return;
   work = tempDir('pystage-duck');
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
+  // the temp directory every process of this file is given, so what one leaves there is seen below
+  process.env.TMPDIR = join(work, 'tmp');
+  mkdirSync(process.env.TMPDIR);
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const runner = createDbt({ environment: ENV, profilesDir: PROJECT, timeout: 600000 });
@@ -163,6 +167,21 @@ test('python stage: a runtime error in the Python model is reported from dbt, no
   await assert.rejects(() => readTable(engine, r.context_id, r.model).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
 });
 
+// dbt-duckdb runs a Python model by writing it to a temp file and importing it, and CPython caches
+// the bytecode of what it imports in a __pycache__ beside it — one .pyc per run that nothing removed.
+// A run, whether it succeeds or fails, leaves neither the model file nor its bytecode: not in the temp
+// directory the process was given, and not anywhere in the context.
+test('python stage: a run leaves no bytecode cache behind, whether it succeeds or fails', opts, async (t) => {
+  if (skip(t)) return;
+  const ok = await engine._buildPipeline({ name: 'nocache', pipeline: { source: 'events', stages: [AGG, PY] } });
+  assert.equal(ok.build?.executed, true, JSON.stringify(ok.error || ok));
+  const bad = { ...PY, steps: [PY.steps[0], { call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
+  const failed = await engine._buildPipeline({ name: 'nocache_bad', pipeline: { source: 'events', stages: [AGG, bad] } });
+  assert.equal(failed.error?.stage, 'run', 'the Python model ran and failed');
+  const left = readdirSync(work, { recursive: true }).filter((p) => basename(p) === '__pycache__' || /^tmp\w*\.py$/.test(basename(p)));
+  assert.deepEqual(left, []);
+});
+
 // The steps work on what dbt.ref() returns on this warehouse — a DuckDBPyRelation here (BigFrames /
 // Snowpark / PySpark elsewhere) — and the work stays in the engine.
 test('python stage: steps run on the relation dbt.ref() returns — no pandas anywhere', opts, async (t) => {
@@ -208,21 +227,4 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   for (const m of r.models) assert.equal((await readTable(engine, r.context_id, m.model)).ok !== false, true, m.model);
   const s1 = await readTable(engine, r.context_id, r.models[0].model);
   assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
-});
-
-// A Python model leaves nothing in the temporary directory. dbt-duckdb writes the model to a temporary
-// .py, imports it — Python compiles it into __pycache__ beside it — and removes only the .py: in a
-// temporary directory of the dbt process's own (src/dbt/process.js), the bytecode goes with it, where
-// in the server's it stayed for good, one file per run.
-test('python stage: a run leaves no model file or bytecode in the temporary directory', opts, async (t) => {
-  if (skip(t)) return;
-  const left = () => [
-    ...readdirSync(tempRoot()).filter((n) => /^tmp\w*\.py$/.test(n)),
-    ...(existsSync(join(tempRoot(), '__pycache__')) ? readdirSync(join(tempRoot(), '__pycache__')).filter((n) => /^tmp\w*\..*\.pyc$/.test(n)) : []),
-  ];
-  const had = new Set(left());
-  const r = await engine._buildPipeline({ name: 'seg_tmp', pipeline: { source: 'events', stages: [AGG, PY] } });
-  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
-  assert.equal(r.rows.length, 4);
-  assert.deepEqual(left().filter((n) => !had.has(n)), [], `left in ${tempRoot()}`);
 });

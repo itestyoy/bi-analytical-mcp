@@ -151,7 +151,12 @@ export class DbtV1 {
   pythonModelsOn(_adapter) { return true; }
 
   _env(projectDir) {
-    const env = { DBT_PROJECT_DIR: projectDir };
+    // No bytecode cache: dbt-duckdb runs a Python model by writing it to a temp file and importing it,
+    // and CPython would cache its bytecode in a __pycache__ beside it, which dbt-duckdb never removes
+    // (the process's own temporary directory, src/dbt/process.js, goes after it; this spares the
+    // write). The environments' own modules were compiled when pip installed them, so imports cost
+    // nothing more.
+    const env = { DBT_PROJECT_DIR: projectDir, PYTHONDONTWRITEBYTECODE: '1' };
     if (this.profilesDir) env.DBT_PROFILES_DIR = this.profilesDir;
     return env;
   }

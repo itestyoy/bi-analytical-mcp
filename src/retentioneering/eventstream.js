@@ -19,6 +19,7 @@
 // of the row), and every ordering carries a tiebreak.
 
 import { renderPipeline } from '../pipeline.js';
+import { concatSql } from '../pipeline/compute.js';
 import { getDialect } from '../dialects/index.js';
 import { ToolError } from '../validate.js';
 import { namedColumns, checkNamedColumns } from './build-input.js';
@@ -73,12 +74,15 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   // every column the eventstream reads of the rows is one the caller named: quoted as the dialect quotes it
   const q = (c) => d.quoteIdent(c);
   const text = (sql) => d.castExpr(sql, 'string');
+  // values ({ sql, type? }) joined by '|' as text, by the one writer of a concatenation: missing where
+  // any is missing, on every warehouse; each not known to be text read as its text
+  const joined = (values) => concatSql(d, values.flatMap((v, i) => (i ? [{ sql: lit(d, '|'), type: 'string' }, v] : [v])));
   const cols = namedColumns(catalog, spec);
   // the path owner: the source's user, or the key the caller named — its parts as text, several joined
   // by '|' (a composite key), so one path is one value of all of them together
   const named = pathParts(spec);
   const parts = named || [cols.user];
-  const owner = !named ? q(cols.user) : named.length === 1 ? text(q(named[0])) : `concat(${named.map((p) => text(q(p))).join(", '|', ")})`;
+  const owner = !named ? q(cols.user) : named.length === 1 ? text(q(named[0])) : joined(named.map((p) => ({ sql: q(p) })));
   const ownerText = named ? owner : text(owner);
   const event = q(cols.event);
   const time = q(cols.time);
@@ -90,7 +94,7 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   // a share of the rows of the named events (by the name the rows hold), each row by a hash of its
   // user, time and name — its own hash, independent of the user sample
   const eventShares = Object.entries(spec.sample?.events || {}).filter(([, v]) => v < 1);
-  const rowKey = `concat(${ownerText}, '|', ${text(time)}, '|', ${text(event)})`;
+  const rowKey = joined([{ sql: ownerText, type: 'string' }, { sql: time }, { sql: event }]);
   const eventSample = eventShares.length
     ? ` AND (CASE ${eventShares.map(([e, v]) => `WHEN ${event} = ${lit(d, e)} THEN ${d.valueBucket(rowKey, SAMPLE_BUCKETS)} < ${Math.round(v * SAMPLE_BUCKETS)}`).join(' ')} ELSE TRUE END)`
     : '';
@@ -115,7 +119,8 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
     const order = `ORDER BY ${ES_COLUMNS.time}, ${ES_COLUMNS.event}`;
     const gap = d.dateDiff('second', `LAG(${ES_COLUMNS.time}) OVER (PARTITION BY ${ES_COLUMNS.user} ${order})`, ES_COLUMNS.time);
     ctes.push(`es_breaks AS (SELECT *, CASE WHEN LAG(${ES_COLUMNS.time}) OVER (PARTITION BY ${ES_COLUMNS.user} ${order}) IS NULL OR ${gap} > ${Number(spec.sessions.gap_minutes) * 60} THEN 1 ELSE 0 END AS es_new_session FROM es_named)`);
-    final = `SELECT ${ES_COLUMNS.user}, ${ES_COLUMNS.event}, ${ES_COLUMNS.time}${segNames}, CONCAT(${ES_COLUMNS.user}, '#', ${d.castExpr(`SUM(es_new_session) OVER (PARTITION BY ${ES_COLUMNS.user} ${order} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`, 'string')}) AS ${ES_COLUMNS.session} FROM es_breaks`;
+    const n = `SUM(es_new_session) OVER (PARTITION BY ${ES_COLUMNS.user} ${order} ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`;
+    final = `SELECT ${ES_COLUMNS.user}, ${ES_COLUMNS.event}, ${ES_COLUMNS.time}${segNames}, ${concatSql(d, [{ sql: ES_COLUMNS.user, type: 'string' }, { sql: lit(d, '#'), type: 'string' }, { sql: n }])} AS ${ES_COLUMNS.session} FROM es_breaks`;
   }
   return {
     sql: `WITH ${ctes.join(',\n')}\n${final}`,

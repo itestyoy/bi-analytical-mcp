@@ -4,8 +4,13 @@
 
 import { isNumericType } from '../dialects/base.js';
 
-// Native dbt `data_type`s that map to a MetricFlow time dimension.
-export const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);
+// Native dbt `data_type`s that map to a MetricFlow time dimension: a moment. A TIME is a time of DAY — no
+// moment, and no time dimension (MetricFlow truncates a time dimension to a day and coarser).
+export const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime']);
+
+// A time of day (a TIME column, BigQuery's TIME, DuckDB's TIME / TIMETZ), tracked apart from a moment: no
+// date part but its hour, no truncation, never read as a TIMESTAMP (BigQuery casts no TIME to one).
+const TIME_OF_DAY = /^(time|timetz)\b/;
 
 /** Logical dimension type derived from the native dbt column `data_type`. */
 export function dimTypeFromDataType(dataType) {
@@ -23,6 +28,7 @@ export function pipelineColumnType(cm, col) {
     return cm.array.fields ? 'array<struct>' : arrayColumnType(cm.array.items);
   }
   const dt = String(col.data_type || '').toLowerCase();
+  if (TIME_OF_DAY.test(dt)) return 'time_of_day';
   if (TIME_DATA_TYPES.has(dt)) return 'time';
   if (isBooleanType(dt)) return 'boolean';
   return isNumericType(dt) ? 'numeric' : 'string';
@@ -38,15 +44,16 @@ export const isArrayPropertyType = (t) => String(t || '').toLowerCase().startsWi
 /**
  * AN ARRAY'S ITEMS AS A PIPELINE TYPE — a catalog's `items` word or a warehouse's element type (INT64,
  * BIGINT, FLOAT64, DOUBLE, NUMERIC, DECIMAL(…), STRING, VARCHAR, BOOL, TIMESTAMP …) in the words a value
- * is tracked by: int, float, numeric, string (the cast type words), boolean, time, json — 'struct' for a
- * struct, and 'unknown' (not claimed) for anything else.
+ * is tracked by: int, float, numeric, string (the cast type words), boolean, time (a moment), time_of_day
+ * (a TIME), json — 'struct' for a struct, and 'unknown' (not claimed) for anything else.
  */
 export function itemType(items) {
   const t = String(items || '').trim().toLowerCase();
   if (/^(struct|record|row)\b/.test(t)) return 'struct';
   if (/[[<]|^(array|list|map)\b/.test(t)) return 'unknown'; // an array of arrays, of maps
   if (isBooleanType(t)) return 'boolean';
-  if (/^(date|datetime|time|timestamp)\b/.test(t)) return 'time';
+  if (TIME_OF_DAY.test(t)) return 'time_of_day';
+  if (/^(date|datetime|timestamp)\b/.test(t)) return 'time';
   if (/^(tinyint|smallint|int|integer|bigint|hugeint|uhugeint|ubigint|uinteger|usmallint|utinyint|int2|int4|int8|int16|int32|int64)\b/.test(t)) return 'int';
   if (/^(float|float4|float8|float64|double|real)\b/.test(t)) return 'float';
   if (/^(decimal|numeric|bignumeric|bigdecimal)\b/.test(t)) return 'numeric';
@@ -109,5 +116,5 @@ export function physicalColumnType(dtype) {
   if (/^(array|list)\b/.test(t)) return 'array';
   const k = itemType(t);
   if (k === 'int' || k === 'float' || k === 'numeric') return 'numeric';
-  return k === 'boolean' || k === 'time' ? k : 'string';
+  return k === 'boolean' || k === 'time' || k === 'time_of_day' ? k : 'string';
 }

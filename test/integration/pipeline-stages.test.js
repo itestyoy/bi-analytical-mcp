@@ -1630,7 +1630,7 @@ test('5. unnest a struct then json_field x3: sum(line) 922, max 250, in_app 13 /
 });
 
 // 6. An array-of-structs also answers non-exploding questions: how deep was each stack.
-test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read NULL', opts, async (t) => {
+test('6. array_length over the struct array: 16 frames on 10 reports, the ANRs\' length 0', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'compute', name: 'depth', expr: { fn: 'array_length', args: [{ property: 'stack_frames_of_event_data' }] } },
@@ -1638,18 +1638,18 @@ test('6. array_length over the struct array: 16 frames on 10 reports, ANRs read 
   );
   assert.equal(rows.length, 13, 'every report is still here');
   const by = Object.fromEntries(rows.map((r) => [String(r.crash_id), r.depth == null || r.depth === '' ? null : numOrNaN(r.depth)]));
-  assert.deepEqual(by, { k1: 2, k2: 1, k3: 3, k4: 2, k5: 1, k6: 2, k7: 1, k8: 2, k9: 1, k10: 1, k11: null, k12: null, k13: null });
+  // a report with no stack holds no array: its length is 0, never NULL, on every warehouse
+  assert.deepEqual(by, { k1: 2, k2: 1, k3: 3, k4: 2, k5: 1, k6: 2, k7: 1, k8: 2, k9: 1, k10: 1, k11: 0, k12: 0, k13: 0 });
   assert.equal(sumCol(rows, 'depth'), 16);
-  // the three NULLs are exactly the ANRs — a blocked main thread has no exception stack.
+  // the three zeros are exactly the ANRs — a blocked main thread has no exception stack.
   const anr = rows.filter((r) => String(r.event_name) === 'anr');
   assert.equal(anr.length, 3);
-  assert.ok(anr.every((r) => r.depth == null || r.depth === ''), JSON.stringify(anr));
+  assert.ok(anr.every((r) => numOrNaN(r.depth) === 0), JSON.stringify(anr));
 });
 
 // 7. …and that is the difference between the two readings: an unnest DROPS the reports with no
 //    stack, while a length keeps them. Same data, two grains, both correct. (The length's side —
-//    13 reports, 10 of them with a depth — is 6's rows; a count over a column skipping its NULLs
-//    is model-results.test.js's count(column) read.)
+//    13 reports, 10 of them with a stack, the other 3 of length 0 — is 6's rows.)
 test('7. unnest drops the stackless reports (10 of 13), a length keeps all 13', opts, async (t) => {
   if (skip(t)) return;
   const exploded = await pipeRows(
@@ -1877,7 +1877,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
 // one good row and one malformed one, and the test reads the VALUES that come back. It does not
 // look at the SQL text.
 
-test('duckdb JSON reads: a malformed row yields NULL instead of failing the query', async (t) => {
+test('duckdb JSON reads: a malformed row reads as absent (NULL, a length 0) instead of failing the query', async (t) => {
   const db = await scratchWarehouse(t);
 
   await db.exec(`
@@ -1888,9 +1888,9 @@ test('duckdb JSON reads: a malformed row yields NULL instead of failing the quer
       (3, '{"not":"an array"}',    '{"mode":"b","n":"9"}');
   `);
 
-  // array length: good row counts, malformed and wrong-shape rows read as absent
+  // array length: good row counts, malformed and wrong-shape rows hold no array — a length of 0
   const len = await db.query(`SELECT id, ${duck.jsonColumnArrayLength('tags')} AS n FROM payloads ORDER BY id`);
-  assert.deepEqual(len.rows.map((r) => [r.id, r.n]), [[1, 2], [2, null], [3, null]]);
+  assert.deepEqual(len.rows.map((r) => [r.id, r.n]), [[1, 2], [2, 0], [3, 0]]);
 
   // array containment: true on the good row, NULL (not an error) on the others
   const has = await db.query(`SELECT id, ${duck.jsonColumnArrayContains('tags', 'banner')} AS hit FROM payloads ORDER BY id`);

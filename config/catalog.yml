@@ -1737,7 +1737,7 @@ models:
   #                          unnest { expr: { property }, name } + compute json_field -> several fields, same row
   #     array, positional    compute json_parse_array -> element_at / array_last
   #     JSON object          compute { name, expr: { property, field } } or json_field
-  #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads NULL. Both
+  #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads 0. Both
   #   readings are correct — pick the grain the question is about.
 
   # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────

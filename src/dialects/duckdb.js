@@ -4,7 +4,7 @@
 // (a value that does not parse, a malformed JSON row), this dialect answers as BigQuery does: NULL for
 // that row, a result for the rest — never a failed statement.
 
-import { Dialect, isNumericType } from './base.js';
+import { Dialect, isNumericType, isTimeType } from './base.js';
 import { isBooleanType } from '../catalog/column-types.js';
 
 // An integer is a BIGINT, as BigQuery's INT64. Numbers come back as DOUBLE, not DECIMAL: DuckDB's bare
@@ -19,6 +19,19 @@ const EXACT = 'DECIMAL(38,9)';
 const DIGITS = '([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?';
 const NUMBER_TEXT = `[+-]?${DIGITS}`;
 const FLOAT_TEXT = `[+-]?(${DIGITS}|inf|infinity|nan)`;
+// GoogleSQL's canonical TIMESTAMP text — what BigQuery's SAFE_CAST reads as a moment, as NUMBER_TEXT is
+// what it reads as a number: YYYY-[M]M-[D]D, then { |T|t}[H]H:[M]M:[S]S[.F] (an hour 00–23, the seconds
+// written, up to six fractional digits), then Z, an offset ±H[H][:MM] or ±HHMM, or after a space a tz name
+// (read with the 'i' flag). DuckDB's own cast also reads '2024/01/05', 'epoch', '±infinity', an hour 24, a
+// time without seconds and nine fractional digits, which BigQuery does not: those are missing on both.
+const MOMENT_TEXT = '[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}([ t]([01]?[0-9]|2[0-3]):[0-5]?[0-9]:[0-5]?[0-9]([.][0-9]{1,6})?(z|[+-]([0-9]{1,2}(:[0-9]{2})?|[0-9]{4})| [a-z][a-z0-9_+-]*(/[a-z0-9_+-]+)*)?)?';
+// A moment of MOMENT_TEXT written with a zone after its time of day — Z, an offset or a zone name: the
+// instant it names, as BigQuery reads it. DuckDB's own TIMESTAMP cast drops an offset.
+const ZONED_TEXT = '.*[0-9]:[0-9]{1,2}:[0-9]{1,2}([.][0-9]*)?(z|[+-].+| .+)';
+// The whitespace a text read as a flag or a moment is trimmed of: ONE set on both warehouses (DuckDB's
+// trim() alone removes spaces only, BigQuery's TRIM() every Unicode whitespace character) — space, tab,
+// newline, vertical tab, form feed, carriage return.
+const BLANK = "(' ' || chr(9) || chr(10) || chr(11) || chr(12) || chr(13))";
 
 /** A JSON path to one key: `$."key"` (the key is a validated identifier). */
 const keyPath = (key) => `'$."${key}"'`;
@@ -48,11 +61,11 @@ export class DuckDBDialect extends Dialect {
   jsonArrayLength(column, key) {
     this.ident(key);
     // A payload key is not typed: on some rows it may hold a scalar where others hold an array.
-    // Not an array → NULL, which reads as "no array here" everywhere this is used.
-    return this._whenJson(column, `json_array_length(${column}, ${keyPath(key)})`, `json_type(${column}, ${keyPath(key)}) = 'ARRAY'`);
+    // Not an array (absent, a scalar, a row that holds no JSON) → no array here: length 0.
+    return `COALESCE(${this._whenJson(column, `json_array_length(${column}, ${keyPath(key)})`, `json_type(${column}, ${keyPath(key)}) = 'ARRAY'`)}, 0)`;
   }
 
-  // Element count of a native LIST column (an empty list is 0, NULL stays 0 as on the other side).
+  // Element count of a native LIST column (an empty list is 0, a missing one 0 as on the other side).
   arrayLength(column) { return `COALESCE(len(${column}), 0)`; }
 
   // A JSON array's elements are text, as every read of one has them (json_extract_string of each): the
@@ -116,8 +129,9 @@ export class DuckDBDialect extends Dialect {
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
+  // (a value that is no JSON array — NULL, a scalar, no JSON — is a missing array: length 0)
   jsonColumnArrayLength(column) {
-    return this._whenJson(column, `json_array_length(${column})`, `json_type(${column}) = 'ARRAY'`);
+    return `COALESCE(${this._whenJson(column, `json_array_length(${column})`, `json_type(${column}) = 'ARRAY'`)}, 0)`;
   }
 
   // (its elements are text, as jsonArrayContains says)
@@ -138,7 +152,10 @@ export class DuckDBDialect extends Dialect {
 
   valueBucket(expr, buckets) { return `(hash(CAST(${expr} AS VARCHAR)) % ${Number(buckets)})`; }
 
-  secondsBetween(from, to) { return `EXTRACT(EPOCH FROM (${to} - ${from}))`; }
+  // (both read as TIMESTAMP, as dateDiff's: a DATE minus a DATE is a count of days, which has no epoch;
+  //  the exact microseconds subtracted, then divided — as BigQuery's TIMESTAMP_DIFF(…, MICROSECOND) / 1000000,
+  //  where two epochs in seconds, DOUBLEs, would read 1.2 s as 1.2000000476837158)
+  secondsBetween(from, to) { return `((epoch_us(CAST(${to} AS TIMESTAMP)) - epoch_us(CAST(${from} AS TIMESTAMP))) / 1000000)`; }
   // range() is a table of timestamps, one per day
   timeSpineSelect(start, end) { return `select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)`; }
 
@@ -151,8 +168,8 @@ export class DuckDBDialect extends Dialect {
   }
 
   // Whole 24-HOUR days between two timestamps (retention-day style): floor of the elapsed span in
-  // 24h buckets — matches BigQuery's EXTRACT(DAY FROM datetime interval), NOT calendar days.
-  // floor() (not dateDiff's trunc) puts a pre-install moment on day -1, not day 0.
+  // 24h buckets — as BigQuery's fullDaysBetween counts it (FLOOR of TIMESTAMP_DIFF in microseconds), NOT
+  // calendar days. floor() (not dateDiff's trunc) puts a pre-install moment on day -1, not day 0.
   fullDaysBetween(from, to) {
     return `CAST(FLOOR((${this._epoch(to)} - ${this._epoch(from)}) / 86400.0) AS INTEGER)`;
   }
@@ -207,14 +224,35 @@ export class DuckDBDialect extends Dialect {
 
   /** A text read as `type`: the number it holds — an integer rounded half away from zero, a numeric to
    *  NUMERIC's 9 places, a float as a double — where it is written as BigQuery reads one (NUMBER_TEXT,
-   *  FLOAT_TEXT), and missing where it holds none; as it is for a type no number is (text). The one
-   *  conversion of a text: cast's, and every typed read of JSON or an array's. */
+   *  FLOAT_TEXT), and missing where it holds none; a flag its true / false in any case; a moment as
+   *  BigQuery reads it, only in GoogleSQL's canonical form (_textMoment, MOMENT_TEXT), a date that
+   *  moment's DATE — a flag and a moment trimmed of the whitespace both warehouses trim (BLANK); as it is
+   *  for a type none of these is (text). The one conversion of a text: cast's, and every typed read of
+   *  JSON or an array's. */
   fromText(expr, type) {
+    if (isBooleanType(type)) return `(CASE lower(trim(CAST(${expr} AS VARCHAR), ${BLANK})) WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END)`;
+    if (isTimeType(type)) {
+      const moment = this._textMoment(expr);
+      return String(type).toLowerCase() === 'date' ? `CAST(${moment} AS DATE)` : moment;
+    }
     const ct = this.castType(type);
     if (!ct) return expr;
     const exact = ct === 'BIGINT' || String(type).toLowerCase() === 'numeric';
     const read = exact ? `TRY_CAST(TRY_CAST(${expr} AS ${EXACT}) AS ${ct})` : `TRY_CAST(${expr} AS DOUBLE)`;
     return `(CASE WHEN regexp_full_match(trim(CAST(${expr} AS VARCHAR)), '${exact ? NUMBER_TEXT : FLOAT_TEXT}', 'i') THEN ${read} END)`;
+  }
+
+  /** A text read as a moment, a TIMESTAMP, as BigQuery's SAFE_CAST reads it: only where it is written in
+   *  GoogleSQL's canonical form (MOMENT_TEXT — missing otherwise, as there), spelled as DuckDB's cast reads
+   *  the same moment (a T or t between the date and the time a space, a z the Z, an offset's one-digit hour
+   *  two digits); with a zone (ZONED_TEXT), the instant it names, in UTC (the epoch of a TIMESTAMPTZ, read
+   *  in no session time zone); without one, the time it says, as UTC. */
+  _textMoment(expr) {
+    const t = `trim(CAST(${expr} AS VARCHAR), ${BLANK})`;
+    const spaced = `regexp_replace(${t}, '^([0-9]{4}-[0-9]{1,2}-[0-9]{1,2})[Tt]', '\\1 ')`;
+    const zulu = `regexp_replace(${spaced}, '([0-9])z$', '\\1Z')`;
+    const n = `regexp_replace(${zulu}, '(:[0-9]{1,2}([.][0-9]*)?)([+-])([0-9])(:[0-9]{2})?$', '\\1\\30\\4\\5')`;
+    return `(CASE WHEN NOT regexp_full_match(${t}, '${MOMENT_TEXT}', 'i') THEN NULL WHEN regexp_full_match(${t}, '${ZONED_TEXT}', 'i') THEN make_timestamp(epoch_us(TRY_CAST(${n} AS TIMESTAMPTZ))) ELSE TRY_CAST(${n} AS TIMESTAMP) END)`;
   }
 
   substringExpr(expr, start, len) { return `substring(${expr}, ${Number(start)}${len != null ? `, ${Number(len)}` : ''})`; }

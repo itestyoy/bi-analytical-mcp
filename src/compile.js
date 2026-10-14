@@ -14,7 +14,7 @@
 import { isNumericType } from './dialects/base.js';
 import { getDialect } from './dialects/index.js';
 import { NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog.js';
-import { exprSql, conditionListSql, eachNode, isConditionCall, isAggregateCall } from './pipeline/compute.js';
+import { exprSql, conditionListSql, eachNode, isAggregateCall } from './pipeline/compute.js';
 import { refKind } from './schema/refs.js';
 import { rankFuzzy } from './fuzzy.js';
 
@@ -200,8 +200,9 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
  * A dimension is a column ({ column }: a column the catalog types as time is a time dimension, at `grain`
  * — default: the catalog's granularity for it — any other is categorical), an event property
  * ({ property }, categorical), or computed from the row ({ name, expr }: categorical, its expression
- * written by the one writer — a condition there is never missing, false where it does not hold, as a
- * compute stage stores it). What a column or a property IS comes from the catalog, never from the caller.
+ * written by the one writer — a boolean there (a condition, array_contains, a boolean column, a case of
+ * booleans …) is never missing, false where it cannot be decided, as a compute stage stores it). What a
+ * column or a property IS comes from the catalog, never from the caller.
  */
 function compileDimension(catalog, task, modelKey, decl) {
   const label = decl.label ? { label: decl.label } : {};
@@ -213,7 +214,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     checkLeaves(catalog, modelKey, decl.expr, 'dimensions.expr', `dimension '${decl.name}'`);
     const { d, opts } = modelWriter(catalog, modelKey);
     const r = attempt('dimensions.expr', () => exprSql(d, null, decl.expr, `dimension '${decl.name}'`, opts));
-    return { name: NS(task, decl.name), type: 'categorical', expr: isConditionCall(decl.expr) ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name };
+    return { name: NS(task, decl.name), type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name };
   }
   if (decl.column !== undefined) {
     if (!columns.includes(decl.column)) fail(`dimension: '${decl.column}' is not a groupable column of '${modelKey}'.${nearest(decl.column, columns)} Its groupable columns: ${columns.join(', ') || '(none)'}; a value computed from the row is { name, expr }.`, 'dimensions.column');

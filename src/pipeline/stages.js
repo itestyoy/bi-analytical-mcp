@@ -13,12 +13,24 @@
 // src/pipeline/compute.js PLACES) and passes it to the one writer.
 
 import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
-import { exprSchema, exprSql, conditionListSql, isConditionCall, mapAggregates, foldWhere } from './compute.js';
+import { exprSchema, exprSql, conditionListSql, mapAggregates, foldWhere } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
 import { METRICS_STEP } from '../schema/fields.js';
+import { isNumericType } from '../dialects/base.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+/** The refusal of a column a step would add under a name the rows already have: two columns sharing one
+ *  name are unaddressable in every later stage (one warehouse renames the second, the other refuses it). */
+const nameTaken = (at, name, what) => `${at}: the pipeline already has a column named '${name}', so ${what} under that name would leave two columns sharing one name — unaddressable in every later stage.`;
+
+/** A column a step ADDS (a compute, an unnest's element): under a name of its own, never over one the
+ *  rows have — refused as a join's attrs are. */
+function newCol(cols, name, type, at, what) {
+  if (cols.has(name)) throw new Error(`${nameTaken(at, name, what)} Choose another name.`);
+  return addCol(cols, name, type);
+}
 
 /** A stage's measures, each { name, expr } folded over the rows' groups: the SQL of each, and the type
  *  of the column it produces (what its expression yields). A name is one column: a group_by column or
@@ -31,6 +43,23 @@ function measuresSql({ d, catalog, cols, source, place }, groupBy, measures, at)
     const r = exprSql(d, cols, m.expr, `${at} measure '${m.name}'`, { context: 'aggregate', groupBy, catalog, source, place });
     return { as: m.name, expr: r.sql, type: r.type };
   });
+}
+
+/** AN UNPIVOT'S VALUE COLUMN holds every folded column's values, so it is of the one type they share (a
+ *  column holds one type, and BigQuery's UNPIVOT folds only columns of one): columns of different kinds
+ *  are refused, each named with its type. Numbers are one kind — what a number is tracked by (int,
+ *  numeric, float) does not say the warehouse's type, so the warehouse's lowering folds them through one
+ *  (BigQuery's unpivot) — and so are moments: 'time' is a DATE, a DATETIME or a TIMESTAMP, which BigQuery's
+ *  unpivot folds as TIMESTAMPs (DuckDB's UNION ALL promotes them so). A column whose type is not known
+ *  claims none, so the value column claims none either. */
+function unpivotType(cols, columns) {
+  const typed = columns.map((c) => [c, cols.get(c)?.type || 'unknown']);
+  const known = [...new Set(typed.map(([, t]) => t).filter((t) => t !== 'unknown'))];
+  if (known.length > 1 && !known.every(isNumericType)) {
+    throw new Error(`unpivot: the value column holds one type, and the folded columns hold several — ${typed.map(([c, t]) => `'${c}' ${t}`).join(', ')}. Cast them to one type first: a compute stage of each, { fn: "cast", args: [{ column }], type }, folded instead.`);
+  }
+  if (typed.some(([, t]) => t === 'unknown')) return 'unknown';
+  return known.length === 1 ? known[0] : 'numeric';
 }
 
 // ── Stage registry ───────────────────────────────────────────────────────────
@@ -64,11 +93,12 @@ export const STAGES = {
     }),
     build: ({ d, catalog, cols, source, place }, p) => {
       const { sql, type, physical } = exprSql(d, cols, p.expr, `compute '${p.name}'`, { catalog, source, place });
-      // a flag a condition computes is stored true or false: where the condition cannot be decided (a
-      // missing operand) it does not hold, as it does not hold in a where
-      const out = addCol(cols, p.name, type);
+      // a boolean it computes — a condition, array_contains, a boolean column, a case of booleans … — is
+      // stored true or false: where it cannot be decided (a missing operand, a missing array) it does not
+      // hold, as it does not hold in a where
+      const out = newCol(cols, p.name, type, `compute '${p.name}'`, 'adding the computed one');
       if (physical) out.get(p.name).physical = true; // a copy of a column is stored as that column is
-      return { op: { op: 'extend', cols: [{ name: p.name, expr: isConditionCall(p.expr) ? `COALESCE(${sql}, FALSE)` : sql }] }, cols: out };
+      return { op: { op: 'extend', cols: [{ name: p.name, expr: type === 'boolean' ? `COALESCE(${sql}, FALSE)` : sql }] }, cols: out };
     },
   },
 
@@ -126,14 +156,14 @@ export const STAGES = {
         const native = op.encoding === 'native';
         const items = native ? elementType(nativeArrayType(spec, cols.get(column)?.type)) : String(spec.type || '').toLowerCase() === 'array<struct>' ? 'struct' : 'string';
         const { read, type } = element(native, items, spec.fields);
-        return { op: { op: 'unnest', ...op, as: p.name, field: p.field, type: read }, cols: addCol(cols, p.name, type) };
+        return { op: { op: 'unnest', ...op, as: p.name, field: p.field, type: read }, cols: newCol(cols, p.name, type, `unnest '${p.name}'`, 'adding the element') };
       }
       if (leaf && e.column !== undefined && Object.keys(e).length === 1) {
         requireCol(cols, e.column);
         const t = cols.get(e.column).type;
         if (!isArrayPropertyType(t)) throw new Error(`unnest: '${e.column}' is ${t || 'not typed'}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
         const { read, type } = element(true, elementType(t));
-        return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type: read, encoding: 'native' }, cols: addCol(cols, p.name, type) };
+        return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type: read, encoding: 'native' }, cols: newCol(cols, p.name, type, `unnest '${p.name}'`, 'adding the element') };
       }
       // an expression that yields an array: computed into a working column first, exploded, and the
       // working column dropped — the columns after it are those before plus the element
@@ -141,7 +171,7 @@ export const STAGES = {
       if (r.type && !isArrayPropertyType(r.type) && r.type !== 'unknown') throw new Error(`unnest: its expr yields ${r.type}, not an array — json_parse_array makes one from a JSON text`);
       const work = `_unnest_${p.name}`;
       const { read, type } = element(true, elementType(r.type));
-      const out = addCol(cols, p.name, type);
+      const out = newCol(cols, p.name, type, `unnest '${p.name}'`, 'adding the element');
       return {
         ops: [
           { op: 'extend', cols: [{ name: work, expr: r.sql }] },
@@ -267,7 +297,7 @@ export const STAGES = {
         if (cols.has(a.as)) {
           const isKey = onKeys ? onKeys.right.some((k) => k.column === a.column) : on.includes(a.column);
           throw new Error(
-            `join '${p.with}' attrs: the pipeline already has a column named '${a.as}', so exposing '${p.with}'.${a.column} under that name would leave two columns sharing one name — unaddressable in every later stage.`
+            nameTaken(`join '${p.with}' attrs`, a.as, `exposing '${p.with}'.${a.column}`)
             + (isKey
               ? ` '${a.column}' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs.`
               : ` The two hold different data, so rename the joined one: { column: '${a.column}', name: '${p.with}_${a.column}' }.`),
@@ -390,7 +420,7 @@ export const STAGES = {
   unpivot: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_column', 'value_column'],
-      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too). The result is exactly `keep` + those two columns; every other column is dropped. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
+      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too) — so the folded columns are of one type (numbers alike; cast the others first). The result is exactly `keep` + those two columns; every other column is dropped. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { enum: ['unpivot'] },
         columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Columns to fold into rows.' },
@@ -409,8 +439,11 @@ export const STAGES = {
       const out = new Map();
       for (const k of keep) out.set(k, cols.get(k) || { type: 'string' });
       out.set(p.name_column, { type: 'string' });
-      out.set(p.value_column, { type: 'numeric' });
-      return { op: { op: 'unpivot', keep, columns: p.columns, nameColumn: p.name_column, valueColumn: p.value_column }, cols: out };
+      out.set(p.value_column, { type: unpivotType(cols, p.columns) });
+      // each folded column's type, as far as it is known: the lowering folds numbers through one type where
+      // the warehouse folds only columns of one (BigQuery's UNPIVOT)
+      const types = p.columns.map((c) => cols.get(c)?.type || 'unknown');
+      return { op: { op: 'unpivot', keep, columns: p.columns, types, nameColumn: p.name_column, valueColumn: p.value_column }, cols: out };
     },
   },
 

@@ -8,87 +8,15 @@
 // boundaries inside MetricFlow-generated SQL is out of scope.)
 
 import { ToolError } from './validate.js';
+import { localToUtc, momentMs, hasOffset } from './moment.js';
+
+// (the moment's own reading lives in a leaf module, ./moment.js: these are re-exported for the window's callers)
+export { localToUtc, momentMs };
 
 /** True if `tz` is a valid IANA timezone name. */
 export function isValidTimezone(tz) {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 }
-
-/** Offset (ms) of timezone `tz` vs UTC at the given UTC instant (whole seconds: a zone's offset has none). */
-function tzOffsetMs(tz, atUtc) {
-  const dtf = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  });
-  const p = Object.fromEntries(dtf.formatToParts(atUtc).map((x) => [x.type, x.value]));
-  const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
-  // the parts carry no milliseconds, so neither may the instant they are compared with
-  return asUtc - Math.floor(atUtc.getTime() / 1000) * 1000;
-}
-
-// 'YYYY-MM-DD[( |T)HH:mm[:ss[.fff]]][Z|±hh[:]mm]' — the one spelling of a moment every window takes
-const MOMENT_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:?\d{2})?)?$/;
-
-/**
- * A moment, read strictly: { ms, offset } — its components taken literally as UTC (ms), and its own
- * offset when it carries one (minutes east of UTC; null for a wall-clock reading) — or null when it is
- * no moment at all: a day the month does not have, an hour past 23, a minute past 59 are refused, never
- * rolled over into the next day.
- */
-function parseMoment(value) {
-  const m = MOMENT_RE.exec(String(value));
-  if (!m) return null;
-  const [y, mo, d, h = 0, mi = 0, sec = 0] = [m[1], m[2], m[3], m[4], m[5], m[6]].map((x) => (x === undefined ? undefined : +x));
-  const ms = m[7] ? Math.floor(Number(`0.${m[7]}`) * 1000) : 0;
-  const t = Date.UTC(y, mo - 1, d, h, mi, sec, ms);
-  const back = new Date(t);
-  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d || back.getUTCHours() !== h || back.getUTCMinutes() !== mi || back.getUTCSeconds() !== sec) return null;
-  let offset = null;
-  if (m[8]) {
-    if (m[8] === 'Z') offset = 0;
-    else {
-      const [, sign, oh, om] = /^([+-])(\d{2}):?(\d{2})$/.exec(m[8]);
-      if (+oh > 23 || +om > 59) return null;
-      offset = (sign === '-' ? -1 : 1) * (+oh * 60 + +om);
-    }
-  }
-  return { ms: t, offset };
-}
-
-const fmtUtc = (ms) => {
-  const d = new Date(ms);
-  const pad = (n, w = 2) => String(n).padStart(w, '0');
-  const frac = d.getUTCMilliseconds() ? `.${pad(d.getUTCMilliseconds(), 3)}` : '';
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${frac}`;
-};
-
-/**
- * A moment as the UTC instant 'YYYY-MM-DD HH:mm:ss[.fff]' the warehouse stores: one carrying its own
- * offset (Z, ±hh:mm) is that instant whatever the zone; a wall-clock one is read in `tz` (two passes
- * of the offset lookup settle DST edges) — or, with no `tz`, as UTC already. Null when it is no moment.
- */
-export function localToUtc(value, tz) {
-  const p = parseMoment(value);
-  if (!p) return null;
-  if (p.offset !== null) return fmtUtc(p.ms - p.offset * 60000);
-  if (!tz) return fmtUtc(p.ms);
-  const naive = p.ms;
-  let guess = naive - tzOffsetMs(tz, new Date(naive));
-  guess = naive - tzOffsetMs(tz, new Date(guess)); // second pass settles DST edges
-  return fmtUtc(guess);
-}
-
-/**
- * A moment as epoch milliseconds — one with an offset of its own at that instant, a wall-clock one read
- * as UTC (what resolveTimeRange's bounds are). Null when it is no moment.
- */
-export function momentMs(value) {
-  const p = parseMoment(value);
-  return p ? p.ms - (p.offset ?? 0) * 60000 : null;
-}
-
-/** Whether a moment carries its own offset (Z, ±hh:mm): an instant, not a wall-clock reading. */
-const hasOffset = (v) => parseMoment(v)?.offset != null;
 
 export const isDateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
@@ -150,7 +78,7 @@ export function resolveTimeRange(tr) {
   // scan the whole history and report it as the window asked for
   const at = (v, which) => {
     const utc = localToUtc(v, timezone);
-    if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh:mm)`, { stage: 'validate', field: `time_range.${which}` });
+    if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh[:mm])`, { stage: 'validate', field: `time_range.${which}` });
     return utc;
   };
   if (!timezone) {

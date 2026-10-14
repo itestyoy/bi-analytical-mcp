@@ -59,7 +59,7 @@
 //                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
-import { partitionConditions } from './time-range.js';
+import { partitionConditions, localToUtc, resolveTimeRange } from './time-range.js';
 import { physicalColumnType, groundedType } from './catalog/column-types.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { comparisonOf } from './pipeline/compute.js';
@@ -169,6 +169,10 @@ export function columnList(columns) {
  * axis stays the exact bound; the new condition only lets the warehouse skip the other days. The
  * rows are the source's while every stage before the `where` declares `keepsSourceRows` (its rows
  * are source rows — a subset, perhaps with columns added — not groups or reshaped ones).
+ * The days are the warehouse clock's (UTC), as a window's bound is read with no timezone
+ * (resolveTimeRange): a constant with a time and an offset of its own (Z, ±hh[:mm]) is the UTC instant it
+ * is, so '2024-01-05T02:00:00+05:00' touches 2024-01-04; a date, or a date-time without one, stands as
+ * written; what is no moment (localToUtc: null) is left as it is.
  */
 function boundPartitions(m, stages, cols, ctx = {}) {
   const time = m.time?.column; const part = m.partition_column;
@@ -187,7 +191,7 @@ function boundPartitions(m, stages, cols, ctx = {}) {
     for (const c of cur.conditions || []) {
       const cmp = comparisonOf(c);
       if (cmp?.subject.column !== time || cmp.values.some((v) => v === null)) continue;
-      const [v, w] = cmp.values;
+      const [v, w] = cmp.values.map((x) => (localToUtc(x) == null ? x : resolveTimeRange({ start: x }).start));
       const b = cmp.op === 'gte' || cmp.op === 'gt' ? { start: v }
         : cmp.op === 'lt' ? { endExclusive: v }
           : cmp.op === 'lte' ? { end: v }

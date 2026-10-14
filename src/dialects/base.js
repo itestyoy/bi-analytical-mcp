@@ -19,22 +19,61 @@ export function isTimeType(type) {
   return TIME_TYPES.has(String(type || '').toLowerCase());
 }
 
-/** A safe SQL literal — written the same way by every dialect. */
-export function sqlLiteral(value) {
+/** A literal of `value`, its text quoted by `quote` (the warehouse's own string syntax). */
+function literal(value, quote) {
   if (value === null || value === undefined) return 'NULL';
   if (typeof value === 'number') return String(value);
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  const s = String(value);
+  // DuckDB's parser ends a string at a NUL and BigQuery's CHR(0) is empty: no SQL says it alike
+  if (s.includes('\0')) throw new Error(`the text constant ${JSON.stringify(s)} holds a NUL character (U+0000), which no warehouse reads alike in SQL — leave it out of the constant`);
   // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
-  return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
+  return inertLiteral(s, quote);
+}
+
+// The characters the warehouses quote DIFFERENTLY: a quote (DuckDB doubles it, BigQuery escapes it with a
+// backslash), a backslash (an escape on BigQuery, a plain character on DuckDB) and a control character
+// (a newline cannot stand in a BigQuery quoted string).
+const UNEVEN = /['\\\x00-\x1f]/;
+
+/** A text quoted as both warehouses read it alike: a plain quoted string where it holds none of the UNEVEN
+ *  characters, each of those otherwise CHR(code) — a function both name alike — joined to the rest by ||. */
+function portableText(s) {
+  if (!UNEVEN.test(s)) return `'${s}'`;
+  const parts = [];
+  let run = '';
+  for (const ch of s) {
+    if (!UNEVEN.test(ch)) { run += ch; continue; }
+    if (run) parts.push(`'${run}'`);
+    run = '';
+    parts.push(`CHR(${ch.codePointAt(0)})`);
+  }
+  if (run) parts.push(`'${run}'`);
+  return `(${parts.join(' || ')})`;
+}
+
+/**
+ * A safe SQL literal for a writer that does not know which warehouse it writes for: the same text reads
+ * as the same value on every dialect. A writer that holds its dialect writes `dialect.sqlLiteral`, the
+ * warehouse's own string syntax.
+ */
+export function sqlLiteral(value) {
+  return literal(value, portableText);
 }
 
 export class Dialect {
   /* eslint-disable class-methods-use-this */
   get name() { throw new Error('abstract'); }
 
-  /** A safe SQL string/number/boolean literal (shared across dialects). */
+  /** A safe SQL string/number/boolean literal, its text in this warehouse's string syntax (quoteText). */
   sqlLiteral(value) {
-    return sqlLiteral(value);
+    return literal(value, (s) => this.quoteText(s));
+  }
+
+  /** A text as a standard SQL string: a quote doubled, every other character (a backslash, a newline)
+   *  as it is. */
+  quoteText(s) {
+    return `'${s.replace(/'/g, "''")}'`;
   }
 
   /** Validate a SQL identifier (column/alias/json key) — guards injection. */
@@ -99,7 +138,9 @@ export class Dialect {
    * "what is it NOW" question is about.
    */
   validityWindow(value, from, to) {
-    return `${value} >= ${from} AND (${to} IS NULL OR ${value} <= ${to})`;
+    // compared as moments: the bounds may be DATEs and the row's time a TIMESTAMP (timeOperand)
+    const [v, f, t] = [value, from, to].map((x) => this.timeOperand(x));
+    return `${v} >= ${f} AND (${to} IS NULL OR ${v} <= ${t})`;
   }
 
   /**
@@ -148,6 +189,9 @@ export class Dialect {
   // ── Abstract primitives (per-dialect) ──────────────────────────────────────
   castType(_type) { throw new Error('abstract castType'); }
   jsonExtract(_column, _key, _type) { throw new Error('abstract jsonExtract'); }
+  // An array's length is 0 where there is no array — a NULL, an absent key, a value that is no array —
+  // in every form (a native array, a JSON column, a key of the payload, a parsed JSON array), alike on
+  // every warehouse.
   jsonArrayLength(_column, _key) { throw new Error('abstract jsonArrayLength'); }
   arrayLength(_column) { throw new Error('abstract arrayLength'); }
   jsonArrayContains(_column, _key, _value) { throw new Error('abstract jsonArrayContains'); }
@@ -169,18 +213,20 @@ export class Dialect {
   /** The WHOLE `unit`s (day|hour|minute|second) elapsed from fromExpr to toExpr, truncated toward
    *  zero (an hour and 59 minutes is 1 hour; signed), as an integer — the same count on every warehouse. */
   dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
-  /** The seconds from one timestamp to another, as a number (a funnel's time between steps). */
+  /** The seconds from one moment to another (a date or a timestamp), as a number with the fraction of a
+   *  second (a funnel's time between steps). */
   secondsBetween(_fromExpr, _toExpr) { throw new Error('abstract secondsBetween'); }
   /** The body of the daily time spine MetricFlow needs: one `date_day` per day, start..end inclusive. */
   timeSpineSelect(_start, _end) { throw new Error('abstract timeSpineSelect'); }
   /** A stable bucket in [0, buckets) for a value — the same value always lands in the same bucket,
    *  on every run: a deterministic sample of users is `bucket < share * buckets`. */
   valueBucket(_expr, _buckets) { throw new Error('abstract valueBucket'); }
-  /** Whole 24-HOUR days between two timestamps (retention-day: floor of the span in 24h buckets,
-   *  NOT calendar days). Signed; the caller clamps negatives / coalesces NULLs. */
+  /** Whole 24-HOUR days between two moments (retention-day: FLOOR of the span in 24h buckets, so a
+   *  moment before `from` is day -1, NOT calendar days). Signed; the caller clamps negatives / coalesces
+   *  NULLs. */
   fullDaysBetween(_fromExpr, _toExpr) { throw new Error('abstract fullDaysBetween'); }
-  /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). A week is the ISO
-   *  week, starting on Monday, on every warehouse (as MetricFlow's week is). */
+  /** Truncate a moment (a date, a datetime or a timestamp) to a granularity (day|week|month|quarter|year),
+   *  as a timestamp. A week is the ISO week, starting on Monday, on every warehouse (as MetricFlow's week is). */
   dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
 
   /**
@@ -190,9 +236,11 @@ export class Dialect {
    * the caller's own explicit truncation.
    */
   grainExpr(granularity, expr) { return this.dateTrunc(granularity, expr); }
-  /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number — dow the ISO
-   *  day of the week (Monday 1 … Sunday 7), week the ISO week number, on every warehouse. */
-  datePart(_part, _expr) { throw new Error('abstract datePart'); }
+  /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) of a moment (a date, a datetime or
+   *  a timestamp) as a number — dow the ISO day of the week (Monday 1 … Sunday 7), week the ISO week
+   *  number, on every warehouse. `type`: the value's tracked type where it is known (a time_of_day has
+   *  its hour alone). */
+  datePart(_part, _expr, _type) { throw new Error('abstract datePart'); }
   /** Current timestamp. */
   nowExpr() { throw new Error('abstract nowExpr'); }
   /** A moment as compared with another expression: one where a date and a timestamp do not meet as they are. */
@@ -205,8 +253,11 @@ export class Dialect {
    *  ('unknown', null), the value is read as its text (a flag's true / false as 1 / 0). */
   castExpr(_expr, _type, _from) { throw new Error('abstract castExpr'); }
   /** A text read as a type word: the number it holds where it is written as a number (an int rounded half
-   *  away from zero, a numeric to 9 places), missing where it holds none; as it is for text. The one
-   *  conversion of a text — cast's, and every typed read of JSON or an array's. */
+   *  away from zero, a numeric to 9 places); a boolean where it says true or false (in any case, around
+   *  spaces); a moment where it is written as one (a date, a timestamp — with a zone, the instant it
+   *  names; without, UTC — a timestamp read as a TIMESTAMP, a date as the DATE of that moment); missing
+   *  where it holds none of these; as it is for text. The one conversion of a text — cast's, and every
+   *  typed read of JSON or an array's. */
   fromText(_expr, _type) { throw new Error('abstract fromText'); }
   /** The dbt config keys that make a table this server builds expire `days` after it is (re)built,
    *  for a model in `language` ('sql': its config() line | 'python': its YAML config): {} where the

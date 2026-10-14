@@ -24,7 +24,7 @@
 
 import { GRAINS, TASK_MEASURE_AGGS } from '../catalog.js';
 import { isNumericType, isTimeType } from '../dialects/base.js';
-import { isArrayPropertyType, arrayColumnType, elementType, nativeArrayType } from '../catalog/column-types.js';
+import { isArrayPropertyType, arrayColumnType, elementType, nativeArrayType, isBooleanType } from '../catalog/column-types.js';
 // (sql.js is read when a function runs, never as this module loads)
 import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, sourceProp, partitionItem, partitionColumn } from './sql.js';
 import { OPS, predicateSql, typedValue } from '../conditions.js';
@@ -82,7 +82,7 @@ const params = (catalog, { ref, entities = true }) => ({
   grain: { enum: GRAINS, description: 'The time bucket to truncate to (a week starts on Monday, the ISO week).' },
   part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
-  sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
+  sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). It is one expression: no ; or comment, a text with one in `args` as { value }. E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
   else: { $ref: ref, description: 'The value when no branch holds (default NULL — under an aggregate, the rows it leaves out). Under count / count_distinct leave it out: count would count those rows, count_distinct their else value as one more.' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
@@ -107,6 +107,15 @@ function commonType(types, fallback) {
   if (typed.every(isNumericType)) return 'numeric';
   if (typed.every(isTimeType)) return 'time';
   return 'unknown';
+}
+
+/** The texts of `parts` ({ sql, type?, declared? }) one after another, missing where any of them is
+ *  missing — SQL's ||, on every warehouse (DuckDB's concat() would skip a NULL, BigQuery's returns one);
+ *  a part that is not known to be text read as its text by the dialect's cast (BigQuery's || takes text
+ *  alone). The one writer of a concatenation: concat's, and the eventstream's keys. */
+export function concatSql(d, parts) {
+  const texts = parts.map((x) => (x.type === 'string' && !x.declared ? x.sql : d.castExpr(x.sql, 'string', x.type)));
+  return texts.length === 1 ? texts[0] : `(${texts.join(' || ')})`;
 }
 
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
@@ -177,17 +186,35 @@ function propertyRead(kind, { d, cols, catalog, source, property, field, item, a
     return { sql: d.arrayContains(flat, typedValue(elementType(arrayType), item, `an element of '${property}'`)), type: 'boolean' };
   }
   if (field !== undefined) return { sql: flat ? d.jsonColumnStructField(flat, field) : d.jsonStructField(payload, key, field), type: 'string' };
-  // a scalar in its own column holds what the catalog declares; a payload key is extracted as that type —
-  // or, read by a cast (`as`), as the type cast to: the payload's text converted once, by the dialect's
-  // one conversion of a text, not the declared type's value converted again (3 read as text is '3', not
-  // '3.0'). An array is what it is stored as: a native one an array of its items, JSON text otherwise —
-  // a payload key's read as its JSON (a read of the key's text takes only a scalar on BigQuery)
+  // a scalar in its own column holds what the catalog declares (the column itself: a text one holding a
+  // flag is compared as one, as a { column } of it is); a payload key is extracted as that type — or, read
+  // by a cast (`as`), as the type cast to: the payload's text converted once, by the dialect's one
+  // conversion of a text (fromText: a number, a flag, a moment), not the declared type's value converted
+  // again (3 read as text is '3', not '3.0') — but a flag cast to a number is its 1 / 0, cast's own rule
+  // for a flag: read as the flag, which cast converts; a type that conversion does not make is not
+  // claimed: the key's text. An array is what it is stored as: a native one an array of its items, JSON
+  // text otherwise — a payload key's read as its JSON (a read of the key's text takes only a scalar on BigQuery)
   if (array && !flat) return { sql: d.jsonExtractJson(payload, key), type: 'string' };
   const type = !array ? propertyType(spec) : native ? arrayType : 'string';
-  if (flat) return { sql: flat, type };
-  if (as) return { sql: d.jsonExtract(payload, key, as), type: as, readAs: as };
-  return { sql: d.jsonExtract(payload, key, type), type };
+  // a scalar's own column, where it is tracked here, is read as that column is — its type (the
+  // warehouse's once it was asked: a BOOLEAN column is a flag, a VARCHAR one holding a flag text) and its
+  // mark — exactly as a { column } of it
+  const backing = flat && !array ? cols?.get(spec.column) : null;
+  if (backing && backing.type && backing.type !== 'unknown') return { sql: flat, type: backing.type, ...(backing.physical ? { physical: true } : {}) };
+  if (flat) return { sql: flat, type: tracked(type) };
+  const castTo = as !== undefined && !(isBooleanType(type) && isNumericType(as)) ? as : undefined;
+  const read = textConverts(castTo ?? type) ? castTo ?? type : 'string';
+  return { sql: d.jsonExtract(payload, key, read), type: tracked(read), ...(castTo !== undefined ? { readAs: read } : {}) };
 }
+
+/** Whether a text is converted to `type` by the dialect's one conversion of a text (fromText): a number,
+ *  a flag, a moment — any other type is the text as it is. */
+const textConverts = (type) => isNumericType(type) || isBooleanType(type) || isTimeType(type);
+
+/** A declared type in the words a value is tracked by — a flag `boolean` (bool, BOOLEAN …), a moment
+ *  `time` (date, timestamp …), as a column of either is: what the conditions and a compute stage test.
+ *  The read itself is told the declared word (a date is read as a DATE, a timestamp as a TIMESTAMP). */
+const tracked = (type) => (isBooleanType(type) ? 'boolean' : isTimeType(type) ? 'time' : type);
 
 /** The type a property's value is read as: the catalog's declared type, text where it declares none. */
 const propertyType = (spec) => spec?.type || 'string';
@@ -235,7 +262,7 @@ function aggregateType(fn, argType) {
 
 const condition = (op, args, title) => ({
   kind: 'condition', args, title,
-  sql: ({ d, r, opts }) => ({ expr: predicateSql(op, r, { timeOperand: (x) => d.timeOperand(x), castToConstant: !!opts.castToConstant, dialect: d.name }), type: 'boolean' }),
+  sql: ({ d, r, opts }) => ({ expr: predicateSql(op, r, { timeOperand: (x) => d.timeOperand(x), castToConstant: !!opts.castToConstant, dialect: d }), type: 'boolean' }),
 });
 
 const aggregate = (fn, { args = 1, title, needs } = {}) => ({
@@ -271,7 +298,7 @@ export const FNS = {
   coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
   least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
   greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `greatest(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
-  concat: { args: { min: 1 }, sql: ({ a }) => ({ expr: `concat(${a.join(', ')})`, type: 'string' }) },
+  concat: { args: { min: 1 }, sql: ({ d, r }) => ({ expr: concatSql(d, r), type: 'string' }) },
   // the dialect's one conversion, told what the value is where it is known: a number, a flag or a text
   // converts to int alike on every warehouse — the number it holds, rounded half away from zero. A raw's
   // type is the caller's word for what its SQL yields, never checked: it converts as a value of no known
@@ -293,7 +320,13 @@ export const FNS = {
   array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: elementType(t[0]) }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
   date_trunc: { args: 1, needs: ['grain'], sql: ({ d, a, p }) => ({ expr: d.dateTrunc(p.grain, a[0]), type: 'time' }) },
-  date_part: { args: 1, needs: ['part'], sql: ({ d, a, p }) => ({ expr: d.datePart(p.part, a[0]), type: 'int' }) },
+  // (a time of day has its hour alone: no date, so no day, week, month, quarter, year, doy or dow)
+  date_part: {
+    args: 1, needs: ['part'], sql: ({ d, a, t, p, at }) => {
+      if (t[0] === 'time_of_day' && p.part !== 'hour') throw new Error(`${at} date_part: its argument is a time of day, which has an hour and no date — part '${p.part}' needs a date or a timestamp`);
+      return { expr: d.datePart(p.part, a[0], t[0]), type: 'int' };
+    },
+  },
   // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h buckets,
   // NOT calendar days. Default clamp_zero folds negatives (pre-`from` events) AND NULLs (e.g. a
   // missing install_date on a left join) to 0, so the result is a clean day 0+.
@@ -469,8 +502,6 @@ const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 export const isWindowCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '') && (kindOf(e.fn) === 'window' || (kindOf(e.fn) === 'aggregate' && e.over !== undefined));
 /** Whether an expression calls an aggregate that folds rows (an aggregate with no `over`). */
 export const isAggregateCall = (e) => isObj(e) && Object.hasOwn(FNS, e.fn ?? '') && kindOf(e.fn) === 'aggregate' && e.over === undefined;
-/** Whether an expression is a condition or a logic function — a boolean by what it is. */
-export const isConditionCall = (e) => isObj(e) && (CONDITION_FNS.includes(e.fn) || LOGIC_FNS.includes(e.fn));
 
 // ── The leaves, as the schema offers them ────────────────────────────────────────────────────────────
 /** { column } — a column of the rows here (checked when built, with the columns there are). */

@@ -2,10 +2,17 @@
 // syntax (FROM ... |> WHERE ... |> AGGREGATE ... |> UNPIVOT ...).
 // https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/pipe-syntax
 
-import { Dialect, isNumericType } from './base.js';
+import { Dialect, isNumericType, isTimeType } from './base.js';
 import { isBooleanType } from '../catalog/column-types.js';
 
 const CASTS = { int: 'INT64', integer: 'INT64', bigint: 'INT64', numeric: 'NUMERIC', float: 'FLOAT64', double: 'FLOAT64' };
+// A GoogleSQL quoted string's escapes: the backslash is its escape character (a doubled quote is no
+// escape there), and a quoted string holds no newline.
+const ESCAPES = { '\\': '\\\\', "'": "\\'", '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+// The whitespace a text read as a flag or a moment is trimmed of: ONE set on both warehouses (BigQuery's
+// TRIM() alone removes every Unicode whitespace character, DuckDB's trim() spaces only) — space, tab,
+// newline, vertical tab, form feed, carriage return.
+const BLANK_CHARS = ' \t\n\v\f\r';
 
 
 export class BigQueryDialect extends Dialect {
@@ -15,6 +22,13 @@ export class BigQueryDialect extends Dialect {
   }
 
   get name() { return 'bigquery'; }
+
+  /** A text as a GoogleSQL quoted string: a backslash, a quote, a newline, a carriage return and a tab
+   *  escaped by a backslash, any other control character as \xHH — so the text is the value, whatever
+   *  it holds. */
+  quoteText(s) {
+    return `'${s.replace(/[\\'\x00-\x1f]/g, (c) => ESCAPES[c] ?? `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)}'`;
+  }
 
   /** A pipeline is lowered to BigQuery's pipe syntax (FROM … |> …), which dbt's own SQL parser (dbt v2) does not read. */
   get writesPipeSyntax() { return true; }
@@ -53,9 +67,18 @@ export class BigQueryDialect extends Dialect {
    *  rounded half away from zero ('9.99' → 10, '2.5' → 3 — SAFE_CAST('9.99' AS INT64) alone is NULL, as is
    *  '3.0'), a numeric or a float as itself; as it is for a type no number is (text). NUMERIC rather than
    *  BIGNUMERIC: it takes what DuckDB's DECIMAL(38,9) takes (an exponent, '1e3'), at the same precision
-   *  and scale; what is no numeric literal here ('1_000', '0x1F') DuckDB's side refuses alike. The one
-   *  conversion of a text: cast's, and every typed read of JSON or an array's. */
+   *  and scale; what is no numeric literal here ('1_000', '0x1F') DuckDB's side refuses alike. A flag is
+   *  its true / false in any case; a moment BigQuery's own reading of the text as a TIMESTAMP (UTC unless
+   *  it names a zone) — its canonical form, which DuckDB's side reads alone (MOMENT_TEXT there) — a date
+   *  that moment's DATE; a flag and a moment trimmed of the whitespace both warehouses trim (BLANK_CHARS).
+   *  The one conversion of a text: cast's, and every typed read of JSON or an array's. */
   fromText(expr, type) {
+    const blank = this.quoteText(BLANK_CHARS);
+    if (isBooleanType(type)) return `(CASE LOWER(TRIM(${expr}, ${blank})) WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END)`;
+    if (isTimeType(type)) {
+      const moment = `SAFE_CAST(TRIM(${expr}, ${blank}) AS TIMESTAMP)`;
+      return String(type).toLowerCase() === 'date' ? `DATE(${moment})` : moment;
+    }
     const ct = this.castType(type);
     if (!ct) return expr;
     return ct === 'INT64' ? `SAFE_CAST(SAFE_CAST(${expr} AS NUMERIC) AS INT64)` : `SAFE_CAST(${expr} AS ${ct})`;
@@ -66,13 +89,15 @@ export class BigQueryDialect extends Dialect {
     return this.fromText(`JSON_VALUE(${column}, '$.${key}')`, type);
   }
 
+  // (JSON_QUERY_ARRAY is NULL where the key is absent or holds no array: a missing array, length 0)
   jsonArrayLength(column, key) {
     this.ident(key);
-    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$.${key}'))`;
+    return `COALESCE(ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$.${key}')), 0)`;
   }
 
-  // Element count of a native REPEATED column (0 for empty; a REPEATED column is never NULL).
-  arrayLength(column) { return `ARRAY_LENGTH(${column})`; }
+  // Element count of a native array (0 for empty). A REPEATED column is never NULL, but an array an
+  // expression yields may be (a parsed JSON array of a NULL text): a missing array, length 0.
+  arrayLength(column) { return `COALESCE(ARRAY_LENGTH(${column}), 0)`; }
 
   // A JSON array's elements are text (JSON_VALUE_ARRAY reads each so): the value looked for is its text too.
   jsonArrayContains(column, key, value) {
@@ -134,9 +159,9 @@ export class BigQueryDialect extends Dialect {
   // ── column-level complex primitives (a flattened payload column, no blob) ──
   jsonColumnArrayLength(column) {
     // JSON_QUERY_ARRAY reads a JSON-typed column and a STRING holding JSON alike, and yields NULL
-    // when the value is not an array — so a row whose value is a scalar counts as absent instead of
-    // failing the query. (DuckDB needs an explicit guard for the same thing; see its dialect.)
-    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`;
+    // when the value is not an array — so a row whose value is a scalar counts as absent (length 0)
+    // instead of failing the query. (DuckDB needs an explicit guard for the same thing; see its dialect.)
+    return `COALESCE(ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$')), 0)`;
   }
 
   jsonColumnArrayContains(column, value) {
@@ -164,7 +189,8 @@ export class BigQueryDialect extends Dialect {
   }
   valueBucket(expr, buckets) { return `MOD(ABS(FARM_FINGERPRINT(CAST(${expr} AS STRING))), ${Number(buckets)})`; }
 
-  secondsBetween(from, to) { return `TIMESTAMP_DIFF(${to}, ${from}, SECOND)`; }
+  // the span to the microsecond, in seconds, as DuckDB's epoch difference has it (SECOND would truncate)
+  secondsBetween(from, to) { return `(TIMESTAMP_DIFF(${this.timeOperand(to)}, ${this.timeOperand(from)}, MICROSECOND) / 1000000)`; }
   timeSpineSelect(start, end) { return `select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d`; }
 
   // TIMESTAMP_DIFF counts the whole units elapsed, truncated toward zero (a DAY is 24 hours, not a
@@ -175,20 +201,20 @@ export class BigQueryDialect extends Dialect {
     return `TIMESTAMP_DIFF(${this.timeOperand(to)}, ${this.timeOperand(from)}, ${u})`;
   }
 
-  // Whole 24-HOUR days between two timestamps (retention-day style) — the DAY component of the
-  // datetime interval equals div(total_hours, 24), i.e. genuine 24h buckets with NO month
-  // normalization and NOT calendar-day boundaries. Signed (negative before `from`); the caller
-  // clamps/coalesces.
+  // Whole 24-HOUR days between two moments (retention-day style), as DuckDB counts them: the FLOOR of
+  // the span (to the microsecond) in 24h buckets — NOT calendar days, and a moment before `from` is day
+  // -1, not 0 (an interval's DAY part truncates toward zero). Signed; the caller clamps/coalesces.
   fullDaysBetween(from, to) {
-    return `EXTRACT(DAY FROM (CAST(${to} AS DATETIME) - CAST(${from} AS DATETIME)))`;
+    return `CAST(FLOOR(TIMESTAMP_DIFF(${this.timeOperand(to)}, ${this.timeOperand(from)}, MICROSECOND) / 86400000000) AS INT64)`;
   }
 
   // A week is the ISO week, starting on Monday (BigQuery's WEEK starts on Sunday) — the week DuckDB
-  // truncates to and MetricFlow's BigQuery renderer writes (`isoweek`)
+  // truncates to and MetricFlow's BigQuery renderer writes (`isoweek`). The moment is read as a
+  // TIMESTAMP (timeOperand): TIMESTAMP_TRUNC has no DATE or DATETIME overload.
   dateTrunc(granularity, expr) {
     const g = { day: 'DAY', week: 'ISOWEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);
-    return `TIMESTAMP_TRUNC(${expr}, ${g})`;
+    return `TIMESTAMP_TRUNC(${this.timeOperand(expr)}, ${g})`;
   }
 
   // A join key's column type is not declared, and GoogleSQL has no DATE overload for
@@ -202,12 +228,15 @@ export class BigQueryDialect extends Dialect {
   }
 
   // ISO numbering, as DuckDB's and MetricFlow's: DAYOFWEEK counts Sunday 1 … Saturday 7, renumbered to
-  // Monday 1 … Sunday 7; the week is ISOWEEK (BigQuery's WEEK starts on Sunday)
-  datePart(part, expr) {
-    if (part === 'dow') return `IF(EXTRACT(DAYOFWEEK FROM ${expr}) = 1, 7, EXTRACT(DAYOFWEEK FROM ${expr}) - 1)`;
+  // Monday 1 … Sunday 7; the week is ISOWEEK (BigQuery's WEEK starts on Sunday). The moment is read as a
+  // TIMESTAMP (timeOperand), so a DATE has an hour too (0, as on DuckDB) and every part is UTC's; a time of
+  // day (`type` time_of_day: a TIME, which no CAST makes a TIMESTAMP) is read as it is, for its hour.
+  datePart(part, expr, type = null) {
+    const m = type === 'time_of_day' ? expr : this.timeOperand(expr);
+    if (part === 'dow') return `IF(EXTRACT(DAYOFWEEK FROM ${m}) = 1, 7, EXTRACT(DAYOFWEEK FROM ${m}) - 1)`;
     const p = { hour: 'HOUR', day: 'DAY', week: 'ISOWEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR', doy: 'DAYOFYEAR' }[part];
     if (!p) throw new Error(`datePart: bad part ${part}`);
-    return `EXTRACT(${p} FROM ${expr})`;
+    return `EXTRACT(${p} FROM ${m})`;
   }
 
   nowExpr() { return 'CURRENT_TIMESTAMP()'; }
@@ -291,6 +320,32 @@ export class BigQueryDialect extends Dialect {
     return lines.join('\n');
   }
 
+  /**
+   * An unpivot's folded columns as UNPIVOT reads them (`types`: each one's tracked type). UNPIVOT folds
+   * only columns of ONE type, and INT64, NUMERIC and FLOAT64 are three, while a stage tracks every number
+   * as one kind (stages.js unpivotType): numbers whose words do not say they are one type — all int
+   * (INT64) or all float (FLOAT64) — are each read as a FLOAT64. Of the two types that could hold them,
+   * NUMERIC holds an INT64 and a NUMERIC exactly (FLOAT64 rounds them past 2^53, past ~15 significant
+   * digits), so it is the one where every folded column is one of those; but it holds no FLOAT64 past
+   * ±1e29, no NaN or ±inf (its cast would fail the query) and no digit past 9 places, and no word says a
+   * column is a NUMERIC rather than a FLOAT64 — 'numeric' is also an average, a division, a FLOAT64
+   * column — while the words that do say a type say INT64 alone where no fold is needed. FLOAT64 holds a
+   * value of every one of them: BigQuery's own supertype of a FLOAT64 and any number, and the DOUBLE
+   * DuckDB's UNION ALL lowering folds such columns to. Moments are one kind too: a stage tracks a DATE, a
+   * DATETIME and a TIMESTAMP alike ('time'), so each is read as the TIMESTAMP of its moment (timeOperand, a
+   * date its midnight) — the type DuckDB's UNION ALL promotes them to.
+   */
+  _unpivotValues(columns, types = []) {
+    const q = columns.map((c) => this.quoteIdent(c));
+    if (columns.length < 2 || types.length !== columns.length) return q;
+    if (types.every((t) => String(t).toLowerCase() === 'time')) return q.map((c) => `${this.timeOperand(c)} AS ${c}`);
+    if (!types.every(isNumericType)) return q;
+    // the one BigQuery type a word names (CASTS), but 'numeric': a number of a kind not said
+    const named = new Set(types.map((t) => (String(t).toLowerCase() === 'numeric' ? null : this.castType(t))));
+    if (named.size === 1 && !named.has(null)) return q;
+    return q.map((c, i) => `${this.castExpr(c, 'float', types[i])} AS ${c}`);
+  }
+
   _step(op) {
     switch (op.op) {
       case 'where':
@@ -340,8 +395,9 @@ export class BigQueryDialect extends Dialect {
       case 'unpivot':
         // exactly `keep` + the two produced columns, and a row for every folded value — a NULL one too
         // (UNPIVOT drops them unless told otherwise), as the UNION ALL of the CTE lowering returns — in
-        // the declared order, the name column before the value (UNPIVOT puts the value first)
-        return `|> SELECT ${[...op.keep, ...op.columns].map((c) => this.quoteIdent(c)).join(', ')}\n|> UNPIVOT INCLUDE NULLS (${this.quoteIdent(op.valueColumn)} FOR ${this.quoteIdent(op.nameColumn)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))\n|> SELECT ${[...op.keep, op.nameColumn, op.valueColumn].map((c) => this.quoteIdent(c)).join(', ')}`;
+        // the declared order, the name column before the value (UNPIVOT puts the value first); the folded
+        // columns of one type (_unpivotValues)
+        return `|> SELECT ${[...op.keep.map((c) => this.quoteIdent(c)), ...this._unpivotValues(op.columns, op.types)].join(', ')}\n|> UNPIVOT INCLUDE NULLS (${this.quoteIdent(op.valueColumn)} FOR ${this.quoteIdent(op.nameColumn)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))\n|> SELECT ${[...op.keep, op.nameColumn, op.valueColumn].map((c) => this.quoteIdent(c)).join(', ')}`;
       case 'order_by':
         return `|> ORDER BY ${op.keys.map((k) => this.orderKey(this.quoteIdent(k.key), k.direction, k.nulls)).join(', ')}`;
       case 'sample':

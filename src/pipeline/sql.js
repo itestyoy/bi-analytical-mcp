@@ -110,14 +110,15 @@ export const sourceProp = (catalog, source, name) => (source
   ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
-/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside strings, quoted
- *  names and comments); a placeholder with no argument, or an argument no placeholder uses, is refused.
- *  So is a Jinja opener anywhere in the text, strings and comments included: the SQL lands in a file
- *  dbt renders as Jinja, which would RUN it (src/jinja-inert.js) — and breaking it, as a constant's is
- *  broken, would change the SQL the caller wrote. */
+/** A raw expression's SQL with `{n}` replaced by its n-th argument's SQL (outside strings and quoted
+ *  names); a placeholder with no argument, or an argument no placeholder uses, is refused. So is a
+ *  Jinja opener anywhere in the text, strings included: the SQL lands in a file dbt renders as Jinja,
+ *  which would RUN it (src/jinja-inert.js) — and breaking it, as a constant's is broken, would change
+ *  the SQL the caller wrote. And so is anything that makes it more than ONE expression (rawCode). */
 export function fillPlaceholders(sql, args) {
-  const src = String(sql); const code = unquotedSql(src);
+  const src = String(sql);
   if (hasJinjaOpener(src)) throw new Error('pipeline: a raw expression\'s SQL may not hold {{, {% or {# — dbt renders the model as Jinja and would run it; a text holding one goes in as a constant: { value } in args, {n} in the SQL where it goes');
+  const code = rawCode(src);
   const used = new Set();
   let out = ''; let last = 0;
   for (const m of code.matchAll(/\{(\d+)\}/g)) {
@@ -159,11 +160,47 @@ export function rawNamedColumns(sql, cols, identQuote) {
   return named;
 }
 
+// QUOTED TEXT of raw SQL: strings ('…', "…" — a doubled quote inside is one) and quoted names (`…`).
+// It is where both warehouses end it once rawCode has refused the quotes they read differently.
+const QUOTED = /'(?:[^']|'')*'|"(?:[^"]|"")*"|`[^`]*`/g;
+const COMMENT = /--[^\n]*|\/\*[\s\S]*?\*\//;
+const blank = (m) => ' '.repeat(m.length);
+
 /** Raw SQL with its comments, strings ('…', "…") and quoted names (`…`) blanked to spaces of the same
- *  length: what is left is its code, at the positions it holds in the text — the one reading of raw
- *  text, for its placeholders and its OVER alike. */
+ *  length: what is left is its code, at the positions it holds in the text — the reading of raw text
+ *  for its OVER and the columns it names (its placeholders are read where it is checked: rawCode). */
 export function unquotedSql(sql) {
-  return String(sql).replace(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, (m) => ' '.repeat(m.length));
+  return String(sql).replace(new RegExp(`${COMMENT.source}|${QUOTED.source}`, 'g'), blank);
+}
+
+/**
+ * A raw expression is ONE EXPRESSION, in the parentheses the server writes around it — the one place its
+ * text is checked (fillPlaceholders). Its quoted text has to end where both warehouses end it: a backslash
+ * before a quote escapes it on BigQuery and is a character on DuckDB ('a\' is a whole text there), and
+ * three quotes in a row open a text on BigQuery and are an escaped quote on DuckDB — both refused. Its
+ * code (the text with the quoted text blanked) then holds no statement end (;), no comment (--, #, /*,
+ * *\/), no $ (DuckDB's $$ opens a text), no quote that does not close and no parenthesis that does not
+ * balance: else '1)); DROP TABLE x; SELECT ((1' would close the model's SELECT, and BigQuery runs the rest
+ * as a script. A text holding one goes in as a constant, which the server quotes.
+ * → the code, at the positions it holds in the text
+ */
+function rawCode(src) {
+  const fix = 'a text holding one goes in as a constant: { value } in args, {n} in the SQL where it goes';
+  const read = [/\\['"`]/.test(src) && 'a backslash before a quote', /'''|"""/.test(src) && 'three quotes in a row'].filter(Boolean);
+  if (read.length) throw new Error(`pipeline: a raw expression's SQL holds ${read.join(' and ')}, which BigQuery and DuckDB end a text at differently; ${fix}`);
+  const code = src.replace(QUOTED, blank);
+  const found = [];
+  const quote = /['"`]/.exec(code);
+  if (quote) found.push(`a ${quote[0]} that does not close`);
+  if (code.includes(';')) found.push('a statement end (;)');
+  const comments = ['--', '#', '/*', '*/'].filter((c) => code.includes(c));
+  if (comments.length) found.push(`a comment (${comments.join(' ')})`);
+  if (code.includes('$')) found.push('a $ (a dollar-quoted text on DuckDB)');
+  let depth = 0;
+  for (const ch of code) if ((depth += ch === '(' ? 1 : ch === ')' ? -1 : 0) < 0) break;
+  if (depth) found.push(depth < 0 ? 'a ) that closes what it did not open' : 'a ( that does not close');
+  if (found.length) throw new Error(`pipeline: a raw expression is ONE expression, and its SQL holds ${found.join(', ')} outside quoted text; ${fix}`);
+  return code;
 }
 
 

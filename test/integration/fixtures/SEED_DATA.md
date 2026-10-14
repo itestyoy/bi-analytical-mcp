@@ -572,8 +572,8 @@ k11 `ui_freeze→gc_pause`, k13 `gc_pause→gc_pause`, k2 `level_start→level_s
 
 `in_app` true 13 / false 3 (the three Engine.cs frames). `sum(line)` **922**, deepest
 **Engine.cs:250** in k6. Depth per report: k1 2, k2 1, k3 3, k4 2, k5 1, k6 2, k7 1, k8 2,
-k9 1, k10 1; k11–k13 NULL (an ANR has no exception stack). So an `unnest` yields 16 rows over
-10 reports while `array_length` keeps all 13 with NULL for the ANRs.
+k9 1, k10 1; k11–k13 none (an ANR has no exception stack: the key is NULL). So an `unnest` yields
+16 rows over 10 reports while `array_length` keeps all 13, with 0 for the ANRs.
 
 **Custom keys** — `network` wifi **8** / cellular **5**; `sum(coins)` **5205**;
 `sum(level)` **163**, max **31**, median **12**. Breadcrumb elements split by network:

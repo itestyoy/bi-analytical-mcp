@@ -353,8 +353,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   branch's `when`, a funnel step's `where`, a semantic model's `where`, the
   retentioneering stages' and filter_events' — is a LIST of them that all hold (`conditionSlot`,
   src/schema-kit.js). A missing value is two-valued everywhere: a comparison with one does not hold
-  (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, and a
-  boolean a compute stage stores is never NULL. A VALUE'S TYPE IS WHERE IT IS READ, AND CONVERTING IS
+  (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, a
+  `concat` is missing where any part is (each part read as its text), a missing array's length is 0 on
+  both warehouses, and a boolean a compute stage (or a computed semantic dimension) stores is never
+  NULL. A VALUE'S TYPE IS WHERE IT IS READ, AND CONVERTING IS
   `cast`: a column has the warehouse's type (where the warehouse was asked: ONE rule of grounding,
   `groundedType`, src/catalog/column-types.js — the catalog's, a build's and a join's), a `{ property }`
   the type the catalog declares (text where it declares none; an array as it is stored — a native one of
@@ -363,13 +365,17 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's) text, an array's
   element (element_at, array_last, an unnested one) the type it is stored as — a native array's items
   (not claimed where they are not known; a native struct is no JSON, so not claimed either), a JSON
-  array's text; another type is `{ fn: "cast", args: [x], type }` (SAFE: what will not convert is
+  array's text, an unpivot's value column the one type of the columns it folds (numbers of any kind
+  one — folded through one on BigQuery —, any other mix refused, saying to cast); another type is
+  `{ fn: "cast", args: [x], type }` (SAFE: what will not convert is
   missing). ONE CONVERSION ON BOTH WAREHOUSES (`castExpr` / `fromText` of each dialect): to `int`, the
   number a value holds — a number's, a text's alike — rounded half away from zero ('9.99' → 10, '2.5' →
   3, a word missing), a flag 1 / 0; a text read only where it is written as BigQuery reads a number (so
   '1_000' and '0x1F' are missing on both) and through an exact decimal of NUMERIC's 38 digits and 9
-  places (`fromText`: cast's and every typed read of JSON, the payload's one read under a cast
-  included); a value of no known type (a raw's) read as its text, a flag's true / false as 1 / 0. Only
+  places, as a flag where it says 'true' / 'false' (any case), as a moment where it is written as one
+  (with a zone the instant it names, else UTC) (`fromText`: cast's and every typed read of JSON, the
+  payload's one read under a cast included); a value of no known type (a raw's) read as its text, a
+  flag's true / false as 1 / 0. Only
   what MAKES a value says its `type` — `cast`, `case`, `raw` (nothing else knows what its SQL returns): a
   case's value is converted to the type it says where its branches are of another, a raw's type is its
   caller's word (taken where it is compared, read as of no known type where it is converted), and a raw
@@ -433,17 +439,23 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (the pipeline preview: dbt run --empty; preview_semantic_model: MetricFlow, over a time_range the
   warehouse); a week is the ISO
   week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE
-  expression of that grammar (a compute stage's `expr`; one that is a condition is stored as a boolean); a
+  expression of that grammar (a compute stage's `expr`; one that is a condition is stored as a boolean),
+  under a name of its own — a compute or an unnest naming a column the rows already have is refused; a
   window function takes `over` (`sum average min max count` with it are windows), and
   `raw` stays the escape hatch — its columns STRUCTURED, items of its `args` with `{1}`, `{2}`, … in its SQL
   where each goes, written quoted by the server — POSITIONAL: a word of its text spelled exactly as a
-  column of the step is refused, with no list of words beside it; the rest goes as written, except a
-  Jinja opener (`{{`, `{%`, `{#` — dbt would run it; a text holding one is a constant in `args`). It is a
+  column of the step is refused, with no list of words beside it; the rest goes as written, as ONE
+  expression — a `;`, a comment or a parenthesis that does not balance outside quoted text is refused —
+  and with no Jinja opener (`{{`, `{%`, `{#` — dbt would run it); a text holding one is a constant in
+  `args`. It is a
   build's escape hatch: a read (query_pipeline_model, the steps after a metrics step, a drill) takes
   no raw (`PLACES.stored_rows`), and neither query tool's schema holds it. A constant
   is written in the type of the first argument that is not a constant, one rule for every comparison
-  (`typedValue`, src/conditions.js — a number against a text is its text, and a text is not ORDERED
-  against a number, which would order it as text: refused, saying to cast), and the value array_contains
+  (`typedValue`, src/conditions.js — a number or a flag against a text is its text, a moment written
+  with an offset of its own (Z, ±hh[:mm]) against a moment the UTC instant it names, to the microsecond
+  — and a partition bound from one its UTC day; a date-time in a spelling the warehouses read apart (a
+  zone name, a one-digit offset) refused —, and a text is not ORDERED against a number, which would order it as
+  text: refused, saying to cast), and the value array_contains
   looks for in the type of the array's elements (a native array's items, a JSON array's text).
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
   every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is

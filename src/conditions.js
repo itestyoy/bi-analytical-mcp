@@ -9,6 +9,7 @@
 // the type of what they are compared with (typedLiteral below).
 
 import { sqlLiteral, isNumericType, isTimeType } from './dialects/base.js';
+import { localToUtc, hasOffset } from './moment.js';
 
 /** The order comparisons, as the grammar spells them → SQL. */
 export const COMPARE_SQL = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
@@ -42,12 +43,19 @@ export const OPS = [...Object.keys(COMPARE_SQL), 'in', 'not_in', 'between', 'is_
 
 // A constant compared with something of a KNOWN type is written in that type. A warehouse compares a
 // value only with its own type — BigQuery refuses BOOL = STRING, INT64 = STRING and STRING = INT64
-// outright, and DuckDB reads a text column met by a number as numbers, failing on the first word — and
-// the caller often spells a flag "true" or a number "5". So a boolean takes true / false (written either
-// way, or 1 / 0), a number a number (or a numeric string), and a text a number as its text (5 is '5');
-// anything else is refused HERE, when the step is added, rather than by the warehouse when it runs. What
+// outright, and DuckDB reads a text column met by a number or a flag as that, failing on the first word —
+// and the caller often spells a flag "true" or a number "5". So a boolean takes true / false (written
+// either way, or 1 / 0), a number a number (or a numeric string), and a text a number or a flag as its
+// text (5 is '5', true is 'true'); anything else is refused HERE, when the step is added, rather than by
+// the warehouse when it runs. A moment takes a moment with an offset of its own (Z, ±hh[:mm]) as the UTC
+// instant it names, to the microsecond — BigQuery reads the offset, DuckDB's reading of the text drops it —
+// as a window's bound is written (resolveTimeRange); a date-time in any other spelling (a zone name, an
+// offset of one digit, a time past 23:59) is refused, since the two warehouses would read it apart. What
 // nothing is known about ('unknown', null) takes the constant as it is written.
 const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
+
+// a text that starts as a date-time: what a moment's constant is read as, or refused
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 
 /** A constant as a value of `type` (what it is compared with, or looked for among; null for unknown) —
  *  the value typedLiteral writes, and an array's member (array_contains) is. `where` names it in a refusal. */
@@ -63,7 +71,12 @@ export function typedValue(type, v, where) {
     if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
     throw new Error(`${where} is a number: compare it with a number, not ${JSON.stringify(v)}`);
   }
-  if (type === 'string' && typeof v === 'number') return String(v);
+  if (type === 'string' && (typeof v === 'number' || typeof v === 'boolean')) return String(v);
+  if (isTimeType(type) && typeof v === 'string' && DATE_TIME.test(v.trim())) {
+    const utc = localToUtc(v.trim());
+    if (utc == null) throw new Error(`${where} is a moment: write it YYYY-MM-DD[ HH:mm[:ss[.ffffff]]] with an optional Z or ±hh[:mm] (a zone name, or an offset of one digit, is not read alike by every warehouse), not ${JSON.stringify(v)}`);
+    return hasOffset(v.trim()) ? utc : v;
+  }
   return v;
 }
 
@@ -87,19 +100,27 @@ function textFlag(op, subject, constants) {
 
 /**
  * A column compared with constants AS THE CONSTANTS' KIND (castToConstant — the retentioneering
- * eventstream, whose segments are stored as text: a threshold on one is a number's): read as a number,
- * a flag or text, safely — a value that does not read as that kind is missing, and matches nothing.
+ * eventstream, whose segments are stored as text: a threshold on one is a number's): its text read as a
+ * number or a flag by the dialect's one conversion of a text (fromText — the rule cast and every typed
+ * read follow, so '1_000' is missing on every warehouse), or as text — a value that does not read as
+ * that kind is missing, and matches nothing.
  */
-function castToKind(sql, kind, op, dialectName) {
-  const text = dialectName === 'bigquery' ? 'STRING' : 'VARCHAR';
-  const safe = dialectName === 'bigquery' ? 'SAFE_CAST' : 'TRY_CAST';
-  if (TEXT_OPS.has(op)) return `CAST(${sql} AS ${text})`;
-  if (kind === 'number') return `${safe}(${sql} AS ${dialectName === 'bigquery' ? 'FLOAT64' : 'DOUBLE'})`;
-  if (kind === 'boolean') return `${safe}(${sql} AS ${dialectName === 'bigquery' ? 'BOOL' : 'BOOLEAN'})`;
+function castToKind(sql, kind, op, d) {
+  const text = d.castExpr(sql, 'string');
+  if (TEXT_OPS.has(op)) return text;
+  if (kind === 'number') return d.fromText(text, 'float');
+  if (kind === 'boolean') return d.fromText(text, 'boolean');
   return sql;
 }
 
 const isConstant = (x) => x.constant === true;
+
+// An operand that is not ATOMIC — a quoted column, a Jinja reference (a constant is a literal, written by
+// the one literal writer) — is written in parentheses, so an argument that is itself a condition or an
+// infix expression (a = b, x IN (…), x LIKE p, a AND b) keeps its own precedence beside the operator it
+// is an argument of: eq [gt(a, b), true] is ("a" > "b") = TRUE, never "a" > "b" = TRUE.
+const ATOMIC = /^(?:"[^"]*"|`[^`]*`|\{\{[^{}]*\}\})$/;
+const operand = (sql) => (ATOMIC.test(sql) ? sql : `(${sql})`);
 
 /**
  * ONE CONDITION FUNCTION over its written arguments → its SQL. `args`: [{ sql, type?, physical?,
@@ -107,22 +128,26 @@ const isConstant = (x) => x.constant === true;
  * member, …], between [a, low, high], is_null / is_not_null [a], like … ends_with [text, pattern].
  *
  * The typing rule, one for every level: a constant is written in the type of the first argument that
- * is not a constant (a flag spelled "true" meets a boolean, "5" a number, 5 a text as '5' — and a text is
- * not ordered against a number, which would order it as text: refused, saying to cast); a boolean beside a physical
- * TEXT column holding a flag matches every spelling of it; two arguments that are not constants, one a
- * moment, meet as timestamps (`timeOperand`) — a number or a boolean on the other side is refused. A
+ * is not a constant (a flag spelled "true" meets a boolean, "5" a number, 5 a text as '5', true a text as
+ * 'true' — and a text is not ordered against a number, which would order it as text: refused, saying to
+ * cast); a boolean beside a physical TEXT column holding a flag matches every spelling of it; two
+ * arguments that are not constants, one a moment, meet as timestamps (`timeOperand`) — a number or a
+ * boolean on the other side is refused. A
  * constant null is refused: a missing value is tested with is_null / is_not_null, and a comparison with
  * a missing operand never holds (neq, not_in and not_like included: "present and different").
  *
+ * Every operand that is not atomic is written in parentheses (`operand`), so a condition stands as an
+ * argument of another as it means.
+ *
  * `opts.timeOperand` the dialect's (a moment read as a timestamp); `opts.literal` writes a constant
  * instead of typedLiteral (a caller that binds the type itself); `opts.castToConstant` with
- * `opts.dialect` reads the first argument as its constants' kind (castToKind).
+ * `opts.dialect` (the dialect itself) reads the first argument as its constants' kind (castToKind).
  */
 export function predicateSql(op, args, { timeOperand = (x) => x, literal = null, castToConstant = false, dialect = null } = {}) {
   if (!OPS.includes(op)) throw new Error(`unsupported condition: ${op} (the conditions: ${OPS.join(', ')})`);
   const [subject, ...rest] = args;
   if (!subject) throw new Error(`${op} needs its arguments`);
-  if (op === 'is_null' || op === 'is_not_null') return `${subject.sql} ${op === 'is_null' ? 'IS NULL' : 'IS NOT NULL'}`;
+  if (op === 'is_null' || op === 'is_not_null') return `${operand(subject.sql)} ${op === 'is_null' ? 'IS NULL' : 'IS NOT NULL'}`;
   if (args.some((a) => isConstant(a) && a.value === null)) {
     throw new Error(`${op} compares with { value: null }, which no value equals — a missing value is tested with is_null / is_not_null ({ fn: "is_null", args: [<the expression>] })`);
   }
@@ -133,8 +158,8 @@ export function predicateSql(op, args, { timeOperand = (x) => x, literal = null,
   if (TEXT_OPS.has(op)) {
     const pattern = rest[0];
     if (isConstant(pattern) && typeof pattern.value !== 'string') throw new Error(`${op} takes text as its second argument (a ${LIKE_SQL[op] ? 'LIKE pattern' : 'substring'}), not ${JSON.stringify(pattern.value)}`);
-    const text = castToConstant && !isConstant(subject) ? castToKind(subject.sql, 'string', op, dialect) : subject.sql;
-    const p = isConstant(pattern) ? sqlLiteral(pattern.value) : pattern.sql;
+    const text = operand(castToConstant && !isConstant(subject) ? castToKind(subject.sql, 'string', op, dialect) : subject.sql);
+    const p = isConstant(pattern) ? sqlLiteral(pattern.value) : operand(pattern.sql);
     return LIKE_SQL[op] ? `${text} ${LIKE_SQL[op]} ${p}` : SUBSTRING[op](text, p, isConstant(pattern) ? pattern.value : undefined);
   }
   // a column compared as its constants' kind: one kind for all of them, read safely as it
@@ -166,7 +191,7 @@ export function predicateSql(op, args, { timeOperand = (x) => x, literal = null,
     }
   }
   const lit = literal || ((v) => (castKind ? sqlLiteral(v) : typedLiteral(anchor?.type ?? null, v, named(anchor))));
-  const write = (a) => (isConstant(a) ? lit(a.value) : castKind && a === anchor ? castToKind(a.sql, castKind, op, dialect) : timed ? timeOperand(a.sql) : a.sql);
+  const write = (a) => (isConstant(a) ? lit(a.value) : operand(castKind && a === anchor ? castToKind(a.sql, castKind, op, dialect) : timed ? timeOperand(a.sql) : a.sql));
   const [s, ...others] = args.map(write);
   if (COMPARE_SQL[op]) {
     if (others.length !== 1) throw new Error(`${op} compares two arguments [a, b], not ${args.length}`);

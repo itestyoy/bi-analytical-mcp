@@ -12,7 +12,7 @@ import { Engine } from '../../src/engine.js';
 import { renderRead } from '../../src/pipeline.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({ catalog: loadCatalog(CATALOG), ctxs: new ContextManager({ root: mkdtempSync(join(tmpdir(), 'refusal-')) }) });
+const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'refusal-')) }) });
 const refusal = (e, tool, input) => { try { e._validate(tool, input); return null; } catch (err) { return err.message; } };
 
 test('a mode left unnamed is refused as the mode the fields belong to, with the modes there are', () => {

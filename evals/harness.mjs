@@ -20,6 +20,7 @@ import { BackgroundIndexer } from '../src/value-indexer.js';
 import { buildWarehouse, connectMcp, fixtureProject } from '../test/integration/warehouse-harness.js';
 import { settleMcp } from '../test/helpers/settle.js';
 import { HAS_DBT } from '../test/helpers/dbt-env.js';
+import { runTempDir } from '../test/helpers/run-temp.js';
 
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
 
@@ -41,6 +42,7 @@ function engineOver(base, dbPath) {
  */
 export async function startEval() {
   if (!HAS_DBT) throw new Error('the eval runs on the fixture warehouse: build the dbt environments first (npm run dbt:env -- create)');
+  runTempDir(); // every world's workspace and store, removed with it when the eval ends
   const base = fixtureProject('dbt_project');
   const wh = await buildWarehouse(base);
   const template = join(mkdtempSync(join(tmpdir(), 'eval-store-')), 'mcp.sqlite');

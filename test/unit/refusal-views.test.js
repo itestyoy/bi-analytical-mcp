@@ -12,7 +12,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({ catalog: loadCatalog(CATALOG), ctxs: new ContextManager({ root: mkdtempSync(join(tmpdir(), 'refusal-views-')) }) });
+const engine = () => new Engine({ catalog: loadCatalog(CATALOG), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'refusal-views-')) }) });
 const refusal = (e, tool, input) => { try { e._validate(tool, input); return null; } catch (err) { return err.message; } };
 
 test('semantic_index({ views }): an item with a field its view does not take is refused at that item', async () => {

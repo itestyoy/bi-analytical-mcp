@@ -26,14 +26,17 @@
 // The run has ONE fixture cache (MCP_TEST_FIXTURE_CACHE, test/integration/warehouse-harness.js): the
 // fixture warehouse buildWarehouse() makes is built once, by the first file that asks for it, and
 // copied into each file. It lives as long as the run, so no run reads what an earlier one built.
+// The run has ONE temporary directory (test/helpers/run-temp.js), every file's TMPDIR and the cache's
+// home, removed when the run ends — with everything the files and the processes under them made there.
 // The report is node's own — spec on a terminal, TAP otherwise — and the exit code is 1 when a test failed.
 
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { availableParallelism, tmpdir } from 'node:os';
+import { mkdirSync, readdirSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { run } from 'node:test';
 import { spec, tap } from 'node:test/reporters';
 import { fileURLToPath } from 'node:url';
+import { runTempDir } from '../test/helpers/run-temp.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const INTEGRATION = join(ROOT, 'test', 'integration');
@@ -137,11 +140,11 @@ const files = filesOf(args);
 
 // the tests find their fixtures from the working directory, as under `npm run`
 process.chdir(ROOT);
-const cache = mkdtempSync(join(tmpdir(), 'mcp-test-fixtures-'));
+const cache = join(runTempDir(), 'fixtures');
+mkdirSync(cache);
 process.env.MCP_TEST_FIXTURE_CACHE = cache;
-process.on('exit', () => rmSync(cache, { recursive: true, force: true }));
 
-// Ctrl-C or a kill ends the files' processes and still removes the cache
+// Ctrl-C or a kill ends the files' processes and still removes the run's directory
 const abort = new AbortController();
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { process.exitCode = 1; abort.abort(); });
 

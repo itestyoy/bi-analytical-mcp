@@ -120,3 +120,26 @@ test('dbt runs in a named environment (`dbt-v1` unless named, for now); MetricFl
   const c = createDbt({ environment: d });
   assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [1, d.dbtBin, d.mfBin, 'dbt-v1']);
 });
+
+test('a dbt v2 show runs in a target directory of its own, removed after: the file it writes on every call never lands in the context\'s target/', async () => {
+  const { existsSync, mkdirSync, readdirSync } = await import('node:fs');
+  const dir = mkdtempSync(join(tmpdir(), 'show-target-'));
+  const proj = project('bigquery');
+  mkdirSync(join(proj, 'target'));
+  // a stand-in dbt: writes a file under a fresh name into the target it was given, as v2's show does,
+  // and reports which target that was
+  const dbt = bin(dir, 'T="${DBT_TARGET_PATH:-target}"; touch "$T/inline_$$.sql"; echo "{\\"show\\": [{\\"target\\": \\"$T\\"}]}"');
+  const files = () => readdirSync(join(proj, 'target'));
+  const v2 = createDbt({ version: 2, dbtBin: dbt, profilesDir: proj });
+  for (let i = 0; i < 3; i++) {
+    const shown = await v2.show(proj, 'select 1');
+    assert.equal(shown.ok, true);
+    assert.notEqual(shown.rows[0].target, 'target');
+    assert.equal(existsSync(shown.rows[0].target), false, 'removed after');
+  }
+  assert.deepEqual(files(), [], 'nothing of three shows is left in the context\'s target/');
+  await v2.run(proj, 'm');
+  assert.equal(files().length, 1, 'a v2 run still writes to the context\'s own target/');
+  const v1 = createDbt({ version: 1, dbtBin: dbt, profilesDir: proj });
+  assert.equal((await v1.show(proj, 'select 1')).rows[0].target, 'target', 'a 1.x show, which rewrites one file in place, runs in the context\'s own target/');
+});

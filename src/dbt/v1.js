@@ -3,7 +3,7 @@
 // Each context runs in its own overlay project dir, so target/ is naturally isolated. NOT
 // `dbt sl query` (that is dbt platform/remote and incompatible with local per-context isolation).
 
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inIsolatedTarget } from '../request-context.js';
@@ -60,9 +60,25 @@ export class DbtV1 {
   pythonModelsOn(_adapter) { return true; }
 
   _env(projectDir) {
-    const env = { DBT_PROJECT_DIR: projectDir };
+    // No bytecode cache: dbt-duckdb runs a Python model by writing it to a temp file and importing it,
+    // and CPython would cache its bytecode in a __pycache__ beside it — one .pyc per run that nothing
+    // removes. The environments' own modules were compiled when pip installed them, so imports cost
+    // nothing more.
+    const env = { DBT_PROJECT_DIR: projectDir, PYTHONDONTWRITEBYTECODE: '1' };
     if (this.profilesDir) env.DBT_PROFILES_DIR = this.profilesDir;
     return env;
+  }
+
+  /**
+   * What a `dbt run` is given beyond `_env`: a temp directory inside the project's target/. dbt-duckdb
+   * writes each Python model there and removes it once the model has run, unless the run is killed
+   * mid-model (a cancel, DBT_TIMEOUT_SECONDS). What a killed run leaves then goes when the context is
+   * dropped, instead of staying in the system's temp directory.
+   */
+  _runEnv(projectDir) {
+    const dir = join(projectDir, 'target', 'tmp');
+    try { mkdirSync(dir, { recursive: true }); } catch { return {}; } // the system's temp directory then
+    return { TMPDIR: dir };
   }
 
   /** The warehouse the project talks to (its adapter, and the turn a single-writer one takes). */
@@ -81,13 +97,13 @@ export class DbtV1 {
    * partial-parse cache so it still parses incrementally — and that directory is removed after.
    * The context's own target/ (whose semantic manifest MetricFlow reads) is left untouched.
    */
-  async _dbt(projectDir, args, timeout = this.timeout) {
-    if (!inIsolatedTarget()) return this._proc(this.dbtBin, projectDir, args, { timeout });
+  async _dbt(projectDir, args, timeout = this.timeout, env = {}) {
+    if (!inIsolatedTarget()) return this._proc(this.dbtBin, projectDir, args, { timeout, env });
     const target = mkdtempSync(join(tmpdir(), 'dbt-target-'));
     try {
       const cache = join(projectDir, 'target', 'partial_parse.msgpack');
       if (existsSync(cache)) { try { copyFileSync(cache, join(target, 'partial_parse.msgpack')); } catch { /* a full parse then */ } }
-      return await this._proc(this.dbtBin, projectDir, args, { timeout, env: { DBT_TARGET_PATH: target } });
+      return await this._proc(this.dbtBin, projectDir, args, { timeout, env: { ...env, DBT_TARGET_PATH: target } });
     } finally {
       rmSync(target, { recursive: true, force: true });
     }
@@ -154,7 +170,7 @@ export class DbtV1 {
     const args = ['run'];
     if (select) args.push('--select', select);
     if (empty) args.push('--empty');
-    const r = await this._dbt(projectDir, args);
+    const r = await this._dbt(projectDir, args, this.timeout, this._runEnv(projectDir));
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.cancelled ? { cancelled: true } : {}) };
   }
 

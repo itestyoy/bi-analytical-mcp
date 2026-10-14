@@ -7,7 +7,8 @@
 //   * there is no partial-parse cache to seed an isolated target with;
 //   * its manifest's percentiles are put back as asked — the same correction dbt 1.12 needs on the
 //     latest spec (src/dbt/v1.js restorePercentiles), so it lives in the shared parse;
-//   * Python models: not on DuckDB ("Python models are not supported for duckdb adapter").
+//   * Python models: not on DuckDB ("Python models are not supported for duckdb adapter") — so no
+//     model is written to a local temp file, and its `dbt run` keeps the server's temp directory.
 // Metric queries still go through MetricFlow's `mf` (a Python install of its own), which reads the
 // semantic_manifest.json v2 writes.
 
@@ -28,4 +29,6 @@ export class DbtV2 extends DbtV1 {
   unparsedSqlConfig() { return { static_analysis: 'off' }; }
 
   pythonModelsOn(adapter) { return !NO_PYTHON_MODELS.has(String(adapter || '').toLowerCase()); }
+
+  _runEnv() { return {}; }
 }

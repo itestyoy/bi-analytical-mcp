@@ -11,9 +11,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -39,6 +39,9 @@ before(async () => {
   if (!HAS) return;
   work = mkdtempSync(join(tmpdir(), 'pystage-duck-'));
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
+  // the temp directory every process of this file is given, so what one leaves there is seen below
+  process.env.TMPDIR = join(work, 'tmp');
+  mkdirSync(process.env.TMPDIR);
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const runner = createDbt({ environment: ENV, profilesDir: PROJECT, timeout: 600000 });
@@ -124,6 +127,21 @@ test('python stage: a runtime error in the Python model is reported from dbt, no
   assert.equal(r.error.stage, 'run');
   assert.match(r.error.message, /no_such_column/);
   await assert.rejects(() => readTable(engine, r.context_id, r.model).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
+});
+
+// dbt-duckdb runs a Python model by writing it to a temp file and importing it, and CPython caches
+// the bytecode of what it imports in a __pycache__ beside it — one .pyc per run that nothing removes.
+// A run, whether it succeeds or fails, leaves none: not in the temp directory the process was given,
+// and not anywhere in the context.
+test('python stage: a run leaves no bytecode cache behind, whether it succeeds or fails', opts, async (t) => {
+  if (skip(t)) return;
+  const ok = await engine._buildPipeline({ name: 'nocache', pipeline: { source: 'events', stages: [AGG, PY] } });
+  assert.equal(ok.build?.executed, true, JSON.stringify(ok.error || ok));
+  const bad = { ...PY, steps: [PY.steps[0], { call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
+  const failed = await engine._buildPipeline({ name: 'nocache_bad', pipeline: { source: 'events', stages: [AGG, bad] } });
+  assert.equal(failed.error?.stage, 'run', 'the Python model ran and failed');
+  const caches = readdirSync(work, { recursive: true }).filter((p) => basename(p) === '__pycache__');
+  assert.deepEqual(caches, []);
 });
 
 // The steps work on what dbt.ref() returns on this warehouse — a DuckDBPyRelation here (BigFrames /

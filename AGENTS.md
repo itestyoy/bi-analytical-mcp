@@ -318,8 +318,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   leaf, the rows' and the refs that name a value, one per function shape, `args` recursive through the
   one def), `$defs.stage` (`stageDefs`, src/pipeline/stages.js — titled groups, `STAGE_GROUPS`: SQL over
   rows, over a source's events (match_recognize), on a runtime (python; in the retentioneering tool also
-  the library's ops, the feature's own runtime group), in the semantic layer (the metrics step, which
-  only a place that names it takes — query_semantic_model's)), `$defs.ref` (`refSchema`, src/schema/refs.js —
+  the library's ops, the feature's own runtime group), in the semantic layer (the metrics step — no
+  pipeline stage, so not in the registry a build reads: its one definition, `METRICS_STEP`
+  (src/schema/fields.js — its form, its group, what another place says of it), is offered by the place
+  that takes it, query_semantic_model's `STAGE_PLACES.metric_scope`, as a feature passes its runtime
+  group)), `$defs.ref` (`refSchema`, src/schema/refs.js —
   the catalog: `{ source }`, `{ source, event }`, `{ source, column, via? }` a model's column (`via`
   where a place reads one), `{ source, property }` an event property; the semantic layer:
   `{ semantic_model, dimension, grain? }`,
@@ -352,11 +355,25 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   src/schema-kit.js). A missing value is two-valued everywhere: a comparison with one does not hold
   (`neq`, `not_in`, `not_like` mean present and different), `not(c)` holds wherever `c` does not, and a
   boolean a compute stage stores is never NULL. A VALUE'S TYPE IS WHERE IT IS READ, AND CONVERTING IS
-  `cast`: a column has the warehouse's type, a `{ property }` the type the catalog declares (text where it
-  declares none), a JSON object's `field` (the leaf's, json_field's), an array's element (element_at,
-  array_last, an unnested one) text; another type is `{ fn: "cast", args: [x], type }` (SAFE: what will
-  not convert is missing). Only what MAKES a value says its `type` — `cast`, `case`, `raw` (nothing else
-  knows what its SQL returns); a read never does. What each place takes (`PLACES`): a step over a
+  `cast`: a column has the warehouse's type (where the warehouse was asked: ONE rule of grounding,
+  `groundedType`, src/catalog/column-types.js — the catalog's, a build's and a join's), a `{ property }`
+  the type the catalog declares (text where it declares none; an array as it is stored — a native one of
+  its items, as its column is tracked (`nativeArrayType`, the one reader — a `{ property }` read's and an
+  unnest's): the warehouse's where it was asked, else the catalog's `items`; JSON text otherwise, a
+  payload key's read as its JSON), a JSON object's `field` (the leaf's, json_field's) text, an array's
+  element (element_at, array_last, an unnested one) the type it is stored as — a native array's items
+  (not claimed where they are not known; a native struct is no JSON, so not claimed either), a JSON
+  array's text; another type is `{ fn: "cast", args: [x], type }` (SAFE: what will not convert is
+  missing). ONE CONVERSION ON BOTH WAREHOUSES (`castExpr` / `fromText` of each dialect): to `int`, the
+  number a value holds — a number's, a text's alike — rounded half away from zero ('9.99' → 10, '2.5' →
+  3, a word missing), a flag 1 / 0; a text read only where it is written as BigQuery reads a number (so
+  '1_000' and '0x1F' are missing on both) and through an exact decimal of NUMERIC's 38 digits and 9
+  places (`fromText`: cast's and every typed read of JSON, the payload's one read under a cast
+  included); a value of no known type (a raw's) read as its text, a flag's true / false as 1 / 0. Only
+  what MAKES a value says its `type` — `cast`, `case`, `raw` (nothing else knows what its SQL returns): a
+  case's value is converted to the type it says where its branches are of another, a raw's type is its
+  caller's word (taken where it is compared, read as of no known type where it is converted), and a raw
+  that says none claims none; a read never does. What each place takes (`PLACES`): a step over a
   source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field? }`
   (an event property read where it is stored, while the rows are that source's events), `{ value }` (a
   scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_pipeline_model,
@@ -377,14 +394,19 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   measures and a derived metric). A CONDITIONAL AGGREGATE IS AN AGGREGATE OVER A `case` — an aggregate
   takes no `where`: the rows where `c` holds are counted by `count` of `{ fn: "case", cases: [{ when:
   [c], then: { value: 1 } }] }`, their revenue is `sum` of the case that yields the price there; the case
-  is missing on every other row, and every aggregate skips a missing value. So its `else` is refused when
-  the value is built, under every aggregate but `sum` (count, count_distinct, average, min, max, median,
-  percentile, … would fold the other rows too, as the else's value) — leave it out (`else: { value:
-  null }` says nothing); `sum` may keep `else: 0`. A pivot's `measure` is such an aggregate expression,
-  each cell folding only its rows the same way — its condition (`on` = the value) a case over the
-  aggregate's argument, or added to every branch of the case already there (`foldWhere`,
-  src/pipeline/compute.js); a semantic measure is written the same way (MetricFlow is handed the case
-  as its expr). What a semantic metric
+  is missing on every other row, and every aggregate skips a missing value. An `else` gives the other
+  rows a value, which every aggregate folds as the value it is — `average` of `then: 1, else: 0` is the
+  share of the rows where `c` holds, `max` of it whether any row holds it, `sum` with `else: 0` adds
+  nothing. Under `count`, `count_distinct` (and its approximations: `approx_count_distinct`, and the
+  sketch `hll_init` builds for one — `COUNTING_FNS`) an else
+  always changes what is counted — they count any value, so every other row is counted, or the else's
+  value is one more distinct value — so there it is refused when the value is built, folding or
+  windowed, saying to leave it out (`else: { value: null }` says nothing). A pivot's `measure` is such an
+  aggregate expression, each cell folding only its rows the same way — its condition (`on` = the value)
+  a case over the aggregate's argument, or added to every branch of the case already there and to its
+  else (the cell's rows keep the else's value): `foldWhere`, src/pipeline/compute.js, the ONE builder of
+  a conditional fold, which an earlier aggregate's `where` is converted by too; a semantic measure is
+  written the same way (MetricFlow is handed the case as its expr). What a semantic metric
   reads is named by a string — a simple or cumulative metric's `measure` — or by `{ metric }` leaves:
   a derived metric's `expr` (its inputs read off the leaves; a ratio is `div` of two metrics) — and a
   model is loaded into a task by an item of `semantic_models` (`{ source }` alone loads it for its
@@ -419,7 +441,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   Jinja opener (`{{`, `{%`, `{#` — dbt would run it; a text holding one is a constant in `args`). It is a
   build's escape hatch: a read (query_pipeline_model, the steps after a metrics step, a drill) takes
   no raw (`PLACES.stored_rows`), and neither query tool's schema holds it. A constant
-  is written in the type of the first argument that is not a constant, one rule for every comparison.
+  is written in the type of the first argument that is not a constant, one rule for every comparison
+  (`typedValue`, src/conditions.js — a number against a text is its text, and a text is not ORDERED
+  against a number, which would order it as text: refused, saying to cast), and the value array_contains
+  looks for in the type of the array's elements (a native array's items, a JSON array's text).
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
   every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is
   told this server's (src/validate.js); a whole value in an EARLIER spelling of this server — a condition
@@ -427,9 +452,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `transform`, a metric query's `metrics` / `group_by` / `where` beside its steps (its metrics step,
   after a where step) and its `order_by` (an order_by step after it), a `{ model, attribute }` (a ref
   now), a read naming its `type` — `{ property, type }`, json_field / element_at / array_last or an
-  unnest with one (the read, in a `cast` where the type is not the read's own; an unnest of another
-  type, its element under `<name>_element` and a compute casting it under `name`; a kept draft's builds
-  as it did, since its steps are counted) —, an aggregate's
+  unnest with one (the read, in a `cast` where the type is not known to be the read's own — an
+  element's never is: it is the array's items; an unnest of a type other than text, its element under
+  `<name>_element` — a name within the name pattern that no other step of the list makes — and a
+  compute casting it under `name`, its element named `name` or `as`, a lone step said as those two; a
+  deployment's recipe handed over so; a kept draft's builds as it did, since its steps are counted) —, an aggregate's
   `where` (the aggregate over a case), the `include_*` flags and explore_errors' `detail` (`include`), a semantic model item's `from`
   (`source`), an update's `task` (`name`) — is refused with the value converted, never accepted (a
   field only renamed — `stages`, `stage`, a model column written `property` — is told its name:

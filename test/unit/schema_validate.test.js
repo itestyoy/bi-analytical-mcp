@@ -272,18 +272,19 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
   said(typedBy, 'semantic_models.0.measures.0.expr.args.0', { property: 'price_in_usd_of_event_data' });
 });
 
-// THE ELSE TRAP, IN A SEMANTIC MODEL TOO: a measure that folds only some rows folds a case with no else —
-// an else gives every other row a value, and any aggregate but sum folds it (a count counts it, an average
-// averages it in). Refused when the declaration compiles, naming the rule; a sum may keep else: 0.
-test('a semantic measure over a case with an else is refused but for sum', async () => {
+// THE ELSE TRAP, IN A SEMANTIC MODEL TOO: a measure that folds only some rows folds a case with no else
+// under count / count_distinct — an else gives every other row a value, and they count any value. Refused
+// when the declaration compiles, naming the rule; every other aggregate folds the else as its value (an
+// average of 1 else 0 is a share of the rows).
+test('a semantic measure over a case with an else is refused under count and count_distinct only', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
   const first = eventIs(catalog.eventNames('events')[0]);
   const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
   const over = (fn, then, other) => ({ fn, args: [{ fn: 'case', cases: [{ when: [first], then }], ...(other ? { else: other } : {}) }] });
-  for (const fn of ['count', 'count_distinct', 'average', 'max']) {
-    assert.throws(() => compileDeclaration(catalog, decl(over(fn, { column: 'session_number' }, { value: 0 }))), (e) => e.field === 'measures.expr' && new RegExp(`${fn} over a case with an else folds every row.*leave the else out`).test(e.message), fn);
+  for (const fn of ['count', 'count_distinct']) {
+    assert.throws(() => compileDeclaration(catalog, decl(over(fn, { column: 'session_number' }, { value: 0 }))), (e) => e.field === 'measures.expr' && new RegExp(`${fn} over a case with an else — an else under count, count_distinct, approx_count_distinct, hll_init always changes what is counted.*Leave the else out`).test(e.message), fn);
   }
-  assert.ok(compileDeclaration(catalog, decl(over('sum', { column: 'session_number' }, { value: 0 }))));
+  for (const fn of ['sum', 'average', 'max']) assert.ok(compileDeclaration(catalog, decl(over(fn, { value: 1 }, { value: 0 }))), fn);
   assert.ok(compileDeclaration(catalog, decl(over('count', { value: 1 }, { value: null }))));
   assert.ok(compileDeclaration(catalog, decl(over('count', { value: 1 }))));
 });

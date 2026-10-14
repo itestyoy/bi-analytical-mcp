@@ -14,7 +14,7 @@ import { isNumericType } from './dialects/base.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
-import { physicalColumnType, isArrayPropertyType } from './catalog/column-types.js';
+import { physicalColumnType, isArrayPropertyType, groundedType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
 import { mcpOf, refuseTopLevelMcp, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
@@ -117,7 +117,8 @@ export class Catalog {
    * reads a time column by, a scalar property's type, an amount's type, and a dimension's time /
    * categorical kind where it was read off the data_type (a stated type, a validity bound and the
    * declared time axis stand).
-   * An array or a JSON payload keeps its declared encoding. → { <model>: ['col: from → to', …] }
+   * An array or a JSON payload keeps its declared encoding; a native array holds the items the warehouse
+   * reports (an ARRAY<INT64> is an array<int>, whatever `items` says). → { <model>: ['col: from → to', …] }
    */
   typeToPhysical(typesByModel = {}) {
     const retyped = {};
@@ -130,11 +131,12 @@ export class Catalog {
         return type === 'unknown' ? null : { dtype, type };
       };
       const note = (what, from, to) => { if (from !== to) (retyped[key] ||= []).push(`${what}: ${from ?? '—'} → ${to}`); };
-      const scalar = (t) => t !== 'json' && t !== 'array';
+      const scalar = (t) => t !== 'json' && !isArrayPropertyType(t);
       for (const c of m.columns || []) {
         const p = physical(c.name);
-        // the declared time axis (meta.mcp.is_time) is a statement of role, like a validity bound
-        if (!p || !scalar(c.type) || !scalar(p.type) || c.name === m.time?.column) continue;
+        // the declared time axis (meta.mcp.is_time) is a statement of role, like a validity bound; a JSON
+        // payload, and an array the warehouse names no items of, keep what is declared (groundedType)
+        if (!p || groundedType(c.type, p.type) !== p.type || c.name === m.time?.column) continue;
         note(c.name, c.type, p.type); c.type = p.type;
         // the semantic layer reads a time column by the warehouse's data type (TIMESTAMP vs DATETIME)
         (m.data_types ||= {})[c.name] = p.dtype;

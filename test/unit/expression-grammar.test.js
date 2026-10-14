@@ -28,6 +28,7 @@ import {
   isEarlierRef, currentRef, isEarlierInclude, currentInclude,
   isTypedRead, isEarlierAggregate, isTypedUnnest, untypedUnnest, isEarlierMetricQuery,
 } from '../../src/earlier-spelling.js';
+import { METRIC_QUERY_FIELDS } from '../../src/schema/fields.js';
 import { beside, deref, forms, pinned } from '../helpers/schema-nav.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 
@@ -102,9 +103,10 @@ test('every tool that takes an expression carries the one definition, $defs.expr
 });
 
 // A VALUE'S TYPE IS WHAT IT IS READ FROM, AND ONE FUNCTION CONVERTS IT (cast): an event property is read
-// as the type the catalog declares, a field of one and what json_field / element_at / array_last take
-// out as text — none of them names a type. Only what makes a value of a type it says names one: cast,
-// case, raw. An aggregate folds the rows its argument has a value on, and takes no where of its own.
+// as the type the catalog declares, a field of one and what json_field takes out as text, what element_at /
+// array_last take out as the array's items — none of them names a type. Only what makes a value of a type
+// it says names one: cast, case, raw. An aggregate folds the rows its argument has a value on, and takes no
+// where of its own.
 test('a read names no type — cast converts; only cast, case and raw say a type; an aggregate takes no where', () => {
   for (const tool of ['build_pipeline_model', 'build_semantic_model']) {
     const doc = schemas[tool];
@@ -115,7 +117,7 @@ test('a read names no type — cast converts; only cast, case and raw say a type
   }
   const build = schemas.build_pipeline_model;
   assert.ok(formOf(build, 'raw').properties.type, 'raw says what its SQL yields');
-  for (const fn of ['json_field', 'element_at', 'array_last']) assert.equal(formOf(build, fn).properties.type, undefined, `${fn} reads text`);
+  for (const fn of ['json_field', 'element_at', 'array_last']) assert.equal(formOf(build, fn).properties.type, undefined, `${fn} names no type`);
   assert.equal(forms(build, stageBranch(build, 'unnest')).some((f) => f.properties?.type), false, 'an unnest reads its element as it is');
   // what a property is read as is the catalog's type, text where it declares none — per source, or the
   // type every events source declaring the name agrees on
@@ -234,26 +236,32 @@ test('an aggregate folds rows only where a measure is written; a window stands o
 });
 
 // A CONDITIONAL AGGREGATE FOLDS A CASE: a value on the rows where the condition holds, missing on the
-// others, which every aggregate skips. An else gives those rows a value, and then every aggregate but sum
-// folds them too — a count counts them, an average averages their 0s — so it is refused where the value is
-// built, saying to leave the else out; sum may keep else: 0 (adding nothing), and an else of null is none.
-test('an aggregate over a case with an else is refused, but for sum — the rule named where it is built', () => {
+// others, which every aggregate skips. An else gives those rows a value, which every aggregate folds as
+// the value it is — an average of 1 else 0 is a share of the rows, a max of it "any". Under count and
+// count_distinct (its approximations alike: approx_count_distinct, and hll_init's sketch) an else always
+// changes what is counted, so there it is refused where the value is built, saying to leave it out; an else
+// of null is none.
+test('an aggregate over a case with an else is refused under count and count_distinct only — the rule named where it is built', () => {
   const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
-  const trap = (fn) => new RegExp(`${fn} over a case with an else folds every row.*leave the else out.*Only sum may keep one, else: 0`, 's');
-  for (const fn of ['count', 'count_distinct', 'approx_count_distinct', 'average', 'min', 'max', 'median', 'stddev', 'variance']) {
+  const trap = (fn) => new RegExp(`${fn} over a case with an else — an else under count, count_distinct, approx_count_distinct, hll_init always changes what is counted.*Leave the else out`, 's');
+  for (const fn of ['count', 'count_distinct', 'approx_count_distinct', 'hll_init']) {
     assert.throws(() => render([measure({ fn, args: [caseOf([isTut], col('session_number'), val(0))] })]), trap(fn), fn);
   }
-  assert.throws(() => render([measure({ fn: 'percentile', args: [caseOf([isTut], col('session_number'), val(0))], percentile: 0.5 })]), trap('percentile'));
   // over a window alike, and in a pivot's cell, whose own condition is folded in beside the caller's
   assert.throws(() => render([{ stage: 'compute', name: 'x', expr: { fn: 'count', args: [caseOf([isTut], val(1), val(0))], over: OVER } }]), trap('count'));
   const pivot = (m) => render([{ stage: 'pivot', on: 'event_name', group_by: ['player_id_of_internal'], measure: m, values: [{ value: 'tutorial', name: 'tut' }, { value: null, name: 'none' }] }]);
   assert.throws(() => pivot({ fn: 'count', args: [caseOf([isTut], val(1), val(0))] }), trap('count'));
-  // what is not: a sum with else 0 (folding or over a window), an else of null, a case with no else
-  assert.equal(render([measure({ fn: 'sum', args: [caseOf([isTut], col('session_number'), val(0))] })]).columns.get('m').type, 'numeric');
-  assert.ok(render([{ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [caseOf([isTut], val(1), val(0))], over: OVER } }]).columns.has('x'));
+  assert.throws(() => pivot({ fn: 'count_distinct', args: [caseOf([isTut], col('player_id_of_internal'), val('none'))] }), trap('count_distinct'));
+  // what is not: every other aggregate with an else (folding, over a window, in a pivot's cell), an else
+  // of null, a case with no else
+  for (const fn of ['sum', 'average', 'min', 'max', 'median', 'stddev', 'variance']) {
+    assert.ok(render([measure({ fn, args: [caseOf([isTut], col('session_number'), val(0))] })]).columns.has('m'), fn);
+  }
+  assert.ok(render([measure({ fn: 'percentile', args: [caseOf([isTut], col('session_number'), val(0))], percentile: 0.5 })]).columns.has('m'));
+  for (const fn of ['sum', 'average', 'max']) assert.ok(render([{ stage: 'compute', name: 'x', expr: { fn, args: [caseOf([isTut], val(1), val(0))], over: OVER } }]).columns.has('x'), fn);
   assert.equal(render([measure({ fn: 'count', args: [caseOf([isTut], val(1), val(null))] })]).columns.get('m').type, 'int');
   assert.equal(render([measure({ fn: 'count', args: [caseOf([isTut], val(1))] })]).columns.get('m').type, 'int');
-  assert.deepEqual([...pivot({ fn: 'sum', args: [caseOf([isTut], col('session_number'), val(0))] }).columns.keys()], ['player_id_of_internal', 'tut', 'none']);
+  for (const fn of ['sum', 'average']) assert.deepEqual([...pivot({ fn, args: [caseOf([isTut], col('session_number'), val(0))] }).columns.keys()], ['player_id_of_internal', 'tut', 'none'], fn);
   assert.ok(pivot({ fn: 'count', args: [caseOf([{ fn: 'gt', args: [col('session_number'), val(1)] }], val(1))] }).columns.has('tut'));
 });
 
@@ -336,7 +344,8 @@ test('every earlier spelling converts to the one grammar — and a value in toda
     [{ fn: 'json_field', args: [col('j')], field: 'f', type: 'int' }, { fn: 'cast', args: [{ fn: 'json_field', args: [col('j')], field: 'f' }], type: 'int' }],
     [{ fn: 'json_field', args: [col('j')], field: 'f', type: 'string' }, { fn: 'json_field', args: [col('j')], field: 'f' }],
     [{ fn: 'element_at', args: [col('a')], index: 2, type: 'numeric' }, { fn: 'cast', args: [{ fn: 'element_at', args: [col('a')], index: 2 }], type: 'numeric' }],
-    [{ fn: 'array_last', args: [col('a')], type: 'string' }, { fn: 'array_last', args: [col('a')] }],
+    // (an element is of its array's items, which the value does not say: the cast stays, a text's too)
+    [{ fn: 'array_last', args: [col('a')], type: 'string' }, { fn: 'cast', args: [{ fn: 'array_last', args: [col('a')] }], type: 'string' }],
     [{ fn: 'count', where: [{ column: 'a', op: 'in', value: [1, 2] }] }, { fn: 'count', args: [caseOf([{ fn: 'in', args: [col('a'), val(1), val(2)] }], val(1))] }],
     [{ fn: 'sum', args: [col('x')], where: [{ fn: 'gt', args: [col('a'), val(0)] }] }, { fn: 'sum', args: [caseOf([{ fn: 'gt', args: [col('a'), val(0)] }], col('x'))] }],
     [{ fn: 'sum', args: [col('x')], where: [] }, { fn: 'sum', args: [col('x')] }],
@@ -361,6 +370,11 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   const windowed = { fn: 'sum', args: [col('x')], over: {}, where: [{ fn: 'gt', args: [col('a'), val(0)] }] };
   assert.equal(isEarlierAggregate(windowed), false);
   assert.deepEqual(currentExpression(windowed), windowed);
+  // …its argument a case already: folded as a pivot's cell is (foldWhere, the one builder) — the
+  // conditions in every branch, the else only where they hold
+  const gt = { fn: 'gt', args: [col('a'), val(0)] };
+  const isX = { fn: 'eq', args: [col('e'), val('x')] };
+  assert.deepEqual(currentExpression({ fn: 'average', args: [caseOf([isX], val(1), val(0))], where: [gt] }), { fn: 'average', args: [{ fn: 'case', cases: [{ when: [gt, isX], then: val(1) }], else: caseOf([gt], val(0)) }] });
   // a measure: `fn` before `agg`, `q` before `percentile`, a cast before a function, its where a case, a
   // pivot's without its name
   for (const [earlier, today] of [
@@ -400,6 +414,16 @@ test('every earlier spelling converts to the one grammar — and a value in toda
   const limit = { stage: 'limit', limit: 5 };
   assert.deepEqual(currentOf([typedUnnest, limit]), [...split, limit]);
   assert.deepEqual(currentOf({ ...typedUnnest, type: 'string' }), unnestToday, 'on its own, a text element drops its type');
+  assert.equal(currentOf(typedUnnest), typedUnnest, 'on its own, an element of another type is two steps, no one value: left for the refusal to say');
+  // the element's name is a name a step may make, and none another step of the list makes
+  const NAME = /^[a-z][a-z0-9_]{0,40}$/;
+  const long = 'a'.repeat(41);
+  const [longUnnest, longCast] = untypedUnnest({ ...typedUnnest, name: long });
+  assert.ok(NAME.test(longUnnest.name) && longUnnest.name !== long, longUnnest.name);
+  assert.deepEqual([longCast.name, longCast.expr.args[0].column], [long, longUnnest.name]);
+  const made = { stage: 'compute', name: 'i_element', expr: val(1) };
+  const [, second, , third] = currentOf([made, typedUnnest, { ...typedUnnest, type: 'numeric' }]);
+  assert.deepEqual([second.name, third.name], ['i_element_2', 'i_element_3']);
   // a read's transform is its steps
   assert.deepEqual(currentOf({ context_id: 'abcdef123456', transform: { group_by: ['a'] } }), { context_id: 'abcdef123456', steps: [{ stage: 'aggregate', group_by: ['a'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   assert.deepEqual(transformStages({}), []);
@@ -520,6 +544,10 @@ test('an earlier metric query is its metrics outside its steps, beside a query\'
   for (const k of ['context_id', 'group_by', 'where', 'order_by', 'steps', 'time_range', 'limit', 'materialize', 'dry_run']) assert.ok(isEarlierMetricQuery({ metrics: ['dau'], [k]: k === 'limit' ? 5 : [] }), k);
   assert.equal(isEarlierMetricQuery({ stage: 'metrics', metrics: ['dau'] }, true), false, 'a metrics step is today\'s');
   assert.equal(isEarlierMetricQuery({ metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }, true), false, 'a declaration\'s metrics are objects');
+  assert.equal(isEarlierMetricQuery({ metrics: [] }, true), false, 'no metric named is no metric query');
+  assert.equal(isEarlierMetricQuery({ metrics: [], group_by: [], context_id: 'abcdef123456' }), false);
+  // a field of today's query, read off its form (METRIC_QUERY_FIELDS, what src/schema.js builds it from)
+  for (const k of METRIC_QUERY_FIELDS) assert.ok(isEarlierMetricQuery({ metrics: ['dau'], [k]: true }), k);
   const update = { action: 'update', context_id: 'abcdef123456', name: 'ret', remove: { metrics: ['n'] } };
   assert.equal(currentOf(update), update);
 });

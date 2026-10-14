@@ -637,16 +637,30 @@ export function validateInput(validator, input, opts = {}) {
   const segsOf = (path) => path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
   const now = [...earlier].reduce((w, [path, v]) => replacedAt(w, segsOf(path), v), input);
   const rest = earlier.size ? explain(validator.schema, validator.schema, now, new Map()) : explained;
+  // a typed unnest standing alone (an edit_step / insert_step `step`) has no one value it is now: in a
+  // list of steps it is two (untypedUnnest), so it is said as those two, each in today's spelling, to put
+  // where it stood — the one thing said of it: what the forms find wrong in it is read off the unnest of
+  // the two (what they put right is not said), and of its name, which the cast keeps, as written
+  const lone = new Map();
   for (const e of rest) {
-    const msg = describe(e, earlier.size ? { ...ctx, input: now } : ctx);
+    for (const path of prefixes(e.instancePath)) {
+      const v = valueAt(now, path);
+      const two = isTypedUnnest(v) ? untypedUnnest(v) : [];
+      if (two.length === 2) { lone.set(path, two.map((x) => currentOfValue(x, opts))); break; }
+    }
+  }
+  const inLone = (p, under = '') => [...lone.keys()].some((path) => within(p, `${path}${under}`));
+  const put = [...lone].reduce((w, [path, [unnest]]) => replacedAt(w, segsOf(path), unnest), now);
+  const toSay = [
+    ...rest.filter((e) => !inLone(e.instancePath) || inLone(e.instancePath, '/name')).map((e) => [e, now]),
+    ...(lone.size ? explain(validator.schema, validator.schema, put, new Map()).filter((e) => inLone(e.instancePath)).map((e) => [e, put]) : []),
+  ];
+  for (const [e, input] of toSay) {
+    const msg = describe(e, input !== ctx.input ? { ...ctx, input } : ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
   }
-  // a typed unnest standing alone (an edit_step / insert_step `step`) has no one value it is now: in a
-  // list of steps it is two (untypedUnnest), so it is said as those two, to put where it stood
-  for (const path of new Set(rest.map((e) => e.instancePath))) {
-    const v = valueAt(now, path);
-    const two = isTypedUnnest(v) ? untypedUnnest(v) : [];
-    if (two.length === 2) errors.push(`${fieldRef(path)}: an unnest takes no type — its element is read as it is stored; converting it is a step of its own, so this is two steps now: ${JSON.stringify(two[0])} in its place, then ${JSON.stringify(two[1])} after it`);
+  for (const [path, [unnest, cast]] of lone) {
+    errors.push(`${fieldRef(path)}: an unnest takes no type — its element is read as it is stored; converting it is a step of its own, so this is two steps now: ${JSON.stringify(unnest)} in its place, then ${JSON.stringify(cast)} after it`);
   }
   if (errors.length === 0) errors.push('input did not match the expected shape');
   return { ok: false, errors };

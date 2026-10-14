@@ -962,7 +962,7 @@
           ]
         }
       ],
-      "notes": "A count of a case counts ROWS, not entities: for \"how many users did X\" use count_distinct over a case with the same conditions that yields the user key (then: { column: <the key> }), or build the flag per entity in a pipeline first. Leave the case's else out: an else would give the other rows a value, and count would count them too (only sum may keep else: 0). The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
+      "notes": "A count of a case counts ROWS, not entities: for \"how many users did X\" use count_distinct over a case with the same conditions that yields the user key (then: { column: <the key> }), or build the flag per entity in a pipeline first. Leave the case's else out: an else would give the other rows a value — count would count those rows, count_distinct their else value as one more — so there it is refused (the share of the rows where the conditions hold is average of the case then 1, else 0). The conditions are evaluated on the fact, so a payload property in them needs an event scope.",
       "hack": "A measure whose expr is { fn: \"count\", args: [{ fn: \"case\", cases: [{ when: [<conditions>], then: { value: 1 } }] }] } counts the rows where the conditions hold — the case is missing on every other row, and count skips it — so a flag becomes a measure you can divide (a derived metric with div), segment and put on a time axis. Any \"did X\" population is such a measure plus a div against the total."
     },
     {

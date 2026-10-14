@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { stageAt, STAGE_PLACES } from '../../src/pipeline.js';
+import { stageAt, stageDef, renderPipeline, STAGE_PLACES } from '../../src/pipeline.js';
 import { PLACES } from '../../src/pipeline/compute.js';
 import { REFS, REF_PLACES, VALUE_REFS, refAt, refKind, refForms, refColumns, relationshipsTo } from '../../src/schema/refs.js';
 import { settle } from '../helpers/settle.js';
@@ -40,22 +40,32 @@ test('a build takes every stage, a read the ones that keep it one table — the 
   // a step that names no stage, or one there is not, is said so at its place
   assert.match(message(() => stageAt('read', { limit: 3 }, 'steps[0]')), /^steps\[0\]: a read takes .* — this step names no `stage`$/);
   assert.match(message(() => stageAt('read', { stage: 'nope' }, 'steps[0]')), /there is no 'nope' stage/);
-  // the semantic layer's step (a metric query's metrics) is no stage over a table's rows: only a place
-  // that names it takes it — not a build's "every stage", not a read; it makes no table, so the refusal
-  // says where it belongs instead of "build it from the task"
+  // the semantic layer's step (a metric query's metrics) is no stage of the registry: only the place that
+  // offers it takes it — not a build's "every stage", not a read; it makes no table, so the refusal says
+  // where it belongs instead of "build it from the task"
   const semantic = /a metrics step is what the semantic layer computes, one per metric query \(query_semantic_model\)$/;
+  assert.equal(stageDef('metrics'), null, 'the metrics step is no pipeline stage');
   assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), /^steps\[0\]: a pipeline build takes every stage over a table's rows — /);
   assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), semantic);
   assert.match(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), /^steps\[0\]: a read takes /);
   assert.match(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), semantic);
   assert.doesNotMatch(message(() => stageAt('read', { stage: 'metrics' }, 'steps[0]')), /makes a new table/);
+  // …and a build that meets one (a step kept in a draft or a recipe, which no schema checked) refuses it
+  // by that place's check, never by building it; a stage name nothing has is told the stages there are,
+  // the metrics step not among them
+  const physicalCols = new Set(['player_id_of_internal']);
+  assert.match(message(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'metrics', metrics: ['m'] }], { physicalCols })), new RegExp(`^a pipeline build takes every stage over a table's rows — ${semantic.source}`));
+  const unknown = message(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'transmogrify' }], { physicalCols }));
+  assert.match(unknown, /^unknown pipeline stage: transmogrify \(known: where, compute, /);
+  assert.doesNotMatch(unknown, /metrics/);
 });
 
-// A METRIC QUERY'S PLACES: up to its metrics step, where steps and the metrics step (metric_scope); after
-// it, what a read takes, over the result (metric_result) — the read's list, and a stage it leaves out is
-// built from the stored result.
+// A METRIC QUERY'S PLACES: up to its metrics step, where steps and the metrics step (metric_scope, which
+// offers it: the step's one definition); after it, what a read takes, over the result (metric_result) —
+// the read's list, and a stage it leaves out is built from the stored result.
 test('a metric query takes where steps and its metrics step up to it, and a read\'s steps after it', () => {
   assert.deepEqual(STAGE_PLACES.metric_scope.stages, ['where', 'metrics']);
+  assert.deepEqual(STAGE_PLACES.metric_scope.offers.map((s) => s.stage), ['metrics'], 'the place up to the metrics step offers it');
   assert.deepEqual(STAGE_PLACES.metric_result.stages, STAGE_PLACES.read.stages);
   for (const stage of ['where', 'metrics']) assert.equal(message(() => stageAt('metric_scope', { stage }, 'steps[0]')), null, stage);
   for (const stage of STAGE_PLACES.read.stages) assert.equal(message(() => stageAt('metric_result', { stage }, 'steps[1]')), null, stage);

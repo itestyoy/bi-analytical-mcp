@@ -214,6 +214,30 @@ test('a deployment recipe\'s aggregate where is served as the aggregate over a c
   assert.deepEqual(served.semantic_payload.semantic_models[0].measures[0].expr, { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [tutorial], then: { column: 'price_in_usd_of_event_data' } }] }] });
 });
 
+// …and an unnest naming its element's type is served as the two steps a NEW call is told it is — the
+// element under a name of its own, a compute stage casting it under the unnest's name — never as a kept
+// draft keeps one (with its type), which the tool would refuse.
+test('a deployment recipe\'s typed unnest is served as the two steps a new call takes', async () => {
+  await import('../../src/engine.js');
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { buildSchemas } = await import('../../src/schema.js');
+  const { makeValidators, validateInput } = await import('../../src/validate.js');
+  const { propertyTypes } = await import('../../src/pipeline/compute.js');
+  const catalog = loadCatalog(fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url)), {});
+  const validators = makeValidators(buildSchemas(catalog));
+  const group = { stage: 'aggregate', group_by: ['qty'], measures: [{ name: 'n', expr: { fn: 'count' } }] };
+  const pipeline_payload = { name: 'old_unnest', pipeline: { source: 'events', stages: [{ stage: 'unnest', source: 'words_collected', as: 'qty', type: 'int' }, group] } };
+  const mine = deploymentFile([{ id: 'old_unnest', task_type: 't', title: 'old', when_to_use: '', hack: '', pipeline_payload }]);
+  const p = loadRecipes(SYSTEM, mine, null, catalog).get('old_unnest').pipeline_payload;
+  assert.deepEqual(p.steps, [
+    { stage: 'unnest', expr: { property: 'words_collected' }, name: 'qty_element' },
+    { stage: 'compute', name: 'qty', expr: { fn: 'cast', args: [{ column: 'qty_element' }], type: 'int' } },
+    group,
+  ]);
+  const r = validateInput(validators.build_pipeline_model, p, { propertyType: propertyTypes(catalog) });
+  assert.equal(r.ok, true, (r.errors || []).join(' | '));
+});
+
 // An example query that names what it groups and filters by as { model, attribute } — the ref an earlier
 // version took — is served with the one ref, read off the recipe's own declaration: a model's column is
 // { source, column }, a payload property it declared a dimension { source, property }, a dimension it

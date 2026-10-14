@@ -364,9 +364,10 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
           assert.ok(name === 'build_retentioneering_model' && pinned(doc, f, 'type').length, `${name}: a step tagged by no stage (${f.title})`);
           continue;
         }
-        // (a place that lists no stages takes every stage over a table's rows; the semantic layer's only
-        // where a place names it)
-        assert.ok(stage.some((p) => (p.stages ? p.stages.includes(s) : stageDef(s)?.group !== 'semantic')), `${name}: the ${s} stage — no place of the tool takes it`);
+        // (a place that lists no stages takes every stage of the registry; a step no stage of it is — the
+        // metrics step — is there only where a place of the tool offers it)
+        assert.ok(stage.some((p) => (p.stages ? p.stages.includes(s) : stageDef(s) !== null)), `${name}: the ${s} stage — no place of the tool takes it`);
+        if (!stageDef(s)) assert.ok(stage.some((p) => (p.offers || []).some((o) => o.stage === s)), `${name}: the ${s} step — no place of the tool offers it`);
       }
       for (const f of defs.ref ? forms(doc, defs.ref) : []) {
         assert.ok(ref.some((p) => p.takes.includes(kindOf(f))), `${name}: the ref ${f.title} — no place of the tool takes it`);

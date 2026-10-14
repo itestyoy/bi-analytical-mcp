@@ -13,7 +13,7 @@
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, semanticDefs, metricSchema, METRIC_TIME_RANGE, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, removedDimensionForms, DRY_RUN, VALIDATE } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, semanticModelBranch, semanticDefs, metricSchema, METRIC_TIME_RANGE, METRIC_QUERY_FIELDS, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, removedDimensionForms, DRY_RUN, VALIDATE } from './schema/fields.js';
 import { refSchema } from './schema/refs.js';
 import { display } from './schema/display.js';
 import { transportSchema } from './schema/transport.js';
@@ -192,7 +192,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // the one stage and the one ref (`$defs.expr`, `$defs.stage`, `$defs.ref`), built for the tool's places —
   // the steps before the metrics step and after it share the stage and the expression, each narrowed by
   // its place as it is built (STAGE_PLACES.metric_scope / metric_result, PLACES.metric_where /
-  // stored_rows), the metrics step's group_by the ref (REF_PLACES.group_by)
+  // stored_rows), the metrics step — no pipeline stage: the place up to it offers it (metric_scope's
+  // `offers`) — its own group of the stage, its group_by the ref (REF_PLACES.group_by)
   const sq = TOOL_PLACES.query_semantic_model;
   const pdefs = { ...stageDefs(catalog, { project, places: sq.stage, exprPlaces: sq.expr }), ref: refSchema(catalog, { project, places: sq.ref }) };
   // A READ OF THE BUILT TABLE IS WRITTEN IN THE PIPELINE'S OWN STAGES — the one stage definition
@@ -225,15 +226,16 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
 
   // A METRIC QUERY IS ITS STEPS: one metrics step (what the semantic layer computes), where steps before
   // it, a read of its result after it — every rule of where a step may stand checked as the query is built
-  // (src/engine/semantic-query.js _metricSteps)
-  const semanticQueryFields = {
+  // (src/engine/semantic-query.js _metricSteps). Its fields are the one list METRIC_QUERY_FIELDS, which
+  // also tells an earlier metric query apart (src/earlier-spelling.js).
+  const semanticQueryFields = pick({
       steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The query, in order. Its metrics step — { stage: "metrics", metrics: [...], group_by: [...] }, what the semantic layer computes — one per query. Before it, where steps: they filter the rows its metrics fold, over what group_by names, named as it names them — { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] }; a column of the rows, a metric or an aggregate is refused there. After it, steps over its result — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — by the names its rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"). A where after it filters the result (a having on a metric); { stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] } ranks it, so the rows a task keeps are the top ones. A join, an unnest, a funnel or a python step makes a new table: store the result (materialize) and build from its task (from_task).' },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
       materialize: { type: 'boolean', description: 'Store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
       dry_run: { type: 'boolean', description: DRY_RUN('the query\'s SQL — MetricFlow\'s, with the steps after it — and the columns it answers with (it waits for the context\'s build only)') },
       include: { type: 'array', uniqueItems: true, items: { enum: ['plan'] }, description: 'What else a dry_run shows: "plan" — MetricFlow\'s dataflow plan (thousands of tokens; the SQL alone is usually what is wanted).' },
-  };
+  }, METRIC_QUERY_FIELDS);
   const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and a where.`);
   const query = {
     type: 'object',

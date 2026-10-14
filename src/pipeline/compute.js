@@ -24,9 +24,10 @@
 
 import { GRAINS, TASK_MEASURE_AGGS } from '../catalog.js';
 import { isNumericType, isTimeType } from '../dialects/base.js';
+import { isArrayPropertyType, arrayColumnType, elementType, nativeArrayType } from '../catalog/column-types.js';
 // (sql.js is read when a function runs, never as this module loads)
 import { fillPlaceholders, rawNamedColumns, unquotedSql, frameClause, requireCol, sqlAgg, TYPE, SORT_KEY, sourceProp, partitionItem, partitionColumn } from './sql.js';
-import { OPS, predicateSql } from '../conditions.js';
+import { OPS, predicateSql, typedValue } from '../conditions.js';
 import { form, strEnum, SCALAR, conditionSlot } from '../schema-kit.js';
 import { REFS, VALUE_REFS, REF_PLACES, refKind, valueRefForms } from '../schema/refs.js';
 import { rankFuzzy } from '../fuzzy.js';
@@ -83,7 +84,7 @@ const params = (catalog, { ref, entities = true }) => ({
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
   sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
-  else: { $ref: ref, description: 'The value when no branch holds (default NULL — under an aggregate, the rows it leaves out; of the aggregates only sum may take another, else: 0).' },
+  else: { $ref: ref, description: 'The value when no branch holds (default NULL — under an aggregate, the rows it leaves out). Under count / count_distinct leave it out: count would count those rows, count_distinct their else value as one more.' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
   default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
   percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' },
@@ -96,11 +97,12 @@ const RAW_OVER = /\bover\s*\(/i;
 
 /** The type of a value picked from several (coalesce, least, greatest, a CASE's branches): the one its
  *  typed arguments share; numbers of any kind are numeric, moments of any kind a time; arguments of
- *  kinds that do not meet are 'unknown' (compared as written); with no typed argument, `fallback`. An
- *  untyped constant (null) says nothing. */
+ *  kinds that do not meet are 'unknown' (compared as written); with no typed argument, 'unknown' where
+ *  one of them is of a type not known, else (only constant nulls) `fallback`. An untyped constant (null)
+ *  says nothing. */
 function commonType(types, fallback) {
   const typed = [...new Set(types.filter((t) => t && t !== 'unknown'))];
-  if (!typed.length) return fallback;
+  if (!typed.length) return types.includes('unknown') ? 'unknown' : fallback;
   if (typed.length === 1) return typed[0];
   if (typed.every(isNumericType)) return 'numeric';
   if (typed.every(isTimeType)) return 'time';
@@ -111,11 +113,14 @@ const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`,
 const arith = (sym) => ({ args: 2, title: '[left, right]', sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
 // An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
 // KNOWN non-array type fails — an array, or a column whose type is unknown (raw, native), passes.
-const ARRAY_TYPES = new Set(['array', 'unknown', undefined, null]);
-const needsArray = (fn, t) => {
-  if (ARRAY_TYPES.has(t)) return;
-  // an array of structs has no scalar element to take: its elements are read a field at a time
-  if (String(t).startsWith('array')) throw new Error(`${fn}: its argument is '${t}' — ${fn} takes an array of scalars. Read the elements' fields instead: unnest the property, then json_field on the element`);
+// `scalars`: the function reads an element (element_at, array_last, array_contains), which an array of
+// structs does not hold as one value — its elements are read a field at a time.
+const needsArray = (fn, t, scalars = true) => {
+  if (t == null || t === 'unknown') return;
+  if (isArrayPropertyType(t)) {
+    if (scalars && elementType(t) === 'struct') throw new Error(`${fn}: its argument is '${t}' — ${fn} takes an array of scalars. Read the elements' fields instead: unnest the property, then json_field on the element`);
+    return;
+  }
   throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
 };
 
@@ -140,10 +145,13 @@ function overSql(d, cols, over = {}, { frame = false, opts = {} } = {}) {
 /**
  * An event property of the pipeline's source, read where it is stored: its flattened column (a native
  * ARRAY, or text holding JSON) or a key of the source's event_data blob. `kind` is what is read: its
- * value (one field of it with `field`), an array's length, or whether an array holds `item`. The value
- * is of the type the catalog declares (text where it declares none), a field of it text: another type
- * is a cast of the read. The column it reads must still be in the row — after a stage that changed the
- * grain it is gone.
+ * value (one field of it with `field`), an array's length, or whether an array holds `item` (looked for
+ * as an element is: of a native array's items, a JSON array's text). The value is of the type the
+ * catalog declares (text where it declares none) — an array as it is stored: a native one an array of its
+ * items (nativeArrayType: as its column is tracked here, the warehouse's where it was asked, else the
+ * catalog's `items`), one held as JSON its text (a payload key's too, read as JSON) — and a field of it
+ * text: another type is a cast of the read. The column it reads must still be in the row — after a stage
+ * that changed the grain it is gone.
  */
 function propertyRead(kind, { d, cols, catalog, source, property, field, item, as, at }) {
   if (!catalog || !source) throw new Error(`${at}: { property: '${property}' } reads an event property of a pipeline's source, and these rows read none (a stored table) — name one of their columns ({ column })`);
@@ -160,13 +168,22 @@ function propertyRead(kind, { d, cols, catalog, source, property, field, item, a
   if (kind !== 'value' && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
     throw new Error(`${at}: '${property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — an array function needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). A field of a JSON object is { property, field }.`);
   }
+  // a native array is of its items as its column is tracked here — the one reader, the unnest's too
+  const array = isArrayPropertyType(spec?.type);
+  const arrayType = native && array ? nativeArrayType(spec, cols?.get(spec.column)?.type) : null;
   if (kind === 'length') return { sql: flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(payload, key), type: 'int' };
-  if (kind === 'contains') return { sql: flat ? (native ? d.arrayContains(flat, item) : d.jsonColumnArrayContains(flat, item)) : d.jsonArrayContains(payload, key, item), type: 'boolean' };
+  if (kind === 'contains') {
+    if (!native) return { sql: flat ? d.jsonColumnArrayContains(flat, item) : d.jsonArrayContains(payload, key, item), type: 'boolean' };
+    return { sql: d.arrayContains(flat, typedValue(elementType(arrayType), item, `an element of '${property}'`)), type: 'boolean' };
+  }
   if (field !== undefined) return { sql: flat ? d.jsonColumnStructField(flat, field) : d.jsonStructField(payload, key, field), type: 'string' };
   // a scalar in its own column holds what the catalog declares; a payload key is extracted as that type —
-  // or, read by a cast (`as`), as the type cast to: the payload's text converted once, not the declared
-  // type's value converted again (3 read as text is '3', not '3.0')
-  const type = propertyType(spec);
+  // or, read by a cast (`as`), as the type cast to: the payload's text converted once, by the dialect's
+  // one conversion of a text, not the declared type's value converted again (3 read as text is '3', not
+  // '3.0'). An array is what it is stored as: a native one an array of its items, JSON text otherwise —
+  // a payload key's read as its JSON (a read of the key's text takes only a scalar on BigQuery)
+  if (array && !flat) return { sql: d.jsonExtractJson(payload, key), type: 'string' };
+  const type = !array ? propertyType(spec) : native ? arrayType : 'string';
   if (flat) return { sql: flat, type };
   if (as) return { sql: d.jsonExtract(payload, key, as), type: as, readAs: as };
   return { sql: d.jsonExtract(payload, key, type), type };
@@ -250,24 +267,30 @@ export const FNS = {
   trim: one('trim', 'string'),
   unix_date: { args: 1, sql: ({ d, a }) => ({ expr: d.unixDateExpr(a[0]), type: 'int' }) },
   hll_extract: { args: 1, sql: ({ d, a }) => ({ expr: d.hllExtract(a[0]), type: 'int' }) },
-  json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: 'array' }) }, // STRING JSON array → native array (then unnest)
+  json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: arrayColumnType('string') }) }, // STRING JSON array → native array of its texts (then unnest)
   coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
   least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
   greatest: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `greatest(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
   concat: { args: { min: 1 }, sql: ({ a }) => ({ expr: `concat(${a.join(', ')})`, type: 'string' }) },
-  cast: { args: 1, needs: ['type'], sql: ({ d, a, p }) => ({ expr: d.castExpr(a[0], p.type), type: p.type }) },
+  // the dialect's one conversion, told what the value is where it is known: a number, a flag or a text
+  // converts to int alike on every warehouse — the number it holds, rounded half away from zero. A raw's
+  // type is the caller's word for what its SQL yields, never checked: it converts as a value of no known
+  // type does (read as its text), which takes every one of them
+  cast: { args: 1, needs: ['type'], sql: ({ d, a, t, r, p }) => ({ expr: d.castExpr(a[0], p.type, r[0].declared ? null : t[0]), type: p.type }) },
   substring: { args: 1, needs: ['start'], may: ['len'], sql: ({ d, a, p }) => ({ expr: d.substringExpr(a[0], p.start, p.len), type: 'string' }) },
   replace: { args: 1, needs: ['search', 'replacement'], sql: ({ d, a, p }) => ({ expr: `replace(${a[0]}, ${d.sqlLiteral(p.search)}, ${d.sqlLiteral(p.replacement)})`, type: 'string' }) },
   // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
   // TEXT and has to be parsed first, or the json operators do not apply to it. What it reads is text
-  // (cast converts it), as what element_at and array_last take out of an array.
+  // (cast converts it): a field read out of JSON.
   json_field: { args: 1, needs: ['field'], sql: ({ d, a, t, p }) => ({ expr: t[0] === 'json' ? d.jsonColumnField(a[0], p.field) : d.jsonColumnStructField(a[0], p.field), type: 'string' }) },
   // how many elements an array holds, whether it holds one value: of an array event property read where
   // it is stored ({ property }), or of an expression that yields an array (written by the writer itself)
   array_length: { args: 1, title: '[array]', array: 'length' },
   array_contains: { args: 2, title: '[array, { value }]', array: 'contains' },
-  element_at: { args: 1, needs: ['index'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: 'string' }; } },
-  array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: 'string' }; } },
+  // an element of a native array, of the type it is stored as: the array's items (a parsed JSON array's
+  // text), not claimed ('unknown') where they are not known
+  element_at: { args: 1, needs: ['index'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: elementType(t[0]) }; } },
+  array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: elementType(t[0]) }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
   date_trunc: { args: 1, needs: ['grain'], sql: ({ d, a, p }) => ({ expr: d.dateTrunc(p.grain, a[0]), type: 'time' }) },
   date_part: { args: 1, needs: ['part'], sql: ({ d, a, p }) => ({ expr: d.datePart(p.part, a[0]), type: 'int' }) },
@@ -281,9 +304,11 @@ export const FNS = {
       return { expr: p.clamp_zero === false ? inner : `COALESCE(GREATEST(${inner}, 0), 0)`, type: 'int' };
     },
   },
+  // what a case yields is what its branches share — or the `type` it says, its value converted to it where
+  // the branches are of another (cast's one conversion), so the type it is tracked by is its SQL's
   case: {
     args: 0, needs: ['cases'], may: ['else', 'type'],
-    sql: ({ p, sub, conds }) => {
+    sql: ({ d, p, sub, conds }) => {
       const thens = [];
       const branches = p.cases.map((cs, i) => {
         const then = sub(cs.then, `cases[${i}].then`);
@@ -292,11 +317,16 @@ export const FNS = {
       });
       const other = p.else !== undefined ? sub(p.else, 'else') : null;
       if (other) thens.push(other.type);
-      return { expr: `CASE ${branches.join(' ')}${other ? ` ELSE ${other.sql}` : ''} END`, type: p.type || commonType(thens, 'string') };
+      const sql = `CASE ${branches.join(' ')}${other ? ` ELSE ${other.sql}` : ''} END`;
+      const common = commonType(thens, null);
+      if (p.type && p.type !== common) return { expr: d.castExpr(sql, p.type, common), type: p.type };
+      return { expr: sql, type: p.type || common || 'string' };
     },
   },
   // escape hatch: dialect SQL whose columns come STRUCTURED — each an item of args, `{n}` in the SQL
-  // where the n-th goes, written quoted by the server; a column named in its text is refused
+  // where the n-th goes, written quoted by the server; a column named in its text is refused. What its SQL
+  // yields is known to no one but the caller: its `type` says it (`declared` — taken at its word where it
+  // is compared, read as of no known type where it is converted), and without one it is not claimed
   raw: {
     args: { min: 0 }, needs: ['sql'], may: ['type'], title: '[the expressions {1}, {2}, … stand for in sql]',
     sql: ({ d, cols, p, scope, a, at }) => {
@@ -309,7 +339,7 @@ export const FNS = {
       // a column comes positionally, in args: one written by name in the text is refused
       const named = cols ? rawNamedColumns(p.sql, cols, d.quoteIdent('x')[0]) : [];
       if (named.length) throw new Error(`pipeline: a raw expression names ${named.map((n) => `'${n}'`).join(', ')} in its SQL text — a column goes in \`args\`, with {1}, {2}, … in the SQL where each goes (e.g. sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "${named[0]}" }, …]); the server writes it quoted`);
-      return { expr: `(${fillPlaceholders(p.sql, a)})`, type: p.type || 'string' };
+      return { expr: `(${fillPlaceholders(p.sql, a)})`, type: p.type || 'unknown', ...(p.type ? { declared: true } : {}) };
     },
   },
   // conditions: a boolean of their arguments, written by the one comparison writer (src/conditions.js)
@@ -567,7 +597,7 @@ export function exprSchema(catalog, { project = null, places = null } = {}) {
     ...(at ? ownPlaces.filter((p) => p.hint).map((p) => (ownPlaces.length > 1 ? `For ${p.what}: ${p.hint.charAt(0).toLowerCase()}${p.hint.slice(1)}.` : `${p.hint}.`)) : []),
     ...(leaves.includes('column') && has('round', 'div', 'sub') ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
     ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
-    ...(AGGREGATE_FNS.some((fn) => offered.includes(fn)) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written, skipping a missing value. A conditional one folds a case, missing on the other rows — the rows where c holds { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }, their revenue { fn: "sum", args: [{ fn: "case", cases: [{ when: [c], then: { column: "price" } }] }] } — with no else, which would fold the other rows too (sum alone may keep else: 0).'] : []),
+    ...(AGGREGATE_FNS.some((fn) => offered.includes(fn)) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written, skipping a missing value. A conditional one folds a case, missing on the other rows — the rows where c holds { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }, their revenue { fn: "sum", args: [{ fn: "case", cases: [{ when: [c], then: { column: "price" } }] }] }; average of the first case with else: { value: 0 } is the share of the rows where c holds. A count / count_distinct takes no else: count would count the other rows, count_distinct their else value as one more.'] : []),
     ...(windows ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
     ...(has('raw') ? ['raw is a build\'s escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
   ].join(' ');
@@ -595,10 +625,17 @@ function earlier(e, at, opts = {}) {
 /** Whether an expression is the constant null — what a case yields where no branch holds. */
 const isNull = (x) => isObj(x) && x.fn === undefined && Object.keys(x).length === 1 && Object.hasOwn(x, 'value') && x.value === null;
 
+/** The aggregates that count what their argument holds, whatever the value — count, count_distinct and
+ *  its approximations (approx_count_distinct, the sketch hll_init builds for it) — the ones a case's else
+ *  (a value on every row no branch takes) always changes, so the writer refuses one there. */
+const COUNTING_FNS = new Set(['count', 'count_distinct', 'approx_count_distinct', 'hll_init']);
+
 /** The aggregate `e` folding only the rows where `conds` hold: its argument a case that yields it there
  *  (1 for a count of the rows) and nothing elsewhere. An argument that is a case already gets them in
- *  every branch, its else only where they hold — so an else the aggregate is refused for stays its own
- *  (a pivot's cell, src/pipeline/stages.js). */
+ *  every branch, its else only where they hold — the conditions' rows keep the else's value (an average
+ *  of 1 else 0 stays a share of them), the others are missing, and an else a count is refused for stays
+ *  its own. The one builder of a conditional fold: a pivot's cell (src/pipeline/stages.js) and an earlier
+ *  aggregate's `where` (src/earlier-spelling.js). */
 export function foldWhere(e, conds) {
   const [arg] = Array.isArray(e.args) ? e.args : [];
   if (isObj(arg) && arg.fn === 'case' && Array.isArray(arg.cases)) {
@@ -687,9 +724,12 @@ function writer(d, cols, opts) {
     if (r.constant) throw new Error(`${at}: ${e.fn} reads an array — an array { property } of the source, or an expression that yields one (json_parse_array)`);
     // text holding a JSON array is read as one; anything else has to be an array
     const json = r.type === 'json' || r.type === 'string';
-    if (!json) needsArray(e.fn, r.type);
+    if (!json) needsArray(e.fn, r.type, kind === 'contains'); // (an array of structs has a length too)
     if (kind === 'length') return { sql: json ? d.jsonColumnArrayLength(r.sql) : d.arrayLength(r.sql), type: 'int' };
-    return { sql: json ? d.jsonColumnArrayContains(r.sql, v) : d.arrayContains(r.sql, v), type: 'boolean' };
+    // the value looked for is written as an element is: of a native array's items (as written where they
+    // are not known), a JSON array's text (the dialect's)
+    if (json) return { sql: d.jsonColumnArrayContains(r.sql, v), type: 'boolean' };
+    return { sql: d.arrayContains(r.sql, typedValue(elementType(r.type), v, `an element of ${r.name ? `'${r.name}'` : 'the array'}`)), type: 'boolean' };
   }
 
   function render(e, at, s) {
@@ -724,9 +764,10 @@ function writer(d, cols, opts) {
     for (const n of spec.needs || []) if (e[written(n)] === undefined) throw new Error(`${at}: ${fn} needs \`${written(n)}\``);
     if (kind === 'window' && e.over === undefined) throw new Error(`${at}: ${fn} needs \`over\``);
     // an aggregate folds the rows its argument has a value on: a case's else gives one to the rows no
-    // branch takes, so every other aggregate folds those too — only a sum of them is the same with 0s
-    if (kind === 'aggregate' && fn !== 'sum' && isObj(args[0]) && args[0].fn === 'case' && args[0].else !== undefined && !isNull(args[0].else)) {
-      throw new Error(`${at}: ${fn} over a case with an else folds every row, the rows no branch takes too (as the else's value) — leave the else out: those rows are then missing, and ${fn} skips them. (Only sum may keep one, else: 0 adding nothing.)`);
+    // branch takes — which a count counts whatever it is; any other aggregate folds it as the value it
+    // is (average of 1 else 0: a share of the rows)
+    if (kind === 'aggregate' && COUNTING_FNS.has(fn) && isObj(args[0]) && args[0].fn === 'case' && args[0].else !== undefined && !isNull(args[0].else)) {
+      throw new Error(`${at}: ${fn} over a case with an else — an else under ${[...COUNTING_FNS].join(', ')} always changes what is counted: it gives every row no branch takes a value, and ${fn === 'count' ? 'count counts each of them' : fn === 'hll_init' ? 'the sketch hll_init builds holds it as one more distinct value' : `${fn} counts it as one more distinct value`}. Leave the else out: those rows are then missing, and ${fn} skips them${fn === 'count' ? ' (every row is { fn: "count" } with no args)' : ''}.`);
     }
     // WHERE each kind may stand
     if (window) {
@@ -760,7 +801,7 @@ function writer(d, cols, opts) {
       sub: (x, what) => render(x, `${at} ${fn} ${what}`, inner),
       conds: (list, what) => conditions(list, `${at} ${fn} ${what}`, inner),
     });
-    return { sql: out.expr, type: out.type || 'numeric', name: `${fn}(…)` };
+    return { sql: out.expr, type: out.type || 'numeric', name: `${fn}(…)`, ...(out.declared ? { declared: true } : {}) };
   }
 
   // a condition slot: a list of booleans that all hold; no window can stand in one

@@ -278,6 +278,14 @@ test('the steps after the metrics step are checked against the result\'s columns
   }
   await assert.rejects(() => e.query_semantic_model({ context_id, ...daily({ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }) }),
     (err) => err.field === 'steps' && /^steps\[1\]: a where after the metrics step reads the result's columns — \{ source: 'users', column: 'country' \} is a dimension the result does not carry: put it before the metrics step/.test(err.message));
+  // metric_time named without its grain is the result's column of the grain the metrics step groups it
+  // by — each of them, when it groups it by several
+  const at = (...grains) => ({ ...CNT, group_by: grains.map((grain) => ({ time: 'metric_time', grain })) });
+  const since = { stage: 'where', conditions: [{ fn: 'gte', args: [{ time: 'metric_time' }, { value: '2026-01-01' }] }] };
+  await assert.rejects(() => e.query_semantic_model({ context_id, steps: [at('month'), since] }),
+    (err) => err.field === 'steps' && /^steps\[1\]: .*\{ time: 'metric_time' \} is its column 'metric_time_month' there \(\{ column: 'metric_time_month' \}\); or put the where before the metrics step/.test(err.message));
+  await assert.rejects(() => e.query_semantic_model({ context_id, steps: [at('day', 'month'), since] }),
+    (err) => err.field === 'steps' && /^steps\[1\]: .*\{ time: 'metric_time' \} is in the result as its columns 'metric_time_day' and 'metric_time_month', one per grain the metrics step groups it by — name the one you mean \(\{ column: 'metric_time_day' \} or \{ column: 'metric_time_month' \}\)/.test(err.message));
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
 });
 

@@ -54,8 +54,11 @@ Conditions, measures and computed values are written in ONE expression grammar i
 ```
 
 A `where` is a list of conditions that all hold; `and` / `or` / `not` nest inside it. A conditional
-aggregate folds a `case` (missing on the rows it leaves out — so no `else`, except `sum`'s `else: 0`),
-and a value has the type of what it is read from (a property the catalog's), converted by `cast`.
+aggregate folds a `case` (missing on the rows it leaves out; an `else` folds them as its value —
+`average` of `then: 1, else: 0` is a share of the rows — except under `count` / `count_distinct`
+(and their approximations), where it is refused: `count` would count those rows, `count_distinct` their
+else value as one more), and a value has the type of what it is read from (a property the catalog's),
+converted by `cast`.
 
 A metric query is steps too — where steps before its `metrics` step filter the rows its metrics fold,
 the read steps after it work on its result:

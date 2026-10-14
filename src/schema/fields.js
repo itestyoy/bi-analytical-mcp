@@ -2,8 +2,9 @@
 // declaration is written in (a measure, a dimension, a metric), the semantic declaration's `$defs` (the
 // one expression of src/pipeline/compute.js), what the checks of the semantic side say (dry_run,
 // validate), and the limits every tool quotes (how long a read waits, how many queries a batch holds).
-// The tools are put together in src/schema.js; a metric query's one stage of its own (the metrics step)
-// is written here and registered with the stages (src/pipeline/stages.js).
+// The tools are put together in src/schema.js; a metric query's one step of its own (the metrics step,
+// no pipeline stage) is written here, and the place that takes it offers it (src/pipeline/stages.js
+// STAGE_PLACES.metric_scope).
 
 import { GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
@@ -162,26 +163,38 @@ export function metricSchema(catalog) {
 /** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
 export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.');
 
+/** The fields a metric query takes beside its context — the one list query_semantic_model's start form
+ *  and a batch's item are built from (src/schema.js), and what tells an earlier metric query apart from
+ *  a bare list of metric names (src/earlier-spelling.js). */
+export const METRIC_QUERY_FIELDS = ['steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include'];
+
 /**
- * WHAT A METRIC QUERY COMPUTES — its metrics step, the one stage of the semantic layer (src/pipeline/
- * stages.js registers it, src/engine/semantic-query.js runs it): the metrics by the names the context
- * offers, and what they are broken down by, each a ref of those a group_by takes (`$defs.ref`, built for
- * REF_PLACES.group_by). `project`: the dbt project's own layer, whose contexts name their dimensions its way.
+ * WHAT A METRIC QUERY COMPUTES — its metrics step: the metrics by the names the context offers, and what
+ * they are broken down by, each a ref of those a group_by takes (`$defs.ref`, built for REF_PLACES.group_by).
+ * It is no pipeline stage: MetricFlow writes its SQL (src/engine/semantic-query.js runs it), so the stage
+ * registry does not hold it and no build reaches it. ONE DEFINITION, read where it is offered and where it
+ * is refused: its form (`schema`; `project` — the dbt project's own layer, whose contexts name their
+ * dimensions its way), the group of `$defs.stage` it is listed under (STAGE_GROUPS, src/pipeline/stages.js),
+ * the place that takes it and offers it — the steps of a metric query up to it (STAGE_PLACES.metric_scope),
+ * which puts it in query_semantic_model's `$defs.stage` — and what any other place says of it (`elsewhere`).
  */
-export function metricsStep({ project = null } = {}) {
-  return {
+export const METRICS_STEP = {
+  stage: 'metrics',
+  group: 'semantic',
+  elsewhere: 'a metrics step is what the semantic layer computes, one per metric query (query_semantic_model)',
+  schema: (_catalog, { project = null } = {}) => ({
     type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
     description: 'What the semantic layer computes: the metrics, one column each, broken down by group_by — one row per combination of its items. MetricFlow writes the SQL and makes every join. A query has one; the where steps before it filter the rows its metrics fold, the steps after it work on its result.',
     properties: {
-      stage: { enum: ['metrics'] },
+      stage: { enum: [METRICS_STEP.stage] },
       metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array', uniqueItems: true, items: { $ref: '#/$defs/ref' },
         description: `How to break the metrics down, one result column per item, in order — each a ref, of those a group_by takes. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context: a column of a model, { source, column } — the join comes from the schema, and the context has to read the model (a semantic_models item of the build, { source } alone to load it; column <source>_<column>); an event property the task declared a dimension, { source, property } (column <source>_<property>); a dimension it computed, { semantic_model: [<its source>], dimension } (column <source>_<dimension>); an entity, { entity } (column: its name).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own; column <semantic_model>_<dimension>) — and { entity }; preview_semantic_model({ request: { context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
       },
     },
-  };
-}
+  }),
+};
 
 // The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by
 // the same thing a build's grace is bounded by: the client's own timeout, which this server neither

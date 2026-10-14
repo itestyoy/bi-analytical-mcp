@@ -4,8 +4,10 @@
 // to work). match_recognize and python register themselves (src/match-recognize.js, src/python-model.js).
 //
 // ONE STAGE DEFINITION PER TOOL (`$defs.stage`, stageDefs): the stages the tool's places take, grouped by
-// what a step needs — SQL over rows, over a source's events, on a runtime, in the semantic layer (a metric
-// query's metrics step) — and a feature adds its own runtime steps to ITS tools' definition. What a PLACE takes of it (a build, a read) is one table
+// what a step needs — SQL over rows, over a source's events, on a runtime, in the semantic layer — and the
+// steps a place offers of its own, no stage of this registry (a metric query's metrics step, which only
+// MetricFlow computes: src/schema/fields.js METRICS_STEP), each in the group it names; a feature adds its
+// own runtime steps to ITS tools' definition. What a PLACE takes of it (a build, a read) is one table
 // (STAGE_PLACES), read by the builder for a tool's definition and checked as the step is built: a refusal
 // names the place and what it takes. A build is handed the expression's place (`place` in its context:
 // src/pipeline/compute.js PLACES) and passes it to the one writer.
@@ -13,8 +15,8 @@
 import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
 import { exprSchema, exprSql, conditionListSql, isConditionCall, mapAggregates, foldWhere } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
-import { physicalColumnType, isArrayPropertyType } from '../catalog/column-types.js';
-import { metricsStep } from '../schema/fields.js';
+import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
+import { METRICS_STEP } from '../schema/fields.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
@@ -74,12 +76,13 @@ export const STAGES = {
     // WHAT IT EXPLODES is an expression that yields an array: an array event property of the source
     // ({ property }, read where it is stored — its flattened column or its key of the payload), an array
     // column of the rows here ({ column }), or a function that makes one (json_parse_array). The element
-    // is read as it is — text, a whole struct element JSON — and a field of a struct element is the
-    // stage's own. (A draft kept from an earlier version may name the element's `type`, which no new step
-    // takes: it builds as it did, src/pipeline/earlier.js.)
+    // is what it is stored as — a native array's item of its items' type, a JSON array's text, a whole
+    // struct element JSON — and a field of a struct element is the stage's own. (A draft kept from an
+    // earlier version may name the element's `type`, which no new step takes: it builds as it did,
+    // src/pipeline/earlier.js.)
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'expr', 'name'],
-      description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }), an array column here ({ column }), or an expression that yields one (json_parse_array of a JSON text). For per-element analysis (items collected, rewards granted). The element is text (cast converts it where it is read). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
+      description: 'Explode an array into one row per element (CHANGES GRAIN; rows without the array drop out): an array event property ({ property }), an array column here ({ column }), or an expression that yields one (json_parse_array of a JSON text). For per-element analysis (items collected, rewards granted). The element has the type it is stored as: a native array\'s items (the catalog\'s `items`), a JSON array\'s text; cast converts it where it is read. For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with a compute json_field.',
       properties: {
         stage: { enum: ['unnest'] },
         expr: { ...EXPR, description: 'The array: { property } of an array event property (semantic_index lists them), { column } of an array column, or an expression that yields an array.' },
@@ -90,8 +93,20 @@ export const STAGES = {
     build: ({ d, catalog, cols, source, place }, p) => {
       const e = p.expr;
       const leaf = isObj(e) && e.fn === undefined;
-      // (`p.type`: a kept draft's, read as that type as it was)
-      const elementType = (isStruct) => (p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string')));
+      // THE ELEMENT, as it is stored: a native array's item of its items' type (`items`, the array's
+      // elementType — the warehouse's or the catalog's, carried with the array's type; 'unknown', not
+      // claimed, where neither says), a JSON array's text, read out of JSON; a struct element of a JSON
+      // array whole is JSON, one field of it text — of a native one, a struct, which is no JSON: not
+      // claimed, one field of it of the type the catalog declares the field (`fields`). `read` is what
+      // the dialect converts it to: nothing ('string'), the whole JSON struct ('json'), or a kept draft's
+      // `type` — the element's type then too (it builds as it did).
+      const element = (native, items, fields = null) => {
+        if (p.field && native && items !== 'struct' && items !== 'unknown') throw new Error(`unnest: \`field\` reads one field of a struct element, and this array's elements are ${items} — leave it out`);
+        if (p.field) return p.type || !native ? { read: p.type || 'string', type: p.type || 'string' } : { read: 'string', type: itemType(fields?.[p.field]) };
+        if (items === 'struct') return native ? { read: 'string', type: 'unknown' } : { read: 'json', type: 'json' };
+        if (p.type) return { read: p.type, type: p.type };
+        return { read: 'string', type: native ? items : 'string' };
+      };
       if (leaf && e.property !== undefined) {
         if (e.field !== undefined || e.type !== undefined) throw new Error(`unnest: the element's field is the stage's own \`field\` — the expr names the array alone: { property: '${e.property}' }`);
         if (!source) throw new Error(`unnest: { property: '${e.property}' } reads an event property of a pipeline's source, and these rows read none (a stored table) — unnest an array column of them ({ column })`);
@@ -101,32 +116,36 @@ export const STAGES = {
         if (!isArrayPropertyType(spec.type)) {
           throw new Error(`unnest: '${e.property}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with { property, field }.`);
         }
-        const isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         // the column it explodes must still be HERE, exactly as a property read's must: after a stage that
         // changed the grain (or on top of a materialized prefix built from one) the payload is gone
         const column = spec.column || catalog.eventDataColumn(source);
         requireCol(cols, column);
-        const type = elementType(isStruct);
         const op = spec.column ? { column, key: null, encoding: spec.encoding || 'native' } : { column, key: found.name, encoding: 'blob' };
-        return { op: { op: 'unnest', ...op, as: p.name, field: p.field, type }, cols: addCol(cols, p.name, type) };
+        // its items: a native array's as a { property } read of it has them (nativeArrayType — as the
+        // column is tracked here, else declared); a JSON array's text, or structs where it declares them
+        const native = op.encoding === 'native';
+        const items = native ? elementType(nativeArrayType(spec, cols.get(column)?.type)) : String(spec.type || '').toLowerCase() === 'array<struct>' ? 'struct' : 'string';
+        const { read, type } = element(native, items, spec.fields);
+        return { op: { op: 'unnest', ...op, as: p.name, field: p.field, type: read }, cols: addCol(cols, p.name, type) };
       }
       if (leaf && e.column !== undefined && Object.keys(e).length === 1) {
         requireCol(cols, e.column);
-        if (cols.get(e.column).type !== 'array') throw new Error(`unnest: '${e.column}' is ${cols.get(e.column).type || 'not typed'}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
-        const type = elementType(false);
-        return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type, encoding: 'native' }, cols: addCol(cols, p.name, type) };
+        const t = cols.get(e.column).type;
+        if (!isArrayPropertyType(t)) throw new Error(`unnest: '${e.column}' is ${t || 'not typed'}, not an array column — make one with json_parse_array (expr: { fn: "json_parse_array", args: [{ column: "${e.column}" }] }), or unnest an array event property as { property }`);
+        const { read, type } = element(true, elementType(t));
+        return { op: { op: 'unnest', column: e.column, key: null, as: p.name, field: p.field, type: read, encoding: 'native' }, cols: addCol(cols, p.name, type) };
       }
       // an expression that yields an array: computed into a working column first, exploded, and the
       // working column dropped — the columns after it are those before plus the element
       const r = exprSql(d, cols, e, `unnest '${p.name}' expr`, { catalog, source, place, windows: false });
-      if (r.type && r.type !== 'array' && r.type !== 'unknown') throw new Error(`unnest: its expr yields ${r.type}, not an array — json_parse_array makes one from a JSON text`);
+      if (r.type && !isArrayPropertyType(r.type) && r.type !== 'unknown') throw new Error(`unnest: its expr yields ${r.type}, not an array — json_parse_array makes one from a JSON text`);
       const work = `_unnest_${p.name}`;
-      const type = elementType(false);
+      const { read, type } = element(true, elementType(r.type));
       const out = addCol(cols, p.name, type);
       return {
         ops: [
           { op: 'extend', cols: [{ name: work, expr: r.sql }] },
-          { op: 'unnest', column: work, key: null, as: p.name, field: p.field, type, encoding: 'native' },
+          { op: 'unnest', column: work, key: null, as: p.name, field: p.field, type: read, encoding: 'native' },
           { op: 'project', cols: [...out.keys()] },
         ],
         cols: out,
@@ -217,13 +236,14 @@ export const STAGES = {
       // …grounded, when the warehouse was asked, as the source's own columns are: a column the table
       // lacks is not offered, and each arrives in the type it HAS — a flag stored as text stays text
       // under its new name, so a boolean compared with it is spelled as text, not run as STRING = BOOL
+      // (by the one rule of grounding: a JSON payload, an array the warehouse names no items of, keep theirs)
       const phys = physical?.joined?.get(p.with);
       if (phys) {
         for (const [name, c] of joined) {
           if (c.type === 'json') continue;
           if (!phys.has(name.toLowerCase())) { joined.delete(name); continue; }
-          const t = c.type === 'array' ? 'unknown' : physicalColumnType(phys.types?.get(name.toLowerCase()) || '');
-          if (t !== 'unknown') joined.set(name, { type: t, physical: true });
+          const t = physicalColumnType(phys.types?.get(name.toLowerCase()) || '');
+          if (t !== 'unknown' && groundedType(c.type, t) === t) joined.set(name, { type: t, physical: true });
         }
       }
       const known = joined.size ? joined : null; // no column info -> accept what the caller names
@@ -441,15 +461,6 @@ export const STAGES = {
       return { op: { op: 'project', cols: keep }, cols: out };
     },
   },
-
-  // WHAT THE SEMANTIC LAYER COMPUTES — a metric query's metrics, broken down by its group_by: MetricFlow
-  // writes its SQL (src/engine/semantic-query.js runs it), so it is no SQL stage of a table's rows, and
-  // only a place that names it takes it (STAGE_PLACES.metric_scope — query_semantic_model's).
-  metrics: {
-    group: 'semantic',
-    schema: (catalog, { project = null } = {}) => metricsStep({ project }),
-    build: () => { throw new Error('a metrics step is computed by the semantic layer — query_semantic_model runs it, over a context\'s metrics'); },
-  },
 };
 
 /** Register an additional stage from another module (match_recognize, python) — with the `group` it is
@@ -471,17 +482,19 @@ export function availableStages(catalog) {
 
 /**
  * WHAT A PLACE TAKES OF THE STAGES — one table, read by the builder for a tool's `$defs.stage` (stageSchema)
- * and checked as each step is built (stageAt): `what` names the
- * place in a refusal, `stages` lists what it takes (null: every stage there is), `elsewhere` says where a
- * stage it leaves out is built. A feature checks a place of its own with stageAt, in this shape.
- *   build         — a pipeline build: every stage over a table's rows;
+ * and checked as each step is built (stageAt): `what` names the place in a refusal, `stages` lists what it
+ * takes by name (null: every stage of the registry), `elsewhere` says where a stage it leaves out is
+ * built, and `offers` holds the steps it takes that are no stage of the registry — each ONE definition,
+ * { stage, group, schema, elsewhere } (src/schema/fields.js METRICS_STEP): its form is listed under its
+ * group in the `$defs.stage` of a tool this place is one of, and a place that does not take it says its
+ * `elsewhere`. A feature checks a place of its own with stageAt, in this shape.
+ *   build         — a pipeline build: every stage of the registry, over a table's rows;
  *   read          — a read of a stored table, a card's drill: the SQL stages that keep it one table; a
  *                   join, an unnest, a funnel or a python model makes a new table, built from the task;
  *   metric_scope  — a metric query up to its one metrics step: where steps, which filter the rows its
  *                   metrics fold (named as a metric query names a dimension: PLACES.metric_where), and
- *                   the metrics step;
+ *                   the metrics step, which it offers — MetricFlow computes it, no build does;
  *   metric_result — a metric query after its metrics step: what a read takes, over the result's columns.
- * A stage of the semantic layer (the metrics step) is taken only where a place names it (takes).
  */
 const READ_STAGES = ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project'];
 export const STAGE_PLACES = {
@@ -490,38 +503,46 @@ export const STAGE_PLACES = {
     what: 'a read', stages: READ_STAGES,
     elsewhere: 'makes a new table: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })',
   },
-  metric_scope: { what: 'a step up to the metrics step', stages: ['where', 'metrics'] },
+  metric_scope: { what: 'a step up to the metrics step', stages: ['where', METRICS_STEP.stage], offers: [METRICS_STEP] },
   metric_result: {
     what: 'a step after the metrics step', stages: READ_STAGES,
     elsewhere: 'makes a new table: store the result (materialize: true) and build from its task, build_pipeline_model({ request: { action: "start", name, from_task } })',
   },
 };
 
-/** Whether a place takes a stage: one its list names — or, where it lists none, every stage over a
- *  table's rows (a stage of the semantic layer only where a place names it). */
+/** Whether a place takes a step: one its list names — or, where it lists none, every stage of the registry. */
 function takes(p, name) {
-  return p.stages ? p.stages.includes(name) : (stageDef(name)?.group || 'sql') !== 'semantic';
+  return p.stages ? p.stages.includes(name) : stageDef(name) !== null;
+}
+
+/** The step a place of the table offers of its own under this name — no stage of the registry (a metric
+ *  query's metrics step) — or null. */
+export function offeredStep(name) {
+  for (const p of Object.values(STAGE_PLACES)) for (const s of p.offers || []) if (s.stage === name) return s;
+  return null;
 }
 
 /** A step at a place (a STAGE_PLACES name, or a place of that shape): refused when the place does not
- *  take its stage — naming the place, what it takes and where a stage it leaves out is built. `at` names
- *  the step. */
-export function stageAt(place, st, at) {
+ *  take its stage — naming the place, what it takes and where a stage it leaves out is built (a step
+ *  another place offers, by that step's own words). `at` names the step (none: the caller does). */
+export function stageAt(place, st, at = null) {
   const p = typeof place === 'string' ? STAGE_PLACES[place] : place;
   const kind = st?.stage;
   if (takes(p, kind)) return;
   const def = kind === undefined ? null : stageDef(kind);
-  // the semantic layer's step makes no table: where it is not taken, it is said where it is
+  // a step another place offers makes no table here: it is said where it is taken
+  const own = def || kind === undefined ? null : offeredStep(kind);
   const why = kind === undefined ? 'this step names no `stage`'
-    : !def ? `there is no '${kind}' stage`
-      : def.group === 'semantic' ? `a ${kind} step is what the semantic layer computes, one per metric query (query_semantic_model)`
+    : own ? own.elsewhere
+      : !def ? `there is no '${kind}' stage`
         : `${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind} stage ${p.elsewhere || 'is not one of them'}`;
-  throw new Error(`${at}: ${p.what} takes ${p.stages ? p.stages.join(', ') : 'every stage over a table\'s rows'} — ${why}`);
+  throw new Error(`${at ? `${at}: ` : ''}${p.what} takes ${p.stages ? p.stages.join(', ') : 'every stage over a table\'s rows'} — ${why}`);
 }
 
 /**
- * THE STAGE GROUPS — what a step needs to work, the titles a tool's `$defs.stage` lists its stages under.
- * A stage says its `group`; one that says none is SQL over rows.
+ * THE STAGE GROUPS — what a step needs to work, the titles a tool's `$defs.stage` lists its steps under.
+ * A stage says its `group` (one that says none is SQL over rows); a step a place offers, its own
+ * (`semantic`: the metrics step).
  */
 export const STAGE_GROUPS = {
   sql: 'SQL over rows — needs a table',
@@ -545,18 +566,25 @@ function stagePlacesOf(places) {
  * the PLACES of that tool (STAGE_PLACES names, or places of that shape; none named — every stage): the
  * stages this warehouse offers that one of them takes, each the closed form(s) its schema writes, tagged
  * by `stage` (so the refusal of a bad step is that stage's, not every stage's: src/validate.js), grouped
- * by what it needs (a titled union per group; a group left empty is left out). `runtime`: the forms a
- * feature adds to ITS tools' runtime group — its library's steps, tagged by what they are; the core's
- * tools pass none, so nothing of a feature is in their definition. One definition per tool: the one step
- * and the list of steps point at it, and where its places take different stages, each place narrows it
- * as the step is built (STAGE_PLACES, stageAt). `project`: the dbt project's own layer, which a stage of
- * the semantic layer names in its text.
+ * by what it needs (a titled union per group; a group left empty is left out). The steps a place offers of
+ * its own (`offers`: the metrics step, query_semantic_model's) join the group each names, as `runtime` —
+ * the forms a feature adds to ITS tools' runtime group, its library's steps tagged by what they are — joins
+ * that one; the core's tools pass none, so nothing of a feature is in their definition. One definition per
+ * tool: the one step and the list of steps point at it, and where its places take different stages, each
+ * place narrows it as the step is built (STAGE_PLACES, stageAt). `project`: the dbt project's own layer,
+ * which a step of the semantic layer names in its text.
  */
 export function stageSchema(catalog, { runtime = [], places = null, project = null } = {}) {
   const at = stagePlacesOf(places);
-  const offered = Object.entries(STAGES).filter(([, s]) => typeof s.available !== 'function' || s.available(catalog));
-  const taken = offered.filter(([name]) => (at || [STAGE_PLACES.build]).some((p) => takes(p, name)));
-  const forms = (group) => [...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project })), ...(group === 'runtime' ? runtime : [])];
+  const registry = Object.entries(STAGES).filter(([, s]) => typeof s.available !== 'function' || s.available(catalog));
+  const taken = registry.filter(([name]) => (at || [STAGE_PLACES.build]).some((p) => takes(p, name)));
+  // the steps the places offer of their own (no stage of the registry), each once
+  const own = [...new Map((at || []).flatMap((p) => p.offers || []).map((s) => [s.stage, s])).values()];
+  const forms = (group) => [
+    ...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project })),
+    ...own.filter((s) => s.group === group).map((s) => s.schema(catalog, { project })),
+    ...(group === 'runtime' ? runtime : []),
+  ];
   const anyOf = Object.entries(STAGE_GROUPS).map(([group, title]) => ({ title, anyOf: forms(group) })).filter((g) => g.anyOf.length);
   if (!at) {
     const read = STAGE_PLACES.read;
@@ -567,10 +595,10 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
   }
   // what the definition holds, said from what it holds: what each of several places takes, and where a
   // stage none of them takes is built
-  const names = taken.map(([name]) => name);
+  const names = [...taken.map(([name]) => name), ...own.map((s) => s.stage)];
   const several = at.length > 1 && new Set(at.map((p) => (p.stages || ['*']).join())).size > 1;
-  // (the stages a build takes that these places leave out — a new table's; the semantic layer's is no table's)
-  const left = offered.map(([name]) => name).filter((name) => !names.includes(name) && takes(STAGE_PLACES.build, name));
+  // (the stages of the registry these places leave out — each a build's, making a new table)
+  const left = registry.map(([name]) => name).filter((name) => !names.includes(name));
   const elsewhere = at.find((p) => p.elsewhere && p.stages && left.some((name) => !p.stages.includes(name)))?.elsewhere;
   const text = [
     `One step: a stage { stage: ${names.slice(0, 3).map((n) => `"${n}"`).join(' | ')}${names.length > 3 ? ' | …' : ''}, … }, grouped by what it needs.`,
@@ -584,8 +612,8 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
  * Root-level `$defs` of a tool that takes steps: what the stages' schemas reference (each stage may
  * declare its own — the one expression, `expr`, is compute's) and `stage`, the one stage definition. They
  * sit at the tool's root, where `#/$defs/…` resolves. `project` reaches the expression's refs (the dbt
- * project's semantic models and entities); `runtime` and `places` (the tool's stage places) as
- * stageSchema's; `exprPlaces` the tool's expression places (src/pipeline/compute.js PLACES), which its
+ * project's semantic models and entities); `runtime` and `places` (the tool's stage places, with the steps
+ * they offer) as stageSchema's; `exprPlaces` the tool's expression places (src/pipeline/compute.js PLACES), which its
  * `$defs.expr` is built for.
  */
 export function stageDefs(catalog, { project = null, runtime = [], places = null, exprPlaces = null } = {}) {

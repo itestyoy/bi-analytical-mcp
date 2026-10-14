@@ -18,16 +18,20 @@
 //                 array_length / array_contains naming `property` (and `item`) → args;
 //   a typed read  { property, field?, type } and json_field / element_at / array_last with a `type` → the
 //                 read, which yields its own type now (a property the catalog's — `opts.propertyType(name)`
-//                 says it —, a field of one or an element text), converted by cast when `type` is another;
+//                 says it —, a field of one text; an element the array's items, which the value does not
+//                 say), converted by cast when `type` is another or not known to be the read's;
 //   an aggregate  { fn, args, where } → the aggregate over a case that yields its argument where the
-//                 conditions hold (a count of the rows: 1) and nothing on every other row;
-//   an unnest's   { property } / { column } → its `expr`; its `type`, in a list of steps, → the element
-//                 read as it is under `<name>_element` and a compute stage casting it under `name` (a
-//                 kept draft's builds as it did: src/pipeline/earlier.js);
+//                 conditions hold (a count of the rows: 1) and nothing on every other row — the fold a
+//                 pivot's cell is, by its one builder (foldWhere, src/pipeline/compute.js);
+//   an unnest's   { property } / { column } → its `expr`, its `as` → `name`; its `type`, in a list of
+//                 steps, → the element read as it is under `<name>_element` (a name no other step of the
+//                 list makes, within the name pattern) and a compute stage casting it under `name` — on
+//                 its own, no one value: the refusal says the two steps (src/validate.js); a kept draft's
+//                 builds as it did: src/pipeline/earlier.js;
 //   a read's      `transform` (where, group_by + measures, having, order_by, then) → its steps;
 //   a query's     input kept with its task (currentQueryInput): a read's `stages` (or `transform`) → its
-//                 `steps`, a metric query's `order_by` → the order_by step after them, its `metrics`,
-//                 `group_by` and `where` → its metrics step, after a where step of that where;
+//                 `steps`, a metric query's `order_by` → the order_by step after them, its `metrics` (one
+//                 name or more), `group_by` and `where` → its metrics step, after a where step of that where;
 //   a metric      a ratio { numerator, denominator } → the derived metric dividing them, a derived
 //                 metric's SQL text over its listed `metrics` → the expression of { metric } leaves, a
 //                 side or a measure referenced as { name } → its name;
@@ -44,6 +48,10 @@
 
 import { CROSS_PATH_SPELLING as SPELLING } from './validate.js';
 import { OPS } from './conditions.js';
+// (read when a value is converted, never as this module loads)
+import { foldWhere } from './pipeline/compute.js';
+import { NAME_RE } from './pipeline/sql.js';
+import { METRIC_QUERY_FIELDS } from './schema/fields.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const only = (v, key) => isObj(v) && Object.keys(v).length === 1 && Array.isArray(v[key]);
@@ -141,10 +149,12 @@ export function isTypedRead(e) {
 
 /** A typed read as the read alone and, where `type` is not what the read yields now, a cast to it. An
  *  event property yields its catalog type (`opts.propertyType(name)`; without one it is not known, and
- *  the cast stays), a field of one and what json_field / element_at / array_last read text. */
+ *  the cast stays), a field of one and what json_field reads text; what element_at / array_last take out
+ *  is of the array's items, which the value does not say — so the cast stays (to the element's own type,
+ *  it changes nothing): the value read is the type it named, as it was. */
 function untypedRead(e, opts) {
   const { type, ...read } = e;
-  const yields = e.fn === undefined && e.field === undefined ? opts.propertyType?.(e.property) : 'string';
+  const yields = e.fn === undefined ? (e.field === undefined ? opts.propertyType?.(e.property) : 'string') : e.fn === 'json_field' ? 'string' : null;
   return yields != null && String(yields).toLowerCase() === String(type).toLowerCase() ? read : { fn: 'cast', args: [read], type };
 }
 
@@ -152,14 +162,13 @@ function untypedRead(e, opts) {
  *  of its own (only an aggregate folding rows took one). */
 export const isEarlierAggregate = (e) => isObj(e) && typeof e.fn === 'string' && Array.isArray(e.where) && e.over === undefined;
 
-/** An aggregate's earlier `where` (its conditions already current) as what it folds now: a case that
- *  yields its argument — 1 for a count of the rows — where the conditions hold, and nothing on every
- *  other row, which the aggregate skips: the same rows folded, the same value. */
-function overCase(e) {
+/** An aggregate's earlier `where` (its conditions already current) as what it folds now — the fold of a
+ *  conditional aggregate, built by its one builder (foldWhere, as a pivot's cell is): a case that yields
+ *  its argument — 1 for a count of the rows — where the conditions hold, and nothing on every other row,
+ *  which the aggregate skips: the same rows folded, the same value. */
+function foldedWhere(e) {
   const { where, ...rest } = e;
-  if (!where.length) return rest;
-  const [arg] = Array.isArray(rest.args) ? rest.args : [];
-  return { ...rest, args: [{ fn: 'case', cases: [{ when: where, then: arg === undefined ? { value: 1 } : arg }] }] };
+  return where.length ? foldWhere(rest, where) : rest;
 }
 
 /** An expression in this version's grammar — every earlier form inside it too (a CASE's conditions,
@@ -187,7 +196,7 @@ export function currentExpression(e, opts = {}) {
     ...(Array.isArray(e.cases) ? { cases: e.cases.map((cs) => (isObj(cs) ? { ...cs, ...(cs.when !== undefined ? { when: currentConditions(cs.when, opts) } : {}), ...(cs.then !== undefined ? { then: currentExpression(cs.then, opts) } : {}) } : cs)) } : {}),
     ...(e.else !== undefined ? { else: currentExpression(e.else, opts) } : {}),
   };
-  if (isEarlierAggregate(out)) return overCase(out);
+  if (isEarlierAggregate(out)) return foldedWhere(out);
   return isTypedRead(out) ? untypedRead(out, opts) : out;
 }
 
@@ -216,7 +225,7 @@ export function currentMeasure(m, opts = {}) {
   // a field read as a number first was cast; it is an argument of cast now
   const arg = subject && cast !== undefined ? { fn: 'cast', args: [subject], type: cast } : subject;
   const quantile = percentile ?? q;
-  // its where, as an aggregate's: the rows it folds are a case's now (overCase)
+  // its where, as an aggregate's: the rows it folds are a case's now (foldedWhere)
   const expr = currentExpression({
     fn, args: arg ? [arg] : [],
     ...(fn === 'percentile' && quantile !== undefined ? { percentile: quantile } : {}),
@@ -240,28 +249,60 @@ export function currentDimension(d, opts = {}) {
   return { ...(from !== undefined ? { source: from } : {}), ...subjectOf(field, opts), ...own };
 }
 
-/** An unnest of an earlier form — the array named { property } or { column } beside the stage's fields
- *  — with what it explodes as its `expr`. */
+/** An unnest of an earlier form — the array named { property } or { column } beside the stage's fields,
+ *  its element named `as` — with what it explodes as its `expr`, the element's name its `name`. */
 export function currentUnnest(st) {
-  if (!isObj(st) || st.stage !== 'unnest' || st.expr !== undefined || (st.property === undefined && st.column === undefined)) return st;
-  const { stage, property, column, ...rest } = st;
-  return { stage, expr: property !== undefined ? { property } : { column }, ...rest };
+  if (!isObj(st) || st.stage !== 'unnest') return st;
+  const array = st.expr === undefined && (st.property !== undefined || st.column !== undefined);
+  const named = typeof st.as === 'string' && st.name === undefined;
+  if (!array && !named) return st;
+  const { stage, property, column, as, ...rest } = st;
+  return { stage, ...(array ? { expr: property !== undefined ? { property } : { column } } : {}), ...rest, ...(named ? { name: as } : { ...(as !== undefined ? { as } : {}) }) };
 }
 
-/** Whether a step is an unnest naming the type its element is read as, the way an earlier version took one. */
-export const isTypedUnnest = (st) => isObj(st) && st.stage === 'unnest' && st.type !== undefined && typeof st.name === 'string';
+/** Whether a step is an unnest naming the type its element is read as, the way an earlier version took
+ *  one — its element named `name`, or `as` before that. */
+export const isTypedUnnest = (st) => isObj(st) && st.stage === 'unnest' && st.type !== undefined && typeof (st.name ?? st.as) === 'string';
+
+/** Every name the steps of a list give a column: a step's `name` and every `name` it holds (a measure's,
+ *  a join attribute's, a pivot value's — or its `as`, an earlier spelling's), an unpivot's name and value
+ *  columns. */
+function namesMade(v, out = new Set()) {
+  if (Array.isArray(v)) for (const x of v) namesMade(x, out);
+  else if (isObj(v)) {
+    for (const [k, x] of Object.entries(v)) {
+      if (['name', 'as', 'name_column', 'value_column'].includes(k) && typeof x === 'string') out.add(x);
+      else namesMade(x, out);
+    }
+  }
+  return out;
+}
+
+/** The name an element read under another name gets: `<name>_element` — `_element_2`, `_element_3` …
+ *  while a step of the list (`taken`) makes that name already —, the name cut from its end until the
+ *  whole is a name a step may make (NAME_RE; `element` when no part of it is one); the one chosen is
+ *  taken from then on. */
+function elementName(name, taken) {
+  for (let k = 1; ; k += 1) {
+    const suffix = k === 1 ? '_element' : `_element_${k}`;
+    let stem = String(name);
+    while (stem && !NAME_RE.test(`${stem}${suffix}`)) stem = stem.slice(0, -1);
+    const element = stem ? `${stem}${suffix}` : suffix.slice(1);
+    if (!taken.has(element)) { taken.add(element); return element; }
+  }
+}
 
 /**
  * A typed unnest as the steps it is now: the element read as it is (text, or a whole struct element's
- * JSON) — a `type` of text said that already, and goes — else under `<name>_element`, with a compute
- * stage after it casting the element under `name`, so the steps after them read the column they did.
- * (A KEPT draft's unnest is not split: its indexes and checkpoints count its steps — it builds as it
- * did, src/pipeline/earlier.js.)
+ * JSON) — a `type` of text said that already, and goes — else under a name of its own (elementName:
+ * `<name>_element`, none a step of the list makes — `taken`), with a compute stage after it casting the
+ * element under `name`, so the steps after them read the column they did. (A KEPT draft's unnest is not
+ * split: its indexes and checkpoints count its steps — it builds as it did, src/pipeline/earlier.js.)
  */
-export function untypedUnnest(st) {
+export function untypedUnnest(st, taken = namesMade([st])) {
   const { type, ...rest } = currentUnnest(st);
   if (String(type).toLowerCase() === 'string') return [rest];
-  const element = `${rest.name}_element`;
+  const element = elementName(rest.name, taken);
   return [{ ...rest, name: element }, { stage: 'compute', name: rest.name, expr: { fn: 'cast', args: [{ column: element }], type } }];
 }
 
@@ -284,15 +325,18 @@ export function transformStages(t) {
   return out;
 }
 
-/** The fields a metric query took beside its metrics, in any version — what tells a query apart from a
- *  bare list of metric names, which is also what an update removes. */
-const METRIC_QUERY_FIELDS = ['context_id', 'group_by', 'where', 'order_by', 'steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include', 'include_plan'];
+/** The fields an earlier metric query took beside its metrics that a query takes no more — its steps and
+ *  `include` hold them now. With the fields its start form takes (context_id, METRIC_QUERY_FIELDS — the
+ *  one list src/schema.js builds the form from), what tells a query apart from a bare list of metric
+ *  names, which is also what an update removes. */
+const EARLIER_METRIC_QUERY_FIELDS = ['group_by', 'where', 'order_by', 'include_plan'];
+const isMetricQueryField = (k) => k === 'context_id' || METRIC_QUERY_FIELDS.includes(k) || EARLIER_METRIC_QUERY_FIELDS.includes(k);
 
-/** Whether a value is a metric query of an earlier form: its metrics named outside its steps (a metrics
- *  step now). `asQuery`: it stands where a query does (a kept input, a batch's item); elsewhere it is
- *  told by a field of a query beside them. A step is never one. */
-export const isEarlierMetricQuery = (v, asQuery = false) => isObj(v) && v.stage === undefined && Array.isArray(v.metrics) && v.metrics.every((m) => typeof m === 'string')
-  && (asQuery || METRIC_QUERY_FIELDS.some((k) => v[k] !== undefined));
+/** Whether a value is a metric query of an earlier form: its metrics — a list of one name or more —
+ *  named outside its steps (a metrics step now). `asQuery`: it stands where a query does (a kept input,
+ *  a batch's item); elsewhere it is told by a field of a query beside them. A step is never one. */
+export const isEarlierMetricQuery = (v, asQuery = false) => isObj(v) && v.stage === undefined && Array.isArray(v.metrics) && v.metrics.length > 0 && v.metrics.every((m) => typeof m === 'string')
+  && (asQuery || Object.entries(v).some(([k, x]) => x !== undefined && isMetricQueryField(k)));
 
 /** Whether a query's input says, outside its steps, what an earlier version wrote there: a read's
  *  `transform`, or a metric query's metrics (with its group_by, where, order_by) — a batch's queries too. */
@@ -323,7 +367,7 @@ export function currentQueryInput(input, opts = {}) {
     const { stages, transform, ...rest } = out;
     out = { ...rest, steps: Array.isArray(stages) ? stages : transformStages(transform) };
   }
-  if (Array.isArray(out.metrics) && Array.isArray(out.order_by)) {
+  if (isEarlierMetricQuery(out, true) && Array.isArray(out.order_by)) {
     const { order_by: keys, ...rest } = out;
     out = keys.length ? { ...rest, steps: [...(rest.steps || []), { stage: 'order_by', keys }] } : rest;
   }
@@ -522,8 +566,10 @@ export function currentDisplay(display) {
  */
 export function currentOf(value, opts = {}) {
   if (Array.isArray(value)) {
-    // a typed unnest in a list of steps is two steps now (untypedUnnest)
-    const out = value.flatMap((v) => (isTypedUnnest(v) ? untypedUnnest(v).map((x) => currentOf(x, opts)) : [currentOf(v, opts)]));
+    // a typed unnest in a list of steps is two steps now (untypedUnnest), its element under a name no
+    // step of the list makes
+    const taken = value.some(isTypedUnnest) ? namesMade(value) : null;
+    const out = value.flatMap((v) => (isTypedUnnest(v) ? untypedUnnest(v, taken).map((x) => currentOf(x, opts)) : [currentOf(v, opts)]));
     return out.length !== value.length || out.some((v, i) => v !== value[i]) ? out : value;
   }
   if (!isObj(value)) return value;
@@ -533,10 +579,11 @@ export function currentOf(value, opts = {}) {
   if (isEarlierDimension(value)) return currentDimension(value, opts);
   if (value.fn === 'event_property' || ((value.fn === 'array_length' || value.fn === 'array_contains') && value.args === undefined && value.property !== undefined) || listConstant(value) || isTypedRead(value) || isEarlierAggregate(value)) return currentExpression(value, opts);
   if (value.stage === 'unnest' && ((value.expr === undefined && (value.property !== undefined || value.column !== undefined)) || isTypedUnnest(value))) {
-    // on its own, an unnest whose type was text drops it; one of another type is two steps, said in its list
+    // on its own, an unnest whose type was text drops it; one of another type is two steps, which no one
+    // value is: it is left as it is, for the refusal to say as those two (src/validate.js)
     const u = currentUnnest(value);
     const now = isTypedUnnest(u) ? untypedUnnest(u) : [u];
-    return now.length === 1 ? currentOf(now[0], opts) : u;
+    return now.length === 1 ? currentOf(now[0], opts) : value;
   }
   if (earlierQueryParts(value)) return currentOf(currentQueryInput(value, opts), opts);
   if (isEarlierInclude(value)) return currentOf(currentInclude(value), opts);

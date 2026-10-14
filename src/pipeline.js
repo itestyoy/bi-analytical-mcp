@@ -60,10 +60,10 @@
 
 import { getDialect } from './dialects/index.js';
 import { partitionConditions } from './time-range.js';
-import { physicalColumnType } from './catalog/column-types.js';
+import { physicalColumnType, groundedType } from './catalog/column-types.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { comparisonOf } from './pipeline/compute.js';
-import { STAGES, STAGE_PLACES, registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt } from './pipeline/stages.js';
+import { STAGES, STAGE_PLACES, registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt, offeredStep } from './pipeline/stages.js';
 export { registerStage, stageDef, listSome, stageDefs, stageSchema, stageAt, STAGE_PLACES };
 
 /**
@@ -99,12 +99,12 @@ function sourceColumns(catalog, key, physicalCols = null) {
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
   // …and, when the warehouse said what each is, the type it HAS — a declared type is only what the
   // schema says, and a constant written for the wrong one fails in the warehouse (STRING = BOOL)
+  // (by the catalog's one rule: a JSON payload, and an array the warehouse names no items of, keep theirs)
   if (physicalCols?.types) {
     for (const [name, c] of cols) {
       const dtype = physicalCols.types.get(name.toLowerCase());
-      if (!dtype || c.type === 'json' || c.type === 'array') continue;
-      const physical = physicalColumnType(dtype);
-      if (physical !== 'unknown') cols.set(name, { ...c, type: physical, physical: true });
+      const physical = dtype ? physicalColumnType(dtype) : 'unknown';
+      if (physical !== 'unknown' && groundedType(c.type, physical) === physical) cols.set(name, { ...c, type: physical, physical: true });
     }
   }
   return cols;
@@ -131,6 +131,9 @@ function buildOps(catalog, d, baseColumns, stages, source, physical = null, spel
       if (st?.stage === undefined) {
         throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_steps`);
       }
+      // a step another place takes — no stage of the registry (a metric query's metrics step, kept in a
+      // draft or a recipe) — is refused as a build's place refuses it, naming the place and where it belongs
+      if (offeredStep(st.stage)) stageAt(STAGE_PLACES.build, st);
       throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
     }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);

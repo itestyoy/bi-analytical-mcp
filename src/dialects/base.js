@@ -152,9 +152,11 @@ export class Dialect {
   arrayLength(_column) { throw new Error('abstract arrayLength'); }
   jsonArrayContains(_column, _key, _value) { throw new Error('abstract jsonArrayContains'); }
   jsonStructField(_column, _key, _field, _type) { throw new Error('abstract jsonStructField'); }
+  /** A key of a JSON column as its JSON text — an array or an object as JSON, not a scalar's value. */
+  jsonExtractJson(_column, _key) { throw new Error('abstract jsonExtractJson'); }
   /** { join, element }: a FROM-join that explodes an array property + the element expr.
    *  encoding: 'blob' (json column at $.key), 'json' (flat STRING holding a JSON array),
-   *  or 'native' (a real ARRAY/REPEATED column). */
+   *  or 'native' (a real ARRAY/REPEATED column). `column` is a bare name, written quoted. */
   arrayUnnest(_prevAlias, _column, _key, _alias, _field, _type, _encoding) { throw new Error('abstract arrayUnnest'); }
   /** Parse a STRING column holding a JSON array into a real (native) array expression. */
   jsonParseArray(_column) { throw new Error('abstract jsonParseArray'); }
@@ -197,8 +199,15 @@ export class Dialect {
   timeOperand(expr) { return expr; }
   /** Round expr to `places` decimals. */
   roundExpr(_expr, _places) { throw new Error('abstract roundExpr'); }
-  /** Cast expr to a logical type. */
-  castExpr(_expr, _type) { throw new Error('abstract castExpr'); }
+  /** Cast expr to a type word (int | numeric | float | string), SAFE: what will not convert is NULL for
+   *  its row. ONE RULE ON EVERY WAREHOUSE — to int, the number a value holds, rounded half away from zero:
+   *  a number's, a text's (by fromText), a flag's 1 / 0. `from` is the value's tracked type; of none known
+   *  ('unknown', null), the value is read as its text (a flag's true / false as 1 / 0). */
+  castExpr(_expr, _type, _from) { throw new Error('abstract castExpr'); }
+  /** A text read as a type word: the number it holds where it is written as a number (an int rounded half
+   *  away from zero, a numeric to 9 places), missing where it holds none; as it is for text. The one
+   *  conversion of a text — cast's, and every typed read of JSON or an array's. */
+  fromText(_expr, _type) { throw new Error('abstract fromText'); }
   /** The dbt config keys that make a table this server builds expire `days` after it is (re)built,
    *  for a model in `language` ('sql': its config() line | 'python': its YAML config): {} where the
    *  warehouse keeps no expiry. */

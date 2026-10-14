@@ -24,11 +24,12 @@ import { propertyTypes } from './pipeline/compute.js';
  * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
  * earlier version carries `{ name, pipeline: { source, time_range?, stages } }` — the one-call contract
  * no tool takes — or its first steps as `stages`, and stages in an earlier spelling; a deployment's file
- * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage respelled
- * as a kept draft's is (src/pipeline/earlier.js; with no columns known, an unnest's `source` is read as
- * an event property, the build's first choice; with the `catalog`, a typed read whose type is the
- * source's own is the bare read): what the recipe view hands over is always a request the tool accepts
- * as it stands.
+ * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage's own
+ * words respelled as a kept draft's are (src/pipeline/earlier.js; with no columns known, an unnest's
+ * `source` is read as an event property, the build's first choice), and then the list in the spelling a
+ * NEW call is told (src/earlier-spelling.js currentOf — a typed unnest the two steps it is now, which a
+ * kept draft's is not; with the `catalog`, a typed read whose type is the source's own the bare read):
+ * what the recipe view hands over is always a request the tool accepts as it stands.
  */
 export function pipelineStartRequest(payload, catalog = null) {
   if (!payload || typeof payload !== 'object') return payload;
@@ -43,8 +44,9 @@ export function pipelineStartRequest(payload, catalog = null) {
     request = { ...rest, steps: stages };
   }
   if (!Array.isArray(request.steps)) return request;
-  const steps = request.steps.map((st) => currentSpelling(st, { catalog, source: request.source }));
-  return steps.every((st, i) => st === request.steps[i]) ? request : { ...request, steps };
+  const respelled = request.steps.map((st) => currentSpelling(st, { catalog, source: request.source }));
+  const steps = currentOf(respelled, { propertyType: propertyTypes(catalog, request.source) });
+  return steps.length === request.steps.length && steps.every((st, i) => st === request.steps[i]) ? request : { ...request, steps };
 }
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);

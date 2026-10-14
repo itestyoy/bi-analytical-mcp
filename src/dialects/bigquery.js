@@ -2,7 +2,8 @@
 // syntax (FROM ... |> WHERE ... |> AGGREGATE ... |> UNPIVOT ...).
 // https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/pipe-syntax
 
-import { Dialect } from './base.js';
+import { Dialect, isNumericType } from './base.js';
+import { isBooleanType } from '../catalog/column-types.js';
 
 const CASTS = { int: 'INT64', integer: 'INT64', bigint: 'INT64', numeric: 'NUMERIC', float: 'FLOAT64', double: 'FLOAT64' };
 
@@ -47,16 +48,22 @@ export class BigQueryDialect extends Dialect {
     return keys.map((k) => (native(k) ? plain(k) : `(${k.sql} IS NULL)${asked(k) === 'first' ? ' DESC' : ''}, ${plain(k)}`)).join(', ');
   }
 
-  /** A value read out of JSON (or an array) as `type`: SAFE_CAST, so a row whose value does not
-   *  convert is NULL for that row — as DuckDB's TRY_CAST answers — instead of failing the query. */
-  _typed(expr, type) {
+  /** A text read as `type` — SAFE, so a row whose text holds no number is NULL for that row, as DuckDB's
+   *  TRY_CAST answers, instead of failing the query: an integer through NUMERIC, the number the text holds
+   *  rounded half away from zero ('9.99' → 10, '2.5' → 3 — SAFE_CAST('9.99' AS INT64) alone is NULL, as is
+   *  '3.0'), a numeric or a float as itself; as it is for a type no number is (text). NUMERIC rather than
+   *  BIGNUMERIC: it takes what DuckDB's DECIMAL(38,9) takes (an exponent, '1e3'), at the same precision
+   *  and scale; what is no numeric literal here ('1_000', '0x1F') DuckDB's side refuses alike. The one
+   *  conversion of a text: cast's, and every typed read of JSON or an array's. */
+  fromText(expr, type) {
     const ct = this.castType(type);
-    return ct ? `SAFE_CAST(${expr} AS ${ct})` : expr;
+    if (!ct) return expr;
+    return ct === 'INT64' ? `SAFE_CAST(SAFE_CAST(${expr} AS NUMERIC) AS INT64)` : `SAFE_CAST(${expr} AS ${ct})`;
   }
 
   jsonExtract(column, key, type = 'string') {
     this.ident(key);
-    return this._typed(`JSON_VALUE(${column}, '$.${key}')`, type);
+    return this.fromText(`JSON_VALUE(${column}, '$.${key}')`, type);
   }
 
   jsonArrayLength(column, key) {
@@ -67,38 +74,47 @@ export class BigQueryDialect extends Dialect {
   // Element count of a native REPEATED column (0 for empty; a REPEATED column is never NULL).
   arrayLength(column) { return `ARRAY_LENGTH(${column})`; }
 
+  // A JSON array's elements are text (JSON_VALUE_ARRAY reads each so): the value looked for is its text too.
   jsonArrayContains(column, key, value) {
     this.ident(key);
-    return `${this.sqlLiteral(value)} IN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}'))`;
+    return `${this.sqlLiteral(value == null ? null : String(value))} IN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}'))`;
   }
 
   jsonStructField(column, key, field, type = 'string') {
     this.ident(key); this.ident(field);
-    return this._typed(`JSON_VALUE(${column}, '$.${key}.${field}')`, type);
+    return this.fromText(`JSON_VALUE(${column}, '$.${key}.${field}')`, type);
+  }
+
+  /** A key's value as its JSON text — an array or an object as JSON (JSON_VALUE takes only a scalar). */
+  jsonExtractJson(column, key) {
+    this.ident(key);
+    return `JSON_QUERY(${column}, '$.${key}')`;
   }
 
   arrayUnnest(_prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
     this.ident(alias);
-    // The element is bound under `<alias>_e` and read through its declared type — a JSON array's
-    // scalars come out as STRING, and `type` is what the stage promised the columns after it.
+    // The element is bound under `<alias>_e` and read as it is stored — a native array's item as its
+    // type (a struct's `field` as that field's), a JSON array's scalar as STRING; `type` (a kept draft's)
+    // converts it as a text is (fromText). The array column is written quoted, as every column is.
     const e = `${alias}_e`;
+    const col = this.quoteIdent(column);
     // Native ARRAY/REPEATED column → unnest directly.
     if (key == null && encoding === 'native') {
-      return { join: `CROSS JOIN UNNEST(${column}) AS ${e}`, element: this._typed(e, type) };
+      return { join: `CROSS JOIN UNNEST(${col}) AS ${e}`, element: this.fromText(field ? `${e}.${this.quoteIdent(field)}` : e, type) };
     }
     // Array-of-JSON elements: a key inside a json column (blob), or the flat STRING column
     // parsed as a JSON array (encoding 'json').
-    const jarr = key != null ? (this.ident(key), `JSON_QUERY_ARRAY(${column}, '$.${key}')`) : `JSON_EXTRACT_ARRAY(${column}, '$')`;
+    const jarr = key != null ? (this.ident(key), `JSON_QUERY_ARRAY(${col}, '$.${key}')`) : `JSON_EXTRACT_ARRAY(${col}, '$')`;
     if (field) {
       this.ident(field);
-      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this._typed(`JSON_VALUE(${e}, '$.${field}')`, type) };
+      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: this.fromText(`JSON_VALUE(${e}, '$.${field}')`, type) };
     }
     if (type === 'json') { // bind the whole struct element as a JSON column
       return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: e };
     }
     // scalar elements
-    const sarr = key != null ? `JSON_VALUE_ARRAY(${column}, '$.${key}')` : `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
-    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${e}`, element: this._typed(e, type) };
+    const sarr = key != null ? `JSON_VALUE_ARRAY(${col}, '$.${key}')` : `JSON_EXTRACT_STRING_ARRAY(${col}, '$')`;
+    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${e}`, element: this.fromText(e, type) };
   }
 
   /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
@@ -112,7 +128,7 @@ export class BigQueryDialect extends Dialect {
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
     this.ident(field);
-    return this._typed(`JSON_VALUE(${column}, '$.${field}')`, type);
+    return this.fromText(`JSON_VALUE(${column}, '$.${field}')`, type);
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
@@ -124,11 +140,12 @@ export class BigQueryDialect extends Dialect {
   }
 
   jsonColumnArrayContains(column, value) {
-    // JSON_EXTRACT_STRING_ARRAY yields ARRAY<STRING>, so the membership literal is compared as a
-    // string too — a numeric or boolean `value` would otherwise be a type error in IN UNNEST.
-    return `CAST(${this.sqlLiteral(value)} AS STRING) IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
+    // JSON_EXTRACT_STRING_ARRAY yields ARRAY<STRING>, so the value looked for is its text too — a
+    // numeric or boolean literal would otherwise be a type error in IN UNNEST.
+    return `${this.sqlLiteral(value == null ? null : String(value))} IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
   }
 
+  // (the value as the caller wrote it in the type of the array's items — src/pipeline/compute.js)
   arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
 
   // JSON_VALUE parses a STRING holding JSON exactly as it reads a JSON-typed column, so the
@@ -201,8 +218,23 @@ export class BigQueryDialect extends Dialect {
 
   roundExpr(expr, places = 0) { return `ROUND(${expr}, ${Number(places)})`; }
 
-  // SAFE cast only: a bad value yields NULL instead of failing the whole query (no unsafe CAST).
-  castExpr(expr, type) { return `SAFE_CAST(${expr} AS ${this.castType(type) || 'STRING'})`; }
+  // SAFE cast only: a bad value yields NULL instead of failing the whole query (no unsafe CAST). ONE RULE
+  // ON BOTH WAREHOUSES: an integer is the number a value holds, rounded half away from zero — a number by
+  // BigQuery's own conversion (FLOAT64 / NUMERIC → INT64 rounds so), a text through NUMERIC (fromText); a
+  // flag is 1 or 0, through INT64 (a BOOL converts to no other number). `from` is the value's type where
+  // the writer knows it; of none known ('unknown', null — a raw's), the value is read as its text, which
+  // every scalar converts to (a BOOL to no number) — a flag's true / false is 1 / 0.
+  castExpr(expr, type, from = null) {
+    const ct = this.castType(type);
+    if (!ct) return `SAFE_CAST(${expr} AS STRING)`;
+    if (isNumericType(from)) return `SAFE_CAST(${expr} AS ${ct})`;
+    if (isBooleanType(from)) return ct === 'INT64' ? `SAFE_CAST(${expr} AS INT64)` : `SAFE_CAST(SAFE_CAST(${expr} AS INT64) AS ${ct})`;
+    if (from == null || from === 'unknown') {
+      const text = `SAFE_CAST(${expr} AS STRING)`;
+      return `(CASE ${text} WHEN 'true' THEN 1 WHEN 'false' THEN 0 ELSE ${this.fromText(text, type)} END)`;
+    }
+    return this.fromText(expr, type);
+  }
 
   substringExpr(expr, start, len) { return `SUBSTR(${expr}, ${Number(start)}${len != null ? `, ${Number(len)}` : ''})`; }
 

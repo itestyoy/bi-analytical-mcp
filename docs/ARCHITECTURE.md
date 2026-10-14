@@ -55,12 +55,20 @@ the server.)
 What a stage holds — a condition, a measure, a computed value — is ONE expression grammar:
 `{ fn, args: [expressions], …params }` over leaves (`{ column }`, `{ property, field? }`,
 `{ value }`, `{ now: true }`), nested to any depth. A value has the type of what it is read from (a
-property the catalog's declared type, a JSON field or an array element text) and is converted by one
-function, `cast`. A condition is an expression with a boolean value
+property the catalog's declared type, a JSON field text, an array element the type it is stored as — a
+native array's items, the warehouse's where it was asked, a JSON array's text) and is converted by one
+function, `cast` — to `int` the number a value or a text holds, rounded half away from zero, alike on
+both warehouses (each dialect's `castExpr` / `fromText`; a text only where it is written as a number
+BigQuery reads, a value of no known type — a raw's — read as its text). Only `cast`, `case` and `raw`
+say a type: a case's value is converted to it, a raw's is its caller's word, and a raw that says none
+claims none. A constant is written in the type of what it is compared with (a number against a text is
+its text; a text is not ordered against a number — cast it). A condition is an expression with a boolean value
 (`eq`, `in`, `between`, `is_null`, a text test, `and` / `or` / `not`); a `where` is a list of them that
 all hold; a measure is `{ name, expr }` whose expression folds rows (`sum`, `count`, `percentile` with
 its `percentile`, a formula over several, an aggregate over a `case` for a conditional one — the case
-missing on the rows it leaves out, so no `else` except a `sum`'s `else: 0`). Every
+missing on the rows it leaves out; an `else` folds them as its value, `average` of `then: 1, else: 0`
+a share of the rows, and is refused only under `count` / `count_distinct` and their approximations:
+`count` would count those rows, `count_distinct` their else value as one more). Every
 tool that takes an expression carries ONE definition of it, `$defs.expr`, built by one builder
 (`exprSchema`) for the tool's places: what a PLACE takes (a step over a source's rows, a read of stored
 rows, a semantic model, a where before a metric query's metrics step, a derived metric) is one table, `PLACES`, and a tool's
@@ -95,7 +103,7 @@ Stage = {
 | `scan` (implicit source) | `FROM` | the events fact or users dim (catalog model) | rows of the source |
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
 | `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (the `{ property }` leaf, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), a condition (stored as a boolean), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
-| `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows; the element is text, converted by `cast` | **expands** |
+| `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows; the element has the type it is stored as (a native array's items, the warehouse's where it was asked; a JSON array's text; a native struct not claimed), converted by `cast` | **expands** |
 | `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
 | `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one aggregate expression (`measure`) per value, each cell folding only its rows — its condition a `case` over the aggregates' argument | **collapses** to group keys |
@@ -105,7 +113,6 @@ Stage = {
 | `sample` | `\|> TABLESAMPLE` | keep a `share` of the rows (0 < share ≤ 1) for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; DuckDB row-level random()) | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
-| `metrics` | (MetricFlow) | a metric query's step — its metrics broken down by `group_by`, computed by the semantic layer; `query_semantic_model` alone takes it, `where` steps before it and the read stages after it | one row per `group_by` combination |
 
 **Implemented**: the registry is `src/pipeline/stages.js` (the functions of the one expression
 grammar are one table in `src/pipeline/compute.js`, the pieces every stage is written with in
@@ -113,11 +120,18 @@ grammar are one table in `src/pipeline/compute.js`, the pieces every stage is wr
 in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `compute`, `unnest`, `join`,
 `aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
 `match_recognize` (`src/match-recognize.js`) and `python` (`src/python-model.js`), which
-register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax — and `metrics`, a
-metric query's step, which MetricFlow runs (it has no SQL of its own here). A stage
+register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax. A stage
 declares what the machinery needs to know about it (`available` on this warehouse,
 `keepsSourceRows`, the next-step hints it `recommend`s), so nothing outside the registry
 names a stage.
+
+A metric query's `metrics` step — its metrics broken down by `group_by`, one row per
+combination, computed by MetricFlow — is in `query_semantic_model`'s `$defs.stage` beside these
+stages, but it is no stage of the registry: a build never reaches it. Its one definition
+(`METRICS_STEP`, `src/schema/fields.js`: its form, its group, what another place says of it) is
+offered by the place that takes it (`STAGE_PLACES.metric_scope`: the steps up to it, `where` steps and
+it), and every other place — a build's, a read's, the steps after it — refuses it in the words of
+that definition, naming the place that refuses it.
 
 New stages the request adds — `aggregate` (group_by), `join`, and
 `match_recognize` (promoted from a bespoke renderer to a registry stage) — slot

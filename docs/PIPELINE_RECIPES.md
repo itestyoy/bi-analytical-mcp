@@ -47,8 +47,9 @@ stage's `description` in the tool schema for the authoritative contract.
 ```
 `|> AGGREGATE SUM(price) / NULLIF(COUNT(DISTINCT appsflyer_id), 0) AS arppu, COUNT(CASE WHEN price >= 20 THEN 1 END) AS big_purchases GROUP BY country`
 — a `count` with no args counts rows; a conditional one counts a `case` that is 1 where the condition
-holds and missing elsewhere (no `else` — count would count the else's rows too; only `sum` may keep
-`else: 0`).
+holds and missing elsewhere (no `else` — under `count` / `count_distinct` and their approximations it is
+refused: `count` would count those rows, `count_distinct` their else value as one more). The share of
+the rows where it holds is `average` of the same case with `else: { value: 0 }`.
 
 ### Revenue pivoted to per-country columns (dashboard matrix)
 ```jsonc

@@ -243,7 +243,7 @@ test('pipeline pivot: a numeric column pivots by number, a missing value is a co
 // formula over two aggregates (revenue per payer), counts with a condition each — a count over a case
 // that yields 1 where it holds: a comparison, a membership of three members, and a range whose value and
 // bound are both expressions — and a sum with a condition, a sum over a case that yields the price there
-// (with no else, and with sum's else: 0).
+// (with no else, and with an else of 0).
 const IAP_PRICES = [5, 5, 5, 10, 10, 10, 20, 20];
 test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev / p90 / p25, sum(price*2) = 170 and sum(price) = 85, a constant column summing to 8, approx and exact distinct payers 7, ARPPU 85/7, conditional counts and conditional sums', opts, async (t) => {
   if (skip(t)) return;
@@ -277,7 +277,7 @@ test('pipeline: one ungrouped aggregate over the 8 IAP rows — median / stddev 
       { name: 'listed', expr: rowsWhere({ fn: 'in', args: [price, { value: 5 }, { value: 20 }, { value: 7 }] }) },
       // price*2 between 15 and price+15: the prices from 7.5 to 15
       { name: 'mid', expr: rowsWhere({ fn: 'between', args: [{ fn: 'mul', args: [price, { value: 2 }] }, { value: 15 }, { fn: 'add', args: [price, { value: 15 }] }] }) },
-      // …and their prices summed: nothing on the other rows, or 0 there (sum's else)
+      // …and their prices summed: nothing on the other rows, or 0 there (its else)
       { name: 'over_10_revenue', expr: sumWhere(price, over10) },
       { name: 'over_10_or_0', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [over10], then: price }], else: { value: 0 } }] } },
     ] },
@@ -1983,4 +1983,58 @@ test('a point-in-time join keeps the open-ended current version, and still picks
   // and the window still EXCLUDES a version that had already ended: no event matches two versions
   const fanout = await db.query(`SELECT count(*)::int AS n FROM (${sql}) x`);
   assert.equal(fanout.rows[0].n, 3, 'one row per event — the key alone would have matched both u1 versions');
+});
+
+// ════════════ ONE TEXT-TO-NUMBER RULE ═════════════════════════════════════════════════════════════
+// A value cast to int is the number it holds, rounded half away from zero — a text's and a number's
+// alike, as BigQuery converts a FLOAT64 or a NUMERIC (DuckDB's own DOUBLE → BIGINT rounds half to EVEN,
+// and BigQuery's SAFE_CAST of '9.99' to INT64 is NULL); a flag is 1; a text that holds no number as
+// BigQuery writes one is missing ('1_000', which DuckDB alone would read, and a hex text alike). What only
+// says its type converts as what it holds: a raw's SQL (of no known type — a flag it yields is 1) and a
+// case that says int over text branches. Asserted on the values one completed level comes back with (e58:
+// 45 seconds, held as text in one column and as a DOUBLE in another), read from the warehouse first, and on
+// the texts the rule names.
+// (The fixture holds no native array of numbers — each array it declares is of strings — so an element
+// of one is not compared with a number here.)
+
+test('cast to int: the number a text or a number holds, rounded half away from zero — 45, 2.5 → 3, ±22.5 → ±23, "9.99" → 10, "abc" and "1_000" missing', opts, async (t) => {
+  if (skip(t)) return;
+  const row = (await wh.query("select complete_time_of_event_data as secs, daily_level_score_of_event_data / 2 as half, cast(daily_level_score_of_event_data / 2 as bigint) as own from fct_analytics_events where event_id = 'e58'")).rows[0];
+  assert.equal(String(row.secs), '45', 'the payload holds the seconds as text');
+  assert.equal(num(row.half), 22.5);
+  assert.equal(num(row.own), 22, 'the warehouse\'s own DOUBLE → BIGINT rounds half to even — the case the rule is about');
+  const toInt = (expr) => ({ fn: 'cast', args: [expr], type: 'int' });
+  const col = (column) => ({ column });
+  const val = (value) => ({ value });
+  const texts = { t_999: '9.99', t_30: '3.0', t_25: '2.5', t_m25: '-2.5', t_1e3: '1e3', t_word: 'abc', t_sep: '1_000', t_hex: '0x1F' };
+  const secs = { property: 'complete_time_of_event_data' };
+  const r = await show([
+    { stage: 'where', conditions: [{ fn: 'eq', args: [col('event_id'), val('e58')] }] },
+    { stage: 'compute', name: 'done', expr: { fn: 'eq', args: [col('event_name'), val('level_completed')] } },
+    { stage: 'compute', name: 'half', expr: { fn: 'div', args: [col('daily_level_score_of_event_data'), val(2)] } },
+    { stage: 'compute', name: 'from_text', expr: toInt({ property: 'complete_time_of_event_data' }) },
+    { stage: 'compute', name: 'from_double', expr: toInt({ fn: 'div', args: [col('daily_level_score_of_event_data'), val(18)] }) },
+    { stage: 'compute', name: 'from_half', expr: toInt(col('half')) },
+    { stage: 'compute', name: 'from_neg_half', expr: toInt({ fn: 'sub', args: [val(0), col('half')] }) },
+    { stage: 'compute', name: 'from_half_text', expr: toInt({ fn: 'cast', args: [col('half')], type: 'string' }) },
+    { stage: 'compute', name: 'from_flag', expr: toInt(col('done')) },
+    { stage: 'compute', name: 'from_raw_flag', expr: toInt({ fn: 'raw', sql: '{1} > 40', args: [col('daily_level_score_of_event_data')] }) },
+    { stage: 'compute', name: 'from_raw_text', expr: toInt({ fn: 'raw', sql: '{1}', args: [secs], type: 'numeric' }) },
+    { stage: 'compute', name: 'from_case_text', expr: toInt({ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('done'), val(true)] }], then: secs }], type: 'int' }) },
+    ...Object.entries(texts).map(([name, text]) => ({ stage: 'compute', name, expr: toInt(val(text)) })),
+    { stage: 'project', keep: ['from_text', 'from_double', 'from_half', 'from_neg_half', 'from_half_text', 'from_flag', 'from_raw_flag', 'from_raw_text', 'from_case_text', ...Object.keys(texts)] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.rows.length, 1);
+  const got = Object.fromEntries(Object.entries(r.rows[0]).map(([k, v]) => [k, v == null ? null : num(v)]));
+  assert.equal(got.from_text, 45, 'the payload\'s text "45"');
+  assert.equal(got.from_double, 3, 'a DOUBLE 2.5 (45 / 18)');
+  assert.equal(got.from_half, 23, 'a DOUBLE 22.5 — half away from zero, not to even');
+  assert.equal(got.from_neg_half, -23, 'and -22.5');
+  assert.equal(got.from_half_text, 23, 'the same number as the text "22.5"');
+  assert.equal(got.from_flag, 1, 'a flag that holds');
+  assert.equal(got.from_raw_flag, 1, 'a flag a raw yields, saying no type (45 > 40)');
+  assert.equal(got.from_raw_text, 45, 'a raw that says numeric over the text "45"');
+  assert.equal(got.from_case_text, 45, 'a case that says int over the text "45"');
+  assert.deepEqual(Object.fromEntries(Object.keys(texts).map((k) => [k, got[k]])), { t_999: 10, t_30: 3, t_25: 3, t_m25: -3, t_1e3: 1000, t_word: null, t_sep: null, t_hex: null }, 'the texts: "9.99" 10, "3.0" 3, "2.5" 3, "-2.5" -3, "1e3" 1000, a word, "1_000" and "0x1F" missing');
 });

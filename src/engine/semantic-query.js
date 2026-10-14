@@ -19,7 +19,7 @@ import { renderRead, stageAt, STAGE_PLACES } from '../pipeline.js';
 import { eachNode } from '../pipeline/compute.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, pageBlock, samplingNote } from './helpers.js';
-import { KEPT_ROWS } from '../schema/fields.js';
+import { KEPT_ROWS, METRICS_STEP } from '../schema/fields.js';
 
 /** Whether a request asks its answer to show `what` beyond the default (its `include` list). */
 export const wants = (input, what) => Array.isArray(input?.include) && input.include.includes(what);
@@ -445,8 +445,16 @@ export const semanticQueryMethods = {
       return { kind: 'dimension', path: item.dunder_name };
     }, w.at));
     // the steps after the query, over its result's columns: checked here, before anything runs (a
-    // reference a where there names is the result's column when a group_by item gave it one)
-    const carried = (ref, at) => { try { const { item, grain } = itemOf(ref, at); const c = columnOf(item, grain); return columns.some((x) => x.name === c) ? c : null; } catch { return null; } };
+    // reference a where there names is the result's column when a group_by item gave it one — a time
+    // named without a grain, the column of each grain the metrics step groups that item by)
+    const carried = (ref, at) => {
+      try {
+        const { time, item, grain } = itemOf(ref, at);
+        if (ref.grain === undefined && (time || grain)) return q.groupBy.map((g, i) => itemOf(g, `${q.at} group_by[${i}]`)).filter((g) => g.item === item).map((g) => columnOf(g.item, g.grain));
+        const c = columnOf(item, grain);
+        return columns.some((x) => x.name === c) ? [c] : [];
+      } catch { return []; }
+    };
     const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: 'unknown' }))], rename, first: q.first, carried });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a
@@ -487,8 +495,9 @@ export const semanticQueryMethods = {
 
   /**
    * A METRIC QUERY IS ITS STEPS — one metrics step, what the semantic layer computes ({ stage: "metrics",
-   * metrics, group_by? }); before it where steps, every condition of which holds for the rows its metrics
-   * fold (MetricFlow's where, PLACES.metric_where: each reference resolved as group_by's is); after it the
+   * metrics, group_by? } — METRICS_STEP, src/schema/fields.js: no pipeline stage, offered by the place that
+   * takes it); before it where steps, every condition of which holds for the rows its metrics fold
+   * (MetricFlow's where, PLACES.metric_where: each reference resolved as group_by's is); after it the
    * steps a read takes, over its result (_metricTail). Where a step stands is checked here, and a refusal
    * names it (STAGE_PLACES.metric_scope): no metrics step or a second one, a step before it that is no
    * where — one the result takes goes after it. `offers`: what the context offers, said to a query with no
@@ -499,9 +508,10 @@ export const semanticQueryMethods = {
   _metricSteps(input, offers) {
     const steps = input.steps || [];
     const refuse = (message) => new ToolError(message, { stage: 'validate', field: 'steps' });
-    const k = steps.findIndex((st) => st?.stage === 'metrics');
+    const isMetrics = (st) => st?.stage === METRICS_STEP.stage;
+    const k = steps.findIndex(isMetrics);
     if (k < 0) throw refuse(`steps: a metric query is one metrics step — { stage: "metrics", metrics: [...], group_by: [...] } — with where steps before it for the rows its metrics fold and steps after it over its result; these steps have none. ${offers}`);
-    const again = steps.findIndex((st, i) => i > k && st?.stage === 'metrics');
+    const again = steps.findIndex((st, i) => i > k && isMetrics(st));
     if (again >= 0) throw refuse(`steps[${again}]: a metric query has one metrics step, and steps[${k}] is one — list every metric in it, or make the other a query of its own (several run side by side in one call: queries)`);
     const result = STAGE_PLACES.metric_result;
     const wheres = steps.slice(0, k).map((st, i) => {
@@ -521,14 +531,15 @@ export const semanticQueryMethods = {
    * runs, by the read compiler they run through: a step naming a column the result does not have is
    * refused with the columns there are at that step. The where steps before the metrics step filter the
    * rows a metric folds; a where step after it filters the result (a having) — and a reference a where
-   * there names is refused with where it goes: the result's column (`carried(ref, at)` → the column a
-   * group_by item gave it, or null) or before the metrics step.
+   * there names is refused with where it goes: the result's column (`carried(ref, at)` → the columns a
+   * group_by item gave it — one, or one per grain for a time named without its grain —, or none) or
+   * before the metrics step.
    * What MetricFlow says itself runs as `mf query`: no steps, or one order_by step whose keys it orders
    * as asked (`orderBy`, its order tokens — `rename` maps each token to the caller's name); any other
    * step runs over the SQL it compiles for the query (`viaSql`, _metricRead).
    * → { steps, columns, orderBy, viaSql, ordered, outputColumns, sample }
    */
-  _metricTail(steps, { columns, rename, first = 0, carried = () => null }) {
+  _metricTail(steps, { columns, rename, first = 0, carried = () => [] }) {
     const at = (i) => `steps[${first + i}]`;
     const refuse = (message) => new ToolError(message, { stage: 'validate', field: 'steps' });
     steps.forEach((st, i) => {
@@ -537,8 +548,11 @@ export const semanticQueryMethods = {
       let ref = null;
       eachNode(st.conditions, (n) => { ref ||= REF_PLACES.group_by.takes.includes(refKind(n)) ? n : null; });
       if (!ref) return;
-      const column = carried(ref, at(i));
-      throw refuse(`${at(i)}: a where after the metrics step reads the result's columns — ${refText(ref)} ${column ? `is its column '${column}' there ({ column: '${column}' }); or put the where before the metrics step` : 'is a dimension the result does not carry: put it before the metrics step'}, where it filters the rows the metrics fold`);
+      const cols = carried(ref, at(i));
+      const named = cols.map((c) => `{ column: '${c}' }`).join(' or ');
+      const there = cols.length > 1 ? `is in the result as its columns ${cols.slice(0, -1).map((c) => `'${c}'`).join(', ')} and '${cols[cols.length - 1]}', one per grain the metrics step groups it by — name the one you mean (${named}); or put the where before the metrics step`
+        : cols.length ? `is its column '${cols[0]}' there (${named}); or put the where before the metrics step` : 'is a dimension the result does not carry: put it before the metrics step';
+      throw refuse(`${at(i)}: a where after the metrics step reads the result's columns — ${refText(ref)} ${there}, where it filters the rows the metrics fold`);
     });
     let read;
     // (the read numbers its steps from 0; here they follow the metrics step)
@@ -752,8 +766,15 @@ export const semanticQueryMethods = {
       filterWarnings = this.advisor.guardFilterValues(specs); // throws on a case/typo/absent mismatch
     }
     // the steps after the query, over its result's columns: checked here, before anything runs (a
-    // reference a where there names is the result's column when a group_by item gave it one)
-    const carried = (ref, at) => { try { const { column } = this._taskRef(ctx, ref, at, 'steps'); return columns.some((x) => x.name === column) ? column : null; } catch { return null; } };
+    // reference a where there names is the result's column when a group_by item gave it one —
+    // metric_time named without a grain, the column of each grain the metrics step groups it by)
+    const carried = (ref, at) => {
+      try {
+        const { kind, column } = this._taskRef(ctx, ref, at, 'steps');
+        if (kind === 'time' && ref.grain === undefined) return q.groupBy.map((g, i) => this._taskRef(ctx, g, `${q.at} group_by[${i}]`, 'steps')).filter((g) => g.kind === 'time').map((g) => g.column);
+        return columns.some((x) => x.name === column) ? [column] : [];
+      } catch { return []; }
+    };
     const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: 'unknown' }))], rename, first: q.first, carried });
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });

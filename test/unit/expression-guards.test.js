@@ -263,10 +263,11 @@ test('a condition is a function: an earlier spelling is refused with the value w
 
 // A READ NAMES NO TYPE, AN AGGREGATE NO WHERE: a new call written the earlier way is refused with the value
 // written today — a typed read as the read cast to its type (the type dropped where the read yields it:
-// text out of a JSON document or an array), an aggregate's where as the case it folds, an unnest naming its
-// element's type as the unnest and a compute stage casting the element (in a list of steps, where the two
-// fit; a lone step has no one value it is now: its `type` is refused as a field no unnest takes, and the
-// two steps it is are said, to put where it stood).
+// text out of a JSON document; an element is of its array's items, so its cast stays), an aggregate's where
+// as the case it folds, an unnest naming its element's type as the unnest and a compute stage casting the
+// element (in a list of steps, where the two fit; a lone step has no one value it is now: the two steps it
+// is are said, to put where it stood — the one thing said of it, never a value that still names a type —
+// its element named `name` or, before that, `as`).
 test('a typed read, an aggregate\'s where and a typed unnest are refused with the value written today', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'guards-')) }) });
   const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'typed', source: 'events' });
@@ -283,9 +284,18 @@ test('a typed read, an aggregate\'s where and a typed unnest are refused with th
   const unnest = { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' };
   await assert.rejects(() => add({ ...unnest, type: 'int' }, { stage: 'limit', limit: 5 }), shown([{ ...unnest, name: 'w_element' }, { stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } }, { stage: 'limit', limit: 5 }]));
   await assert.rejects(() => add({ ...unnest, type: 'string' }), shown(unnest));
-  // alone, it is said as the two steps it is, to put where it stood
-  await assert.rejects(() => e.build_pipeline_model({ action: 'insert_step', context_id, index: 1, step: { ...unnest, type: 'int' } }), (err) => /unexpected property 'type'/.test(err.message)
-    && err.message.includes(`${JSON.stringify({ ...unnest, name: 'w_element' })} in its place, then ${JSON.stringify({ stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } })} after it`));
+  // alone, it is said as the two steps it is, to put where it stood — and nothing else of it: no field
+  // refused one by one, no value still naming its type (its array named the earlier way alike)
+  const two = `${JSON.stringify({ ...unnest, name: 'w_element' })} in its place, then ${JSON.stringify({ stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } })} after it`;
+  for (const step of [
+    { ...unnest, type: 'int' }, { stage: 'unnest', property: 'words_collected', name: 'w', type: 'int' },
+    { stage: 'unnest', expr: { property: 'words_collected' }, as: 'w', type: 'int' }, { stage: 'unnest', property: 'words_collected', as: 'w', type: 'int' },
+  ]) {
+    await assert.rejects(() => e.build_pipeline_model({ action: 'insert_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
+      && err.message.endsWith(two) && !/unexpected property|earlier spelling/.test(err.message) && !err.message.includes('"name":"w","type":"int"'), JSON.stringify(step));
+  }
+  // a long name: its element's name is cut to a name a step may make
+  await assert.rejects(() => add({ ...unnest, name: 'w'.repeat(41), type: 'int' }), shown([{ ...unnest, name: `${'w'.repeat(33)}_element` }, { stage: 'compute', name: 'w'.repeat(41), expr: { fn: 'cast', args: [col(`${'w'.repeat(33)}_element`)], type: 'int' } }]));
   // what is written today is taken
   assert.equal((await add({ stage: 'compute', name: 'p', expr: { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' } }, unnest, { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [isTut], then: val(1) }] }] } }] })).steps_count, 3);
 });

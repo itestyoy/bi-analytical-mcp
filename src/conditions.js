@@ -31,6 +31,9 @@ const SUBSTRING = {
   ends_with: (lhs, s) => `ENDS_WITH(${lhs}, ${s})`,
 };
 
+/** The comparisons that order their arguments. */
+const ORDER_OPS = new Set(['gt', 'gte', 'lt', 'lte', 'between']);
+
 /** The text tests — a LIKE pattern or a substring: their second argument is text whatever the first is. */
 export const TEXT_OPS = new Set([...Object.keys(LIKE_SQL), ...Object.keys(SUBSTRING)]);
 
@@ -38,28 +41,34 @@ export const TEXT_OPS = new Set([...Object.keys(LIKE_SQL), ...Object.keys(SUBSTR
 export const OPS = [...Object.keys(COMPARE_SQL), 'in', 'not_in', 'between', 'is_null', 'is_not_null', ...TEXT_OPS];
 
 // A constant compared with something of a KNOWN type is written in that type. A warehouse compares a
-// value only with its own type — BigQuery refuses BOOL = STRING and INT64 = STRING outright — and the
-// caller often spells a flag "true" or a number "5". So a boolean takes true / false (written either
-// way, or 1 / 0) and a number a number (or a numeric string); anything else is refused HERE, when the
-// step is added, rather than by the warehouse when it runs. A type 'string' is left as it is: that is
-// also the type of what nothing more is known about.
+// value only with its own type — BigQuery refuses BOOL = STRING, INT64 = STRING and STRING = INT64
+// outright, and DuckDB reads a text column met by a number as numbers, failing on the first word — and
+// the caller often spells a flag "true" or a number "5". So a boolean takes true / false (written either
+// way, or 1 / 0), a number a number (or a numeric string), and a text a number as its text (5 is '5');
+// anything else is refused HERE, when the step is added, rather than by the warehouse when it runs. What
+// nothing is known about ('unknown', null) takes the constant as it is written.
 const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
 
-/** A constant as a literal of `type` (what it is compared with; null for unknown). `where` names it in a refusal. */
-export function typedLiteral(type, v, where) {
-  if (v === null) return sqlLiteral(v);
+/** A constant as a value of `type` (what it is compared with, or looked for among; null for unknown) —
+ *  the value typedLiteral writes, and an array's member (array_contains) is. `where` names it in a refusal. */
+export function typedValue(type, v, where) {
+  if (v === null) return v;
   if (type === 'boolean') {
     const b = typeof v === 'boolean' ? v : typeof v === 'number' && (v === 0 || v === 1) ? v === 1 : typeof v === 'string' ? BOOL_TEXT.get(v.trim().toLowerCase()) : undefined;
     if (b === undefined) throw new Error(`${where} is a boolean: compare it with true or false, not ${JSON.stringify(v)}`);
-    return sqlLiteral(b);
+    return b;
   }
   if (isNumericType(type)) {
-    if (typeof v === 'number') return sqlLiteral(v);
-    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return sqlLiteral(Number(v));
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
     throw new Error(`${where} is a number: compare it with a number, not ${JSON.stringify(v)}`);
   }
-  return sqlLiteral(v);
+  if (type === 'string' && typeof v === 'number') return String(v);
+  return v;
 }
+
+/** A constant as a literal of `type` (what it is compared with; null for unknown). `where` names it in a refusal. */
+export const typedLiteral = (type, v, where) => sqlLiteral(typedValue(type, v, where));
 
 // How a flag is spelled when the warehouse stores it as text.
 const TEXT_TRUE = ['true', '1', 't'];
@@ -98,7 +107,8 @@ const isConstant = (x) => x.constant === true;
  * member, …], between [a, low, high], is_null / is_not_null [a], like … ends_with [text, pattern].
  *
  * The typing rule, one for every level: a constant is written in the type of the first argument that
- * is not a constant (a flag spelled "true" meets a boolean, "5" a number); a boolean beside a physical
+ * is not a constant (a flag spelled "true" meets a boolean, "5" a number, 5 a text as '5' — and a text is
+ * not ordered against a number, which would order it as text: refused, saying to cast); a boolean beside a physical
  * TEXT column holding a flag matches every spelling of it; two arguments that are not constants, one a
  * moment, meet as timestamps (`timeOperand`) — a number or a boolean on the other side is refused. A
  * constant null is refused: a missing value is tested with is_null / is_not_null, and a comparison with
@@ -133,6 +143,11 @@ export function predicateSql(op, args, { timeOperand = (x) => x, literal = null,
     const kinds = new Set(constants.map((v) => typeof v));
     if (kinds.size > 1) throw new Error(`${op} on ${named(anchor)} takes constants of one kind — the column is compared as that kind`);
     castKind = [...kinds][0];
+  }
+  // a text ordered against a number would be ordered as text ('10' before '9'), the number written as its
+  // text: refused, saying to read the number the text holds first
+  if (!castKind && !literal && anchor?.type === 'string' && ORDER_OPS.has(op) && constants.some((v) => typeof v === 'number')) {
+    throw new Error(`${named(anchor)} is text: ${op} with a number would order it as text ('10' before '9') — read the number it holds first ({ fn: "cast", args: [<it>], type: "numeric" }), or compare it with text`);
   }
   const flag = !castKind && anchor?.physical && anchor.type === 'string' && constants.some((v) => typeof v === 'boolean');
   if (flag) {

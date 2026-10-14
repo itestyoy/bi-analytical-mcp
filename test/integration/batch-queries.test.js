@@ -133,7 +133,7 @@ test('a batch started right after the declaration waits for its parse, runs ever
   assert.deepEqual(card.rows.map((r) => num(r.mon_revenue)).sort((a, b) => a - b), [0, 25, 25, 35]);
 });
 
-test('a batch of reads over a built pipeline model, each in steps of the pipeline\'s own stages: count, non-NULL count, sums, a where on a measure, and a count and a sum over a case, read back together', opts, async (t) => {
+test('a batch of reads over a built pipeline model, each in steps of the pipeline\'s own stages: count, non-NULL count, sums, a where on a measure, a count and a sum over a case, and a share and an any over a case with an else, read back together', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'priced', source: 'events' });
   // a numeric property, read as the catalog declares it (no cast)
@@ -142,6 +142,7 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const priced = { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'price' }] }] };
   const completed = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] };
+  const purchaseFlag = { fn: 'case', cases: [{ when: [completed], then: { value: 1 } }], else: { value: 0 } };
   const amountByEvent = { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'amount', expr: { fn: 'sum', args: [{ column: 'price' }] } }] };
   const started = await engine.raw.query_pipeline_model({
     context_id: s.context_id,
@@ -158,11 +159,17 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
         { name: 'purchases', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [completed], then: { value: 1 } }] }] } },
         { name: 'purchase_revenue', expr: { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [completed], then: { column: 'price' } }] }] } },
       ] }] },
+      // per player, the average and the max of a case that is 1 on a completed purchase and 0 (its else)
+      // on every other row: the share of the player's rows that are one, and whether any is
+      { steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [
+        { name: 'purchase_share', expr: { fn: 'average', args: [purchaseFlag] } },
+        { name: 'any_purchase', expr: { fn: 'max', args: [purchaseFlag] } },
+      ] }] },
     ],
   });
   assert.equal(started.read_with, 'query_pipeline_model');
-  const [rows, nonNull, revenue, byEvent, over50, conditional] = await readAll('query_pipeline_model', started.task_ids);
-  for (const r of [rows, nonNull, revenue, byEvent, over50, conditional]) assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const [rows, nonNull, revenue, byEvent, over50, conditional, perPlayer] = await readAll('query_pipeline_model', started.task_ids);
+  for (const r of [rows, nonNull, revenue, byEvent, over50, conditional, perPlayer]) assert.equal(r.status, 'done', JSON.stringify(r.error));
   assert.equal(num(rows.rows[0].rows), 184);
   assert.equal(num(nonNull.rows[0].priced), 11);
   assert.equal(num(revenue.rows[0].revenue), 85);
@@ -172,6 +179,16 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
   assert.deepEqual([num(truth.purchases), num(truth.revenue)], [8, 85], '[the truth] 8 completed purchases, 85 of revenue');
   assert.equal(num(revenue.rows[0].revenue), num(truth.revenue), '[a numeric property read with no cast, summed] the warehouse\'s revenue');
   assert.deepEqual([num(conditional.rows[0].purchases), num(conditional.rows[0].purchase_revenue)], [num(truth.purchases), num(truth.revenue)], '[count / sum over a case] the warehouse\'s completed purchases and their revenue');
+  // each player's share of rows that are a completed purchase, and whether any is — as the warehouse
+  // counts them by its own SQL (a mix of players with and without one: the any is 0 and 1)
+  const round = (v) => Math.round(num(v) * 1e9) / 1e9;
+  const shares = Object.fromEntries((await wh.query(`select player_id_of_internal as player,
+      count(*) filter (where event_name = 'iap_purchase_completed') * 1.0 / count(*) as share,
+      bool_or(event_name = 'iap_purchase_completed') as any_purchase
+    from fct_analytics_events group by 1`)).rows.map((r) => [String(r.player), [round(r.share), r.any_purchase === true ? 1 : 0]]));
+  assert.deepEqual(new Set(Object.values(shares).map(([, any]) => any)), new Set([0, 1]), '[the truth] players with a completed purchase and players without one');
+  assert.deepEqual(Object.fromEntries(perPlayer.rows.map((r) => [String(r.player_id_of_internal), [round(r.purchase_share), num(r.any_purchase)]])), shares,
+    '[average / max over a case with else 0] the warehouse\'s share of each player\'s rows that are a completed purchase, and whether any is');
   assert.deepEqual(byEvent.rows.map((r) => [r.event_name, num(r.amount)]), [['iap_purchase_completed', 85], ['iap_purchase_failed', 35]]);
   // the completed purchases' 85 passes 50, the failed ones' 35 does not
   assert.deepEqual(over50.rows.map((r) => [r.event_name, num(r.amount)]), [['iap_purchase_completed', 85]]);

@@ -18,7 +18,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, stepNotes } from '../helpers/settle.js';
+import { settle } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
 
@@ -112,15 +112,15 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.equal(num(r.rows[0].scd_drop_revenue), 100);
 });
 
-// 4) PIPELINE point-in-time join via join.between: same point-in-time numbers as governed.
-test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
+// 4) PIPELINE point-in-time join via the users contract's time: same point-in-time numbers as governed.
+test('pipeline join on the users contract: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
   const r = await engine.build_pipeline_model({
     action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
       { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
-      { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
+      { stage: 'join', source: 'users', on: { user: 'internal_player_id', time: 'device_time' }, attrs: [{ column: 'country' }] },
       { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     ],
   });
@@ -135,39 +135,16 @@ test('pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / 
   assert.equal(mat.rows.reduce((a, x) => a + num(x.n), 0), 4, 'exactly the 4 purchases — no fan-out');
 });
 
-// 5) The SAME pipeline WITHOUT between fans out (u1's purchases match both versions): total inflates
-//    to 130 and there are 6 joined rows. This is exactly what the join-completeness nudge warns about.
-test('pipeline key-only join (no between) fans out: total inflates to 130 / 6 rows', opts, async (t) => {
+// 5) The key alone — u1's purchases meeting both of its versions — would inflate the total to 130 over
+//    6 rows (a hand-written join shows it); the contract requires the moment, so a join that names none
+//    is refused at the step, the part named, instead of building that.
+test('the key alone would inflate to 130 / 6 rows; a join without its time is refused', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
-  await engine.build_pipeline_model({
-    action: 'add_steps', context_id: s.context_id, steps: [
-      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-      { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
-      { stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] },
-      { stage: 'aggregate', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
-    ],
-  });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
-  assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  assert.equal(num(mat.rows[0].revenue), 130, 'fan-out double-counts u1 across both versions → 130 (vs the correct 100)');
-  assert.equal(num(mat.rows[0].n), 6, 'u1 (2 purchases) × 2 versions + u2 + u3 = 6 joined rows');
-});
-
-// 6) The join-completeness nudge fires in the pipeline response for an SCD key-only join, naming the
-//    REAL schema columns to fix it (the caller's key + the event-time + validity columns).
-test('pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
-  if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }] }] });
-  const w = stepNotes(r).find((x) => /INCOMPLETE JOIN/.test(x));
-  assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(stepNotes(r))}`);
-  assert.match(w, /internal_player_id/);        // the caller's join key, echoed
-  assert.match(w, /device_time/);               // the event-time column from the catalog
-  assert.match(w, /install_time_valid_from/);   // validity-window columns from the catalog
-  assert.match(w, /install_time_valid_until/);
-  // and the correct form (WITH between) produces NO such nudge
-  const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', with: 'users', via: { on: ['internal_player_id'] }, attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] });
-  assert.ok(!stepNotes(r2).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
+  const { rows } = await wh.query(`SELECT sum(e.price_in_usd_of_event_data) AS revenue, count(*) AS n FROM main.fct_events e JOIN main.dim_users u ON e.internal_player_id = u.internal_player_id WHERE e.event_name = 'iap_purchase_completed'`);
+  assert.deepEqual([num(rows[0].revenue), num(rows[0].n)], [130, 6], 'u1 (2 purchases) × 2 versions + u2 + u3');
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_notime', source: 'events' });
+  await assert.rejects(
+    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'internal_player_id' }, attrs: [{ column: 'country' }] }] }),
+    /missing required property 'time'/,
+  );
 });

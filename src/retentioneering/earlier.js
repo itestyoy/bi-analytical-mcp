@@ -32,6 +32,7 @@
 // action's include_columns / include_steps by the core's converter (src/earlier-spelling.js currentInclude,
 // as the schema refuses them), a display's { task_id, analysis, … } here.
 
+import { storedJoin } from '../pipeline/earlier.js';
 import { ES_COLUMNS } from './names.js';
 import { ToolError } from '../validate.js';
 import { READ_PAGE } from '../schema/fields.js';
@@ -130,7 +131,9 @@ function joinStage(catalog, source, seg, name, timeColumn) {
   const m = catalog?.models?.[seg.model] ? catalog.getModel(seg.model) : null;
   const bound = (v) => Object.entries(m?.dimensions || {}).find(([, d]) => d.validity === v)?.[0];
   const between = m?.scd && bound('start') && bound('end') && timeColumn ? { column: timeColumn, from: bound('start'), to: bound('end') } : null;
-  return { stage: 'join', with: seg.model, ...(via !== undefined ? { via } : {}), attrs: [{ column: seg.attribute, ...(name !== seg.attribute ? { name } : {}) }], ...(between ? { between } : {}) };
+  const kept = { stage: 'join', with: seg.model, ...(via !== undefined ? { via } : {}), attrs: [{ column: seg.attribute, ...(name !== seg.attribute ? { name } : {}) }], ...(between ? { between } : {}) };
+  // …as the joined model's contract, where its parts can be read off it (src/pipeline/earlier.js)
+  return storedJoin(kept, { catalog, source }) ?? kept;
 }
 
 /**

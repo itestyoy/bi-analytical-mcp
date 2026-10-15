@@ -142,23 +142,22 @@ test('grouped by an attribute of the same source: cost by media_source; and the 
 // (Spend by users.country, attributed POINT-IN-TIME to the install version valid on the spend day —
 // US 6.75 / GB 5.00 / DE 4.00 / BR 1.75 — is mcp-end-to-end.test.js #1, the same measure over MCP.)
 
-// A COMPOSITE join key is what keeps a per-day table from fanning out: u1 has spend on TWO
-// days (SEED_DATA §11), so joining 12 first_launch events on the player alone yields 13 rows,
-// while joining on player + day yields exactly 12.
-test('composite join key prevents fan-out: player+day = 12 rows, player alone = 13', opts, async (t) => {
+// THE DAY IS PART OF THE KEY: u1 has spend on TWO days (SEED_DATA §11), so the 12 first_launch events
+// joined on the player alone would be 13 rows; the acquisition contract joins the player AND the day of
+// the moment named, so they stay exactly 12.
+test('the same-day contract prevents fan-out: 12 first launches stay 12 rows', opts, async (t) => {
   if (skip(t)) return;
-  const rowsAfterJoin = async (name, on) => {
-    const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }] });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'spend_date', expr: { fn: 'date_trunc', args: [{ column: 'device_time' }], grain: 'day' } }] });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', with: 'acquisition', via: { on }, attrs: [{ column: 'media_source' }] }] });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-    const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
-    assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
-    return num(c.rows[0].n);
-  };
-  assert.equal(await rowsAfterJoin('acq_join_pair', ['player_id_of_internal', 'spend_date']), 12, 'player+day matches one cost row per event');
-  assert.equal(await rowsAfterJoin('acq_join_single', ['player_id_of_internal']), 13, "player alone duplicates u1's event across both spend days");
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_join_day', source: 'events' });
+  for (const step of [
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
+    { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'media_source' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'matched', expr: { fn: 'count', args: [{ column: 'media_source' }] } }] },
+  ]) await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(num(c.rows[0].n), 12, 'one row per first launch: the day keeps u1 from meeting both spend days');
+  const { rows } = await wh.query(`SELECT count(*) AS n FROM main.fct_analytics_events e JOIN main.fct_player_acquisition a ON e.player_id_of_internal = a.player_id_of_internal AND CAST(e.device_time AS DATE) = CAST(a.spend_date AS DATE) WHERE e.event_name = 'first_launch'`);
+  assert.equal(num(c.rows[0].matched), num(rows[0].n), 'the launches that met their day\'s spend record, as a hand-written join counts them');
 });
 
 // meta.mcp.dimension:false keeps a column out of the group-by surface while leaving it a real

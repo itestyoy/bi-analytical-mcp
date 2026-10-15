@@ -53,7 +53,6 @@ export class PipelineAdvisor {
   stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
     const draft = { source, stages, timeRange, startsFromTable };
     return stages.flatMap((st, i) => [
-      ...this.joinCompletenessWarnings(st, draft),
       ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
       ...this.pythonPreparationWarnings(st, draft, i),
       ...this.globalWindowWarnings(st),
@@ -112,29 +111,6 @@ export class PipelineAdvisor {
     return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
       + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (sub / div, or least / greatest, with { value }).`
       + ` If it is per group (per player, per day, per session), name those columns in over.partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
-  }
-
-  /**
-   * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
-   * key alone: without a point-in-time `between` window it fans out to EVERY historical version of
-   * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
-   * add the window (and fix it) instead of trusting a silently wrong join.
-   */
-  joinCompletenessWarnings(stage, draft = null) {
-    if (!stage || stage.stage !== 'join' || stage.between) return [];
-    let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
-    if (!m?.scd) return [];
-    const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
-    const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
-    const eventTime = draft?.source ? this.catalog.getModel(draft.source)?.time?.column : null;
-    const fix = (from && to && eventTime)
-      ? ` Add between: { column: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
-      : ' Add a `between` window (column = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
-    // The key is a declared relationship (via: '<name>') or columns both sides name alike
-    // (via: { on: [...] }) — say whichever the caller used, never the object itself.
-    const on = typeof stage.via === 'string' ? null : [].concat(stage.via?.on ?? stage.on ?? []);
-    const named = on ? `key '${on.join(' + ')}'` : `the declared relationship '${stage.via}'`;
-    return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on ${named} with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
   }
 
   /**

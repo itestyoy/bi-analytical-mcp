@@ -116,8 +116,7 @@ export const CASES = [
       source: 'events',
       steps: [
         { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-        { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }, { column: 'experiment_name' }] },
-        { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'experiment_name' }, { value: 'checkout_flow' }] }] },
+        { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
         { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
       ],
       key: 'variant_group',

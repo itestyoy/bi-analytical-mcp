@@ -251,19 +251,20 @@ test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labell
   assert.match(crash.relationships.find((x) => x.entity === 'ad_funnel').use, /^owned here — other models point at it/, '20: the crash side owns ad_funnel');
   const events = await ownerEngine.semantic_index({ source: 'events' });
   const rel = events.relationships.find((x) => x.entity === 'ad_funnel');
-  assert.equal(rel.use, 'metric query + pipeline', '20: the events side reaches it by metric query and pipeline');
+  assert.equal(rel.use, 'metric query', '20: the events side reaches it by metric query and pipeline');
   assert.equal(rel.joins, 'crashlytics', '20: the events side points at the owner');
 });
 
-test('19. a relationship nobody owns is pipeline only — and the pipeline join gives 14 rows', opts, async (t) => {
+test('19. a relationship nobody owns has no governed path — the crash source\'s join contract joins it in a pipeline: 14 rows', opts, async (t) => {
   if (skip(t)) return;
   const v = await engine.semantic_index({ source: 'crashlytics' });
-  assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'pipeline only');
-  const rows = await pipeRows('crashlytics', [
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_name', name: 'ev_name' }] },
-    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
+  assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'no model owns it (no governed path)');
+  assert.deepEqual(Object.keys(v.join.on), ['user', 'funnel', 'format'], 'its contract is in the source view');
+  const rows = await pipeRows('events', [
+    { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'event_name', name: 'crash_event' }] },
+    { stage: 'aggregate', group_by: ['crash_event'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
-  assert.deepEqual(mapCol(rows, 'event_name', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
+  assert.deepEqual(mapCol(rows, 'crash_event', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
 });
 
 // ═══════════ S5. GROUNDING, AND NO ANCHOR ═══════════
@@ -306,7 +307,7 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   assert.equal(num(r.rows[0].agr_n), 184, "33: the source whose role is not called 'events' counts 184");
   // 27. …and the model without its time axis still joins
   const rows = await pipeRows('analytics', [
-    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: [{ column: 'variant_group' }] },
+    { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', group_by: ['variant_group'], measures: [{ name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] },
   ], eng);
   assert.deepEqual(mapCol(rows, 'variant_group', 'players'), { control: 6, variant_b: 6 }, '27: the model without its time axis still joins: control 6 / variant_b 6');

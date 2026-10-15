@@ -64,7 +64,7 @@ test('a read says whether its rows come ordered: the last stage but a limit is a
 
 test('a stage that makes a new table is refused in a read, naming the stages a read takes and the build from the task', () => {
   for (const st of [
-    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] },
     { stage: 'unnest', expr: { column: 'n' }, name: 'w' },
     { stage: 'match_recognize', partition_by: ['user__country'], steps: [{ name: 'a', event_name: ['first_launch'] }] },
     { stage: 'python' },
@@ -80,7 +80,7 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
   const v = makeValidators(buildSchemas(catalog));
   const q = (request) => validateInput(v.query_model, request);
   assert.equal(q({ context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
-  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'nope' }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   // no steps is a read of the table as it is: the field is left out, never an empty list
   assert.match(q({ context_id: 'abcdef123456', steps: [] }).errors.join(' | '), /at least 1 item/);

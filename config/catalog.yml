@@ -1522,6 +1522,12 @@ models:
       meta:
         mcp:
           role: users            # logical name (the dbt model can be named anything)
+          # THE JOIN CONTRACT: what a pipeline names to join this model onto its rows — the player and
+          # the moment; the version valid then is the one row it meets (key + window are unique)
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { within: [install_time_valid_from, install_time_valid_until] }
           # NO measures here: MetricFlow forbids them on a model with a validity window, so any
           # declared measure would be dropped with a warning at render time. Count players on an
           # events source instead — count_distinct of the player key.
@@ -1616,6 +1622,11 @@ models:
       meta:
         mcp:
           role: experiments
+          # one row per player × experiment: joined for ONE experiment, named by its value
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            select: { experiment: experiment_name }
     columns:
       - name: player_id_of_internal
         data_type: integer
@@ -1669,6 +1680,14 @@ models:
   #       mcp:
   #         role: crashlytics
   #         primary_entity: crash               # MUST NOT be `event`
+  #         # joinable onto the analytics events by player + the ad funnel of the format named
+  #         # (one crash report per player and funnel — the authors' guarantee):
+  #         join:
+  #           unique: true
+  #           key:
+  #             user: player_id_of_internal
+  #             funnel: { by: format, columns: { rewarded: rewarded_tracking_id, interstitial: interstitial_tracking_id, banner: banner_tracking_id } }
+  #           select: { format: [rewarded, interstitial, banner] }
   #         partition_column: event_date        # TODO: the real partition column (cost hint)
   #         event_semantics:
   #           crash_event: fatal_crash          # TODO: which event marks a hard crash
@@ -1740,10 +1759,24 @@ models:
   #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads 0. Both
   #   readings are correct — pick the grain the question is about.
 
+  # ── JOIN CONTRACTS (meta.mcp.join) ────────────────────────────────────────────────────
+  # A model is JOINABLE onto a pipeline's rows only when it declares a join contract — its key's
+  # parts, declared UNIQUE by its authors (not checked on data), the time it is matched at and the
+  # values it is narrowed to:
+  #
+  #   join:
+  #     unique: true
+  #     key:    { user: player_id_of_internal }            # each part equals a column of the rows
+  #     time:   { within: [<valid from>, <valid until>] }  # or { same_day: <column> }
+  #     select: { experiment: experiment_name }            # a VALUE the model is filtered to first
+  #
+  # A pipeline names every part: { stage: 'join', source: '<model>', on: { user: <column>,
+  # time: <column>, experiment: '<value>' }, attrs }. A joined model's amounts are not carried —
+  # they are measures of the semantic layer. An events source declares none: it is not joinable.
+  #
   # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────
-  # A relationship between two models is declared ONCE, in the schema, and both paths use it:
-  # a metric query groups by <relationship>__<attribute>, a pipeline joins with `via: <name>`.
-  # Neither ever restates a column.
+  # A relationship between two models for the SEMANTIC LAYER is declared once, in the schema: a
+  # metric query groups by { source, column } through it. It never restates a column.
   #
   #   meta.mcp.entities:
   #     <relationship name>:
@@ -1755,22 +1788,18 @@ models:
   #
   # `primary`/`unique` make the model the join TARGET — exactly one model may own a relationship,
   # and it must be unique per row there. `foreign` points at whichever model owns it. A
-  # relationship NOBODY owns is still a perfectly good PIPELINE join (a many-to-many match); it
-  # simply has no governed path, because MetricFlow can only join onto a unique key.
+  # relationship NOBODY owns has no governed path: MetricFlow joins only onto a unique key.
   #
   # ── JOINING A SLOWLY-CHANGING MODEL (the install record) ──────────────────────────────
   # dim_users below carries a VALIDITY WINDOW (install_time_valid_from / _until), so it holds
   # several versions per player and every join to it must be POINT-IN-TIME: the player key AND a
   # time inside the window. Joining on the key alone matches every historical version and
   # inflates every count.
-  #   · governed path — MetricFlow applies the window itself; just group by user__<attribute>;
-  #   · pipeline — state it in the join stage, explicitly:
-  #       { stage: "join", with: "users", via: "user",
-  #         between: { column: "<this source's time column>",
-  #                    from: "install_time_valid_from", to: "install_time_valid_until" } }
+  #   · governed path — MetricFlow applies the window itself; just group by { source: users, column };
+  #   · pipeline — its join contract's time: { stage: "join", source: "users",
+  #       on: { user: "<the rows' player column>", time: "<the rows' moment>" }, attrs }
   # MetricFlow allows a model with a validity window exactly ONE join key, as its natural key —
-  # a second `primary`/`unique` key there is rejected at catalog load. Such a key can still be
-  # declared `foreign` and joined in a pipeline.
+  # a second `primary`/`unique` key there is rejected at catalog load.
   #
   # ── VARIANTS: one relationship carried by SEVERAL columns ─────────────────────────────
   # A crash source records the last ad-funnel id it saw PER AD FORMAT, one column each, only the
@@ -1791,8 +1820,9 @@ models:
   #   entities:
   #     ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
   #
-  # Joining them reconstructs the ad funnel that was running when the app died. Several events
-  # share one funnel id, so neither side is unique on it: this one is pipeline-only, by nature.
+  # Several events share one funnel id, so neither side is unique on it for the semantic layer. A
+  # pipeline joins the crash report onto the funnel's events by the crash source's join contract
+  # (its funnel part picks the format's column): on: { user, funnel: 'tracking_id', format: 'rewarded' }.
   # ── ACQUISITION SPEND (TEMPLATE, not active) ──────────────────────────────────────────
   # A NON-events source: no event_name, so it is not an events fact — but it has its own time
   # axis and its own AMOUNTS, and both are declared HERE, in the schema. The schema says only
@@ -1816,13 +1846,12 @@ models:
   #   meta.mcp.is_time                -> the source's time axis, so metric_time and time_range
   #                                     work here exactly as on an events source.
   #
-  # HOW IT JOINS (both keys declared in the schema, never restated at the call site):
-  #   · to an events source        — by the PLAYER key alone (via: 'user'). One player has many
-  #     events and several spend days, so this pairing is many-to-many BY DESIGN: use it to carry
-  #     a channel attribute onto events, NEVER to sum money over (the total inflates).
-  #   · to the install record      — by the PLAYER key AND the validity window, point-in-time:
-  #     the governed path applies the window itself; a pipeline states it in the join stage's
-  #     `between` ({ value: spend_date, from: install_time_valid_from, to: install_time_valid_until }).
+  # HOW IT JOINS (its contract below, never restated at the call site):
+  #   · onto other rows — by the player AND the day: { stage: 'join', source: 'acquisition',
+  #     on: { user: <column>, time: <moment> }, attrs } carries the day's channel attributes; its
+  #     amounts are not carried (they would repeat on every row of that day) — they are measures.
+  #   · the install record onto it — users' contract, at spend_date: { stage: 'join', source: 'users',
+  #     on: { user: 'player_id_of_internal', time: 'spend_date' }, attrs }.
   #
   # - name: fct_player_acquisition           # TODO: the real dbt model / view name
   #   description: >
@@ -1833,6 +1862,11 @@ models:
   #       mcp:
   #         role: acquisition
   #         primary_entity: acquisition        # MUST differ from every other model's
+  #         # joinable by player + the day of the moment named (one row per player and day)
+  #         join:
+  #           unique: true
+  #           key: { user: player_id_of_internal }
+  #           time: { same_day: spend_date }
   #         partition_column: spend_date       # TODO: the real partition column (cost hint)
   #         # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
   #         # marked column it fixes NO aggregation — the caller picks one per question.

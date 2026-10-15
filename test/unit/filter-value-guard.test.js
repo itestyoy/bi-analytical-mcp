@@ -149,3 +149,13 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
     /different casing.*'DE'/s,
   );
 });
+
+test('a join\'s select value is checked against the joined model\'s real values, as a where\'s constant is', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('experiments', 'experiment_name', { distinctCount: 1, totalCount: 12, values: [{ value: 'checkout_flow', freq: 12 }] });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'exp_join', source: 'events' });
+  const join = (experiment) => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment }, attrs: [{ column: 'variant_group' }] }] });
+  await assert.rejects(() => join('Checkout_Flow'), (err) => /join experiments on\.experiment/.test(err.message) && /different casing/.test(err.message) && /'checkout_flow'/.test(err.message));
+  await assert.rejects(() => join('pricing_test'), (err) => /does not occur/.test(err.message) && /checkout_flow/.test(err.message));
+  assert.ok((await join('checkout_flow')).context_id);
+});

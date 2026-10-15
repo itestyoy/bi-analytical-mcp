@@ -98,7 +98,7 @@ export class WarehouseProbe {
   async grounding(source, stages = []) {
     const own = await this.physicalColumns(source);
     if (!own) return null; // the warehouse could not be asked: the declared columns stand
-    const models = [...new Set((stages || []).filter((st) => st?.stage === 'join' && st.with && this.catalog.models[st.with]).map((st) => st.with))];
+    const models = [...new Set((stages || []).filter((st) => st?.stage === 'join' && st.source && this.catalog.models[st.source]).map((st) => st.source))];
     const g = new Set(own);
     if (own.types) g.types = own.types;
     g.joined = new Map();

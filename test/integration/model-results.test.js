@@ -305,7 +305,7 @@ const CONVERSION = [
   { stage: 'match_recognize', partition_by: [{ entity: 'user' }], steps: [{ name: 'visit', event_name: ['new_session'] }, { name: 'buy', event_name: ['iap_purchase_completed'] }] },
 ];
 // users is slowly changing: the country a visitor had at the first visit, not every version of it
-const BY_COUNTRY = { stage: 'join', with: 'users', via: 'user', between: { column: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] };
+const BY_COUNTRY = { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'first_seen_at' }, attrs: [{ column: 'country' }] };
 // the visitors who bought: a count over a case that yields 1 on a completed match and nothing elsewhere
 const converted = { name: 'buyers', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'completed' }, { value: true }] }], then: { value: 1 } }] }] } };
 
@@ -525,7 +525,7 @@ test('query_model: conditional aggregates and a second aggregate stage count the
   // a read's stage and expression are the one definitions built for a read's place: a stage that makes a
   // new table, and raw SQL, are a build's — no form of the read tool's, each refused by its schema in the
   // call, naming what a read takes
-  await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }), /invalid input: .*`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), /invalid input: .*`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'compute', name: 'one', expr: { fn: 'raw', sql: '1' } }] }), /invalid input: .*`steps\.0\.expr\.fn` must be one of/);
 });
 

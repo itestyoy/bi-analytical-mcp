@@ -2,6 +2,7 @@
 // event, a property's values, a model, the guides and recipes), and the value index's state behind
 // them. Read-only; methods of the Engine (src/engine/helpers.js — mixin).
 
+import { describeContract, contractParts } from '../catalog/joins.js';
 import { ToolError } from '../validate.js';
 import { TASK_MEASURE_AGGS } from '../catalog.js';
 import { frameProfile } from '../python-model.js';
@@ -20,53 +21,13 @@ export const semanticIndexMethods = {
   _recipe(input) {
     if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
-    // A recipe ships as ONE payload for every catalog, but whether a join needs a point-in-time
-    // window is a property of THIS catalog's schema — so the payload is fitted to it before it is
-    // handed over, and what was fitted is said out loud.
-    const { payload, fitted } = this._fitRecipePipeline(r.pipeline_payload);
     // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
-      ...(payload ? { pipeline_payload: payload } : {}),
-      ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
       building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its steps — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
     };
-  },
-
-  /**
-   * Fit a recipe's pipeline payload to THIS catalog. A recipe is written once for every
-   * deployment, but a join it declares may or may not need a point-in-time window: that depends on
-   * whether the joined model keeps several versions per key HERE. Left unfitted, the shipped
-   * payload runs as-is and fans out to every historical version — plausible numbers, inflated.
-   *
-   * Only the window is filled in, and only where the catalog says one is required; the moment it
-   * pins is the source's own event time, which is what `advisor.joinCompletenessWarnings` recommends for
-   * a hand-written join. Every change is reported so the caller sees it rather than discovering a
-   * payload that does not match the recipe text.
-   */
-  _fitRecipePipeline(payload) {
-    const fitted = [];
-    const steps = payload?.steps;
-    if (!Array.isArray(steps)) return { payload: null, fitted };
-    const source = payload.source;
-    // A recipe is shipped for every deployment, so it may name a source THIS catalog does not have.
-    // getModel throws on an unknown key, and the recipe view would then fail outright instead of
-    // showing the recipe (the caller can still read it and adapt it). Fitting is best-effort.
-    let eventTime = null;
-    if (source) { try { eventTime = this.catalog.getModel(source)?.time?.column || null; } catch { eventTime = null; } }
-    const next = steps.map((st) => {
-      if (st?.stage !== 'join' || st.between || !st.with || !eventTime) return st;
-      let m; try { m = this.catalog.getModel(st.with); } catch { return st; }
-      if (!m?.scd) return st;
-      const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
-      const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
-      if (!from || !to) return st;
-      fitted.push(`join with '${st.with}': added between { column: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
-      return { ...st, between: { column: eventTime, from, to } };
-    });
-    return { payload: fitted.length ? { ...payload, steps: next } : null, fitted };
   },
 
   /**
@@ -166,19 +127,15 @@ export const semanticIndexMethods = {
     // Catalog-declared measures are SELF-DESCRIBING here: the name alone does not say what a
     // measure aggregates, over which expression, or in what unit — and since any column of any
     // source may declare one, this view is the only place to find out.
-    // RELATIONSHIPS this model declares: the join name, the key columns on THIS side, and the
-    // model the key points at. This is what makes a pipeline `join { via }` discoverable —
-    // the caller names the relationship, never the columns.
-    // `use` says what the caller may actually DO with each one, which the type alone does not:
-    // an owned relationship has a governed path AND a pipeline join; one nobody owns but two
-    // models carry is a pipeline join only (MetricFlow joins onto a unique key); one no other
-    // model declares is not a join at all yet — it is a key waiting for a counterpart.
+    // RELATIONSHIPS this model declares for the semantic layer: the join name, the key columns on THIS
+    // side, and the model the key points at — what a metric query groups by through. `use` says what
+    // each one serves: an owned relationship is a governed path; one nobody owns joins nothing.
     const shared = new Set(c.joinEntityNames());
     const rels = Object.entries(c.entitiesOf(k)).map(([entity, e]) => {
       const target = c.joinTargetFor(entity);
-      const use = (target && target !== k) ? 'metric query + pipeline'
+      const use = (target && target !== k) ? 'metric query'
         : target === k ? (shared.has(entity) ? 'owned here — other models point at it (their governed path ends here)' : "owned here (this model's identity; nothing points at it yet)")
-          : shared.has(entity) ? 'pipeline only' : 'no counterpart declares it (not joinable)';
+          : 'no model owns it (no governed path)';
       return {
         entity, type: e.type,
         key: e.key.map((part) => part.column),
@@ -190,13 +147,16 @@ export const semanticIndexMethods = {
     if (rels.length) {
       out.relationships = rels;
       const viaable = rels.filter((r) => r.joins);
-      const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
-      const notes = [];
-      if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_steps { steps: [{ stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}', attrs }] }. In a metric query, group by { source: '${viaable[0].joins}', column: '<column>' }, with the model loaded by a semantic_models item { source: '${viaable[0].joins}' }.`);
-      // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
-      // onto a unique key) — say so here, or it looks like a missing feature at query time.
-      if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
-      if (notes.length) out.join_note = notes.join(' ');
+      if (viaable.length) out.join_note = `In a metric query, group by { source: '${viaable[0].joins}', column: '<column>' }, with the model loaded by a semantic_models item { source: '${viaable[0].joins}' } — the relationship the schema declares is the join.`;
+    }
+    // THE JOIN CONTRACT: what a pipeline names to join THIS model onto its rows (src/catalog/joins.js)
+    const contract = c.joinContract(k);
+    if (contract) {
+      out.join = {
+        contract: describeContract(k, contract),
+        on: Object.fromEntries(contractParts(contract).map((part) => [part, contract.select.find((x) => x.part === part)?.values ? contract.select.find((x) => x.part === part).values.join(' | ') : contract.select.some((x) => x.part === part) ? '<a value>' : '<a column of your rows>'])),
+        how: `{ stage: 'join', source: '${k}', on: { ${contractParts(contract).map((p) => `${p}: …`).join(', ')} }, attrs: [{ column }] } — every part named; the key unique here, so no row of yours repeats.`,
+      };
     }
     // AMOUNTS the schema marks aggregatable on this source. They fix NO function: a measure names one
     // as a { column } of its aggregate, and the aggregate is the one the question needs.

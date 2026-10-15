@@ -40,7 +40,7 @@ test('user/install attributes are on dim_users, NOT on the events fact', () => {
 });
 
 // Consequence of the above: referencing a user attribute directly on the events fact
-// (no join) is rejected by the pipeline compiler; the correct path is `join with:'users'`.
+// (no join) is rejected by the pipeline compiler; the correct path is a join of 'users' on its contract.
 test('user attribute is rejected on the fact directly, accepted via a users-join', () => {
   // direct reference on the fact → unknown column (it is not materialized there).
   assert.throws(() => renderPipeline(catalog, 'duckdb', 'events', [
@@ -48,7 +48,7 @@ test('user attribute is rejected on the fact directly, accepted via a users-join
   ]), /unknown column 'country'/);
   // joined from the users dimension → resolves and renders.
   const { sql } = renderPipeline(catalog, 'duckdb', 'events', [
-    { stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.ok(sql.length > 0);

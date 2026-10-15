@@ -246,7 +246,7 @@ test('what the project does not define is refused in the call, naming what it do
   // …by any tool that would write into it
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, remove: { metrics: ['project_cost'] } })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);
   // (that it still serves its layer after them is asserted by the side-by-side queries below:
   // '[still serves after the refused writes]')
 });

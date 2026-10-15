@@ -21,9 +21,8 @@ stage's `description` in the tool schema for the authoritative contract.
 ```jsonc
 [ {stage:"where",  conditions:[{fn:"eq", args:[{column:"event_name"}, {value:"iap_purchase_completed"}]}]},
   {stage:"compute", name:"price", expr:{ property:"price_in_usd_of_event_data" }},   // numeric, as the catalog declares it
-  {stage:"join",   with:"users", via:"user", attrs:[{ column: "country" }]},   // `via` = the relationship the schema declares; add
-  //                                                                 between:{column:"device_time",from:…,to:…} if the
-  //                                                                 install record is slowly-changing (validity window)
+  {stage:"join",   source:"users", on:{ user:"player_id_of_internal", time:"device_time" }, attrs:[{ column: "country" }]},
+  //               the users model's join contract: the player, and the moment whose version is joined
   {stage:"aggregate", group_by:["country"], measures:[{name:"revenue", expr:{fn:"sum", args:[{column:"price"}]}}]} ]
 ```
 `FROM events |> WHERE event_name='iap_purchase_completed' |> EXTEND … AS price |> JOIN dim_users USING(appsflyer_id) |> AGGREGATE SUM(price) AS revenue GROUP BY country`
@@ -63,7 +62,7 @@ value's rows (a `case` over its argument), and the column is named by the value'
 
 ### Days-since-install (retention-day building block)
 ```jsonc
-[ {stage:"join", with:"users", via:"user", attrs:[{ column: "install_date" }]},
+[ {stage:"join", source:"users", on:{ user:"player_id_of_internal", time:"device_time" }, attrs:[{ column: "install_date" }]},
   {stage:"compute", name:"dsi", expr:{ fn: "date_diff", args: [{column:"install_date"}, {column:"device_time"}], unit: "day" }} ]
 ```
 Then a `where` with `{fn:"eq", args:[{column:"dsi"}, {value:1}]}` + an aggregate of

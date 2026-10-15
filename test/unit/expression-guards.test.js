@@ -87,8 +87,9 @@ test('a step stored by an earlier version is built in this version\'s spelling â
     // stage words
     [{ stage: 'compute', name: 'd', op: 'elapsed_days', from: col('device_time'), to: { now: true } }, { stage: 'compute', name: 'd', expr: { fn: 'elapsed_days', args: [col('device_time'), { now: true }] } }],
     [{ stage: 'compute', name: 'w', op: 'window', fn: 'avg', column: 'session_number', partition_by: ['player_id_of_internal'] }, { stage: 'compute', name: 'w', expr: { fn: 'average', args: [col('session_number')], over: { partition_by: ['player_id_of_internal'] } } }],
-    [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', as: 'c' }] }, { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'c' }] }],
-    [{ stage: 'join', with: 'users', via: 'user', between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] }, { stage: 'join', with: 'users', via: 'user', between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] }],
+    // a join of the model and its relationship is the model's join contract â€” at the source's time where it named none
+    [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', as: 'c' }] }, { stage: 'join', attrs: [{ column: 'country', name: 'c' }], source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }],
+    [{ stage: 'join', with: 'users', via: 'user', between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }, attrs: [{ column: 'country' }] }, { stage: 'join', attrs: [{ column: 'country' }], source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }],
     [{ stage: 'unpivot', keep: ['event_name'], columns: ['session_number'], name_as: 'metric', value_as: 'amount' }, { stage: 'unpivot', keep: ['event_name'], columns: ['session_number'], name_column: 'metric', value_column: 'amount' }],
     [{ stage: 'project', columns: ['event_name', 'device_time'] }, { stage: 'project', keep: ['event_name', 'device_time'] }],
     [{ stage: 'limit', n: 5 }, { stage: 'limit', limit: 5 }],

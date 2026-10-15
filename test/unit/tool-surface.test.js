@@ -284,7 +284,7 @@ test('semantic_index({ source }) reports an owned relationship as owned, with a 
   assert.ok(!/No model owns 'user'/.test(users.join_note || ''), users.join_note);
   const events = await e.semantic_index({ source: 'events' });
   const evUser = events.relationships.find((r) => r.entity === 'user');
-  assert.equal(evUser.use, 'metric query + pipeline');
+  assert.equal(evUser.use, 'metric query');
   assert.equal(evUser.joins, 'users', 'the events side points at the model that owns the relationship');
 });
 
@@ -319,19 +319,19 @@ test('semantic_index({ search }) finds a column that exists only on an events so
   assert.ok(r2.column_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
 });
 
-// The guide speaks only about what the catalog declares: its variant trigger names the real
-// expanded relationships, and is absent on a catalog without variants.
-test('the guide derives its variant-join trigger from the catalog, or omits it', async () => {
+// The guide speaks only about what the catalog declares: its join trigger names the models that declare
+// a join contract, and is absent on a catalog where none does.
+test('the guide derives its join trigger from the catalog\'s join contracts, or omits it', async () => {
   const e = engine();
   const g = await e.semantic_index({ guide: true });
-  const t = g.routing_triggers.find((x) => /alternative columns/.test(x.if));
-  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_interstitial/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
+  const t = g.routing_triggers.find((x) => /JOIN CONTRACT/.test(x.do));
+  assert.ok(t && ['users', 'experiments', 'crashlytics', 'acquisition'].every((m) => t.do.includes(m)), JSON.stringify(t));
   assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
-  for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
+  for (const m of Object.values(catalog.models)) delete m.join;
   const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const g2 = await plain.semantic_index({ guide: true });
-  assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
+  assert.ok(!g2.routing_triggers.some((x) => /JOIN CONTRACT/.test(x.do)), 'no contract → no trigger');
 });
 
 // A task's dimensions are namespaced `<task>_<attribute>` in the manifest. What the tools report

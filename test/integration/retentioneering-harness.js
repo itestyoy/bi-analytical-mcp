@@ -30,9 +30,9 @@ export const FUNNEL = ['tutorial', 'level_started', 'shop_opened', 'iap_purchase
 /** A read of every row of every table of a task: one page as long as a read takes. */
 export const EVERY_ROW = { limit: 100000 };
 
-/** A start's step that brings the user's platform: a join of the users model by the declared
- *  relationship, at the event's time (the model is slowly changing — a start refuses it without). */
-export const usersJoin = (attrs) => ({ stage: 'join', with: 'users', via: 'user', attrs, between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } });
+/** A start's step that brings the user's platform: a join of the users model on its contract, at the
+ *  event's time (the version valid then). */
+export const usersJoin = (attrs) => ({ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs });
 export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
 
 /** Each user's event names in path order, collapsed runs of one event into one. */

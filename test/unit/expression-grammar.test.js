@@ -525,8 +525,8 @@ test('a { model, attribute } ref, a `from`, an update\'s `task` and the include 
   assert.deepEqual(currentOf({ action: 'update', context_id: 'abcdef123456', task: 't1', semantic_models: [{ from: 'users' }] }), { action: 'update', context_id: 'abcdef123456', name: 't1', semantic_models: [{ source: 'users' }] });
   const item = { source: 'events', measures: [COUNT] };
   assert.equal(currentOf(item), item);
-  // a join stage's between and a funnel metric's from are no source (no model named `from` there)
-  const between = { stage: 'join', with: 'users', via: 'user', attrs: [col('country')], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } };
+  // a join stage's source and a funnel metric's from are no earlier source (no model named `from` there)
+  const between = { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [col('country')] };
   assert.equal(currentOf(between), between);
   // the flags: each true one an item of `include`, after what the list already holds; a false one asks for nothing
   for (const [flags, include] of [

@@ -182,46 +182,6 @@ models:
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
 });
 
-// ── a shipped recipe joined a slowly-changing dimension with no point-in-time window ───────
-// The recipe text mentioned the window as something the caller should add; the payload did not
-// carry it, so `dn_retention_exact` run as shipped fanned out to every historical version of each
-// player and inflated Day-N retention. Whether the window is NEEDED is a property of the catalog,
-// so the payload is fitted to it when the recipe is handed over.
-test('a recipe payload is fitted to this catalog: an SCD join gets its validity window', async () => {
-  const { loadRecipes } = await import('../../src/recipes.js');
-  const e = settle(new Engine({
-    catalog: loadCatalog(CATALOG, {}),
-    recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
-    contextManager: new ContextManager({ workspaceRoot: tempDir('rev') }),
-  }));
-  const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
-  const joinStage = out.pipeline_payload.steps.find((s) => s.stage === 'join' && s.with === 'users');
-  const u = e.catalog.getModel('users');
-  assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
-  const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
-  const to = Object.entries(u.dimensions).find(([, d]) => d.validity === 'end')[0];
-  assert.deepEqual(joinStage.between, { column: e.catalog.getModel('events').time.column, from, to });
-  assert.ok(out.fitted_to_catalog?.some((f) => f.includes("join with 'users'")), JSON.stringify(out.fitted_to_catalog));
-});
-
-// ── a pipeline submitted all at once got none of the stage warnings ─────────────────────────
-// The incremental builder warns about an SCD join with no window; _buildPipeline ran the
-// very same stages silently. Both paths now make the same judgements.
-test('_buildPipeline warns about an incomplete SCD join, like the step builder does', async () => {
-  const e = engine();
-  const out = await e._buildPipeline({
-    name: 'scd_fanout', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] },
-  });
-  assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
-  // with the window stated, there is nothing to warn about
-  const ok = await e._buildPipeline({
-    name: 'scd_pit', dry_run: true,
-    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
-  });
-  assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
-});
-
 // ── remove_dimensions matched a name nobody is ever shown ───────────────────────────────────
 // What is stored is the task-namespaced copy ('ret_country'); what the tools publish is the
 // attribute ('country'). Matching on the stored name made every removal a silent no-op that

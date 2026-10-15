@@ -252,6 +252,12 @@ export class Catalog {
         const parts = e.key || [];
         if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
       }
+      // A JOIN CONTRACT naming a column the table lacks would join on nothing: the model stops being
+      // joinable (one capability, dropped alone)
+      if (m.join) {
+        const named = [...m.join.key.flatMap((k) => (k.by ? Object.values(k.columns) : [k.column])), ...(m.join.time?.within || []), ...(m.join.time?.same_day ? [m.join.time.same_day] : []), ...m.join.select.filter((s) => s.column).map((s) => s.column)];
+        if (named.some((c) => !has(c))) { delete m.join; gone.add('join contract'); }
+      }
       // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
       // did not survive, the table has no windows to join on, so the flag has to go with them:
       // left set, the model would render a `natural` entity with no validity_params, which
@@ -700,6 +706,16 @@ export class Catalog {
     const out = {};
     for (const m of Object.values(this.models)) for (const [name, e] of Object.entries(m.entities || {})) if (e.variant_of) (out[e.variant_of] ||= new Set()).add(name);
     return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, [...v].sort()]));
+  }
+
+  /** The join contract a model declares (src/catalog/joins.js), or null: only such a model is joinable. */
+  joinContract(key) {
+    return this.models[key]?.join || null;
+  }
+
+  /** The models a pipeline (and a semantic model) may join onto — those declaring a join contract. */
+  joinableModels() {
+    return this.modelKeys().filter((k) => this.models[k].join);
   }
 
   /** Entity names that appear on at least TWO models — the joins the schema sanctions. */

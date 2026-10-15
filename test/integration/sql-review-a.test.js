@@ -205,7 +205,7 @@ test('a join validity window on a DATE column picks the version valid at its mid
   assert.equal(want.length, 2, 'the window splits u1 between its two versions');
   const rows = await pipe('events', [
     { stage: 'where', conditions: [fn('eq', [col('player_id_of_internal'), val('u1')])] },
-    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }], between: { column: 'event_date', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'event_date' }, attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   const map = (rs) => Object.fromEntries(rs.map((r) => [String(r.country), num(r.n)]));

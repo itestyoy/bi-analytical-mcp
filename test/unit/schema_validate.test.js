@@ -101,7 +101,7 @@ test('query: requires context_id, its metrics in a metrics step', () => {
   assert.equal(v('query_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'day' }] })] }).ok, false);
   assert.ok(v('query_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }] })] }).ok);
   // a step that makes a new table is no step of a metric query: its schema holds none
-  assert.match(v('query_model', { context_id: 'abcd12', steps: [metrics(), { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.1\.stage` must be one of: .*\bmetrics\b/);
+  assert.match(v('query_model', { context_id: 'abcd12', steps: [metrics(), { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.1\.stage` must be one of: .*\bmetrics\b/);
 });
 
 // A METRIC QUERY'S WHERE is a where step before its metrics step: the one expression over what the query

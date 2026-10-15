@@ -149,27 +149,26 @@ test('build_pipeline_model: schema rejects action-irrelevant fields', async () =
   assert.equal(reuse.context_id, s.context_id);
 });
 
-// join with a `between` (point-in-time / SCD-2) window: accepted, validated, exposes attrs.
-test('build_pipeline_model: join between (temporal window) validates and exposes joined columns', async () => {
+// a join on its contract: every part named — for a slowly-changing model the moment of the version.
+test('build_pipeline_model: a join names its contract\'s parts and exposes the joined columns', async () => {
   const e = engine();
   const s = await e.build_pipeline_model({ action: 'start', name: 'pit', source: 'events' });
-  // value is a base (events) column; from/to are columns of the joined model.
   const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{
-    stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
-    between: { column: 'device_time', from: 'install_date', to: 'install_date' },
+    stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }],
   }], include: ['columns'] });
   assert.ok(ok.available_columns.some((c) => c.name === 'country'), 'joined attr exposed');
-  // it renders end-to-end (forces the ON-clause CTE form so the BETWEEN can be expressed).
   const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
-  assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'pipeline renders with the between join');
-  // a window bound that is not a column of the joined model is refused by the schema, naming its columns
+  assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'pipeline renders with the windowed join');
+  // a part left out is refused by the schema: the contract is closed, every part required
   const s2 = await e.build_pipeline_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{
-      stage: 'join', with: 'users', via: { on: ['player_id_of_internal'] }, attrs: [{ column: 'country' }],
-      between: { column: 'device_time', from: 'no_such_col', to: 'install_date' },
-    }] }),
-    /between\.from` must be one of: [^;]*install_time_valid_from/,
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] }),
+    /`steps\.0\.on` is missing required property 'time'/,
+  );
+  // …and a part's column must be one of the rows
+  await assert.rejects(
+    () => e.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'no_such_col' }, attrs: [{ column: 'country' }] }] }),
+    /no_such_col/,
   );
 });
 
@@ -451,58 +450,46 @@ async function addOne(e, source, stage) {
 }
 
 // (from test/integration/declared-joins.test.js)
-test('join guards: an undeclared relationship, a self-join and a top-level on are all rejected', async () => {
+test('join guards: a model with no join contract, a self-join and the earlier with / via are all rejected', async () => {
   const e = engine();
-  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded', attrs: [{ column: 'variant_group' }] }),
-    /`steps\.0\.via` must be "user"/, 'the schema offers only the relationships the joined model shares');
-  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'events', via: 'user', attrs: [{ column: 'event_name', name: 'other_event' }] }), /own source/);
-  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'], attrs: [{ column: 'country' }] }), /unexpected property 'on'/, 'how the rows match is one field, via: a relationship or { on }');
+  await assert.rejects(() => addOne(e, 'crashlytics', { stage: 'join', source: 'events', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'event_id' }] }),
+    /`steps\.0\.source` must be one of: users, experiments, crashlytics, acquisition|`steps\.0\.source`/, 'an events source declares no contract: not joinable');
+  await assert.rejects(() => addOne(e, 'crashlytics', { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'rewarded_tracking_id', format: 'rewarded' }, attrs: [{ column: 'crash_id', name: 'c2' }] }), /own source/);
+  await assert.rejects(() => addOne(e, 'events', { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }), /invalid input/, 'the join names its source and its contract, not with / via');
+  // a model's amounts are not carried onto rows: an attribute only
+  await assert.rejects(() => addOne(e, 'events', { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'cost' }] }), /`steps\.0\.attrs\.0\.column` must be one of/);
 });
 
 // (from test/integration/declared-joins.test.js, 48.) Every way a name can end up used twice is
 // refused, with the reason and the rename. The join key is called out separately: its value is the
-// same on both sides, so the copy is not something to rename — it is something to drop. (The rename
-// the error prints, built with both sides present, is mcp-end-to-end.test.js #5(c).)
+// same on both sides, so the copy is not something to rename — it is something to drop.
 test('48. duplicate names and unknown columns are refused with the fix', async () => {
   const e = engine();
-  // (a) attrs missing entirely — the error lists what the model actually offers.
+  const crash = (attrs) => ({ stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, ...(attrs ? { attrs } : {}) });
+  // (a) attrs missing entirely — the error lists the joined model's attributes (never an amount)
   await assert.rejects(
-    () => addOne(e, 'crashlytics', { stage: 'join', with: 'acquisition', via: 'user' }),
+    () => addOne(e, 'events', { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' } }),
     (err) => {
-      assert.match(err.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*cost.*impressions.*clicks/s, '(a) attrs missing');
+      assert.match(err.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*media_source/s, '(a) attrs missing');
+      assert.doesNotMatch(err.message, /column one of: [^.]*\bcost\b/, '(a) an amount is no attribute');
       return true;
     },
   );
   // (b) a column the joined model does not have.
-  await assert.rejects(
-    () => addOne(e, 'crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: [{ column: 'cost' }, { column: 'nope' }] }),
-    /`steps\.0\.attrs\.1\.column` must be one of: .*cost/s,
-    '(b) a column the joined model does not have',
-  );
+  await assert.rejects(() => addOne(e, 'events', crash([{ column: 'crash_id' }, { column: 'nope' }])), /`steps\.0\.attrs\.1\.column` must be one of: .*crash_id/s, '(b) a column the joined model does not have');
   // (c) a name the pipeline already carries, holding DIFFERENT data → rename it.
   await assert.rejects(
-    () => addOne(e, 'crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'event_name' }] }),
+    () => addOne(e, 'events', crash([{ column: 'event_name' }])),
     (err) => {
       assert.match(err.message, /already has a column named 'event_name'/, '(c) the name already carried');
-      assert.match(err.message, /hold different data.*name: 'events_event_name'/s, '(c) the rename to apply');
+      assert.match(err.message, /hold different data.*name: 'crashlytics_event_name'/s, '(c) the rename to apply');
       return true;
     },
   );
   // (d) the same name, but it is the JOIN KEY → the pipeline's column already holds that value.
-  await assert.rejects(
-    () => addOne(e, 'crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: [{ column: 'player_id_of_internal' }] }),
-    /is the join key.*holds the same value — drop it from attrs/s,
-    '(d) the join key',
-  );
+  await assert.rejects(() => addOne(e, 'events', crash([{ column: 'player_id_of_internal' }])), /is the join key.*holds the same value — drop it from attrs/s, '(d) the join key');
   // (e) two entries resolving to one name.
-  await assert.rejects(
-    () => addOne(e, 'crashlytics', {
-      stage: 'join', with: 'events', via: 'ad_funnel_rewarded',
-      attrs: [{ column: 'event_id', name: 'x' }, { column: 'tracking_id', name: 'x' }],
-    }),
-    /'event_id' and 'tracking_id' would both be named 'x'/,
-    '(e) two entries, one name',
-  );
+  await assert.rejects(() => addOne(e, 'events', crash([{ column: 'crash_id', name: 'x' }, { column: 'app_version', name: 'x' }])), /'crash_id' and 'app_version' would both be named 'x'/, '(e) two entries, one name');
 });
 
 // (from test/integration/crashlytics-fact.test.js) A funnel runs over ONE fact: an event of the

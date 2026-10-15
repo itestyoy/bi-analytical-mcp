@@ -37,8 +37,8 @@ stage tagged by its `stage`:
     { "stage": "where",  "conditions": [ ... ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "args": [ { "property": "words_collected" } ] } },
     { "stage": "unnest", "expr": { "property": "words_collected" }, "name": "word" },
-    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" } ],
-      "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+    { "stage": "join",   "source": "users", "on": { "user": "player_id_of_internal", "time": "device_time" },
+      "attrs": [ { "column": "country" } ] },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "country" ], "steps": [ ... ] },
     { "stage": "aggregate", "group_by": ["country"], "measures": [ ... ] },
     { "stage": "order_by", "keys": [ ... ] },
@@ -106,7 +106,7 @@ Stage = {
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
 | `compute` | `\|> EXTEND` | add a column computed by one expression (`expr`, nested to any depth): an event property read where it is stored (the `{ property }` leaf, a field of a JSON object with `field`; `array_length` / `array_contains` on an array), a condition (stored as a boolean), arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows; the element has the type it is stored as (a native array's items, the warehouse's where it was asked; a JSON array's text; a native struct not claimed), converted by `cast` | **expands** |
-| `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
+| `join` | `\|> JOIN` | join a model on the JOIN CONTRACT it declares (`meta.mcp.join`): `{ source, on: { <part>: <a column of the rows \| a value> }, attrs }` — the key, the time (a validity window or the same day) and a select value; stages stack, so a chain can reach several models | unchanged (the contract's key is unique on the joined side) |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
 | `pivot` | `\|> AGGREGATE` | turn listed values of a column into columns — one aggregate expression (`measure`) per value, each cell folding only its rows — its condition a `case` over the aggregates' argument | **collapses** to group keys |
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name_column, value_column) rows; the result is `keep` + those two | **expands** |
@@ -174,10 +174,10 @@ an aggregate) before generating SQL.
   structs is read a field at a time, by `unnest` then `json_field`. A comparison or a
   grouping is not checked against the type: a condition comparing a whole array with a
   scalar is accepted and fails or misbehaves only at run time. A `join` can only target
-  a catalog model: through a relationship BOTH sides declare (`via: "<relationship>"`,
-  the key columns from the schema), or ad hoc through columns both sides name
-  identically (`via: { on: [...] }`). Stages stack, so a chain reaches several models;
-  `via` always resolves its left-hand key on the pipeline's own source.
+  a model that declares a join contract (`meta.mcp.join`, src/catalog/joins.js), named in
+  full: `on` names every part — a key or the time a column of the rows at that step, a
+  select part a value. Its `attrs` are attributes, never amounts. Stages stack, so a chain
+  reaches several models.
 - **Per-stage validation** happens on the threaded schema (§3): unknown column →
   rejected at the boundary, with a clear message, before any SQL runs.
 - **Generated SQL is read-only** and confined to the context overlay; results are
@@ -301,8 +301,8 @@ Declarative pipeline:
   "source": "events",
   "time_range": { "start": "2026-01-01" },
   "steps": [
-    { "stage": "join",   "with": "users", "via": "user", "attrs": [ { "column": "country" }, { "column": "platform" } ],
-      "between": { "column": "device_time", "from": "install_time_valid_from", "to": "install_time_valid_until" } },
+    { "stage": "join",   "source": "users", "on": { "user": "player_id_of_internal", "time": "device_time" },
+      "attrs": [ { "column": "country" }, { "column": "platform" } ] },
     { "stage": "where",  "conditions": [ { "fn": "eq", "args": [ { "column": "country" }, { "value": "US" } ] } ] },
     { "stage": "compute", "name": "n_words", "expr": { "fn": "array_length", "args": [ { "property": "words_collected" } ] } },
     { "stage": "match_recognize", "partition_by": [ { "entity": "user" }, "platform" ],

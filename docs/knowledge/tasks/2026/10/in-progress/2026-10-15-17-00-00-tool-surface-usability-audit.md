@@ -81,6 +81,11 @@ implemented step by step.
   step is a metric query, one without reads the stored pipeline table; one tool reads every task back.
   Task kinds stay `query_semantic_model` / `query_pipeline_model` internally (`QUERY_KINDS`) and are said
   as `query_model` (`TaskRunner.toolOf`). Tool list 251,942 → 223,543 chars.
+- Step 2 (done): join contracts. A joinable model declares `meta.mcp.join` (src/catalog/joins.js); the
+  pipeline join is `{ source, on, attrs }`, one closed form per joinable model, amounts not carried, a
+  select value checked against the value index. `with` / `via` / `between` and fact-to-fact joins are gone;
+  a kept draft's join is converted on read (`storedJoin`). The experiments contract has no time part
+  (CUPED needs the pre-assignment events — see the decision note). Tool list → 214,738 chars.
 
 ## Not done
 - Evals with a model (no API key); the golden-question probes (the probe server went down with a

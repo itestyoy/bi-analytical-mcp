@@ -266,12 +266,18 @@ models:
       attributes changed has several versions. Every join to it is point-in-time — the player
       key AND a time that falls inside the window — otherwise a row matches every historical
       version and counts inflate. The window bounds are install_time_valid_from /
-      install_time_valid_until; MetricFlow applies them itself, a pipeline states them in
-      `between`.
+      install_time_valid_until; MetricFlow applies them itself, a pipeline names the moment in its
+      join contract's `time`.
     config:
       meta:
         mcp:
           role: users
+          # THE JOIN CONTRACT: a row of other rows meets the ONE version of its player valid at the
+          # moment it names — the key and the window are unique together
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { within: [install_time_valid_from, install_time_valid_until] }
     columns:
       - name: player_id_of_internal
         data_type: string
@@ -335,6 +341,11 @@ models:
       meta:
         mcp:
           role: experiments
+          # one row per player × experiment: joined for ONE experiment, named by its value
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            select: { experiment: experiment_name }
     columns:
       - name: player_id_of_internal
         data_type: string
@@ -389,14 +400,22 @@ models:
             # same relationship, so the caller picks the format the question is about:
             # ad_funnel_rewarded / _interstitial / _banner. Joining it to the events source
             # reconstructs the funnel that was running when the crash happened.
-            # NOBODY owns this key: one funnel id spans SEVERAL events, so neither side is
-            # unique on it and MetricFlow cannot join it — it is a pipeline join.
+            # For the semantic layer NOBODY owns this key; a pipeline joins a crash onto the events
+            # of its funnel by the join contract below.
             ad_funnel:
               type: foreign
               variants:
                 rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
                 interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
                 banner:       { key: [banner_tracking_id, player_id_of_internal] }
+          # THE JOIN CONTRACT: one crash report per player and ad funnel (the authors' guarantee), on
+          # the tracking-id column of the format the caller names
+          join:
+            unique: true
+            key:
+              user: player_id_of_internal
+              funnel: { by: format, columns: { rewarded: rewarded_tracking_id, interstitial: interstitial_tracking_id, banner: banner_tracking_id } }
+            select: { format: [rewarded, interstitial, banner] }
           event_semantics:
             crash_event: fatal_crash
           known_events:
@@ -544,6 +563,12 @@ models:
         mcp:
           role: acquisition
           primary_entity: acquisition
+          # THE JOIN CONTRACT: one row per player and day — a row meets its player's spend record of
+          # the day of the moment it names
+          join:
+            unique: true
+            key: { user: player_id_of_internal }
+            time: { same_day: spend_date }
           # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
           # marked column it fixes NO function — the caller picks one per question.
           measures:

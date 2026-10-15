@@ -126,10 +126,13 @@ function currentStage(st, ctx) {
     const { name_as: nameColumn, value_as: valueColumn, ...rest } = st;
     return { ...rest, ...(nameColumn !== undefined ? { name_column: nameColumn } : {}), ...(valueColumn !== undefined ? { value_column: valueColumn } : {}) };
   }
-  if (st.stage === 'join' && st.on !== undefined && st.via === undefined) {
+  if (st.stage === 'join' && st.on !== undefined && st.via === undefined && st.with !== undefined) {
     const { on, ...rest } = st;
     return { ...rest, via: { on } };
   }
+  // a join written with the model and its relationship (`with`, `via`, a window's `between`) is the
+  // joined model's contract, { source, on }, where its parts can be read off what it named
+  if (st.stage === 'join' && st.with !== undefined && st.source === undefined) return storedJoin(st, ctx) ?? st;
   if (st.stage === 'join' && (st.attrs || []).some((a) => a && typeof a === 'object' && a.as !== undefined)) return { ...st, attrs: st.attrs.map((a) => (a && typeof a === 'object' ? respelled(a, ['as']) : a)) };
   if (st.stage === 'join' && st.between && typeof st.between === 'object' && st.between.value !== undefined && st.between.column === undefined) {
     const { value: column, ...rest } = st.between;
@@ -172,6 +175,40 @@ function currentStage(st, ctx) {
     return { ...st, steps: st.steps.map((x) => (isObj(x) && x.where !== undefined ? { ...x, where: currentConditions(x.where, { ...opts, subject }) } : x)) };
   }
   return st;
+}
+
+/**
+ * A join kept in the form before join contracts — { with, via, between?, attrs, kind? } — as the joined
+ * model's contract { source, on }: each key part the column of the rows `via` paired with the contract's
+ * column (a part chosen by a word, the word whose column it paired), the time `between`'s column — or,
+ * where the kept join stated none, the source's time axis, the version valid then — and nothing else.
+ * Null where the contract has a part the kept join cannot say (a value it never named): the build then
+ * refuses the step, saying to write it as { source, on }.
+ */
+export function storedJoin(st, { catalog, source } = {}) {
+  const contract = catalog?.joinContract?.(st.with);
+  if (!contract || !source) return null;
+  const pairs = new Map(); // a column of the joined model → the column of the rows it was matched with
+  if (typeof st.via === 'string') {
+    const left = catalog.entityKey(source, st.via); const right = catalog.entityKey(st.with, st.via);
+    if (!left || !right || left.length !== right.length) return null;
+    right.forEach((p, i) => pairs.set(p.column, left[i].column));
+  } else for (const c of [].concat(st.via?.on ?? [])) pairs.set(c, c);
+  const on = {};
+  for (const k of contract.key) {
+    if (!k.by) { if (!pairs.has(k.column)) return null; on[k.part] = pairs.get(k.column); continue; }
+    const word = Object.keys(k.columns).find((w) => pairs.has(k.columns[w]));
+    if (!word) return null;
+    on[k.part] = pairs.get(k.columns[word]); on[k.by] = word;
+  }
+  if (contract.time) {
+    const moment = st.between?.column ?? st.between?.value ?? (contract.time.same_day ? pairs.get(contract.time.same_day) : undefined) ?? catalog.getModel(source)?.time?.column;
+    if (!moment) return null;
+    on.time = moment;
+  }
+  for (const s of contract.select) if (on[s.part] === undefined) return null;
+  const { with: model, via: _via, between: _between, ...rest } = st;
+  return { ...rest, source: model, on };
 }
 
 /** Whether a kept unnest's `source` named an event property, resolved as its build resolved it: a

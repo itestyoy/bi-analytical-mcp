@@ -224,9 +224,8 @@ test('input the schema refuses is refused before anything starts', async () => {
   const events = { name: 'x', source: 'events' };
   await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, earlier('events', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }] }));
   await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, earlier('where', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }));
-  // a users attribute as a segment is the join stage it was, point-in-time on the slowly-changing model
-  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
-  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between }], segments: ['platform'] }));
+  // a users attribute as a segment is the join stage it was, on the users model's contract at the event's time
+  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, steps: [{ stage: 'join', attrs: [{ column: 'platform' }], source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }], segments: ['platform'] }));
   // a start's list of stages is its steps: the earlier name is told the field's name, the stages unchanged
   await refused('build_retentioneering_model', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }, /request has an unexpected property 'stages' — here that field is called 'steps'/);
   // a column the start names that its rows do not have is refused with the columns there are — and how one is brought in
@@ -244,8 +243,8 @@ test('input the schema refuses is refused before anything starts', async () => {
     await refused('build_retentioneering_model', { ...events, steps: [stage] }, (err) => err.stage === 'validate' && /^invalid input: `steps\.0\.stage` must be one of: where, compute, join$/.test(err.message));
     assert.throws(() => checkStepPlaces(e.catalog, { ...events, steps: [stage] }, 'start'), (err) => err.field === 'steps[0]' && /^steps\[0\]: an eventstream's start takes where, compute, join — an? \w+ stage is not one of them/.test(err.message) && /from_task/.test(err.message));
   }
-  // …and a join of a slowly-changing model states the version it reads: without it each event would repeat per version
-  await refused('build_retentioneering_model', { ...events, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }] }], segments: ['platform'] }, (err) => err.field === 'steps[0]' && err.message.includes(`between: { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' }`));
+  // …and a join of a slowly-changing model names the moment of the version it reads: its contract's time part
+  await refused('build_retentioneering_model', { ...events, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'platform' }] }], segments: ['platform'] }, /missing required property 'time'/);
   // a start's steps are SQL stages, and the steps added after it the library's ops: neither place takes
   // the other's items — each refused at its place, saying where the item belongs
   await refused('build_retentioneering_model', { ...events, steps: [{ type: 'collapse_events', loops: true }] }, (err) => err.field === 'steps[0]' && /an eventstream's start takes where, compute, join — \{ type: "collapse_events" \} is one of the library's steps, added once the eventstream is built/.test(err.message));
@@ -642,11 +641,10 @@ test('a segment joined from a related model is compared in the type the warehous
   e.probe.physicalColumns = async (k) => asText(k);
   // users.country kept as text, filtered as a flag: a boolean is compared with text by its spellings
   // alone, so one mixed with another constant is refused at the start, naming the column as the call does
-  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
   const start = {
     name: 'x', source: 'events', segments: ['flag'],
     steps: [
-      { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'flag' }], between },
+      { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country', name: 'flag' }] },
       { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'flag' }, { value: true }, { value: 'x' }] }] },
     ],
   };
@@ -870,7 +868,6 @@ test('a start stored in an earlier spelling is carried over when its context is 
   const { currentSpec, currentStep, currentWhere } = await import('../../src/retentioneering/earlier.js');
   const { contextFor, pathContext } = await import('../../src/retentioneering/contexts.js');
   const catalog = e.catalog;
-  const between = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
   const eq = (column, value) => ({ fn: 'eq', args: [{ column }, { value }] });
   const stored = {
     name: 'paths', source: 'events',
@@ -883,7 +880,7 @@ test('a start stored in an earlier spelling is carried over when its context is 
   assert.deepEqual(today.steps, [
     { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }, { value: 'level_completed' }] }] },
     { stage: 'where', conditions: [eq('bundle_id', 'com.omg.wordsearch')] },
-    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'platform' }], between },
+    { stage: 'join', attrs: [{ column: 'platform' }], source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } },
   ]);
   assert.deepEqual([today.segments, today.top, today.sessions], [['platform'], 5, { gap_minutes: 30 }]);
   for (const k of ['where', 'events', 'stages']) assert.equal(today[k], undefined, k);

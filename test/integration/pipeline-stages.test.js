@@ -79,7 +79,6 @@ const duck = getDialect('duckdb');
 // dim_users is SLOWLY-CHANGING (one row per player per validity window), so every join to it
 // is point-in-time: the declared player key AND the event time inside the window. Without the
 // window a player with several versions matches all of them and counts inflate.
-const AT = (column) => ({ column, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 // (where -> compute (an event property) -> join -> aggregate(group_by), IAP revenue by country
 // US 35 / GB 25 / BR 25: the first unpivot test reads it off the rows it folds.)
@@ -175,7 +174,7 @@ test('pipeline where starts_with / contains: iap_purchase_* events', opts, async
 const IAP_BY_COUNTRY = [
   { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
   { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
-  { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
+  { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] },
 ];
 const COUNTRIES = [{ value: 'US', name: 'us' }, { value: 'GB', name: 'gb' }, { value: 'BR', name: 'br' }];
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
@@ -489,7 +488,7 @@ test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi
   if (skip(t)) return;
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'player_id_of_internal' }, { value: 'u1' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
-    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'install_date' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'install_date' }] },
     { stage: 'compute', name: 'dsi', expr: { fn: 'date_diff', args: [{ column: 'install_date' }, { column: 'device_time' }], unit: 'day' } },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', expr: { fn: 'sum', args: [{ column: 'dsi' }] } }, { name: 'max_dsi', expr: { fn: 'max', args: [{ column: 'dsi' }] } }, { name: 'n', expr: { fn: 'count' } }] },
   ]);
@@ -618,7 +617,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35; IAP reven
   const r = await show([
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
     { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
-    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: [{ column: 'country' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'price' }] } }, { name: 'n', expr: { fn: 'count' } }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_column: 'metric', value_column: 'value' },
   ]);
@@ -968,11 +967,11 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
 
 test('a joined text column, under the name the join gave it, is compared with a boolean as text too', opts, async (t) => {
   if (skip(t)) return;
-  const joined = 'from fct_analytics_events e left join dim_users u on e.player_id_of_internal = u.player_id_of_internal';
+  const joined = 'from fct_analytics_events e left join dim_users u on e.player_id_of_internal = u.player_id_of_internal and e.device_time between u.install_time_valid_from and u.install_time_valid_until';
   const all = await truth(`select count(*) as n ${joined} where u.country is not null`);
   const truthy = await truth(`select count(*) as n ${joined} where lower(trim(u.country)) in ('true', '1', 't')`);
   const { rows } = await condPipe([
-    { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'activity_test' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country', name: 'activity_test' }] },
     { stage: 'aggregate', measures: [
       { name: 'yes', expr: rowsWhere({ fn: 'eq', args: [{ column: 'activity_test' }, { value: true }] }) },
       { name: 'no', expr: rowsWhere({ fn: 'neq', args: [{ column: 'activity_test' }, { value: true }] }) },
@@ -1050,10 +1049,8 @@ const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_b
 // dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
 // per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
 // instant to attribute a funnel to: the user as they were when the funnel started.
-const AT_FUNNEL = { column: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' };
 // A join placed BEFORE match_recognize — or in a pipeline with no funnel at all — still sees
 // one row per EVENT, so the instant to attribute it to is the event's own time.
-const AT_EVENT = { column: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
 test('pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
@@ -1234,7 +1231,7 @@ test('funnel sliced by a user attribute: join dim_users → reached_tut1 by coun
   if (skip(t)) return;
   // The funnel is sliced by joining dim_users AFTER match_recognize — all within
   // the pipeline (no separate semantic layer).
-  const out = await mrPipe([matchActivation(), { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: [{ column: 'country' }, { column: 'platform' }] }]);
+  const out = await mrPipe([matchActivation(), { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'first_seen_at' }, attrs: [{ column: 'country' }, { column: 'platform' }] }]);
   assert.ok(out.rows.every((r) => 'country' in r && 'platform' in r), 'attrs joined onto each row');
   assert.equal(reached(out.rows, 'tut1'), 8);
   const byCountry = {};
@@ -1263,7 +1260,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // user-attribute filtering is now a pipeline concern: join dim_users, where on
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await mrPipe([
-    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: [{ column: 'country' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] },
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }] },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: activationSteps.slice(0, 2) },
   ]);
@@ -1520,8 +1517,11 @@ const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [Str
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(numOrNaN(r[col])) ? numOrNaN(r[col]) : 0), 0);
 
 /** Build and materialize a pipeline over the crash source; return its rows. */
-async function pipeRows(...steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cx_${seq++}`, source: 'crashlytics' });
+const pipeRows = (...steps) => pipeRowsFrom('crashlytics', ...steps);
+
+/** …over any source. */
+async function pipeRowsFrom(source, ...steps) {
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cx_${seq++}`, source });
   for (const step of steps) {
     const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
@@ -1730,7 +1730,7 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
   if (skip(t)) return;
   const rows = await pipeRows(
     { stage: 'unnest', expr: { property: 'breadcrumbs_of_event_data' }, name: 'crumb' },
-    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'country' }] },
+    { stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'event_time' }, kind: 'inner', attrs: [{ column: 'country' }] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   );
   assert.deepEqual(mapCol(rows, 'country', 'n'), { GB: 10, US: 6, DE: 3, BR: 1 });
@@ -1738,14 +1738,16 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
   assert.equal(sumCol(rows, 'crashes'), 13);
 });
 
-// 12. …and across a chain: the stack frames of the crash, alongside the ad funnel that was
-//     running when it happened. 6 reports have both a stack and a rewarded funnel; their
-//     10 frames each pair with the funnel's 2 events.
-test('12. stack frames x the rewarded ad funnel: 20 rows, 6 reports, 5 files', opts, async (t) => {
+// 12. …and across a join: the stack frames of the crash report that followed the rewarded ad an event
+//     belongs to. 6 reports have both a stack and a rewarded funnel; their 10 frames each pair with
+//     the funnel's 2 events.
+test('12. the rewarded ad funnel x its crash report\'s stack frames: 20 rows, 6 reports, 5 files', opts, async (t) => {
   if (skip(t)) return;
-  const rows = await pipeRows(
-    { stage: 'unnest', expr: { property: 'stack_frames_of_event_data' }, name: 'file', field: 'file' },
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: [{ column: 'event_id' }] },
+  const rows = await pipeRowsFrom('events',
+    { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'crash_id' }, { column: 'stack_frames_of_event_data' }] },
+    // the joined payload arrives as its JSON text: parsed into an array, then exploded
+    { stage: 'unnest', expr: { fn: 'json_parse_array', args: [{ column: 'stack_frames_of_event_data' }] }, name: 'frame' },
+    { stage: 'compute', name: 'file', expr: { fn: 'json_field', args: [{ column: 'frame' }], field: 'file' } },
     { stage: 'aggregate', measures: [
       { name: 'n', expr: { fn: 'count' } },
       { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } },

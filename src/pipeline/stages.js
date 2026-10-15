@@ -17,6 +17,7 @@ import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere } from '.
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
 import { METRICS_STEP } from '../schema/fields.js';
+import { TIME_PART, contractParts, describeContract } from '../catalog/joins.js';
 import { isNumericType } from '../dialects/base.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -187,149 +188,127 @@ export const STAGES = {
 
   join: {
     keepsSourceRows: true,
+    // offered only where some model declares a join contract (and has an attribute to bring)
+    available: (catalog) => catalog.joinableModels().length > 0,
     recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
     schema: (catalog) => {
-      // ONE CLOSED FORM PER JOINED MODEL AND WAY OF MATCHING: `with` pinned, and every column the form
-      // names — attrs, the window's bounds, the shared key — one of THAT model's own columns, so a
-      // join is written only with names the model has. (Its left side — `via`'s key on the
-      // pipeline's own source, `between.column` — is the pipeline's, checked when the step is added.)
+      // ONE CLOSED FORM PER JOINABLE MODEL — a model whose schema declares a join contract
+      // (meta.mcp.join, src/catalog/joins.js): `source` pinned, `on` naming exactly the contract's parts
+      // (a key or the time a column of the rows, a select part its value), `attrs` one of the model's own
+      // attributes — an amount (a measure column) is not carried: the rows would repeat it.
       const forms = [];
-      for (const model of catalog.modelKeys()) {
-        const m = catalog.models[model];
-        const columns = [...new Set([...catalog.modelColumns(model).map((c) => c.name), ...(m.event_data_column ? [m.event_data_column] : [])])];
-        if (!columns.length) continue;
-        // one enum object for every place the form names a column of the model, so the transport folds it into one $defs entry
-        const column = strEnum(columns, `A column of ${model}.`);
-        const fields = {
-          with: { const: model },
-          attrs: {
-            type: 'array', minItems: 1, uniqueItems: true,
-            description: 'The columns of the joined model that arrive — exactly these.',
-            items: {
-              type: 'object', additionalProperties: false, required: ['column'],
-              properties: {
-                column,
-                name: { type: 'string', pattern: NAME, description: 'The name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
+      for (const model of catalog.joinableModels()) {
+        const contract = catalog.joinContract(model);
+        const amounts = new Set(catalog.aggregatableFields(model).map((f) => f.column).filter(Boolean));
+        const attributes = catalog.modelColumns(model).map((c) => c.name).filter((c) => !amounts.has(c));
+        if (!attributes.length) continue;
+        const rowsColumn = (what) => ({ type: 'string', pattern: NAME, description: `A column of the rows: ${what}.` });
+        const on = {};
+        for (const k of contract.key) on[k.part] = rowsColumn(k.by ? `its value equals ${model}'s column the ${k.by} picks` : `its value equals ${model}.${k.column}`);
+        if (contract.time) on[TIME_PART] = rowsColumn(contract.time.within ? `the moment the version of ${model} valid then is joined (${contract.time.within.join(' … ')})` : `the moment whose day is ${model}.${contract.time.same_day}'s`);
+        for (const s of contract.select) on[s.part] = s.values ? { enum: s.values, description: `Which ${s.part}.` } : { type: 'string', minLength: 1, description: `The ${s.column} of ${model} the join keeps — a value it holds.` };
+        forms.push(form({
+          title: `join ${model}`, tag: ['stage', 'join'], required: ['stage', 'source', 'on', 'attrs'],
+          properties: {
+            source: { const: model },
+            on: { type: 'object', additionalProperties: false, required: Object.keys(on), properties: on, description: `The join contract ${model} declares: ${describeContract(model, contract)}.` },
+            attrs: {
+              type: 'array', minItems: 1, uniqueItems: true,
+              description: 'The columns of the joined model that arrive — exactly these.',
+              items: {
+                type: 'object', additionalProperties: false, required: ['column'],
+                properties: {
+                  column: strEnum(attributes, `An attribute of ${model}.`),
+                  name: { type: 'string', pattern: NAME, description: 'The name it gets in the pipeline (defaults to `column`) — for a column both sides name identically.' },
+                },
               },
             },
+            kind: { enum: ['left', 'inner'], default: 'left' },
           },
-          between: {
-            type: 'object', additionalProperties: false, required: ['column', 'from', 'to'],
-            description: 'The version valid at a moment of this side (see the stage).',
-            properties: {
-              // from / to: the window's lower and upper bound columns on the joined model (inclusive), e.g. valid_from / valid_until
-              column: { type: 'string', pattern: NAME, description: 'A column of this side holding the moment (e.g. the event time); from / to are the joined model\'s bounds, inclusive.' },
-              from: column,
-              to: column,
-            },
-          },
-          kind: { enum: ['left', 'inner'], default: 'left' },
-        };
-        // HOW the two sides match, one field: a relationship declared in the schema (its key columns
-        // come from the catalog, on both sides), or { on } — columns both sides name alike
-        const vias = Object.keys(catalog.entitiesOf(model)).filter((e) => catalog.joinEntityNames().includes(e));
-        const on = { type: 'object', additionalProperties: false, required: ['on'], title: '{ on }', properties: { on: { type: 'array', minItems: 1, uniqueItems: true, items: column, description: 'Key column(s) both sides name identically — when no relationship is declared.' } } };
-        forms.push(form({ title: `join ${model}`, tag: ['stage', 'join'], required: ['stage', 'with', 'via', 'attrs'], properties: { ...fields, via: vias.length ? { anyOf: [{ enum: vias, title: 'a declared relationship' }, on] } : on } }));
+        }));
       }
       return {
         type: 'object',
-        description: 'Bring in columns of a related model. `via` is a relationship the schema declares (its key columns come from the catalog, even composite or named differently on each side; one carried on alternative columns is offered as <relationship>_<variant>), or { on: [...] } for columns both sides name alike. `attrs` lists exactly the columns that arrive. `between` picks the version of a slowly-changing model valid at a moment of this side — without it every historical version matches and counts inflate. Joins stack; via\'s left key is on the pipeline\'s own source.',
+        description: 'Bring in attributes of a model its schema makes joinable — on its join contract, { source, on: { <part>: <a column of the rows | a value> } }: every part it declares named, each key part and the time a column of these rows, a select part its value. The contract is unique on the joined side, so a row meets at most one row there and nothing is repeated; a slowly-changing model is matched at the version valid at the time named. `attrs` lists exactly the columns that arrive — attributes, not amounts (an amount is a measure of the semantic layer). Joins stack.',
         anyOf: forms,
       };
     },
-    build: ({ catalog, cols, source, physical }, p) => {
-      const m = catalog.getModel(p.with);
-      if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);
-      let on = []; let onKeys;
-      if (typeof p.via === 'string') {
-        // The key columns come from the SCHEMA, on both sides — including a composite key — and
-        // each side may name its columns its own way. The LEFT key is resolved on the pipeline's
-        // own SOURCE, not on whatever the previous stages accumulated, so a chained join must use
-        // a relationship the source itself declares.
-        const left = catalog.entityKey(source, p.via);
-        const right = catalog.entityKey(p.with, p.via);
-        if (!left || !right) {
-          const missing = !left ? source : p.with;
-          const shared = catalog.sharedEntities(source, p.with).map((x) => x.entity);
-          throw new Error(`join via '${p.via}': '${missing}' declares no such relationship.${shared.length ? ` '${source}' and '${p.with}' share: ${shared.join(', ')}.` : ` '${source}' and '${p.with}' share no declared relationship — declare one (meta.mcp.entities) or use via: { on: [...] } with a column both sides name identically.`}`);
-        }
-        for (const part of left) requireCol(cols, part.column); // the left key must survive to here
-        onKeys = { left, right };
-      } else {
-        on = p.via?.on;
-        if (!on?.length) throw new Error('join: `via` is a declared relationship, or { on: [key columns both sides name alike] }');
-        for (const k of on) requireCol(cols, k); // every key must exist on THIS side
+    build: ({ d, catalog, cols, source, physical }, p) => {
+      if (p.with !== undefined) throw new Error(`join: this step names its model with \`with\` and its key with \`via\`, and the model's join contract needs what it did not say — write it as { source: '${p.with}', on: { … } }${catalog.joinContract(p.with) ? ` (${describeContract(p.with, catalog.joinContract(p.with))})` : ''}`);
+      const model = p.source;
+      const contract = model ? catalog.joinContract(model) : null;
+      if (!contract) {
+        const joinable = catalog.joinableModels();
+        throw new Error(`join: '${model}' declares no join contract, so it is not joinable${joinable.length ? ` — the joinable models: ${joinable.join(', ')}` : ' — no model of this catalog is'}`);
       }
-      // What the joined model REALLY has (declared, and already grounded to the physical table at
-      // catalog load), with each column's type — so a joined amount stays numeric downstream
-      // instead of arriving as an untyped string. A fact's raw payload blob is a column too.
-      const joined = new Map(catalog.modelColumns(p.with).map((c) => [c.name, { type: c.type || 'string' }]));
-      if (m.event_data_column && !joined.has(m.event_data_column)) joined.set(m.event_data_column, { type: 'json' });
+      if (model === source) throw new Error(`join: '${model}' is the pipeline's own source — join a DIFFERENT model`);
+      const m = catalog.getModel(model);
+      const on = p.on || {};
+      const parts = contractParts(contract);
+      const missing = parts.filter((k) => on[k] === undefined);
+      const stray = Object.keys(on).filter((k) => !parts.includes(k));
+      if (missing.length || stray.length) throw new Error(`join '${model}': on names its contract's parts — ${parts.join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}${stray.length ? `; ${stray.join(', ')} is no part of it` : ''} (${describeContract(model, contract)})`);
+      // the key: each part a column of the rows, equal to the joined model's column (a part chosen by a
+      // select part's word, the column that word picks)
+      const left = []; const right = [];
+      for (const k of contract.key) {
+        requireCol(cols, on[k.part]);
+        left.push({ column: on[k.part] });
+        right.push({ column: k.by ? k.columns[on[k.by]] : k.column });
+      }
+      let between;
+      if (contract.time) {
+        requireCol(cols, on[TIME_PART]);
+        if (contract.time.within) between = { column: on[TIME_PART], from: contract.time.within[0], to: contract.time.within[1] };
+        // the same day: one more part of the key, both sides at the day
+        else { left.push({ column: on[TIME_PART], grain: 'day' }); right.push({ column: contract.time.same_day, grain: 'day' }); }
+      }
+      for (const s of contract.select.filter((x) => x.values)) {
+        if (!s.values.includes(on[s.part])) throw new Error(`join '${model}': on.${s.part} is one of ${s.values.join(', ')}`);
+      }
+      // a select part with a column filters the joined model to the value BEFORE the join
+      const filter = contract.select.filter((s) => s.column).map((s) => {
+        if (typeof on[s.part] !== 'string' || !on[s.part]) throw new Error(`join '${model}': on.${s.part} is a value of ${model}.${s.column} — the one the join keeps`);
+        return { column: s.column, value: on[s.part] };
+      });
+      const amounts = new Set(catalog.aggregatableFields(model).map((f) => f.column).filter(Boolean));
+      const joined = new Map(catalog.modelColumns(model).filter((c) => !amounts.has(c.name)).map((c) => [c.name, { type: c.type || 'string' }]));
       // …grounded, when the warehouse was asked, as the source's own columns are: a column the table
-      // lacks is not offered, and each arrives in the type it HAS — a flag stored as text stays text
-      // under its new name, so a boolean compared with it is spelled as text, not run as STRING = BOOL
-      // (by the one rule of grounding: a JSON payload, an array the warehouse names no items of, keep theirs)
-      const phys = physical?.joined?.get(p.with);
+      // lacks is not offered, and each arrives in the type it HAS (by the one rule of grounding)
+      const phys = physical?.joined?.get(model);
       if (phys) {
         for (const [name, c] of joined) {
-          if (c.type === 'json') continue;
           if (!phys.has(name.toLowerCase())) { joined.delete(name); continue; }
           const t = physicalColumnType(phys.types?.get(name.toLowerCase()) || '');
           if (t !== 'unknown' && groundedType(c.type, t) === t) joined.set(name, { type: t, physical: true });
         }
       }
-      const known = joined.size ? joined : null; // no column info -> accept what the caller names
       const avail = () => [...joined.keys()].join(', ');
-      // `attrs` IS the contract: exactly what is listed arrives, nothing implicit. A join that
-      // quietly widened the row would change what the next stage sees without anyone saying so.
-      if (!p.attrs?.length) {
-        throw new Error(
-          `join '${p.with}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly.`
-          + `${joined.size ? ` Columns of '${p.with}': ${avail()}.` : ''}`
-          + ` Use { column, name } to expose one under a different name. semantic_index({ request: { source: '${p.with}' } }) describes them.`,
-        );
-      }
+      if (!p.attrs?.length) throw new Error(`join '${model}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly. Its attributes: ${avail()}.`);
       const attrs = p.attrs.map((a) => ({ column: a.column, as: a.name || a.column }));
       const byName = new Map();
       for (const a of attrs) {
-        if (known && !known.has(a.column)) throw new Error(`join '${p.with}' attrs: '${a.column}' is not a column of '${p.with}' (available: ${avail()})`);
-        // A name used twice is unaddressable downstream, so say WHICH two things collide and
-        // what to rename. The join key is worth calling out: its value is the same on both
-        // sides, so the copy is usually not wanted at all.
+        if (amounts.has(a.column)) throw new Error(`join '${model}' attrs: '${a.column}' is an amount — carried onto these rows it would repeat on every row that meets it; it is a measure of the semantic layer (a semantic_model's measure over '${model}')`);
+        if (!joined.has(a.column)) throw new Error(`join '${model}' attrs: '${a.column}' is not an attribute of '${model}' (available: ${avail()})`);
         if (cols.has(a.as)) {
-          const isKey = onKeys ? onKeys.right.some((k) => k.column === a.column) : on.includes(a.column);
+          const isKey = right.some((k) => k.column === a.column);
           throw new Error(
-            nameTaken(`join '${p.with}' attrs`, a.as, `exposing '${p.with}'.${a.column}`)
+            nameTaken(`join '${model}' attrs`, a.as, `exposing '${model}'.${a.column}`)
             + (isKey
               ? ` '${a.column}' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs.`
-              : ` The two hold different data, so rename the joined one: { column: '${a.column}', name: '${p.with}_${a.column}' }.`),
+              : ` The two hold different data, so rename the joined one: { column: '${a.column}', name: '${model}_${a.column}' }.`),
           );
         }
-        if (byName.has(a.as)) throw new Error(`join '${p.with}' attrs: '${byName.get(a.as)}' and '${a.column}' would both be named '${a.as}'. Give each its own \`name\`.`);
+        if (byName.has(a.as)) throw new Error(`join '${model}' attrs: '${byName.get(a.as)}' and '${a.column}' would both be named '${a.as}'. Give each its own \`name\`.`);
         byName.set(a.as, a.column);
       }
-      const relation = `{{ ref('${m.dbt_model}') }}`;
+      const ref = `{{ ref('${m.dbt_model}') }}`;
+      const relation = filter.length ? `(SELECT * FROM ${ref} WHERE ${filter.map((f) => `${d.quoteIdent(f.column)} = ${d.sqlLiteral(f.value)}`).join(' AND ')})` : ref;
       let out = cols;
       for (const a of attrs) { out = addCol(out, a.as, joined.get(a.column)?.type || 'string'); if (joined.get(a.column)?.physical) out.get(a.as).physical = true; }
-      let between;
-      if (p.between) {
-        // `column` is a column on THIS side (validated against the live column set); `from`/`to`
-        // are columns of the JOINED model (validated against its declared columns when known).
-        requireCol(cols, p.between.column);
-        const joinedCols = new Set([...catalog.modelColumns(p.with).map((c) => c.name), ...Object.keys(m.dimensions || {})]);
-        for (const side of ['from', 'to']) {
-          const c = p.between[side];
-          if (joinedCols.size && !joinedCols.has(c)) throw new Error(`join between.${side}: '${c}' is not a column of '${p.with}' (available: ${[...joinedCols].join(', ')})`);
-        }
-        between = { column: p.between.column, from: p.between.from, to: p.between.to };
-      }
-      // Each dialect renders the projection `attrs` itself (a `j.col AS alias` list in the CTE
-      // form, a projecting subquery on the right side of a pipe JOIN), so the column set promised
-      // here is exactly what the next stage sees on either path.
-      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}) }, cols: out };
+      return { op: { op: 'join', relation, alias: 'j', on: [], onKeys: { left, right }, attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}) }, cols: out };
     },
   },
-
   aggregate: {
     recommend: (available) => [
       `Aggregated: the output is now group_by keys + measures (${listSome(available)}); add order_by/limit or materialize.`,

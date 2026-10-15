@@ -48,7 +48,7 @@ test('an unnest whose element is named as a column the rows already have is refu
 
 test('a join exposing a column under a name the rows have is refused in the same words', () => {
   assert.throws(
-    () => render([{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country', name: 'event_name' }] }]),
+    () => render([{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country', name: 'event_name' }] }]),
     /join 'users' attrs: the pipeline already has a column named 'event_name', so exposing 'users'\.country under that name would leave two columns sharing one name/,
   );
 });

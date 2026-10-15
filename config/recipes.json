@@ -1791,12 +1791,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "experiments",
-            "via": "user",
+            "source": "experiments",
+            "on": {
+              "user": "player_id_of_internal",
+              "experiment": "checkout_flow"
+            },
             "attrs": [
-              {
-                "column": "experiment_name"
-              },
               {
                 "column": "variant_group"
               },
@@ -1869,7 +1869,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group",
               "player_id_of_internal"
             ],
@@ -1890,7 +1889,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group"
             ],
             "measures": [
@@ -1933,7 +1931,7 @@
           "conversions": "conversions"
         }
       },
-      "notes": "The pipeline-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
+      "notes": "The pipeline-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }). The experiments contract joins ONE experiment, named by its value in on.experiment (\"checkout_flow\" here — the experiment asked about; semantic_index({ request: { source: \"experiments\", column: \"experiment_name\" } }) lists them).",
       "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ request: { action: 'analyze' } }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
@@ -2224,12 +2222,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "experiments",
-            "via": "user",
+            "source": "experiments",
+            "on": {
+              "user": "player_id_of_internal",
+              "experiment": "checkout_flow"
+            },
             "attrs": [
-              {
-                "column": "experiment_name"
-              },
               {
                 "column": "variant_group"
               },
@@ -2309,7 +2307,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group",
               "player_id_of_internal"
             ],
@@ -2330,7 +2327,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group"
             ],
             "measures": [
@@ -2386,7 +2382,7 @@
         }
       },
       "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + average + stddev and call experiment({ request: { action: 'analyze', metric: mean } }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
-      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest."
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest. The experiments contract joins ONE experiment, named by its value in on.experiment (\"checkout_flow\" here — the experiment asked about; semantic_index({ request: { source: \"experiments\", column: \"experiment_name\" } }) lists them)."
     },
     {
       "id": "experiment_cuped",
@@ -2413,12 +2409,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "experiments",
-            "via": "user",
+            "source": "experiments",
+            "on": {
+              "user": "player_id_of_internal",
+              "experiment": "checkout_flow"
+            },
             "attrs": [
-              {
-                "column": "experiment_name"
-              },
               {
                 "column": "variant_group"
               },
@@ -2544,7 +2540,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group",
               "player_id_of_internal"
             ],
@@ -2621,7 +2616,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group"
             ],
             "measures": [
@@ -2715,7 +2709,7 @@
         }
       },
       "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit n, the sums of Y (sum, sum_squares), the sums of X (covariate: { sum, sum_squares }) and sum_products (Σ X·Y), and call experiment({ request: { action: 'analyze', metric: 'cuped' } }) with each group as `arm` says. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
-      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass each group's n, sum and sum_squares of the in-experiment value, covariate { sum, sum_squares } and sum_products — `arm` names the column that holds each; the tool computes the pooled theta and runs Welch on the adjusted means."
+      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass each group's n, sum and sum_squares of the in-experiment value, covariate { sum, sum_squares } and sum_products — `arm` names the column that holds each; the tool computes the pooled theta and runs Welch on the adjusted means. The experiments contract joins ONE experiment, named by its value in on.experiment (\"checkout_flow\" here — the experiment asked about; semantic_index({ request: { source: \"experiments\", column: \"experiment_name\" } }) lists them)."
     },
     {
       "id": "experiment_ratio",
@@ -2751,7 +2745,7 @@
           "sum_products": "sum_numden"
         }
       },
-      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users), the sums of the per-user numerator and denominator with their squares, and the sum of their products. Then call experiment({ request: { action: 'analyze', metric: 'ratio' } }) with each group { n, numerator: { sum, sum_squares }, denominator: { sum, sum_squares }, sum_products } — `arm` names the column that holds each: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "notes": "The pipeline-model pipeline builds a model whose rows carry, per variant: n (users), the sums of the per-user numerator and denominator with their squares, and the sum of their products. Then call experiment({ request: { action: 'analyze', metric: 'ratio' } }) with each group { n, numerator: { sum, sum_squares }, denominator: { sum, sum_squares }, sum_products } — `arm` names the column that holds each: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent. The experiments contract joins ONE experiment, named by its value in on.experiment (\"checkout_flow\" here — the experiment asked about; semantic_index({ request: { source: \"experiments\", column: \"experiment_name\" } }) lists them).",
       "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and product (num·den) and sum per variant — numerator { sum, sum_squares }, denominator { sum, sum_squares }, sum_products. experiment({ request: { action: 'analyze', metric: 'ratio' } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
       "pipeline_payload": {
         "action": "start",
@@ -2760,12 +2754,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "experiments",
-            "via": "user",
+            "source": "experiments",
+            "on": {
+              "user": "player_id_of_internal",
+              "experiment": "checkout_flow"
+            },
             "attrs": [
-              {
-                "column": "experiment_name"
-              },
               {
                 "column": "variant_group"
               },
@@ -2869,7 +2863,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group",
               "player_id_of_internal"
             ],
@@ -2946,7 +2939,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group"
             ],
             "measures": [
@@ -3048,7 +3040,7 @@
           "n": "n"
         }
       },
-      "notes": "The pipeline-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "notes": "The pipeline-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped). The experiments contract joins ONE experiment, named by its value in on.experiment (\"checkout_flow\" here — the experiment asked about; semantic_index({ request: { source: \"experiments\", column: \"experiment_name\" } }) lists them).",
       "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ request: { action: 'check_split' } }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
       "pipeline_payload": {
         "action": "start",
@@ -3057,12 +3049,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "experiments",
-            "via": "user",
+            "source": "experiments",
+            "on": {
+              "user": "player_id_of_internal",
+              "experiment": "checkout_flow"
+            },
             "attrs": [
-              {
-                "column": "experiment_name"
-              },
               {
                 "column": "variant_group"
               },
@@ -3104,7 +3096,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group",
               "player_id_of_internal"
             ],
@@ -3120,7 +3111,6 @@
           {
             "stage": "aggregate",
             "group_by": [
-              "experiment_name",
               "variant_group"
             ],
             "measures": [
@@ -3448,8 +3438,11 @@
           },
           {
             "stage": "join",
-            "with": "users",
-            "via": "user",
+            "source": "users",
+            "on": {
+              "user": "player_id_of_internal",
+              "time": "device_time"
+            },
             "attrs": [
               {
                 "column": "install_date"
@@ -5509,8 +5502,11 @@
           },
           {
             "stage": "join",
-            "with": "users",
-            "via": "user",
+            "source": "users",
+            "on": {
+              "user": "player_id_of_internal",
+              "time": "device_time"
+            },
             "attrs": [
               {
                 "column": "country"
@@ -6378,24 +6374,31 @@
       "metric_types": [],
       "id": "pipeline_join_via_relationship",
       "task_type": "joins",
-      "title": "A pipeline join by the relationship name (and its variants)",
-      "when_to_use": "Matching two facts on a key nobody owns — the same funnel id, the same order id, the same session — which the governed path cannot join.",
+      "title": "A join on a model's join contract — a part chosen by a word",
+      "when_to_use": "Bringing one row of another model onto each row — the crash report of the ad funnel an event belongs to, the install record valid at an event, an experiment assignment — on the contract the joined model declares.",
       "required_roles": [
         "crashlytics"
       ],
       "pipeline_payload": {
         "action": "start",
         "name": "crash_ad_funnel",
-        "source": "crashlytics",
+        "source": "events",
         "steps": [
           {
             "stage": "join",
-            "with": "events",
-            "via": "ad_funnel_rewarded",
+            "source": "crashlytics",
+            "on": {
+              "user": "player_id_of_internal",
+              "funnel": "tracking_id",
+              "format": "rewarded"
+            },
             "kind": "inner",
             "attrs": [
               {
-                "column": "event_id"
+                "column": "crash_id"
+              },
+              {
+                "column": "issue_title_of_event_data"
               }
             ]
           },
@@ -6435,8 +6438,8 @@
           }
         ]
       },
-      "notes": "The join names `via: \"<relationship>\"` and nothing else — the key columns (here a funnel id PLUS the entity, two columns) come from the schema, and the two sides may spell them differently. Both sides keep their own column names, so take from the other side only what you need (`attrs`) and never a name this side already has. Where a side carries the relationship in several alternative columns, each is offered as `<relationship>_<variant>` and the CALLER picks the one the question is about (the semantic_index model view lists them); an empty variant column matches nothing, and a left join is what keeps the unmatched rows. Joins STACK: another join stage reaches a third source.",
-      "hack": "A many-to-many match (several rows share the id on both sides) has no governed path by design — MetricFlow only joins onto a unique key — so it is a pipeline join, declared by relationship name. Extrapolate: any declared relationship as `via`, plus `via: { on: [...] }` as the ad-hoc fallback when both sides name one column identically."
+      "notes": "The join names the joined model (`source`) and its contract's parts (`on`) — the columns of YOUR rows each part equals, and a word where a part is chosen (here `format` picks which tracking-id column of the crash source the funnel is matched on). The contract is declared unique on the joined side, so each row meets at most one row there and nothing repeats; take only the columns you need (`attrs`), never a name your rows already have. semantic_index({ request: { source: \"<model>\" } }) shows a model's contract under `join`. Joins STACK: another join stage brings a third model.",
+      "hack": "A join is the joined model's contract, named in full: { stage: \"join\", source, on: { <part>: <a column of the rows | a value> }, attrs }. Only a model that declares one is joinable, and an amount of it is a measure of the semantic layer, never carried onto rows. Extrapolate: any model with a contract, any column of your rows that holds the key."
     },
     {
       "required_events": [],
@@ -6447,7 +6450,7 @@
       "metric_types": [],
       "id": "pipeline_point_in_time_join",
       "task_type": "joins",
-      "title": "Joining a slowly-changing model: state the window",
+      "title": "Joining a slowly-changing model: name the moment",
       "when_to_use": "Joining attributes that CHANGE (an install record, a plan, a price list) — anything with a validity window.",
       "required_roles": [
         "acquisition"
@@ -6459,14 +6462,12 @@
         "steps": [
           {
             "stage": "join",
-            "with": "users",
-            "via": "user",
-            "kind": "inner",
-            "between": {
-              "column": "spend_date",
-              "from": "install_time_valid_from",
-              "to": "install_time_valid_until"
+            "source": "users",
+            "on": {
+              "user": "player_id_of_internal",
+              "time": "spend_date"
             },
+            "kind": "inner",
             "attrs": [
               {
                 "column": "country"
@@ -6509,8 +6510,8 @@
           }
         ]
       },
-      "notes": "Without `between`, the key alone matches EVERY historical version of the row: the count and any money inflate silently (the add_steps response nudges about it and names the real window columns). The `column` side is the time being asked about — the event time, the spend day, or a funnel's first event after a match_recognize stage. The governed path applies the window itself; a pipeline states it here, deliberately, so the moment is visible at the call site.",
-      "hack": "Point-in-time = the key AND a time inside the window: `between: { column: <the time asked about>, from: <validity start>, to: <validity end> }`. The window is half-open on the right — the CURRENT version has no end (NULL) and must still match. Extrapolate: any versioned dimension."
+      "notes": "The users contract has a `time` part: the moment whose valid version is joined — the event time, the spend day, or a funnel's first event after a match_recognize stage. Every part is required, so the moment is always visible at the call site; the governed path applies the window itself.",
+      "hack": "Point-in-time = the key AND the moment: on: { user: <the rows' player column>, time: <the moment asked about> }. The window is half-open on the right — the CURRENT version has no end (NULL) and still matches. Extrapolate: any versioned model whose contract carries a time part."
     },
     {
       "required_events": [
@@ -6715,12 +6716,10 @@
           },
           {
             "stage": "join",
-            "with": "users",
-            "via": "user",
-            "between": {
-              "column": "device_time",
-              "from": "install_time_valid_from",
-              "to": "install_time_valid_until"
+            "source": "users",
+            "on": {
+              "user": "player_id_of_internal",
+              "time": "device_time"
             },
             "attrs": [
               {

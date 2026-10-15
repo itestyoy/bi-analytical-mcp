@@ -167,14 +167,14 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
      that a reader has to trace back to a source.
   2. **users** — the user-attributes dimension (one row per user).
   3. **experiments** — A/B-test assignments (one row per user×experiment:
-     experiment_name, variant_group, assigned_at, ended_at); joined to events by
-     the user entity for A/B analysis.
+     experiment_name, variant_group, assigned_at, ended_at); joined onto events by
+     its join contract — the user AND the experiment named (a value) — for A/B analysis.
   4. **a MEASURES source** — a non-events fact whose columns are amounts, not
      events (e.g. `acquisition`: one row per player×day with cost/impressions/
      clicks). It has no `event_name`; it declares its own time axis
-     (`meta.mcp.is_time`) and its own measures, and joins to users / an events
-     source by the user entity — on a per-day grain with a COMPOSITE join key
-     (`on: [<user column>, <day column>]`) so the daily rows do not fan out.
+     (`meta.mcp.is_time`) and its own measures, and joins to users by the user
+     entity; onto other rows by its join contract — the player AND the day
+     (`time: { same_day: <its day column> }`), so the daily rows do not fan out.
 - Do NOT invent other tables/fixtures (no orders/customers/Jaffle, no "step"
   tables). Only the roles above.
 - THE SCHEMA MARKS WHAT MAY BE AGGREGATED; THE CALLER PICKS THE FUNCTION. Any
@@ -211,29 +211,36 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
 - Segmentation/joins use user attributes on `dim_users` and experiment assignments
   on the experiments source, joined to events by the user entity — from ANY events
   source that carries the user entity.
-- JOIN KEYS ARE DECLARED IN THE SCHEMA, NEVER PASSED IN AT THE CALL SITE. A model
-  declares `meta.mcp.entities: { <relationship>: { type, key: [...] } }`; a key may
-  span SEVERAL columns, and the two sides may name their columns differently — only
-  the relationship name and the NUMBER of key parts have to agree.
-  `primary`/`unique` makes the model the join TARGET
-  (exactly one owner, unique per row there); `foreign` points at the owner. Both
-  paths consume the SAME declaration — `{ source, column, via? }` in a metric
-  query (MetricFlow's `<relationship>__<column>` underneath), `join { with, via }` in a pipeline. A side may declare `variants` when the
-  same relationship is carried by SEVERAL alternative key columns (one tracking id
-  per ad format): each expands to `<relationship>_<variant>` and the CALLER picks
-  which to use, while the side with one such column declares it plainly once. Do NOT
-  hardcode a pair of column names in `src/` for a particular join, and do NOT add a
-  per-role join path: a new relationship is a schema key, not code. `on:` in a
-  pipeline join stays only as the ad-hoc fallback for a column both sides name
-  identically.
-- A relationship NOBODY owns is a legitimate PIPELINE join (a many-to-many match —
-  an ad funnel spans several events, so neither side is unique on it). It has no
-  governed path, and that is correct: MetricFlow only joins onto a unique key.
+- JOINS ARE DECLARED IN THE SCHEMA (HARD RULE). For the SEMANTIC LAYER a model declares
+  `meta.mcp.entities: { <relationship>: { type, key: [...] } }`; a key may span SEVERAL
+  columns, and the two sides may name their columns differently — only the relationship
+  name and the NUMBER of key parts have to agree. `primary`/`unique` makes the model the
+  join TARGET (exactly one owner, unique per row there); `foreign` points at the owner; a
+  metric query groups by `{ source, column, via? }` (MetricFlow's `<relationship>__<column>`
+  underneath), and a relationship nobody owns has no governed path (MetricFlow joins only
+  onto a unique key). A side may declare `variants` when one relationship is carried by
+  SEVERAL alternative key columns.
+  ONTO A PIPELINE'S ROWS a model is joined only by the JOIN CONTRACT it declares —
+  `meta.mcp.join` (src/catalog/joins.js): `unique: true` (the authors' word that the key
+  is unique on that model — trusted, never checked on data), `key: { <part>: <column> }`
+  (a part may be `{ by: <select part>, columns: { <word>: <column> } }`: the column a
+  word picks), `time: { within: [<from>, <to>] } | { same_day: <column> }`, `select:
+  { <part>: <column> | [<words>] }` (a value the model is filtered to before the join, or
+  a choice among words). A model without one is not joinable (an events source declares
+  none), and a contract naming a column the warehouse lacks is dropped at grounding. The
+  join step names EVERY part and nothing else — `{ stage: "join", source, on: { <part>:
+  <a column of the rows | a value> }, attrs }`, one closed form per joinable model — each
+  key part and the time a column of the rows AT THAT STEP; a select value is checked
+  against the value index as a where's constant is. `attrs` carries attributes only: a
+  joined model's amounts (its `measure` columns) would repeat on every row that meets it,
+  so they are measures of the semantic layer. Do NOT hardcode a pair of column names in
+  `src/` for a particular join, and do NOT add a per-role join path: a new join is a
+  schema key, not code.
 - JOINING A SLOWLY-CHANGING MODEL IS POINT-IN-TIME. A model with a validity window
   (`meta.mcp.dimension.validity: start|end`) holds several versions per key, so the
   key ALONE matches every historical version and inflates counts. The governed path
-  applies the window itself; a pipeline states it EXPLICITLY in the join stage's
-  `between` — deliberately, so the time being asked about is visible at the call
+  applies the window itself; a pipeline names the moment in the join contract's `time`
+  part — required, so the time being asked about is visible at the call
   site. MetricFlow allows such a model exactly one join key, as its natural key: a
   second `primary`/`unique` key there is rejected at catalog load, and measures on it
   are dropped with a warning (count on an events source instead) — a declaration whose every metric
@@ -435,7 +442,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   funnel's) is a column, or `{ entity }` where the rows are a source's (a build, an eventstream's start
   — `entities` in `PLACES`); a share kept is a fraction (`share`, 0–1); a time window is
   `time_range` `{ start, end, timezone }` (ONE builder, `timeRange` in src/schema-kit.js, read by
-  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a thing
+  src/time-range.js `resolveTimeRange` — the error log's too); a substring filter is `search`; a join of a model onto rows is `{ source, on }` — its join contract's parts, the one form of every join step; a thing
   of the catalog or the semantic layer is named by the one ref (`REF_PLACES`) — semantic_index's views
   and what a memory note is `about` take `{ source }`, `{ source, event }`, `{ source, column }`,
   `{ source, property }`, a metric query's group_by `{ source, column }`, `{ source, property }`,
@@ -604,8 +611,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `steps`, the pipeline's own stages that keep the rows events (where, compute, join — the one
   `$defs.stage`, the core's with the library's ops as this tool's runtime group; a start's steps take
   where / compute / join and add_steps / edit_step / insert_step the library's ops, each refused at its
-  place naming what it takes; a join of a slowly-changing
-  model states its `between`, refused without one), then the columns it names (`columns.event` / `time`,
+  place naming what it takes; a join names its model's contract, the time part included),
+  then the columns it names (`columns.event` / `time`,
   `path`, `segments` — column names of the prepared rows), rendered in SQL, materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
   (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /

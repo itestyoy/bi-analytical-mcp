@@ -69,8 +69,8 @@ export function namedColumns(catalog, spec) {
 /**
  * What a start says that can be checked before its steps are built: a source whose paths have an owner
  * (unless the path is named), the events a sample names — when the event is the source's own column, its
- * vocabulary is the catalog's — the names the eventstream keeps for its own columns, which no segment
- * may take, and a join that would repeat the events.
+ * vocabulary is the catalog's — and the names the eventstream keeps for its own columns, which no segment
+ * may take. (A join repeats no event: it is onto a contract unique on the joined side.)
  */
 export function validateStart(catalog, spec) {
   const { source } = spec;
@@ -86,16 +86,6 @@ export function validateStart(catalog, spec) {
   for (const seg of spec.segments || []) {
     if (reserved.includes(seg)) throw new ToolError(`segment '${seg}' takes a name the eventstream uses for its own column (${reserved.join(', ')}) — carry it under another: a compute stage copies it ({ stage: "compute", name: "${seg}_value", expr: { column: "${seg}" } })`, { stage: 'validate', field: 'segments' });
   }
-  // a slowly-changing model joined on its key alone matches every version of it, so each event would
-  // repeat once per version — and an eventstream is one row per event: the version valid at the event's
-  // time is stated, as a pipeline states it (a pipeline only warns: its rows may be meant as versions)
-  (spec.steps || []).forEach((st, i) => {
-    if (st?.stage !== 'join' || st.between || !catalog.models?.[st.with]) return;
-    const m = catalog.getModel(st.with);
-    if (!m?.scd) return;
-    const bound = (v) => Object.entries(m.dimensions || {}).find(([, d]) => d.validity === v)?.[0] ?? `<its ${v === 'start' ? 'valid-from' : 'valid-until'} column>`;
-    throw new ToolError(`steps[${i}] (join): '${st.with}' is a slowly-changing model, and joined on its key alone it matches every version of a key — each event would repeat once per version, and an eventstream is one row per event. Join the version valid at the event's time: between: { column: '${cols.time ?? '<the event time column>'}', from: '${bound('start')}', to: '${bound('end')}' }`, { stage: 'validate', field: `steps[${i}]` });
-  });
   return spec;
 }
 

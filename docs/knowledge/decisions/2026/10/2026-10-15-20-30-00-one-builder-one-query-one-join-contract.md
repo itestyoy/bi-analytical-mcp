@@ -81,9 +81,15 @@ join:
   time:   { within: [valid_from, valid_until] }    # or { same_day: <column> }
   select: { experiment: experiment_name }          # a value part, filtered before the join
 ```
-`users` (user + time within its validity window), `experiments` (user + time within assigned_at–ended_at +
-experiment), `acquisition` (user + time on spend_date's day), `crashlytics` (user + funnel by the
-format's tracking id + format); an events source declares none and is not joinable.
+`users` (user + time within its validity window), `experiments` (user + experiment), `acquisition` (user +
+time on spend_date's day), `crashlytics` (user + funnel by the format's tracking id + format); an events
+source declares none and is not joinable.
+
+Amended while implementing (step 2): the experiments contract has NO time part. One row per player ×
+experiment is already unique on (user, experiment), and a time window there would hide the
+pre-assignment events CUPED reads as its covariate; the assignment window stays a where step on
+assigned_at / ended_at, as the experiment recipes write it. Adding `time: { within: [assigned_at,
+ended_at] }` to the catalog later is a one-line change.
 
 ### Removed
 Input-side earlier-spelling converters (a stored draft still reads), the `<task>_<metric>` prefix, the five

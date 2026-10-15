@@ -45,11 +45,13 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   }
 });
 
-test('a join stage says how rows match in one field, via — a top-level on is refused', () => {
+test('a join stage names its contract\'s parts in one field, on — the earlier with / via are refused', () => {
   const e = engine();
   const base = { action: 'add_steps', context_id: 'abc123' };
-  const both = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', with: 'users', via: 'user', on: ['player_id'], attrs: [{ column: 'country' }] }] });
-  assert.match(both, /unexpected property 'on'/);
+  const earlier = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
+  assert.match(earlier, /unexpected property 'with'|missing required property 'source'/);
+  const list = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', source: 'users', on: ['player_id'], attrs: [{ column: 'country' }] }] });
+  assert.match(list, /`steps\.0\.on`/);
 });
 
 test('a read\'s condition is the one grammar over the stored table\'s columns, and a refusal names the form it meant', () => {

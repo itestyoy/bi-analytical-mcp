@@ -5,6 +5,7 @@
 import { isNumericType } from '../dialects/base.js';
 import { normalizeMeasure, normalizeAggregatable } from './measures.js';
 import { normalizeEntityKey } from './entities.js';
+import { normalizeJoinContract } from './joins.js';
 import { dimTypeFromDataType, pipelineColumnType } from './column-types.js';
 
 /** A model's or a column's MCP block: `config.meta.mcp`. */
@@ -12,7 +13,7 @@ export const mcpOf = (node) => node?.config?.meta?.mcp;
 
 // The keys an MCP block may carry — what this loader reads, on a model and on a column. Any other key
 // is refused at load: read past, a mistyped or retired key would leave its declaration unapplied.
-const MODEL_KEYS = ['role', 'primary_entity', 'known_events', 'measures', 'entities', 'event_semantics', 'partition_column', 'partition_late_days', 'require_time_range'];
+const MODEL_KEYS = ['role', 'primary_entity', 'known_events', 'measures', 'entities', 'join', 'event_semantics', 'partition_column', 'partition_late_days', 'require_time_range'];
 const COLUMN_KEYS = ['entity', 'is_time', 'granularity', 'is_event_name', 'is_event_data', 'properties', 'property', 'array', 'measure', 'unit', 'dimension', 'index'];
 
 function refuseUnknownKeys(mcp, allowed, where) {
@@ -288,6 +289,9 @@ export function dbtSchemaToCatalog(doc) {
       }
     }
     if (Object.keys(entities).length) m.entities = entities;
+    // THE JOIN CONTRACT (meta.mcp.join): what makes this model joinable onto other rows — its unique
+    // key's parts, the time it is matched at, the values it is narrowed to (src/catalog/joins.js)
+    if (mcp.join != null) m.join = normalizeJoinContract(mcp.join, { model: model.name, columns: new Set(allColumns.map((c) => c.name)) });
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
     // The role IS the source's identity, so two models cannot share one: the second used to

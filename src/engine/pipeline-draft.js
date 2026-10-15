@@ -595,6 +595,14 @@ export const pipelineDraftMethods = {
       });
       filterWarnings = this.advisor.guardFilterValues(specs);
     }
+    // a join's select part names a VALUE of the joined model (the experiment it keeps): checked against
+    // that column's real values, as a where's constant is
+    if (changedStage && changedStage.stage === 'join' && changedStage.source && changedStage.on) {
+      const contract = this.catalog.joinContract(changedStage.source);
+      const specs = (contract?.select || []).filter((s) => s.column && typeof changedStage.on[s.part] === 'string')
+        .map((s) => ({ at: { source: changedStage.source, property: s.column }, op: 'eq', value: changedStage.on[s.part], where: `join ${changedStage.source} on.${s.part}` }));
+      if (specs.length) filterWarnings = [...filterWarnings, ...this.advisor.guardFilterValues(specs)];
+    }
     // a step an earlier version stored is kept from now on in the spelling it was built in — the
     // render's, resolved against the columns before it (src/pipeline/earlier.js); a step the render
     // did not reach (a materialized prefix) was respelled by the build that made its checkpoint, and is
@@ -638,7 +646,7 @@ export const pipelineDraftMethods = {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include: ["steps"] or use build_pipeline_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
-        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.joinCompletenessWarnings(changedStage, draft), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after, { building })] : []),
+        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after, { building })] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;

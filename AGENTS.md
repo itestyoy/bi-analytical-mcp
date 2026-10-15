@@ -236,7 +236,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `between` — deliberately, so the time being asked about is visible at the call
   site. MetricFlow allows such a model exactly one join key, as its natural key: a
   second `primary`/`unique` key there is rejected at catalog load, and measures on it
-  are dropped with a warning (count on an events source instead).
+  are dropped with a warning (count on an events source instead) — a declaration whose every metric
+  would be dropped so is refused in the call, nothing created.
 - A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js) over
   per-group aggregates (proportion → z-test; mean →
   Welch t-test; ratio → delta method; cuped → variance reduction). A group's sums of one value are

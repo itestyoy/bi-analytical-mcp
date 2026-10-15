@@ -3156,7 +3156,7 @@
       "metric_types": [
         "power"
       ],
-      "notes": "experiment({ request: { action: 'plan' } }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ request: { action: 'analyze' } }) with an up-front MDE so a non-significant result can be read correctly.",
+      "notes": "experiment({ request: { action: 'plan' } }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev first from a query of the metric itself (recipe measure_over_metric_time, or ratio_metric for a rate), then plan. Pair every experiment({ request: { action: 'analyze' } }) with an up-front MDE so a non-significant result can be read correctly.",
       "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
       "tool_calls": [
         {

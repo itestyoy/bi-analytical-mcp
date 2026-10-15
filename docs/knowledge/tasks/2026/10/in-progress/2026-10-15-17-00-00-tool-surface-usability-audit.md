@@ -45,6 +45,22 @@ re-checked by hand). The full report (in Russian) was handed to the owner in the
   (F26, F27, F45, F52, F69).
 - Size: ≈57.7K tokens of tool definitions; ≈9.2K chars left of the 260K budget on config/catalog.yml.
 
+## Fixed (behaviour defects)
+- F2: a constant compared with a source's event-name column is checked against the catalog's events in
+  a pipeline where and a metric query's where (refused with the same casing / close names, or the
+  source that records it); the semantic model's where and funnels say the same did-you-mean
+  (`Catalog.eventNameRefusal`).
+- F3: a declaration whose every metric reads a measure on a slowly-changing model is refused in the
+  call (nothing created); the drop warning is in the caller's words with the events-source count written
+  out; `next` is never built from an empty metric list.
+- F4: a function given a parameter under another name is refused as that function, naming the parameter
+  (`DISCRIMINATORS` in src/validate.js).
+- F43: a NULL metric of a one-metric query is null, not ''.
+- F48 / F65: an unknown context_id names the way out (context list); deleting one says it named none; a
+  refused pipeline start leaves no draft.
+- Texts: F10 (`fill_nulls_with` adds no rows), F6 (python trigger examples; served only with a python
+  runtime), F59 (serverInfo.description), F69 (dead recipe references).
+
 ## Not done
 - Evals with a model (no API key); the golden-question probes (the probe server went down with a
   container restart); independent verification of F17–F74.

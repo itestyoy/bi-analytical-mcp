@@ -255,7 +255,7 @@ test('a condition is a function: an earlier spelling is refused with the value w
     { fn: 'is_null', args: [col('session_number')] },
     { fn: 'gte', args: [col('session_number'), col('session_number')] },
     { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, val(3)] },
-    { fn: 'not', args: [{ fn: 'and', args: [{ fn: 'in', args: [col('event_name'), val('a'), val('b')] }, { fn: 'between', args: [col('session_number'), val(1), val(3)] }] }] },
+    { fn: 'not', args: [{ fn: 'and', args: [{ fn: 'in', args: [col('event_name'), ...catalog.eventNames('events').slice(0, 2).map(val)] }, { fn: 'between', args: [col('session_number'), val(1), val(3)] }] }] },
   ]) assert.ok(await add(c), JSON.stringify(c));
 });
 

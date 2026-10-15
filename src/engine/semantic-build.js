@@ -4,7 +4,7 @@
 
 import { ToolError } from '../validate.js';
 import { compileDeclaration, measureRefs, inputMetrics, NS } from '../compile.js';
-import { renderContext } from '../yaml-render.js';
+import { renderContext, slowlyChangingNoMeasures } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { clone } from './helpers.js';
@@ -21,6 +21,18 @@ const heldBy = (state) => ({
   measures: Object.values(state.additions || {}).flatMap((a) => a.measures.map((m) => m.name)),
   metrics: state.metrics || [],
 });
+
+/**
+ * A declaration whose every metric would be left out of the layer (each reads a measure declared on a
+ * slowly-changing model, which takes none) is refused in the call, with the way out — a build that
+ * answered "done" with no metric to query left the caller nothing. When some of its metrics remain,
+ * the others are left out with a warning (renderContext).
+ */
+function refuseIfNoMetricLeft(catalog, compiled, render) {
+  const asked = (compiled.metrics || []).map((m) => m.name);
+  if (!asked.length || asked.some((n) => render.metricNames.includes(n))) return;
+  throw new ToolError(`no metric of this declaration can be queried — ${asked.map((n) => `'${n}'`).join(', ')} ${asked.length > 1 ? 'read measures' : 'reads a measure'} declared on ${render.droppedFrom.map((m) => `'${m}'`).join(', ')}. ${slowlyChangingNoMeasures(catalog, render.droppedFrom)}`, { stage: 'validate', field: 'semantic_models' });
+}
 
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
@@ -103,15 +115,16 @@ export const semanticBuildMethods = {
     // a measure or metric it would declare a second time is refused here, not written twice
     const into = input.context_id && this.ctxs.has(input.context_id) ? this._ctx(input.context_id).state : null;
     const compiled = this._compile(input, into ? heldBy(into) : undefined);
+    // the layer this declaration would make, rendered on a copy: nothing is written for a dry run or a
+    // declaration that is refused
+    const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
+    if (into) mergeCompiled(draft, { additions: clone(into.additions), metrics: clone(into.metrics), usedModels: [...into.usedModels], task: null });
+    mergeCompiled(draft, compiled);
+    const preview = renderContext(this.catalog, draft, { spec: this._semanticSpec() });
+    refuseIfNoMetricLeft(this.catalog, compiled, preview);
 
     if (input.dry_run) {
-      const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
-      if (input.context_id && this.ctxs.has(input.context_id)) {
-        const cur = this._ctx(input.context_id).state;
-        mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
-      }
-      mergeCompiled(draft, compiled);
-      const render = renderContext(this.catalog, draft, { spec: this._semanticSpec() });
+      const render = preview;
       const out = { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
     }
@@ -152,7 +165,9 @@ export const semanticBuildMethods = {
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
-      next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`,
+      next: render.metricNames.length
+        ? `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
+        : `This context has no metric to query yet: declare one with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }).`,
       recommendations: [
         `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
         `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
@@ -233,6 +248,7 @@ export const semanticBuildMethods = {
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
+    refuseIfNoMetricLeft(this.catalog, compiled, render);
     if (input.dry_run) {
       const out = { context_id: ctx.id, semantic_models: models, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });

@@ -348,8 +348,15 @@ export class DbtV1 {
       // a CSV carries no types: a metric's column is a number, as the warehouse computed it (a
       // dimension's values stay as written — "1.0.0" or "007" is not a number)
       const metricCols = new Set(opts.metrics || []);
+      // A metric is a number or missing, never text: an empty field is a NULL however it was written —
+      // Python's csv writer quotes a row's only field when it is empty ("" — so the row is not a blank
+      // line), which a query of one metric and no group_by returns for a NULL
       for (const row of rows) {
-        for (const c of metricCols) if (typeof row[c] === 'string' && row[c].trim() !== '' && Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+        for (const c of metricCols) {
+          if (typeof row[c] !== 'string') continue;
+          if (row[c].trim() === '') row[c] = null;
+          else if (Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+        }
       }
       return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
     } finally {

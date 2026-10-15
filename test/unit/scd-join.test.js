@@ -93,7 +93,7 @@ test('renderContext drops a task measure + its metric on an SCD model, with a wa
     const users = /name: users[\s\S]*?(?=\nsemantic_models:|\nmetrics:|$)/;
     assert.ok(!/users_count/.test(r.yaml), 'the SCD measure and its metric are gone from the YAML');
     assert.equal(r.metricNames.includes('users_count'), false, 'dependent metric dropped');
-    assert.ok(r.warnings.some((w) => /join-only/i.test(w) && /users_count/.test(w)), 'warns about the drop');
+    assert.ok(r.warnings.some((w) => /slowly-changing/i.test(w) && /users_count/.test(w)), 'warns about the drop');
     void users;
   }
 });

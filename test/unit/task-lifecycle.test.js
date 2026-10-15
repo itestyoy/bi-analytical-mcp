@@ -390,8 +390,10 @@ test('a draft starts with its first steps, and adding steps may start its build 
   // the earlier flag is refused with the request it is now
   await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'lvl3', source: 'events', steps: [WHERE_EVENT], include_steps: true }),
     (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'start', name: 'lvl3', source: 'events', steps: [WHERE_EVENT], include: ['steps'] })}`));
-  // a step that cannot compile leaves the draft started, with none of the batch
-  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /started, with no steps/.test(err.message) && err.field === 'steps[0]');
+  // a step that cannot compile starts nothing: no context is left for the refused call
+  const contexts = e.ctxs.list().length;
+  await assert.rejects(() => e.build_pipeline_model({ action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /nothing was started/.test(err.message) && err.field === 'steps[0]');
+  assert.equal(e.ctxs.list().length, contexts);
   const added = await e.build_pipeline_model({ action: 'add_steps', context_id: started.context_id, steps: [{ stage: 'limit', limit: 3 }], materialize: true });
   assert.ok(isStartedTask(added.materialize), JSON.stringify(added));
   assert.deepEqual(asksToMaterialize(added), [], 'nothing asks for the build this call started');

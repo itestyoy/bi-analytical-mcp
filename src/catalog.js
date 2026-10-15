@@ -11,6 +11,7 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { isNumericType } from './dialects/base.js';
+import { rankFuzzy } from './fuzzy.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { MEASURE_AGGS, NUMERIC_AGGS, TASK_MEASURE_AGGS } from './catalog/measures.js';
 import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
@@ -379,10 +380,27 @@ export class Catalog {
    * silently matches nothing. `hint` appends the caller's fix.
    */
   eventNameFor(fact, name, { hint } = {}) {
-    if (this.eventNames(fact).includes(name)) return name;
+    const refusal = this.eventNameRefusal(fact, name, { hint });
+    if (refusal) throw new Error(refusal);
+    return name;
+  }
+
+  /**
+   * Why `name` is not an event of `fact`, or null when it is: another source's event (named), or an
+   * unknown one with the names it may have meant — the same casing first, then the close ones. The
+   * catalog's events are the whole vocabulary of a source, so this is exact, not a guess from an index.
+   */
+  eventNameRefusal(fact, name, { hint } = {}) {
+    const own = this.eventNames(fact);
+    if (own.includes(name)) return null;
     const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
-    if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
-    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { source: '${fact}' } })`);
+    if (other) return `event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`;
+    const text = String(name);
+    const cased = own.filter((e) => e.toLowerCase() === text.toLowerCase());
+    // (a word of one or two letters is close to anything: it gets no guess)
+    const near = cased.length ? cased : text.length < 3 ? [] : rankFuzzy(text, own, { fields: (e) => [e], threshold: 0.7, limit: 3 }).map((r) => r.item);
+    const mean = near.length ? ` Did you mean ${near.map((e) => `'${e}'`).join(' or ')}?` : '';
+    return `unknown event '${text}' on '${fact}'.${mean} See semantic_index({ request: { source: '${fact}' } })`;
   }
 
   /**

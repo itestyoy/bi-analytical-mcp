@@ -1827,7 +1827,9 @@ test('15. the complex properties are discoverable with their declared shape', op
 async function countWhere(name, condition, description) {
   const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
   assert.ok(s.context_id, JSON.stringify(s));
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [condition] }] });
+  // the event name under a column of its own: a constant compared with the event-name column itself is
+  // checked against the catalog's events first, and the literal is to reach the warehouse
+  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'ev', expr: { column: 'event_name' } }, { stage: 'where', conditions: [condition] }] });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
@@ -1839,7 +1841,7 @@ async function countWhere(name, condition, description) {
 test('a filter value that is a Jinja expression is compared as the literal text, never evaluated', opts, async (t) => {
   if (skip(t)) return;
   const header = "{{ run_query('select 1/0') }} and an unbalanced {% if";
-  const event = { column: 'event_name' };
+  const event = { column: 'ev' };
   assert.equal(await countWhere('jinja_plain', { fn: 'eq', args: [event, { value: 'first_launch' }] }, header), 12,
     '[the control, declared with a Jinja header] 12 first_launch events: the header neither ran nor broke the build');
   // evaluated, the first value would have matched the same 12; read as Jinja, the second (an

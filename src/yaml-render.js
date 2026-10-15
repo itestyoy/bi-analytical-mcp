@@ -187,6 +187,22 @@ function manifestOnly(decl) {
  * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
  * @returns { yaml, semanticModels: string[], metricNames: string[] }
  */
+/**
+ * Why a slowly-changing model takes no measure, in the caller's words, with the way out written as a
+ * value: the same count on an events source that carries the model's key (named from the catalog).
+ */
+export function slowlyChangingNoMeasures(catalog, models) {
+  const [model] = models;
+  const entity = model ? primaryEntityName(catalog.getModel(model)) : null;
+  const keyOn = (f) => (typeof catalog.entityKey === 'function' ? catalog.entityKey(f, entity) : undefined);
+  const fact = entity ? (catalog.facts || []).find((f) => keyOn(f)?.length === 1) : null;
+  const key = fact ? keyOn(fact)[0].column : null;
+  const instead = key
+    ? `count on an events source instead — e.g. a semantic_models item { source: '${fact}', measures: [{ name: '${entity}s', expr: { fn: 'count_distinct', args: [{ column: '${key}' }] } }] } — and group it by ${model}'s columns`
+    : 'count on an events source instead, and group it by its columns';
+  return `${models.map((m) => `'${m}'`).join(', ')} ${models.length > 1 ? 'are' : 'is'} slowly-changing (several versions per key, each with a validity window), so ${models.length > 1 ? 'they take' : 'it takes'} no measures; ${instead}.`;
+}
+
 export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);
   // always include any model that received additions
@@ -194,6 +210,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
 
   const semanticModels = [];
   const droppedMeasures = new Set(); // measures removed because their model is SCD (join-only)
+  const droppedFrom = new Set(); // the slowly-changing models they were declared on
   for (const key of modelsToRender) {
     const sm = renderBaseModel(catalog, key);
     const scd = !!catalog.getModel(key).scd;
@@ -208,7 +225,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
-        if (scd) { droppedMeasures.add(me.name); continue; }
+        if (scd) { droppedMeasures.add(me.name); droppedFrom.add(key); continue; }
         const mm = onWarehouse(catalog, { ...me });
         if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
@@ -237,7 +254,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     : yaml.dump(inertProse(doc), { lineWidth: 120, noRefs: true, quotingType: '"' });
   const warnings = [];
   if (droppedMeasures.size) {
-    warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Source of such a measure is the catalog's meta.mcp.measures on this model OR a prior task on a reused context_id (it stays in ctx.state.additions) — not auto-generated. Define user counts on the events fact (count_distinct of the user key) instead.`);
+    warnings.push(`measure(s) ${[...droppedMeasures].map((m) => `'${m}'`).join(', ')} were left out${droppedMetrics.length ? `, and with them metric(s) ${droppedMetrics.map((m) => `'${m}'`).join(', ')}, which cannot be queried` : ''}: ${slowlyChangingNoMeasures(catalog, [...droppedFrom])}`);
   }
   return {
     yaml: latest ? body : unquoteRefs(body),
@@ -245,6 +262,8 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     semanticModels: semanticModels.map((s) => s.name),
     metricNames: metrics.map((m) => m.name),
     warnings,
+    // the slowly-changing models a measure was declared on and left out from
+    droppedFrom: [...droppedFrom],
   };
 }
 

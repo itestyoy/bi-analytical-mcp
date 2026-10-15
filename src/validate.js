@@ -83,6 +83,9 @@ export const CROSS_PATH_SPELLING = {
  */
 const HINT_WHERE_VALUE_TAKEN = new Set(['model', 'property']);
 
+/** The fields whose value says which form of a union is meant: a function, a stage, a tool's action. */
+const DISCRIMINATORS = new Set(['fn', 'stage', 'action']);
+
 /**
  * What this path calls `used`, when it has a name for it at all. `takes(alt)` says whether the field
  * `alt` here takes the value written under `used`; it is asked only for HINT_WHERE_VALUE_TAKEN.
@@ -502,8 +505,15 @@ function explainNode(root, n, value, memo) {
   // a users property is that form's stray field, not a reason to say "`source` must be events" of a
   // form that knows every field given. A pin of several values is a vocabulary, not a tag: a name it
   // does not hold is a misspelling inside the form meant, and costs what a bad value costs (below).
-  const identifying = new Set(isPlainObject(value) ? Object.keys(value).filter((k) => candidates.some((j) => requires(root, branches[j], k))) : []);
-  const mismatched = (i) => (isPlainObject(value) ? Object.keys(value).filter((k) => { const p = pins[i].get(k); return p && new Set(p).size === 1 && !p.includes(value[k]); }).length : 0);
+  // A discriminator (DISCRIMINATORS: the function, the stage, the action) names the form even where its
+  // pin holds several values: a value some form takes there means that form, so a form that does not
+  // take it is another form — a `cast` with a misnamed parameter is the cast form missing `type`, not a
+  // floor form whose `fn` is wrong; and a field only such another form requires names no mode (a
+  // date_trunc given a `unit` meant date_trunc, not date_diff, whose `unit` it is).
+  const takenBySome = (k) => DISCRIMINATORS.has(k) && candidates.some((j) => pins[j].get(k)?.includes(value[k]));
+  const meansForm = (j) => Object.keys(value).every((k) => !takenBySome(k) || !pins[j].has(k) || pins[j].get(k).includes(value[k]));
+  const identifying = new Set(isPlainObject(value) ? Object.keys(value).filter((k) => candidates.some((j) => meansForm(j) && requires(root, branches[j], k))) : []);
+  const mismatched = (i) => (isPlainObject(value) ? Object.keys(value).filter((k) => { const p = pins[i].get(k); return p && !p.includes(value[k]) && (new Set(p).size === 1 || takenBySome(k)); }).length : 0);
   // These, the value's own fields, decide before whatever lies deeper inside the fields a form knows — a
   // list of views with one bad item is still the { views } form, not the empty one that knows no
   // `views` (errors under a field would otherwise outweigh the field).

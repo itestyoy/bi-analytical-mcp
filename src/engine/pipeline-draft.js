@@ -365,6 +365,12 @@ export const pipelineDraftMethods = {
     try {
       added = await this._draftAddSteps(ctx, ctx.state.draft, input.steps, inc.columns, inc.steps, { building: !!input.materialize });
     } catch (e) {
+      // a context this call made for the draft goes with the refused steps: a corrected retry starts
+      // afresh, and no empty draft is left behind for every attempt
+      if (!input.context_id) {
+        try { this.ctxs.drop(ctx.id); } catch { /* held by an operation: left to the gc */ }
+        throw new ToolError(`${e.message} — nothing was started: correct the step and start again`, { stage: e.stage || 'compile', field: e.field || 'steps', code: e.code });
+      }
       throw new ToolError(`${e.message} — the draft ${ctx.id} is started, with no steps: add them with add_steps (context_id: "${ctx.id}")`, { stage: e.stage || 'compile', field: e.field || 'steps', code: e.code });
     }
     const { context_id: _id, action: _a, ...rest } = added;

@@ -100,7 +100,7 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
     ],
   });
   assert.equal(created.parse.ok, true, `parse must still succeed after dropping the SCD measure: ${JSON.stringify(created.parse)}`);
-  assert.ok((created.warnings || []).some((w) => /join-only/i.test(w) && /player_count/.test(w)), `expected a drop warning naming player_count, got ${JSON.stringify(created.warnings)}`);
+  assert.ok((created.warnings || []).some((w) => /slowly-changing/i.test(w) && /player_count/.test(w)), `expected a drop warning naming player_count, got ${JSON.stringify(created.warnings)}`);
   assert.ok(!created.metrics.includes('scd_drop_players'), 'the metric depending on the dropped measure is gone');
   assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a derived metric over it goes with it');
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');

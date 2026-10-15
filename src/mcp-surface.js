@@ -81,7 +81,7 @@ WHERE THE DETAIL IS
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (one or more events facts + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
+const SERVER_SUMMARY = 'Semantic layer for product analytics over a fixed data catalog (events sources, a user-attributes dimension, experiment assignments, spend): declare reusable metrics, or build one-off tables — funnels, sessions, pivots — and query them by name; the server writes and runs the SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
 
 // WHAT A TOOL IS — its title, description, annotations, the task side it starts
 // and reads, whether it draws — is its definition (src/tools/define.js): the core's in

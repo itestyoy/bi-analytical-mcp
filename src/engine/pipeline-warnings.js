@@ -150,6 +150,10 @@ export class PipelineAdvisor {
   checkFilterValue(at, value) {
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return null; // only string literals are case/value-checked
     if (!at) return null;
+    if (at.events) {
+      const refusal = this.catalog.eventNameRefusal(at.source, String(value));
+      return refusal ? { kind: 'event', value: String(value), message: refusal } : null;
+    }
     const st = this.valueIndex.stats(at.source, at.property);
     if (!st) return null; // not indexed → cannot verify (do not block)
     const stored = this.valueIndex.sampleValues(at.source, at.property, 1000); // all stored values (≤ indexer cap)
@@ -176,6 +180,9 @@ export class PipelineAdvisor {
   valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
+    // an events source's event-name column is checked against the catalog's events — the whole
+    // vocabulary of the source, so a wrong name is refused for certain, never matched to nothing
+    if (c.isFact(sourceKey) && column === c.eventNameColumn(sourceKey)) return { source: sourceKey, property: column, events: true };
     return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
   }
 
@@ -198,7 +205,8 @@ export class PipelineAdvisor {
         // exists with different casing) and a value absent from a FULLY-indexed small set.
         // A fuzzy near-match or any incompletely-indexed (top-N) column → WARN, never block —
         // a real value may simply not be in the index, so we must not reject it.
-        if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
+        if (r.kind === 'event') errors.push(`${where}: ${r.message}`);
+        else if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
         else if (r.kind === 'absent') errors.push(`${where}: value '${r.value}' does not occur in this column (its full value set is indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
         else if (r.kind === 'typo') warnings.push(`${where}: value '${r.value}' was not found among indexed values; a similar value exists.${fix} Verify the exact value before relying on this filter.`);
         // a value past the indexed top-N is most often real: said only if the query comes back

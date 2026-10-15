@@ -141,7 +141,7 @@ export function metricSchema(catalog) {
     name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as <task>_<name>.' },
     label: { type: 'string', description: D.label },
     measure: ref('The measure it reads, by name: one declared in this call or already in the context (as declared, or as stored: <task>_<name>), or a governed measure of the catalog.'),
-    fill_nulls_with: { type: 'number', description: 'Value to substitute for NULL results (e.g. 0) so gaps in a time series render as zeros.' },
+    fill_nulls_with: { type: 'number', description: 'Value (e.g. 0) for this metric where a result row has none — beside another metric of the query, or as an input of a derived metric. It adds no rows: a time bucket with no rows at all is absent from the result.' },
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
     window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },

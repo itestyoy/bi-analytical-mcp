@@ -20,7 +20,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { renderPipeline } from '../../src/pipeline.js';
-import { FNS, PLACES, exprSchema, exprSql, conditionListSql, propertyTypes } from '../../src/pipeline/compute.js';
+import { FNS, PLACES, EXPR_KINDS, AGGREGATE_FNS, exprSchema, exprSql, conditionListSql, propertyTypes } from '../../src/pipeline/compute.js';
 import { getDialect } from '../../src/dialects/index.js';
 import {
   currentCondition, currentConditions, currentExpression, currentMeasure, currentDimension, currentUnnest,
@@ -62,7 +62,7 @@ function exprDef(doc, node = doc.$defs?.expr) {
 /** The fields of the form a function is offered in (the first: an aggregate's that folds rows). */
 const formOf = (doc, fn, node = doc.$defs?.expr) => forms(doc, node).find((f) => pinned(doc, f, 'fn').includes(fn));
 
-test('every tool that takes an expression carries the one definition, $defs.expr, built for its places, its arguments referring back to it', () => {
+test('every tool that takes an expression carries the row expression, $defs.expr, built for its places, its arguments referring back to it', () => {
   // the definition with no place named (an internal caller's): every leaf of the rows, every ref that
   // names a value, every function
   const one = exprDef({}, exprSchema(catalog));
@@ -71,19 +71,27 @@ test('every tool that takes an expression carries the one definition, $defs.expr
   assert.ok(!one.leaves.some((t) => /^\{ source \}$|event \}$/.test(t)), 'a ref that names no value (a source, an event) is no leaf');
   assert.deepEqual([...one.fns].sort(), Object.keys(FNS).sort(), 'every function, windows and raw included');
   // a tool's is the one builder's for ITS places (TOOL_PLACES): what they take together and nothing else,
-  // under the one name, never a level of its own beside it
+  // under the one name, never a level of its own beside it — less the aggregates where its measures are a
+  // kind of their own (build_semantic_model's $defs.aggregate)
   for (const tool of ['build_pipeline_model', 'query_pipeline_model', 'build_semantic_model', 'query_semantic_model', 'build_pipeline_model.pipeline']) {
     const doc = schemas[tool];
-    const places = TOOL_PLACES[tool.split('.')[0]].expr;
+    const kinds = TOOL_PLACES[tool.split('.')[0]];
+    const places = kinds.expr;
     const l = exprDef(doc);
     assert.deepEqual(l.leaves, exprDef({}, exprSchema(catalog, { places })).leaves, `${tool}: the leaves its places take`);
-    assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn))).sort(), `${tool}: the functions its places take`);
-    assert.equal(forms(doc, doc.$defs.expr).some((f) => f.properties?.over), places.some((p) => PLACES[p].windows), `${tool}: a window's form only where a place takes one`);
+    assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn)) && !(kinds.aggregate && AGGREGATE_FNS.includes(fn))).sort(), `${tool}: the functions its places take`);
+    const windows = places.some((p) => PLACES[p].windows);
+    assert.equal(forms(doc, doc.$defs.expr).some((f) => f.properties?.over), windows, `${tool}: a window's form only where a place takes one`);
+    // …a window function's `over` $defs.over, an aggregate over a window's $defs.over_frame, there and only there
+    for (const def of ['over', 'over_frame']) assert.equal(def in doc.$defs, windows, `${tool}: $defs.${def} ${windows ? 'missing' : 'with no window form'}`);
+    for (const f of forms(doc, doc.$defs.expr).filter((x) => x.properties?.over)) assert.equal(f.properties.over.$ref, f.title.includes('(over a window)') ? '#/$defs/over_frame' : '#/$defs/over', `${tool}: ${f.title} refers to its window`);
     assert.equal(l.argsRef, '#/$defs/expr', `${tool}: its arguments are the one expression`);
     // a conditional aggregate folds a case: no aggregate takes a where of its own, beside the forms or in one
     assert.equal(l.fields.has('where'), false, `${tool}: no aggregate's where`);
     assert.ok(!l.fns.has('event_property'), `${tool}: an event property is a leaf`);
-    for (const gone of ['read_expr', 'metric_expr', 'eventstream_expr']) assert.equal(doc.$defs[gone], undefined, `${tool}: no ${gone}`);
+    for (const gone of ['read_expr', 'eventstream_expr']) assert.equal(doc.$defs[gone], undefined, `${tool}: no ${gone}`);
+    // a closed kind of the expression is there only where a place of that kind is
+    for (const kind of ['aggregate', 'metric_expr']) assert.equal(kind in doc.$defs, !!kinds[kind], `${tool}: $defs.${kind}`);
   }
   const of = (tool) => exprDef(schemas[tool]);
   // a pipeline build: the rows' leaves, every function — no ref (a metric, another model's column)
@@ -92,9 +100,24 @@ test('every tool that takes an expression carries the one definition, $defs.expr
   // a read of stored rows: no event property and no raw — a build's
   assert.deepEqual(of('query_pipeline_model').leaves, ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
   assert.ok(!of('query_pipeline_model').fns.has('raw'));
-  // a semantic declaration: its rows' leaves and { metric } (a derived metric's), no raw, no window, no sketch
-  assert.deepEqual(of('build_semantic_model').leaves, [...one.leaves.slice(0, 4), '{ metric }']);
-  for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) assert.ok(!of('build_semantic_model').fns.has(fn), `a semantic declaration takes no ${fn}`);
+  // a semantic declaration: its rows' leaves and no aggregate — a measure is a kind of its own, ONE
+  // aggregate of the task's whose arguments are the rows' expression; a derived metric's value is another,
+  // { metric } and { value } in arithmetic, its arguments of its own kind. No raw, no window, no sketch
+  const sem = schemas.build_semantic_model;
+  assert.deepEqual(of('build_semantic_model').leaves, one.leaves.slice(0, 4));
+  for (const fn of AGGREGATE_FNS) assert.ok(!of('build_semantic_model').fns.has(fn), `a semantic row expression takes no ${fn}`);
+  const measure = exprDef(sem, sem.$defs.aggregate);
+  assert.deepEqual(measure.leaves, [], 'a measure is a function: no leaf');
+  assert.deepEqual([...measure.fns].sort(), AGGREGATE_FNS.filter((fn) => PLACES.semantic_model.fns.includes(fn)).sort(), 'the aggregates a semantic model takes');
+  assert.equal(measure.argsRef, EXPR_KINDS.aggregate.args, 'its arguments are the rows\' expression');
+  assert.ok(!forms(sem, sem.$defs.aggregate).some((f) => f.properties?.over), 'it folds rows: no window form');
+  const derived = exprDef(sem, sem.$defs.metric_expr);
+  assert.deepEqual(derived.leaves, ['a constant — { value }', '{ metric }']);
+  assert.deepEqual([...derived.fns].sort(), [...PLACES.derived_metric.fns].sort());
+  assert.equal(derived.argsRef, '#/$defs/metric_expr', 'its arguments are of its own kind');
+  for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) {
+    for (const kind of ['expr', 'aggregate', 'metric_expr']) assert.ok(!exprDef(sem, sem.$defs[kind]).fns.has(fn), `a semantic declaration's ${kind} takes no ${fn}`);
+  }
   // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — no metric, no event property, no raw
   const sq = of('query_semantic_model').leaves;
   for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_semantic_model: ${leaf}`);
@@ -113,7 +136,8 @@ test('a read names no type — cast converts; only cast, case and raw say a type
     const leaf = forms(doc, doc.$defs.expr).find((f) => f.title === 'an event property — { property }');
     assert.deepEqual(Object.keys(leaf.properties).sort(), ['field', 'property'], `${tool}: { property, field? }`);
     for (const fn of ['cast', 'case']) assert.ok(formOf(doc, fn).properties.type, `${tool}: ${fn} says its type`);
-    for (const fn of ['sum', 'count', 'percentile']) assert.equal(formOf(doc, fn).properties.where, undefined, `${tool}: ${fn} takes no where`);
+    // (a semantic measure is a kind of its own: its aggregates are there)
+    for (const fn of ['sum', 'count', 'percentile']) assert.equal(formOf(doc, fn, doc.$defs.aggregate || doc.$defs.expr).properties.where, undefined, `${tool}: ${fn} takes no where`);
   }
   const build = schemas.build_pipeline_model;
   assert.ok(formOf(build, 'raw').properties.type, 'raw says what its SQL yields');
@@ -233,6 +257,39 @@ test('an aggregate folds rows only where a measure is written; a window stands o
     measure({ fn: 'sum', args: [caseOf([{ fn: 'gt', args: [col('nth'), val(1)] }], col('nth'))] }),
   ]);
   assert.equal(ok.columns.get('m').type, 'numeric');
+});
+
+// THE WINDOW IS NAMED ONCE PER WHAT READS IT, in every tool whose expression takes one, both built by
+// overSchema: a window function's `over` is $defs.over (its partition and order — a rank or a neighbour reads
+// its partition whole), an aggregate over a window's is $defs.over_frame (the same and the frame each value
+// folds). So a frame on a rank or a neighbour is refused by the schema, and — for a caller past it — where
+// the value is built, saying to leave it out.
+test('a window function\'s window is $defs.over, an aggregate over a window\'s $defs.over_frame: a frame on a rank or a neighbour is refused', () => {
+  for (const tool of ['build_pipeline_model', 'query_pipeline_model', 'query_semantic_model']) {
+    const doc = schemas[tool];
+    const windowed = forms(doc, doc.$defs.expr).filter((f) => f.properties?.over);
+    assert.ok(windowed.length >= 4, `${tool}: its window forms`);
+    for (const f of windowed) assert.equal(deref(doc, f.properties.over), f.title.includes('(over a window)') ? doc.$defs.over_frame : doc.$defs.over, `${tool}: ${f.title}`);
+    assert.deepEqual(Object.keys(doc.$defs.over.properties), ['partition_by', 'order_by']);
+    assert.deepEqual(Object.keys(doc.$defs.over_frame.properties), ['partition_by', 'order_by', 'frame']);
+  }
+  for (const def of ['over', 'over_frame']) assert.equal(schemas.build_semantic_model.$defs[def], undefined, 'a semantic model takes no window');
+  const FRAMED = { ...OVER, frame: { mode: 'rows', preceding: 6 } };
+  const step = (expr) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr }] });
+  for (const expr of [{ fn: 'sum', args: [col('session_number')], over: FRAMED }, { fn: 'count', over: FRAMED }, { fn: 'row_number', over: OVER }]) {
+    assert.equal(step(expr).ok, true, `${JSON.stringify(expr)}: ${step(expr).errors?.join(' | ')}`);
+  }
+  assert.match(step({ fn: 'sum', args: [col('session_number')], over: { ...OVER, rows: 6 } }).errors.join(' | '), /`steps\.0\.expr\.over` has an unexpected property 'rows'/);
+  // a frame on a rank or a neighbour is refused by the schema…
+  for (const expr of [{ fn: 'row_number', over: FRAMED }, { fn: 'lag', args: [col('session_number')], over: FRAMED }]) {
+    assert.match(step(expr).errors.join(' | '), /`steps\.0\.expr\.over` has an unexpected property 'frame'/, expr.fn);
+  }
+  // …and, past it, where the value is built: an aggregate over a frame builds; a frame on a rank or a
+  // neighbour is refused, naming the rule
+  assert.equal(render([{ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [col('session_number')], over: FRAMED } }]).columns.get('x').type, 'numeric');
+  for (const expr of [{ fn: 'row_number', over: FRAMED }, { fn: 'lag', args: [col('session_number')], over: FRAMED }]) {
+    assert.throws(() => render([{ stage: 'compute', name: 'x', expr }]), new RegExp(`${expr.fn} takes no \`over\\.frame\` — a frame bounds what an aggregate over a window \\(sum / average / min / max / count\\) folds for each row.*Leave the frame out`), expr.fn);
+  }
 });
 
 // A CONDITIONAL AGGREGATE FOLDS A CASE: a value on the rows where the condition holds, missing on the

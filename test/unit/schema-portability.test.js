@@ -19,7 +19,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas, TOOL_PLACES } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { eachSchema, transportSchema } from '../../src/schema/transport.js';
-import { PLACES } from '../../src/pipeline/compute.js';
+import { PLACES, AGGREGATE_FNS } from '../../src/pipeline/compute.js';
 import { STAGE_PLACES, stageDef } from '../../src/pipeline.js';
 import { REF_PLACES, refKind } from '../../src/schema/refs.js';
 import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema, startPlace } from '../../src/retentioneering/schema.js';
@@ -269,27 +269,30 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   }
 });
 
-// ONE DEFINITION PER CONCEPT, IN EVERY TOOL: an expression is `$defs.expr`, a step `$defs.stage`, a name
-// of a thing of the catalog or the semantic layer `$defs.ref` — the same name in each tool that takes one,
-// built for that tool's places, never a definition per place beside it (where two places of one tool
+// ONE DEFINITION PER CONCEPT, IN EVERY TOOL: an expression is `$defs.expr` (and, where a place takes a
+// closed part of it, a kind of its own: a semantic measure's `$defs.aggregate`, a derived metric's
+// `$defs.metric_expr` — src/pipeline/compute.js EXPR_KINDS), a window `$defs.over` (a window function's;
+// `$defs.over_frame` an aggregate over a window's, with its frame), a step `$defs.stage`, a
+// name of a thing of the catalog or the semantic layer `$defs.ref` — the same name in each tool that takes
+// one, built for that tool's places, never a definition per place beside it (where two places of one kind
 // take different parts, each narrows the one definition as the value is built).
-test('each tool schema holds one expr, one stage and one ref where it takes them, and no definition per place', () => {
+test('each tool schema holds one expr of each kind, its window, one stage and one ref where it takes them, and no definition per place', () => {
   const all = allSchemas(CATALOG);
   const takes = {
-    build_pipeline_model: ['expr', 'stage'],
-    'build_pipeline_model.pipeline': ['expr', 'stage'],
-    query_pipeline_model: ['expr', 'stage'],
-    build_semantic_model: ['expr'],
-    query_semantic_model: ['expr', 'stage', 'ref'],
+    build_pipeline_model: ['expr', 'over', 'over_frame', 'stage'],
+    'build_pipeline_model.pipeline': ['expr', 'over', 'over_frame', 'stage'],
+    query_pipeline_model: ['expr', 'over', 'over_frame', 'stage'],
+    build_semantic_model: ['expr', 'aggregate', 'metric_expr'],
+    query_semantic_model: ['expr', 'over', 'over_frame', 'stage', 'ref'],
     semantic_index: ['ref'],
     memory: ['ref'],
-    build_retentioneering_model: ['expr', 'stage'],
+    build_retentioneering_model: ['expr', 'over', 'over_frame', 'stage'],
   };
-  const PER_PLACE = ['pipeline_stage', 'read_stage', 'eventstream_stage', 'read_expr', 'metric_expr', 'eventstream_expr'];
+  const PER_PLACE = ['pipeline_stage', 'read_stage', 'eventstream_stage', 'read_expr', 'eventstream_expr'];
   for (const [name, schema] of Object.entries(all)) {
     const defs = schema.$defs || {};
     for (const gone of PER_PLACE) assert.equal(defs[gone], undefined, `${name}: $defs.${gone} — a definition per place`);
-    for (const concept of ['expr', 'stage', 'ref']) {
+    for (const concept of ['expr', 'aggregate', 'metric_expr', 'over', 'over_frame', 'stage', 'ref']) {
       assert.equal(concept in defs, (takes[name] || []).includes(concept), `${name}: $defs.${concept} ${(takes[name] || []).includes(concept) ? 'missing' : 'unexpected'}`);
     }
   }
@@ -339,20 +342,31 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
       const expr = placesIn(PLACES, places.expr);
       const stage = placesIn(STAGE_PLACES, places.stage);
       const ref = placesIn(REF_PLACES, places.ref);
-      // a definition is there where the tool has a place for it, and only there
-      for (const [concept, ps] of [['expr', expr], ['stage', stage], ['ref', ref]]) {
+      // the closed kinds of the expression: a semantic measure (ONE aggregate), a derived metric's value
+      const kinds = { aggregate: placesIn(PLACES, places.aggregate), metric_expr: placesIn(PLACES, places.metric_expr) };
+      // a definition is there where the tool has a place for it, and only there — the window where a
+      // place of its row expression takes one
+      for (const [concept, ps] of [['expr', expr], ['stage', stage], ['ref', ref], ...Object.entries(kinds), ['over', expr.filter((p) => p.windows)], ['over_frame', expr.filter((p) => p.windows)]]) {
         assert.equal(concept in defs, ps.length > 0, `${name}: $defs.${concept} ${ps.length ? 'missing' : 'with no place of the tool to take it'}`);
       }
-      for (const f of defs.expr ? forms(doc, defs.expr) : []) {
-        const fns = pinned(doc, f, 'fn');
-        if (!fns.length) assert.ok(expr.some((p) => p.leaves.includes(kindOf(f))), `${name}: the leaf ${f.title} — no place of the tool takes it`);
-        for (const fn of fns) assert.ok(expr.some((p) => p.fns.includes(fn)), `${name}: ${fn} (${f.title}) — no place of the tool takes it`);
-        if (f.properties?.over) {
-          assert.ok(expr.some((p) => p.windows), `${name}: a window (${f.title}) — no place of the tool takes one`);
-          // a window restarts per a declared relationship { entity } only over a source's rows
-          const partition = deref(doc, deref(doc, f.properties.over).properties?.partition_by);
-          const byEntity = forms(doc, partition?.items).some((item) => item?.properties?.entity);
-          if (byEntity) assert.ok(expr.some((p) => p.entities), `${name}: a window partitioned by { entity } (${f.title}) — no place of the tool reads a source's rows`);
+      for (const [kind, ps] of [['expr', expr], ...Object.entries(kinds)]) {
+        for (const f of defs[kind] ? forms(doc, defs[kind]) : []) {
+          const fns = pinned(doc, f, 'fn');
+          if (!fns.length) assert.ok(kind !== 'aggregate' && ps.some((p) => p.leaves.includes(kindOf(f))), `${name}: the leaf ${f.title} in $defs.${kind} — no place of that kind takes it`);
+          for (const fn of fns) assert.ok(ps.some((p) => p.fns.includes(fn)), `${name}: ${fn} (${f.title}) in $defs.${kind} — no place of that kind takes it`);
+          // a measure is ONE aggregate, folding rows; where measures are their own kind, the rows take none
+          if (kind === 'aggregate') assert.ok(fns.every((fn) => AGGREGATE_FNS.includes(fn)) && !f.properties?.over, `${name}: ${f.title} — a measure is an aggregate folding rows`);
+          if (kind === 'expr' && kinds.aggregate.length) assert.ok(!fns.some((fn) => AGGREGATE_FNS.includes(fn)), `${name}: ${f.title} — an aggregate in the row expression of a tool whose measures are their own kind`);
+          if (f.properties?.over) {
+            assert.ok(ps.some((p) => p.windows), `${name}: a window (${f.title}) — no place of the tool takes one`);
+            // a window function reads its partition whole; an aggregate over a window also a frame of it
+            const framed = fns.some((fn) => AGGREGATE_FNS.includes(fn));
+            assert.equal(deref(doc, f.properties.over), framed ? defs.over_frame : defs.over, `${name}: ${f.title} — its window is $defs.${framed ? 'over_frame' : 'over'}`);
+            // a window restarts per a declared relationship { entity } only over a source's rows
+            const partition = deref(doc, deref(doc, f.properties.over).properties?.partition_by);
+            const byEntity = forms(doc, partition?.items).some((item) => item?.properties?.entity);
+            if (byEntity) assert.ok(ps.some((p) => p.entities), `${name}: a window partitioned by { entity } (${f.title}) — no place of the tool reads a source's rows`);
+          }
         }
       }
       for (const f of defs.stage ? forms(doc, defs.stage) : []) {

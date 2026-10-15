@@ -13,7 +13,7 @@
 // src/pipeline/compute.js PLACES) and passes it to the one writer.
 
 import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
-import { exprSchema, exprSql, conditionListSql, mapAggregates, foldWhere } from './compute.js';
+import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
 import { METRICS_STEP } from '../schema/fields.js';
@@ -79,9 +79,11 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
-    // the expression grammar, once: every stage that takes an expression references it — built for the
-    // expression places of the tool (`places`: what its stages' expressions take)
-    defs: (catalog, { project = null, places = null } = {}) => ({ expr: exprSchema(catalog, { project, places }) }),
+    // the expression grammar, once: every stage that takes an expression references it — the row
+    // expression built for the expression places of the tool (`places`: what its stages' expressions take),
+    // with the window its window forms refer to where one of them takes a window (a window function's
+    // `over`, an aggregate over a window's `over_frame`)
+    defs: (catalog, { project = null, places = null } = {}) => exprDefs(catalog, { project, kinds: { expr: places } }),
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'expr'],
       description: 'Add a column computed by one expression (`expr`) over the columns, event properties and constants — arithmetic, text, dates, a CASE, a condition (a flag: true or false, never missing), a window function — nested, so a whole formula is one stage.',
@@ -643,11 +645,11 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
 
 /**
  * Root-level `$defs` of a tool that takes steps: what the stages' schemas reference (each stage may
- * declare its own — the one expression, `expr`, is compute's) and `stage`, the one stage definition. They
- * sit at the tool's root, where `#/$defs/…` resolves. `project` reaches the expression's refs (the dbt
- * project's semantic models and entities); `runtime` and `places` (the tool's stage places, with the steps
- * they offer) as stageSchema's; `exprPlaces` the tool's expression places (src/pipeline/compute.js PLACES), which its
- * `$defs.expr` is built for.
+ * declare its own — the one expression, `expr`, and the window, `over` / `over_frame`, are compute's) and `stage`,
+ * the one stage definition. They sit at the tool's root, where `#/$defs/…` resolves. `project` reaches the
+ * expression's refs (the dbt project's semantic models and entities); `runtime` and `places` (the tool's
+ * stage places, with the steps they offer) as stageSchema's; `exprPlaces` the tool's expression places
+ * (src/pipeline/compute.js PLACES), which its `$defs.expr` is built for.
  */
 export function stageDefs(catalog, { project = null, runtime = [], places = null, exprPlaces = null } = {}) {
   return {

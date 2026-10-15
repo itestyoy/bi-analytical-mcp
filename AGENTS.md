@@ -313,11 +313,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   tasks are read with `task_ids` and paged by `offset` / `limit` in every query tool, and a condition,
   a measure and a computed value are ONE EXPRESSION GRAMMAR — `{ fn, args: [expressions], …its parameters }` over
   leaves, nested to any depth. A CONCEPT HAS ONE DEFINITION — built by ONE builder, under ONE name in
-  `$defs`, its groups titled alike in every tool — its forms grouped by what they need to work: `$defs.expr`
-  (`exprSchema`, src/pipeline/compute.js — one closed form per
-  leaf, the rows' and the refs that name a value, one per function shape, `args` recursive through the
-  one def), `$defs.stage` (`stageDefs`, src/pipeline/stages.js — titled groups, `STAGE_GROUPS`: SQL over
-  rows, over a source's events (match_recognize), on a runtime (python; in the retentioneering tool also
+  `$defs`, its groups titled alike in every tool — its forms grouped by what they need to work: an
+  expression one definition PER KIND a tool takes (`EXPR_KINDS`, src/pipeline/compute.js) — the row
+  expression `$defs.expr`, a semantic measure's `$defs.aggregate` (exactly ONE aggregate, its `args` row
+  expressions), a derived metric's `$defs.metric_expr` — all built by `exprSchema` from `FNS` and
+  `PLACES` (one closed form per leaf, the rows' and the refs that name a value, one per function shape,
+  `args` recursive through the kind's own def, a measure's through `$defs.expr`), a window function's
+  `over` the window `$defs.over`, an aggregate over a window's `$defs.over_frame` (the same and its
+  `frame`), both by `overSchema`, `$defs.stage` (`stageDefs`,
+  src/pipeline/stages.js — titled groups, `STAGE_GROUPS`: SQL over rows, over a source's events
+  (match_recognize), on a runtime (python; in the retentioneering tool also
   the library's ops, the feature's own runtime group), in the semantic layer (the metrics step — no
   pipeline stage, so not in the registry a build reads: its one definition, `METRICS_STEP`
   (src/schema/fields.js — its form, its group, what another place says of it), is offered by the place
@@ -333,13 +338,19 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   shape. IN EACH TOOL'S SCHEMA THE DEFINITION HOLDS WHAT THAT TOOL'S PLACES TAKE — the union of its
   places (`TOOL_PLACES`, src/schema.js; a feature passes its own), nothing else, a group none of them
   takes left out: a read's has no join, unnest, funnel or python stage, no event property and no `raw`,
-  a semantic declaration's no window, semantic_index's and memory's ref no form of the semantic layer.
+  a semantic declaration's no window and no aggregate in a row (its measures are their own kind),
+  semantic_index's and memory's ref no form of the semantic layer.
   So what a tool cannot take is refused by its own schema, and its listing carries no form it has no use
   for (every request carries the tool list: test/unit/schema-portability.test.js holds its size). It is
-  NEVER SPLIT PER PLACE inside a tool (no second definition beside it): where the places of
-  one tool take different parts (a metric query's steps before its metrics step and after it; an eventstream's start,
+  NEVER SPLIT PER PLACE inside a tool (no second definition of a kind beside it — a kind is a closed part
+  of the grammar, `EXPR_KINDS`, not a place): where the places of
+  one kind take different parts (a metric query's steps before its metrics step and after it; an eventstream's start,
   filter_events and its library steps), each is checked when the value is built, as a function's
-  placement is, and the refusal names the place and what it takes. A list of
+  placement is, and the refusal names the place and what it takes. What the schema does not say, the
+  build checks: a name's existence and scope at its step, types (text against a number, a property of
+  another source), a column outside an aggregate only when grouped by, a function's placement (an
+  aggregate in a row only with `over`, a window only in a compute stage — the schema holds it only where a
+  kind is its own, a semantic measure's), name collisions, metric cycles, the order of stages. A list of
   a table's OWN columns stays a list of names (an aggregate's `group_by`,
   project, unpivot, an eventstream's segments and path); anything else names a thing through a ref or
   an expression leaf. Its SQL comes from ONE writer (`exprSql`, and `conditionListSql` for a slot, each

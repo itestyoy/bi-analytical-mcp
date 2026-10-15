@@ -126,11 +126,38 @@ function fieldRef(instancePath) {
  * column or attribute names what was meant, even when the list is long and its first values are not
  * it). A long list is cut: the schema is exact, the message names enough to act on.
  */
-function oneOf(at, vals, used, alt) {
-  const near = typeof used === 'string' && !alt ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
+function oneOf(at, vals, used, alt, elsewhere = null) {
+  const near = typeof used === 'string' && !alt && !elsewhere ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
   return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
     + (near.length ? `. Did you mean ${near.map((v) => `'${v}'`).join(' or ')}?` : '')
-    + (alt ? `. Here '${used}' is spelled '${alt}'` : '');
+    + (alt ? `. Here '${used}' is spelled '${alt}'` : '')
+    + (elsewhere ? `. '${used}' is not taken here: it stands in ${elsewhere}` : '');
+}
+
+/**
+ * A VALUE ANOTHER DEFINITION OF THE SCHEMA TAKES. A tool may hold one concept in several definitions, each
+ * for the places that take a closed part of it (src/pipeline/compute.js EXPR_KINDS: a semantic measure's
+ * ONE aggregate, a derived metric's value): a value refused at a field that a TITLED definition of the
+ * same schema pins that field to is said with where it stands — an aggregate in a dimension is a
+ * measure's, a sum in a derived metric too — instead of the nearest spellings of what this place takes.
+ * A value (`whole`, the object the field is in) that the ARGUMENT of a titled kind takes as written is
+ * said as that argument, wrapped in the kind — a row formula written as a measure is what the measure's
+ * ONE aggregate folds, not a derived metric's value, though the derived metric pins its function too.
+ * → where it stands, or null.
+ */
+function takenElsewhere(root, key, used, whole) {
+  if (typeof used !== 'string') return null;
+  // a value the ARGUMENT of a closed kind takes whole (a measure's ONE aggregate folds a value of each
+  // row): it stands there — wrapped in that kind — rather than wherever else its function does
+  for (const def of Object.values(root?.$defs || {})) {
+    const arg = isPlainObject(def) && def.title ? deref(root, deref(root, def.properties?.args)?.items) : null;
+    if (isPlainObject(arg) && arg !== def && isPlainObject(whole) && nodeValidator(root, arg)(whole)) return `the argument of ${def.title}: { fn: <one of them>, args: [{ ${key}: "${used}", … }] }`;
+  }
+  for (const def of Object.values(root?.$defs || {})) {
+    if (!isPlainObject(def) || !def.title || !Array.isArray(def.anyOf)) continue;
+    if (def.anyOf.some((b) => (pinsOf(root, b).get(key) || []).includes(used))) return def.title;
+  }
+  return null;
 }
 
 /**
@@ -190,7 +217,8 @@ function describe(e, ctx = {}) {
       // said as an enum is said (describe, 'enum'): one value is a pinned one, several a list
       const vals = e.params.values;
       if (vals.length === 1) return `${fieldRef(e.params.at)} must be ${JSON.stringify(vals[0])}`;
-      return oneOf(fieldRef(e.params.at), vals, used, alt);
+      const path = String(e.params.at);
+      return oneOf(fieldRef(path), vals, used, alt, alt ? null : takenElsewhere(ctx.schema, path.split('/').pop(), used, valueAt(ctx.input, path.slice(0, path.lastIndexOf('/')))));
     }
     case 'oneOf':
     case 'anyOf': return `${at} must match exactly one of the allowed configurations (provide the fields for exactly one mode)`;

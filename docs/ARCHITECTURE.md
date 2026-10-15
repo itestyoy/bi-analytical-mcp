@@ -69,14 +69,16 @@ its `percentile`, a formula over several, an aggregate over a `case` for a condi
 missing on the rows it leaves out; an `else` folds them as its value, `average` of `then: 1, else: 0`
 a share of the rows, and is refused only under `count` / `count_distinct` and their approximations:
 `count` would count those rows, `count_distinct` their else value as one more). Every
-tool that takes an expression carries ONE definition of it, `$defs.expr`, built by one builder
-(`exprSchema`) for the tool's places: what a PLACE takes (a step over a source's rows, a read of stored
+tool that takes an expression carries ONE definition of each KIND of it its places take (`EXPR_KINDS`)
+— the row expression `$defs.expr`; a semantic measure's `$defs.aggregate`, exactly one aggregate over
+row expressions; a derived metric's `$defs.metric_expr` — a window function's `over` the window
+`$defs.over`, an aggregate over a window's `$defs.over_frame` (with its frame), all built by one builder (`exprSchema`) for the tool's places: what a PLACE takes (a step over a source's rows, a read of stored
 rows, a semantic model, a where before a metric query's metrics step, a derived metric) is one table, `PLACES`, and a tool's
 definition holds the union of what its places take (`TOOL_PLACES`, `src/schema.js`) — of the leaves,
 the rows' and the refs that name a value (`{ source, column }`, `{ source, property }`,
 `{ semantic_model, dimension }`, `{ entity }`, `{ time }`, `{ metric }`), and of the functions — and
 nothing else, so a read's has no `raw` and no event property and its schema refuses them. It is never
-split per place inside a tool: where two places of one tool take different parts, each is checked as
+split per place inside a tool: where two places of one kind take different parts, each is checked as
 the value is built by the one writer (`exprSql`), whose refusal names the place and what it takes —
 both in `src/pipeline/compute.js`. A step is likewise one `$defs.stage` (its places in `STAGE_PLACES`,
 `src/pipeline/stages.js`: a read's has no join, unnest, funnel or python stage) and a name of a catalog

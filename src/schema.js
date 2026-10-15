@@ -34,16 +34,20 @@ export const METHOD_CONTRACTS = new Set(['build_pipeline_model.pipeline', 'delet
 
 /**
  * WHAT EACH TOOL'S DEFINITIONS HOLD — the places of the tool, by kind: where its expressions stand
- * (src/pipeline/compute.js PLACES), where its steps run (src/pipeline/stages.js STAGE_PLACES), where it
- * names a thing (src/schema/refs.js REF_PLACES). Its `$defs.expr`, `$defs.stage` and `$defs.ref` are the
- * one definition each, built for these places: they hold what the places take together and nothing else,
- * and where two places of one tool take different parts, each is checked as its value is built. A method's
- * contract takes its tool's (build_pipeline_model.pipeline is a build's).
+ * (src/pipeline/compute.js PLACES), by the kind of expression each takes (EXPR_KINDS: `expr` the row
+ * expression, and where a place takes a closed part of it, `aggregate` — a semantic measure — and
+ * `metric_expr` — a derived metric's value), where its steps run (src/pipeline/stages.js STAGE_PLACES),
+ * where it names a thing (src/schema/refs.js REF_PLACES). Its `$defs` of each expression kind, `$defs.stage`
+ * and `$defs.ref` are one definition each, built for these places: they hold what the places take together
+ * and nothing else, and where two places of one kind take different parts, each is checked as its value is
+ * built. A method's contract takes its tool's (build_pipeline_model.pipeline is a build's).
  */
 export const TOOL_PLACES = {
   build_pipeline_model: { expr: ['source_rows'], stage: ['build'] },
   query_pipeline_model: { expr: ['stored_rows'], stage: ['read'] },
-  build_semantic_model: { expr: ['semantic_model', 'derived_metric'] },
+  // a declaration: the row expression and a measure (ONE aggregate of it) of a semantic model, a derived
+  // metric's value — each a kind of its own (src/pipeline/compute.js EXPR_KINDS)
+  build_semantic_model: { expr: ['semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'] },
   // a metric query: where steps and its metrics step, then a read of its result
   query_semantic_model: { expr: ['metric_where', 'stored_rows'], stage: ['metric_scope', 'metric_result'], ref: ['group_by'] },
   // its views of the catalog's things, and the notes' filter by what they are about
@@ -104,8 +108,9 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   const create = {
     type: 'object',
     description: 'Two forms. The default declares a task — name, semantic_models, metrics — in a new context, or beside the task already in context_id. action:"update" changes the task in a context, named by its name, in the same words: semantic_models and metrics are added, `remove` takes them away by name, and the rest stays as declared.',
-    // the one expression, at a semantic model's place and a derived metric's
-    $defs: semanticDefs(catalog, { project, places: TOOL_PLACES.build_semantic_model.expr }),
+    // the expression in the kinds a declaration writes it in: a semantic model's rows, its measures, a
+    // derived metric's value
+    $defs: semanticDefs(catalog, { project, kinds: TOOL_PLACES.build_semantic_model }),
     anyOf: [
       form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, required: ['name', 'metrics'], properties: createFields }),
       form({ title: 'update the task in a context', tag: ['action', 'update'], required: ['context_id'], properties: updateFields }),

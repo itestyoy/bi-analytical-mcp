@@ -9,7 +9,7 @@
 import { GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { form, pick, timeRange, conditionSlot, measureForm } from '../schema-kit.js';
-import { exprSchema, EXPR_REF, PLACES } from '../pipeline/compute.js';
+import { exprDefs, EXPR_REF, EXPR_KINDS, PLACES } from '../pipeline/compute.js';
 import { CONTEXT_ID } from '../context-manager.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -30,17 +30,18 @@ export const D = {
 };
 
 /**
- * The `$defs` of build_semantic_model: the one expression (`expr`, src/pipeline/compute.js), built by the
- * one builder every tool's is. A declaration writes it at two places, each checked as it is compiled
- * (src/compile.js): a semantic model's where, computed dimensions and measures (PLACES.semantic_model —
- * its columns, checked against the model it is written on with "did you mean", its event properties on
- * an events source, constants, the current time), and a derived metric's value (PLACES.derived_metric —
- * { metric } leaves and numbers, in arithmetic). `places`: those two (src/schema.js TOOL_PLACES), so the
- * definition holds what they take together — no window, no raw. `project`: the dbt project's own layer,
- * whose names the expression's refs offer too.
+ * The `$defs` of build_semantic_model: the expression in the KINDS a declaration writes it in
+ * (src/pipeline/compute.js EXPR_KINDS), each built by the one builder every tool's is and checked again as
+ * it is compiled (src/compile.js): the row expression (`expr`) of a semantic model's where, computed
+ * dimensions and a measure's arguments, and a measure itself (`aggregate`: ONE aggregate over row
+ * expressions) — both at PLACES.semantic_model: its columns, checked against the model it is written on
+ * with "did you mean", its event properties on an events source, constants, the current time, no window,
+ * no raw — and a derived metric's value (`metric_expr`, PLACES.derived_metric: { metric } leaves and
+ * numbers, in arithmetic). `kinds`: each kind's places (src/schema.js TOOL_PLACES). `project`: the dbt
+ * project's own layer, whose names the expression's refs offer too.
  */
-export function semanticDefs(catalog, { project = null, places = null } = {}) {
-  return { expr: exprSchema(catalog, { project, places }) };
+export function semanticDefs(catalog, { project = null, kinds = {} } = {}) {
+  return exprDefs(catalog, { project, kinds });
 }
 
 /**
@@ -121,7 +122,7 @@ export function semanticModelBranch(catalog, modelKey) {
       measures: {
         type: 'array',
         items: measureForm({
-          ref: EXPR_REF, pattern: NAME,
+          ref: EXPR_KINDS.aggregate.ref, pattern: NAME,
           nameDescription: 'The measure\'s name; metrics read it by this name (stored as <task>_<name>).',
           exprDescription: 'ONE aggregate of the model\'s rows — sum, average, min, max, median, percentile (with `percentile`), count_distinct, or count (with no args it counts the rows) — over a row expression, a case where it folds only the rows a condition holds for (within the item\'s own where): { fn: "count", args: [{ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }], then: { value: 1 } }] }] }, { fn: "percentile", args: [{ property: "load_ms" }], percentile: 0.9 }. A formula over several aggregates is several measures and a derived metric.',
           extra: { label },
@@ -144,7 +145,7 @@ export function metricSchema(catalog) {
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
     window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },
-    expr: { $ref: EXPR_REF, description: `The metric's value over the metrics it is built from — each a { metric } leaf (of this call or already in the context, as declared or as stored), which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
+    expr: { $ref: EXPR_KINDS.metric_expr.ref, description: `The metric's value over the metrics it is built from — each a { metric } leaf (of this call or already in the context, as declared or as stored), which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
   const kind = (type, title, required, optional) => form({ title, tag: ['type', type], required: ['name', ...required], properties: pick(fields, ['name', 'label', ...required, ...optional]) });

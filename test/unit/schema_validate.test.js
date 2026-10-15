@@ -178,27 +178,90 @@ test('a metric names what it reads by a string; a derived metric reads its input
   ]) assert.equal(ok(metrics).ok, false, JSON.stringify(metrics));
 });
 
-// A derived metric's expr is the one expression; its place (PLACES.derived_metric) takes other metrics
-// and constants in arithmetic — a column is a model's, an aggregate a measure's — and a constant there
-// is a number. What the tool's other place (a semantic model's) takes passes the schema and is refused
-// when the declaration compiles, naming what the place takes; what neither takes (a ref of the semantic
-// layer, another model's column) is no form of the tool's definition, and its schema refuses it.
-test('a derived metric reads metrics and numbers in arithmetic: anything else is refused at its place', async () => {
+// A derived metric's expr is an expression of its own kind (`$defs.metric_expr`): what its place
+// (PLACES.derived_metric) takes — other metrics and constants in arithmetic — and nothing else, so a
+// column (a model's), an aggregate (a measure's), a condition or a ref of the semantic layer is no form of
+// it and the schema refuses it, saying what the place takes (and, of an aggregate, where it stands). The
+// declaration's own compile refuses each too, for a caller past the schema, and holds what the schema does
+// not say: a constant there is a number.
+test('a derived metric reads metrics and numbers in arithmetic: anything else is refused by its kind, and at its place', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
   const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }, { name: 'd', type: 'derived', expr }] });
   const place = /is not what a derived metric's expr takes — it takes \{ metric \}, \{ value \}, and add, sub, mul, div, round, floor, ceil, abs, coalesce, least, greatest/;
-  for (const [expr, said] of [
-    [{ fn: 'mul', args: [{ column: 'n' }, { value: 2 }] }, /\{ column \} /],
-    [{ fn: 'mul', args: [{ source: 'users', column: 'country' }, { value: 2 }] }, /\{ source, column \} /],
-    [{ fn: 'add', args: [{ metric: 'n' }, { semantic_model: ['users'], dimension: 'is_us' }] }, /\{ semantic_model, dimension \} /],
-    [{ fn: 'sum', args: [{ metric: 'n' }] }, /sum /],
-    [{ fn: 'gt', args: [{ metric: 'n' }, { value: 2 }] }, /gt /],
+  const fns = /`metrics\.1\.expr\.fn` must be one of: add, sub, mul, div, round, floor, ceil, abs, coalesce, least, greatest/;
+  for (const [expr, said, refusal] of [
+    [{ fn: 'mul', args: [{ column: 'n' }, { value: 2 }] }, /\{ column \} /, /`metrics\.1\.expr\.args\.0` must be exactly one of: a constant — \{ value \} \| \{ metric \} \| fn: add/],
+    [{ fn: 'mul', args: [{ source: 'users', column: 'country' }, { value: 2 }] }, /\{ source, column \} /, /`metrics\.1\.expr\.args\.0`/],
+    [{ fn: 'add', args: [{ metric: 'n' }, { semantic_model: ['users'], dimension: 'is_us' }] }, /\{ semantic_model, dimension \} /, /`metrics\.1\.expr\.args\.1`/],
+    [{ fn: 'sum', args: [{ metric: 'n' }] }, /sum /, new RegExp(`${fns.source}\\. 'sum' is not taken here: it stands in a measure's expr — ONE aggregate of the rows`)],
+    [{ fn: 'gt', args: [{ metric: 'n' }, { value: 2 }] }, /gt /, fns],
   ]) {
-    const refOfNoPlace = expr.args.some((a) => a.source !== undefined || a.semantic_model !== undefined);
-    assert.equal(v('build_semantic_model', decl(expr)).ok, !refOfNoPlace, `${JSON.stringify(expr)}: ${refOfNoPlace ? 'no place of the tool takes it' : 'the tool\'s other place takes it'}`);
+    const r = v('build_semantic_model', decl(expr));
+    assert.equal(r.ok, false, `${JSON.stringify(expr)}: no form of a derived metric's expr`);
+    assert.match(r.errors.join(' | '), refusal, JSON.stringify(expr));
     assert.throws(() => compileDeclaration(catalog, decl(expr)), (e) => e.field === 'metrics.expr' && said.test(e.message) && place.test(e.message), JSON.stringify(expr));
   }
+  for (const expr of [{ fn: 'div', args: [{ metric: 'n' }, { metric: 'n' }] }, { fn: 'round', args: [{ fn: 'mul', args: [{ metric: 'n' }, { value: 100 }] }], places: 1 }]) assert.ok(v('build_semantic_model', decl(expr)).ok, JSON.stringify(expr));
   assert.throws(() => compileDeclaration(catalog, decl({ fn: 'add', args: [{ metric: 'n' }, { value: 'x' }] })), (e) => e.field === 'metrics.expr' && /a derived metric computes with numbers/.test(e.message));
+});
+
+// A SEMANTIC MODEL'S EXPRESSIONS ARE OF TWO KINDS: a value of each row (`$defs.expr` — an item's where, a
+// computed dimension, what a measure folds), in which no aggregate stands, and a measure (`$defs.aggregate`)
+// — exactly ONE aggregate of the task's, its arguments row expressions, a case among them where it folds
+// only the rows a condition holds for. The schema holds both: a measure that is no aggregate (a column, a
+// formula over aggregates), an aggregate nested in one, an aggregate in a row is refused in the call,
+// saying what the place takes and where the refused function stands. An earlier spelling of a measure is
+// still refused with its value as it is now.
+test('a semantic measure is ONE aggregate over row expressions, and a row takes none — held by the schema', () => {
+  const decl = ({ measures = [COUNT], where, dims } = {}) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures, ...(where ? { where } : {}) }, ...(dims ? [{ source: 'users', dimensions: dims }] : [])], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
+  const m = (expr) => decl({ measures: [{ name: 'n', expr }] });
+  const refused = (input, ...said) => {
+    const r = v('build_semantic_model', input);
+    assert.equal(r.ok, false, JSON.stringify(input));
+    for (const re of said) assert.match(r.errors.join(' | '), re, JSON.stringify(input));
+  };
+  const elsewhere = (fn) => new RegExp(`'${fn}' is not taken here: it stands in a measure's expr — ONE aggregate of the rows`);
+  const at = '`semantic_models\\.0\\.measures\\.0\\.expr';
+  // a measure that is no aggregate: a column, a constant, a formula over aggregates — the forms it may be named
+  refused(m({ column: 'session_number' }), new RegExp(`${at}\` must be exactly one of: fn: sum \\| average \\| min \\| max \\| count_distinct \\| median \\(an aggregate\\) \\| fn: count`), new RegExp(`${at}\` is missing required property 'fn'`));
+  refused(m({ value: 1 }), new RegExp(`${at}\` is missing required property 'fn'`));
+  // (a formula over aggregates: each aggregate a measure's, the formula a derived metric's)
+  refused(m({ fn: 'div', args: [{ fn: 'count' }, { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] }] }), new RegExp(`${at}\\.fn\` must be one of: sum, average, min, max, count_distinct, median, count, percentile\\. 'div' is not taken here: it stands in a derived metric's expr`), elsewhere('count'), elsewhere('count_distinct'));
+  // a measure written as a value of the row — a formula over its columns or properties, a case, a cast — is
+  // what the ONE aggregate folds: said as its argument, never as a derived metric's (which reads no column)
+  for (const expr of [
+    { fn: 'mul', args: [{ property: catalog.eventNumericProps('events')[0] }, { value: 2 }] },
+    { fn: 'add', args: [{ column: 'session_number' }, { column: 'session_number' }] },
+    { fn: 'coalesce', args: [{ column: 'session_number' }, { value: 0 }] },
+    { fn: 'case', cases: [{ when: [eventIs(catalog.eventNames('events')[0])], then: { value: 1 } }] },
+  ]) {
+    refused(m(expr), new RegExp(`${at}\\.fn\` must be one of: sum, average, min, max, count_distinct, median, count, percentile\\. '${expr.fn}' is not taken here: it stands in the argument of a measure's expr — ONE aggregate of the rows`));
+    assert.doesNotMatch(v('build_semantic_model', m(expr)).errors.join(' | '), /derived metric/, JSON.stringify(expr));
+  }
+  // an aggregate of an aggregate, an aggregate in a row: an item's where, a computed dimension
+  refused(m({ fn: 'sum', args: [{ fn: 'count' }] }), new RegExp(`${at}\\.args\\.0\\.fn\` must be one of: `), elsewhere('count'));
+  refused(decl({ where: [{ fn: 'gt', args: [{ fn: 'count' }, { value: 1 }] }] }), /`semantic_models\.0\.where\.0\.args\.0\.fn` must be one of: /, elsewhere('count'));
+  refused(decl({ dims: [{ name: 'x', expr: { fn: 'max', args: [{ column: 'country' }] } }] }), /`semantic_models\.1\.dimensions\.0\.expr\.fn` must be one of: /, elsewhere('max'));
+  // the measures there are: a conditional aggregate (over a case), a count of the rows, a percentile, an
+  // aggregate over a computed row value
+  const first = eventIs(catalog.eventNames('events')[0]);
+  for (const expr of [
+    { fn: 'sum', args: [{ fn: 'case', cases: [{ when: [first], then: { column: 'session_number' } }] }] },
+    { fn: 'count' },
+    { fn: 'count', args: [{ fn: 'case', cases: [{ when: [first], then: { value: 1 } }] }] },
+    { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 },
+    { fn: 'average', args: [{ fn: 'mul', args: [{ column: 'session_number' }, { value: 2 }] }] },
+  ]) assert.ok(v('build_semantic_model', m(expr)).ok, `${JSON.stringify(expr)}: ${v('build_semantic_model', m(expr)).errors?.join(' | ')}`);
+  refused(m({ fn: 'percentile', args: [{ column: 'session_number' }] }), new RegExp(`${at}\` is missing required property 'percentile'`));
+  // a measure in an earlier spelling — { name, agg, column } — is refused with the measure it is now
+  for (const [earlier, now] of [
+    [{ name: 'n', agg: 'sum', column: 'session_number' }, { name: 'n', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }],
+    [{ name: 'n', agg: 'count' }, { name: 'n', expr: { fn: 'count', args: [] } }],
+  ]) {
+    const r = v('build_semantic_model', decl({ measures: [earlier] }));
+    assert.ok(r.errors.join(' ').includes(`\`semantic_models.0.measures.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
+    assert.ok(v('build_semantic_model', decl({ measures: [now] })).ok, 'and what it is now is taken');
+  }
 });
 
 test('a derived metric that reads no metric, an unknown one or itself is refused when it is compiled', async () => {

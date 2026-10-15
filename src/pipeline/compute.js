@@ -12,12 +12,16 @@
 // one folds a case — a value on the rows where the condition holds — and nothing else says it.
 //
 // One table (FNS) says each function's arguments, parameters, kind and SQL; one builder (exprSchema)
-// turns it into THE schema every tool that takes an expression carries as `$defs.expr` — a closed form
-// per leaf and per function shape, `args` referring back to the same definition, holding what the tool's
-// own places take; one writer (exprSql, and conditionListSql for a condition slot) turns an expression
-// into SQL. What a PLACE takes of it is one table (PLACES: the leaves and the functions of a pipeline
-// step, a read, a semantic model, a where before a metrics step, a derived metric), read by the builder for a
-// tool's definition and checked by the writer as the value is built, and so are the rules of
+// turns it into the schema every tool that takes an expression carries — the row expression `$defs.expr`,
+// and, where a place takes a closed part of the grammar, that part as a kind of its own (EXPR_KINDS: a
+// semantic measure's `$defs.aggregate`, a derived metric's `$defs.metric_expr`) — a closed form per leaf
+// and per function shape, `args` referring to the kind's arguments, holding what the tool's own places
+// take, a window function's `over` `$defs.over`, an aggregate over a window's `$defs.over_frame` (with its
+// frame); one writer (exprSql, and conditionListSql
+// for a condition slot) turns an expression into SQL. What a PLACE takes of it is one table (PLACES: the
+// leaves and the functions of a pipeline step, a read, a semantic model, a where before a metrics step, a
+// derived metric), read by the builder for a tool's definitions and checked by the writer as the value is
+// built, and so are the rules of
 // WHERE each kind may stand: an aggregate folds rows only where a measure is written, a window keeps them
 // only in a compute stage, a condition slot takes booleans. A function is added in one place, and a
 // parameter it does not read is not in its form, so it is refused instead of silently ignored.
@@ -66,10 +70,30 @@ const FRAME = {
   },
 };
 
-// the parameters a function may take, by name — each function's form picks its own. `ref` is the one
-// expression's definition (a CASE's branches and conditions are expressions too); `entities` whether a
-// window may restart per a relationship of the source.
-const params = (catalog, { ref, entities = true }) => ({
+/** Where the window is defined in every tool schema whose expression takes one: a window function's
+ *  (`$defs.over`), and an aggregate over a window's, which also reads a frame (`$defs.over_frame`). */
+export const OVER_REF = '#/$defs/over';
+export const OVER_FRAME_REF = '#/$defs/over_frame';
+
+/**
+ * THE WINDOW — one builder for both of its definitions in a tool schema whose expression takes one: the
+ * rows a window function or an aggregate over a window is computed over, restarted per `partition_by`, in
+ * the order of `order_by` — `$defs.over`, what a rank or a neighbour reads (its partition whole) — and,
+ * with `frame` (`$defs.over_frame`, an aggregate over a window's), the frame of them each value folds; so
+ * a frame on a window function is refused by the schema, not ignored.
+ * `entities`: whether the rows are a source's, so a partition may name a declared relationship.
+ */
+export function overSchema(catalog, { entities = true, frame = false } = {}) {
+  return {
+    type: 'object', additionalProperties: false,
+    description: frame ? 'The window: the rows it is computed over, in order, and the frame of them each value reads.' : 'The window: the rows it is computed over, in order.',
+    properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER(), ...(frame ? { frame: FRAME } : {}) },
+  };
+}
+
+// the parameters a function may take, by name — each function's form picks its own. `ref` is the
+// definition a CASE's branches and conditions are (expressions of the same kind as the case).
+const params = ({ ref }) => ({
   places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places (default 0).' },
   type: TYPE,
   start: { type: 'integer', minimum: 1, description: '1-based start position.' },
@@ -88,8 +112,7 @@ const params = (catalog, { ref, entities = true }) => ({
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
   default: { ...SCALAR, description: 'The constant when the offset row does not exist.' },
   percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'The quantile in (0,1), e.g. 0.95 for p95.' },
-  over: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order.', properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER() } },
-  over_frame: { type: 'object', additionalProperties: false, description: 'The window: the rows it is computed over, in order, and the frame of them each value reads.', properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER(), frame: FRAME } },
+  over: { $ref: OVER_REF },
 });
 
 // a window clause in raw SQL, outside its string literals, quoted names and comments
@@ -429,8 +452,9 @@ const NOT_OVER_DIMENSIONS = new Set(['raw', 'json_parse_array', 'json_field', 'a
  * and its `fns`, whether a window may stand there, and whether its rows are a source's (`entities`: a
  * window may restart per a relationship the source declares, { entity }). The writer refuses anything else as it builds the
  * value (exprSql's `place`), naming the place (`what`) and what it takes, with the place's `hint` where
- * something it refuses has a home elsewhere. A tool's `$defs.expr` holds what its places take together
- * (exprSchema's `places`); each place narrows it further, as the value is built.
+ * something it refuses has a home elsewhere. A tool's definition of each expression kind (EXPR_KINDS)
+ * holds what its places of that kind take together (exprSchema's `places`); each place narrows it
+ * further, as the value is built.
  *   source_rows    — a pipeline step over a source's rows (a build, an eventstream's start);
  *   stored_rows    — rows without a payload: a read of a stored table, the steps after a metrics step,
  *                    a card's drill (a feature's filter over its own rows passes a place of this shape);
@@ -493,9 +517,6 @@ const placeSaid = (p) => `${p.leaves.map((k) => LEAVES[k].says).join(', ')}, and
 /** The refusal of what a place does not take: `what` (a leaf, a function), named with the place. */
 const notTaken = (p, what, at) => new Error(`${at}: ${what} is not what ${p.what} takes — it takes ${placeSaid(p)}`);
 
-/** The parameter a function's spec names, as the caller writes it (`over_frame` is written `over`). */
-const written = (name) => (name === 'over_frame' ? 'over' : name);
-
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 /** Whether an expression calls a window: a window function, or an aggregate given `over`. */
@@ -531,14 +552,38 @@ function shapesOf(fn) {
   if (kindOf(fn) === 'aggregate') {
     return [
       { ...base, label: 'an aggregate' },
-      ...(s.windowable ? [{ ...base, needs: [...base.needs, 'over_frame'], label: 'over a window', window: true }] : []),
+      ...(s.windowable ? [{ ...base, needs: [...base.needs, 'over'], label: 'over a window', window: true, frame: true }] : []),
     ];
   }
   return [{ ...base, window: kindOf(fn) === 'window', label: kindOf(fn) === 'condition' ? 'a condition' : kindOf(fn) === 'logic' ? 'logic' : null }];
 }
 
-/** Where the one expression is defined in every tool schema that takes one. */
+/** Where the ROW expression is defined in every tool schema that takes an expression. */
 export const EXPR_REF = '#/$defs/expr';
+
+/**
+ * THE EXPRESSION KINDS — the definitions a tool schema holds an expression in, by what its places take
+ * of the one grammar. Every tool that takes an expression holds the ROW expression, `$defs.expr`: a value
+ * of each row — and, where its places fold or window rows (a pipeline's measure, a compute stage), the
+ * aggregates over them. Where a place takes a CLOSED part of the grammar, the tool holds that part as a
+ * kind of its own, and its schema refuses the rest:
+ *   aggregate   — a semantic measure's expr: exactly ONE aggregate, its arguments row expressions
+ *                 (`$defs.expr`, a case among them where it folds only some rows) — the tool's row
+ *                 expression then holds no aggregate, which only ever stands as a measure there;
+ *   metric_expr — a derived metric's expr: the leaves and functions of its place, its arguments of the
+ *                 same kind.
+ * Each is built by exprSchema from FNS and PLACES for the places a tool has of that kind (src/schema.js
+ * TOOL_PLACES); the writer checks the place as the value is built, whichever definition the schema held.
+ * `ref` is where the kind is defined, `args` what its arguments are, `fnKinds` the kinds of function it
+ * holds (none said: every one its places take), `leaves` false where it holds none, `windows` false where
+ * no window form stands in it; `title` names a closed kind, so a value refused elsewhere in the tool that
+ * it takes is said with where it stands (src/validate.js).
+ */
+export const EXPR_KINDS = {
+  expr: { ref: EXPR_REF, args: EXPR_REF },
+  aggregate: { ref: '#/$defs/aggregate', args: EXPR_REF, fnKinds: ['aggregate'], leaves: false, windows: false, title: 'a measure\'s expr — ONE aggregate of the rows' },
+  metric_expr: { ref: '#/$defs/metric_expr', args: '#/$defs/metric_expr', title: 'a derived metric\'s expr' },
+};
 
 /** Places by their PLACES names (or places of that shape, as a feature passes) — null for none named. */
 function exprPlacesOf(places) {
@@ -561,27 +606,32 @@ const LEAF_SAID = {
 /** A list said in words: "a, b or c". */
 const either = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} or ${xs[xs.length - 1]}` : xs[0] || '');
 
+/** How an aggregate folds rows, said where one is offered: a conditional one folds a case. */
+const FOLD_SAID = 'A conditional one folds a case, missing on the other rows — the rows where c holds { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }, their revenue { fn: "sum", args: [{ fn: "case", cases: [{ when: [c], then: { column: "price" } }] }] }; average of the first case with else: { value: 0 } is the share of the rows where c holds. A count / count_distinct takes no else: count would count the other rows, count_distinct their else value as one more.';
+
 /**
- * THE EXPRESSION SCHEMA — `$defs.expr` of every tool that takes an expression, ONE definition built by
- * this one builder for the PLACES of that tool (PLACES names, or places of that shape; none named —
- * everything): the leaves those places take (the rows' { column }, { property } of the catalog's events,
- * { value }, { now }, and the refs that name a value — src/schema/refs.js, with the catalog's names closed
- * per source and, given `project`, the dbt project's semantic models and entities) and the functions they
- * take, a window's form only where one of them takes windows, recursive through `#/$defs/expr` (every
- * argument and a CASE's branches refer back to it). One form per function SHAPE — the
- * functions that take the same arguments and parameters share one, tagged by those of them the places
- * take — each with exactly its own fields. Places of one tool that take different parts share the one
+ * THE EXPRESSION SCHEMA — one definition of a KIND (EXPR_KINDS: the row expression `$defs.expr` unless
+ * `kind` says another), built by this one builder for the PLACES of a tool (PLACES names, or places of
+ * that shape; none named — everything): the leaves those places take (the rows' { column }, { property } of
+ * the catalog's events, { value }, { now }, and the refs that name a value — src/schema/refs.js, with the
+ * catalog's names closed per source and, given `project`, the dbt project's semantic models and entities)
+ * and the functions they take, of the function kinds the definition holds (`leaveOut`: kinds it leaves to
+ * another definition of the tool — a row expression's aggregates, where measures are a kind of their own),
+ * a window's form only where one of them takes windows (its `over` a window function's `$defs.over`, an
+ * aggregate over a window's `$defs.over_frame`, with its frame), each
+ * argument the kind's `args` and a CASE's branches its own. One form per function SHAPE — the functions
+ * that take the same arguments and parameters share one, tagged by those of them the places take — each
+ * with exactly its own fields. Places of one tool that take different parts of one kind share its one
  * definition, never one each: what each takes is the writer's check (PLACES) as the value is built.
  */
-export function exprSchema(catalog, { project = null, places = null } = {}) {
-  const ref = EXPR_REF;
+export function exprSchema(catalog, { project = null, places = null, kind = 'expr', leaveOut = [] } = {}) {
+  const K = EXPR_KINDS[kind];
+  if (!K) throw new Error(`exprSchema: no expression kind '${kind}'`);
   const at = exprPlacesOf(places);
-  // a window restarts per a declared relationship only over a source's rows
-  const entities = !at || at.some((p) => p.entities);
-  const P = params(catalog, { ref, entities });
-  const leaves = Object.keys(LEAVES).filter((k) => !at || at.some((p) => p.leaves.includes(k)));
-  const offered = Object.keys(FNS).filter((fn) => !at || at.some((p) => p.fns.includes(fn)));
-  const windows = !at || at.some((p) => p.windows);
+  const P = params({ ref: K.ref });
+  const leaves = K.leaves === false ? [] : Object.keys(LEAVES).filter((k) => !at || at.some((p) => p.leaves.includes(k)));
+  const offered = Object.keys(FNS).filter((fn) => (!at || at.some((p) => p.fns.includes(fn))) && (!K.fnKinds || K.fnKinds.includes(kindOf(fn))) && !leaveOut.includes(kindOf(fn)));
+  const windows = K.windows !== false && (!at || at.some((p) => p.windows));
   const byShape = new Map();
   for (const fn of offered) {
     for (const shape of shapesOf(fn)) {
@@ -600,19 +650,20 @@ export function exprSchema(catalog, { project = null, places = null } = {}) {
     const { min, max } = typeof n === 'number' ? { min: n, max: n } : { min: n.min, max: n.max };
     return { type: 'array', minItems: min, ...(max !== undefined ? { maxItems: max } : {}) };
   };
-  const forms = [...byShape.values()].map(({ args, title, needs, may, fns: names, label }) => {
+  const forms = [...byShape.values()].map(({ args, title, needs, may, fns: names, label, frame }) => {
     const takesArgs = args !== 0;
     const required = typeof args === 'number' ? args > 0 : args.min > 0;
-    const fields = Object.fromEntries([...needs, ...may].map((n) => [written(n), P[n]]));
+    const fields = Object.fromEntries([...needs, ...may].map((n) => [n, P[n]]));
     return form({
       title: `fn: ${names.join(' | ')}${title ? ` — args ${title}` : ''}${label ? ` (${label})` : ''}`,
       tag: ['fn', names],
-      required: [...(takesArgs && required ? ['args'] : []), ...needs.map(written)],
-      properties: { ...(takesArgs ? { args: argsOf(args) } : {}), ...fields },
+      required: [...(takesArgs && required ? ['args'] : []), ...needs],
+      // an aggregate over a window reads a frame of its window; a window function reads its partition whole
+      properties: { ...(takesArgs ? { args: argsOf(args) } : {}), ...fields, ...(frame ? { over: { $ref: OVER_FRAME_REF } } : {}) },
     });
   });
   const rowLeaf = { column: () => columnLeaf(), property: () => propertyLeaf(catalog?.eventPropEnum ? catalog.eventPropEnum() : []), value: valueLeaf, now: nowLeaf };
-  const leafForms = [...Object.keys(ROW_LEAVES).filter((k) => leaves.includes(k)).map((k) => rowLeaf[k]()), ...valueRefForms(catalog, { project, kinds: leaves })];
+  const leafForms = [...Object.keys(ROW_LEAVES).filter((k) => leaves.includes(k)).map((k) => rowLeaf[k]()), ...(leaves.length ? valueRefForms(catalog, { project, kinds: leaves }) : [])];
   // what the definition holds, said from what it holds — and, where the tool's places take different parts
   // of it, what each takes, read off the one table, so the description and the refusals say the same
   const has = (...fns) => fns.every((fn) => offered.includes(fn));
@@ -621,22 +672,52 @@ export function exprSchema(catalog, { project = null, places = null } = {}) {
   // the places the definition is for, each once (none named: every place there is)
   const ownPlaces = at ? at.filter((p, i) => at.findIndex((q) => q.what === p.what) === i) : Object.values(PLACES);
   const noRaw = at && has('raw') ? ownPlaces.filter((p) => !p.fns.includes('raw')).map((p) => `${p.what} takes no raw`) : [];
+  const aggregates = AGGREGATE_FNS.filter((fn) => offered.includes(fn));
   const text = [
-    `An expression: a leaf — ${either(leafSaid)} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`,
+    leaves.length
+      ? `An expression: a leaf — ${either(leafSaid)} — or a function { fn, args: [expressions], …its parameters }, its arguments expressions themselves, nested to any depth.`
+      : `ONE aggregate of the rows { fn, args: [row expressions], …its parameters } — ${either(aggregates)}; count with no args counts the rows, percentile takes \`percentile\`. It folds the rows its argument has a value on, skipping a missing value; its arguments are values of each row, with no aggregate in them — a formula over several aggregates is several measures and a derived metric.`,
     ...(ownPlaces.length > 1 ? [`Each place takes some of them, and a refusal says which — ${ownPlaces.map((p) => `${p.what}: ${p.leaves.map((k) => LEAVES[k].says).join(', ')}`).join('; ')}${noRaw.length ? `; ${noRaw.join('; ')}` : ''}.`] : []),
     // where what a place leaves out is written instead — its hint, as its refusal says it
     ...(at ? ownPlaces.filter((p) => p.hint).map((p) => (ownPlaces.length > 1 ? `For ${p.what}: ${p.hint.charAt(0).toLowerCase()}${p.hint.slice(1)}.` : `${p.hint}.`)) : []),
+    ...(leaveOut.includes('aggregate') ? ['An aggregate is no value of a row: it stands only as a measure\'s expr.'] : []),
     ...(leaves.includes('column') && has('round', 'div', 'sub') ? ['round((a - b) / b, 2): { fn: "round", args: [{ fn: "div", args: [{ fn: "sub", args: [{ column: "a" }, { column: "b" }] }, { column: "b" }] }], places: 2 }.'] : []),
     ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
-    ...(AGGREGATE_FNS.some((fn) => offered.includes(fn)) ? ['An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with `percentile`, …) folds rows where a measure is written, skipping a missing value. A conditional one folds a case, missing on the other rows — the rows where c holds { fn: "count", args: [{ fn: "case", cases: [{ when: [c], then: { value: 1 } }] }] }, their revenue { fn: "sum", args: [{ fn: "case", cases: [{ when: [c], then: { column: "price" } }] }] }; average of the first case with else: { value: 0 } is the share of the rows where c holds. A count / count_distinct takes no else: count would count the other rows, count_distinct their else value as one more.'] : []),
+    ...(aggregates.length && leaves.length ? [`An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with \`percentile\`, …) folds rows where a measure is written, skipping a missing value. ${FOLD_SAID}`] : []),
+    ...(aggregates.length && !leaves.length ? [FOLD_SAID] : []),
     ...(windows ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
     ...(has('raw') ? ['raw is a build\'s escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
   ].join(' ');
   // what an argument is, said once beside the forms that take one
   const nested = {
-    ...(forms.some((f) => f.properties.args) ? { args: { type: 'array', items: { $ref: ref }, description: 'A function\'s arguments, each an expression.' } } : {}),
+    ...(forms.some((f) => f.properties.args) ? { args: { type: 'array', items: { $ref: K.args }, description: K.args === K.ref ? 'A function\'s arguments, each an expression.' : 'Its arguments, each a value of the row.' } } : {}),
   };
-  return { type: 'object', description: text, properties: nested, anyOf: [...leafForms, ...forms] };
+  return { type: 'object', ...(K.title ? { title: K.title } : {}), description: text, properties: nested, anyOf: [...leafForms, ...forms] };
+}
+
+/**
+ * THE EXPRESSION'S DEFINITIONS IN A TOOL SCHEMA — each kind the tool's places take (`kinds`: { <EXPR_KINDS
+ * name>: [its places] }, null for every place; src/schema.js TOOL_PLACES — any other key is not an
+ * expression's), built by exprSchema, and the window where one of them takes one — each of its two
+ * definitions a form refers to (`over`, a window function's; `over_frame`, an aggregate over a window's,
+ * with its frame), by overSchema. A tool whose measures are a kind of their own (`aggregate`) holds no
+ * aggregate in its row expression.
+ * → { expr, aggregate?, metric_expr?, over?, over_frame? }, for the tool's `$defs`.
+ */
+export function exprDefs(catalog, { project = null, kinds = {} } = {}) {
+  const named = Object.keys(EXPR_KINDS).filter((k) => kinds[k] === null || kinds[k]?.length);
+  const defs = Object.fromEntries(named.map((k) => [k, exprSchema(catalog, { project, places: kinds[k], kind: k, leaveOut: k === 'expr' && named.includes('aggregate') ? ['aggregate'] : [] })]));
+  // the window: where a kind holds window forms — its places take a window — over the places it is for
+  const windowed = named.filter((k) => EXPR_KINDS[k].windows !== false).flatMap((k) => (exprPlacesOf(kinds[k]) || Object.values(PLACES)).filter((p) => p.windows));
+  if (!windowed.length) return defs;
+  const entities = windowed.some((p) => p.entities);
+  // each window definition a form refers to: a window function's, an aggregate over a window's
+  const refs = new Set(Object.values(defs).flatMap((d) => d.anyOf.map((f) => f.properties?.over?.$ref)));
+  return {
+    ...defs,
+    ...(refs.has(OVER_REF) ? { over: overSchema(catalog, { entities }) } : {}),
+    ...(refs.has(OVER_FRAME_REF) ? { over_frame: overSchema(catalog, { entities, frame: true }) } : {}),
+  };
 }
 
 // ── The writer ───────────────────────────────────────────────────────────────────────────────────────
@@ -781,7 +862,7 @@ function writer(d, cols, opts) {
     if (place && !place.fns.includes(fn)) throw notTaken(place, fn, at);
     if (place && window && !place.windows) throw notTaken(place, `a window (${fn} with over)`, at);
     // the fields a call may carry: its function's parameters, and over where it is a window
-    const allowed = new Set(['fn', ...(spec.args !== 0 ? ['args'] : []), ...(spec.needs || []).map(written), ...(spec.may || []).map(written), ...(window ? ['over'] : [])]);
+    const allowed = new Set(['fn', ...(spec.args !== 0 ? ['args'] : []), ...(spec.needs || []), ...(spec.may || []), ...(window ? ['over'] : [])]);
     const stray = Object.keys(e).filter((k) => !allowed.has(k));
     if (stray.length) {
       if (stray.includes('over') && kind !== 'window' && !spec.windowable) throw new Error(`${at}: ${fn} takes no \`over\` — a window is ${WINDOW_FNS.join(', ')}, or ${WINDOW_AGGREGATE_FNS.join(' / ')} over rows`);
@@ -792,8 +873,12 @@ function writer(d, cols, opts) {
     if (!Array.isArray(args)) throw new Error(`${at}: ${fn} takes \`args\` as a list of expressions`);
     const { min, max } = typeof spec.args === 'number' ? { min: spec.args, max: spec.args } : { min: spec.args.min, max: spec.args.max ?? Infinity };
     if (args.length < min || args.length > max) throw new Error(`${at}: ${fn} takes ${min === max ? min : max === Infinity ? `at least ${min}` : `${min} to ${max}`} argument${max === 1 ? '' : 's'}${spec.title ? ` ${spec.title}` : ''}, not ${args.length}`);
-    for (const n of spec.needs || []) if (e[written(n)] === undefined) throw new Error(`${at}: ${fn} needs \`${written(n)}\``);
+    for (const n of spec.needs || []) if (e[n] === undefined) throw new Error(`${at}: ${fn} needs \`${n}\``);
     if (kind === 'window' && e.over === undefined) throw new Error(`${at}: ${fn} needs \`over\``);
+    // a frame is read only by an aggregate over a window (it bounds what it folds for each row); a rank or
+    // a neighbour reads its partition whole, in order — its window ($defs.over) has no frame, and a caller
+    // past the schema is told so here
+    if (kind === 'window' && isObj(e.over) && e.over.frame !== undefined) throw new Error(`${at}: ${fn} takes no \`over.frame\` — a frame bounds what an aggregate over a window (${WINDOW_AGGREGATE_FNS.join(' / ')}) folds for each row; ${fn} is read over its whole partition, in the window's order. Leave the frame out`);
     // an aggregate folds the rows its argument has a value on: a case's else gives one to the rows no
     // branch takes — which a count counts whatever it is; any other aggregate folds it as the value it
     // is (average of 1 else 0: a share of the rows)

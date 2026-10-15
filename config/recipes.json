@@ -309,8 +309,8 @@
     {
       "id": "funnel_from_event_property_steps",
       "task_type": "metric_types",
-      "title": "A funnel whose steps are one event + a property value",
-      "when_to_use": "A funnel / drop-off over ordered steps recorded as one event with a different payload value (tutorial step_1 → step_2 → step_3) or as different events: onboarding, activation, checkout.",
+      "title": "Step reach of a funnel, order not checked: one event + a property value per step",
+      "when_to_use": "Who reached each step of a funnel when the order does not matter — steps recorded as one event with a different payload value (tutorial step_1, step_2, step_3) or as different events: onboarding, activation, checkout. For an ordered funnel, or one with a time limit between steps, see pipeline_ordered_sequence.",
       "required_events": [
         "tutorial"
       ],
@@ -545,7 +545,7 @@
     {
       "id": "conversion_metric_window",
       "task_type": "pipeline",
-      "title": "A conversion within a window: B within N hours/days of A",
+      "title": "A conversion within a window — retention (D1/D7), repeat purchase: B within N hours/days of A",
       "when_to_use": "Any \"did they do B within N of A\" question per entity: retention (D1/D7), repeat purchase, trial-to-paid, start-to-complete, reactivation, visit-to-purchase conversion.",
       "required_events": [
         "first_launch",

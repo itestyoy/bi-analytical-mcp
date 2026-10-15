@@ -312,7 +312,10 @@ export const semanticIndexMethods = {
       // Compact index hint: cardinality + the top 3 real values (null/[] until indexed).
       const st = this.valueIndex.stats(fact, p);
       const spec = c.eventPropertySpec(p, fact) || {};
-      return { name: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex: c.isComplexEventProp(p, fact), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(fact, p, 3) };
+      // the index keeps a property's values across every event that carries it, not per event: a
+      // property other events carry too says which, so its samples are not read as this event's
+      const others = (applies[p] || []).filter((e) => e !== eventName);
+      return { name: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex: c.isComplexEventProp(p, fact), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(fact, p, 3), ...(others.length ? { sample_values_also_from: others } : {}) };
     });
     // Drill-down guidance: point at properties whose real values are worth inspecting
     // next (prefer ones already indexed so the AI sees data), plus value search.
@@ -342,6 +345,7 @@ export const semanticIndexMethods = {
       source: fact,
       property_count: props.length,
       properties: rows,
+      ...(rows.some((r) => r.sample_values_also_from) ? { sample_values_note: `sample_values are a property's values on every event that carries it — where sample_values_also_from lists other events, some of them may never occur on '${input.event}'; semantic_index({ request: { source: '${fact}', property } }) shows how often each event carries it (event_coverage); filter on the event to see its own values.` } : {}),
       next_actions: nextActions,
       recommendations: recommendations.slice(0, 4),
     };
@@ -661,6 +665,8 @@ export const semanticIndexMethods = {
   const bundleList = c.facts.some((f) => c.bundleColumn(f)) ? this.valueIndex.bundles() : []; // [{ source, bundle, row_count }]
   return {
     dialect: c.dialect,
+    // the date a relative window ("last week", "yesterday") is resolved against — the surface has no other
+    today: new Date().toISOString().slice(0, 10),
     models,
     // The events FACTS — independent and equal; none is a default. Every tool takes the
     // source as its own argument (optional only when there is exactly one).

@@ -668,13 +668,19 @@ export function validateInput(validator, input, opts = {}) {
   // and what the input still lacks is read off it as it is now: a misspelt name inside the converted
   // value is said (the earlier spelling's own complaints are not)
   const earlier = earlierSpellings(validator, input, explained, opts);
-  for (const [path, now] of earlier) {
-    const msg = `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(now)}`;
-    seen.add(msg); errors.push(msg);
-  }
   const segsOf = (path) => path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
   const now = [...earlier].reduce((w, [path, v]) => replacedAt(w, segsOf(path), v), input);
   const rest = earlier.size ? explain(validator.schema, validator.schema, now, new Map()) : explained;
+  for (const [path, value] of earlier) {
+    // a conversion is offered as the value to write only where it is taken: one this place refuses too
+    // (a column it does not list) is said as today's spelling, with what is wrong in it below — never as
+    // a value to write that the next call is refused for
+    const refusedToo = rest.some((e) => within(e.instancePath, path));
+    const msg = refusedToo
+      ? `${fieldRef(path)} is written in an earlier spelling, and today's spelling of it, ${JSON.stringify(value)}, is not taken here either`
+      : `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(value)}`;
+    seen.add(msg); errors.push(msg);
+  }
   // a typed unnest standing alone (an edit_step / insert_step `step`) has no one value it is now: in a
   // list of steps it is two (untypedUnnest), so it is said as those two, each in today's spelling, to put
   // where it stood — the one thing said of it: what the forms find wrong in it is read off the unnest of

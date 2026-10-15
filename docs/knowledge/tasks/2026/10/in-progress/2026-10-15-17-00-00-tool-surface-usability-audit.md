@@ -61,6 +61,18 @@ re-checked by hand). The full report (in Russian) was handed to the owner in the
 - Texts: F10 (`fill_nulls_with` adds no rows), F6 (python trigger examples; served only with a python
   runtime), F59 (serverInfo.description), F69 (dead recipe references).
 
+## Wave 1 (done)
+- F34: tool results are compact JSON. F22: folded `$defs` are named by the field that uses them
+  (`users_column`, `context_id`, a form's title) — 12 of 148 still generic. F7/F23: one minimal call per
+  grammar tool in its description (`EXAMPLES`, src/tools/core.js; held valid by
+  test/unit/tool-examples.test.js) and a "use it for / for … use" sentence on the query tools; F21.
+- F42: an earlier spelling whose conversion the place refuses too is not offered as the value to write.
+  F71: an event view marks samples pooled across events (`sample_values_also_from`). F18: the overview
+  carries `today`. Texts: F28 (frame, not clarify), F25 (count_distinct is the default; HLL to combine
+  buckets), F26 / F52 (recipe titles: step reach; retention).
+- F13 (metric names in the start answer) is NOT done: a start answers with its task only (HARD RULE);
+  the description's example shows the `<name>_<metric>` naming instead.
+
 ## Not done
 - Evals with a model (no API key); the golden-question probes (the probe server went down with a
   container restart); independent verification of F17–F74.

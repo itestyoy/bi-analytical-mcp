@@ -163,7 +163,7 @@ export function toCallToolResult(result, name, args, engine = null) {
   // say (a feature view's forModel — every record is the card's, not the conversation's)
   const forModel = structured && !declared && typeof def?.view?.forModel === 'function' ? def.view.forModel(result, args) : result;
   return {
-    content: [{ type: 'text', text: JSON.stringify(forModel, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(forModel) }],
     ...(structured ? { structuredContent: result } : {}),
     // a result the engine RETURNED as a failure ({ ok: false, error }) — a build that failed, a
     // query the warehouse refused — is a tool execution error like a thrown one (spec: isError)
@@ -327,7 +327,7 @@ function summarizeResult(result) {
 
 export function errorResult(message, stage, field, code) {
   const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}), ...(code ? { code } : {}) } };
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
+  return { content: [{ type: 'text', text: JSON.stringify(payload) }], isError: true };
 }
 
 /**

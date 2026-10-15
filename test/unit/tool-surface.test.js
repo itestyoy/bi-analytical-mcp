@@ -217,7 +217,7 @@ test('a group-by path onto an unloaded FACT is refused with the fix: an item { s
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
     (err) => err.field === 'steps' && /needs model 'crashlytics'.*semantic_models: \[\{ source: 'crashlytics' \}\]/s.test(err.message),
   );
 });
@@ -236,7 +236,7 @@ test('a group-by column or via the model does not have is refused, listing the r
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   // (the metrics step's group_by: a refusal names it as the query numbers its steps)
-  const groupBy = (eng, contextId, metric, ref) => eng.query_semantic_model({ context_id: contextId, steps: [{ stage: 'metrics', metrics: [metric], group_by: [ref] }] });
+  const groupBy = (eng, contextId, metric, ref) => eng.query_model({ context_id: contextId, steps: [{ stage: 'metrics', metrics: [metric], group_by: [ref] }] });
   await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'users', column: 'shoe_size' }),
     /`steps\.0\.group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
   assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');

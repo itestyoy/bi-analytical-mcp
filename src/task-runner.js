@@ -143,6 +143,9 @@ export class TaskRunner {
    * drawn like any other). Returns { task_ids, context_id, read_with, next }.
    */
   startBatch(ctx, tool, queries, prepare) {
+    // the kind of task each query starts: one for the batch, or one per query (a metric query and a
+    // read of a stored table share a tool)
+    const kindOf = typeof tool === 'function' ? tool : () => tool;
     const works = queries.map((q, i) => {
       try { return prepare(q); } catch (e) {
         if (e instanceof ToolError) {
@@ -152,12 +155,12 @@ export class TaskRunner {
       }
     });
     const batch = { before: this.queue.get(ctx.id) || null };
-    const ids = works.map((work, i) => this.start(ctx, tool, work, { batch, input: { ...queries[i], context_id: ctx.id } }));
+    const ids = works.map((work, i) => this.start(ctx, kindOf(queries[i]), work, { batch, input: { ...queries[i], context_id: ctx.id } }));
     const all = Promise.allSettled(ids.map((id) => this.runs.get(id))).finally(() => {
       if (this.queue.get(ctx.id) === all) this.queue.delete(ctx.id);
     });
     this.queue.set(ctx.id, all);
-    const reader = this.readers[this.sideOf(tool)];
+    const reader = this.readers[this.sideOf(kindOf(queries[0]))];
     return {
       task_ids: ids,
       context_id: ctx.id,
@@ -170,6 +173,12 @@ export class TaskRunner {
   started(id, extra = {}) {
     const side = this.sideOf(this.jobs.get(id)?.tool);
     return { task_id: id, ...extra, read_with: this.readers[side], next: `${this.readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+  }
+
+  /** The tool a task's kind is said as: a query's kind (a metric query, a read of a stored table) by the
+   *  tool that started it, the query tool of its side; any other kind is a tool's own name. */
+  toolOf(kind) {
+    return kind?.startsWith('query_') && this.readers[this.sideOf(kind)] ? this.readers[this.sideOf(kind)] : kind;
   }
 
   /** The call that reads a task back: its side's query tool, with the task_id. */
@@ -197,7 +206,8 @@ export class TaskRunner {
     return job;
   }
 
-  /** A known task of THIS side — a task of the other side is refused with the tool that reads it. */
+  /** A known task of THIS side — one of `side` (a side, or the sides one tool reads) — a task of another
+   *  side is refused with the tool that reads it. */
   forSide(id, side) {
     const job = this.known(id);
     const own = this.sideOf(job.tool);
@@ -206,7 +216,7 @@ export class TaskRunner {
     if (!own) throw new ToolError(job.tool
       ? `task ${job.id} was started by ${job.tool}, which this server does not serve now (its feature is off), so no tool reads it back`
       : `task ${job.id} records no tool that started it, so neither side can read it back — start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-    if (own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_ids: ['${job.id}'] } })`, { stage: 'validate', field: 'task_id' });
+    if (![].concat(side).includes(own)) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_ids: ['${job.id}'] } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 
@@ -224,7 +234,7 @@ export class TaskRunner {
       if (job.status !== 'running') {
         return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
       }
-      const reason = `cancelled by ${this.readers[side]}({ request: { task_ids, cancel: true } })`;
+      const reason = `cancelled by ${this.readers[this.sideOf(job.tool)]}({ request: { task_ids, cancel: true } })`;
       this.controls.get(id)?.abort(new Error(reason));
       this.jobs.cancel(id, reason);
       this.keep(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
@@ -270,7 +280,7 @@ export class TaskRunner {
   status(id, waited = 0) {
     const job = this.jobs.get(id);
     const timing = this.results.get(id)?.timing;
-    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}), ...(timing ? { timing } : {}) };
+    const head = { task_id: id, ...(job.tool ? { tool: this.toolOf(job.tool) } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}), ...(timing ? { timing } : {}) };
     if (job.status === 'running') {
       if (!this.jobs.isLive(id)) return { head, pending: { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } } };
       return { head, pending: { ok: true, ...head, status: 'running', waited_seconds: waited, ...this.progressOf(id, job), next: `still running — call ${this.readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` } };

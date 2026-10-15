@@ -73,7 +73,7 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   // a tool's is the one builder's for ITS places (TOOL_PLACES): what they take together and nothing else,
   // under the one name, never a level of its own beside it — less the aggregates where its measures are a
   // kind of their own (build_semantic_model's $defs.aggregate)
-  for (const tool of ['build_pipeline_model', 'query_pipeline_model', 'build_semantic_model', 'query_semantic_model', 'build_pipeline_model.pipeline']) {
+  for (const tool of ['build_pipeline_model', 'query_model', 'build_semantic_model', 'build_pipeline_model.pipeline']) {
     const doc = schemas[tool];
     const kinds = TOOL_PLACES[tool.split('.')[0]];
     const places = kinds.expr;
@@ -97,9 +97,10 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   // a pipeline build: the rows' leaves, every function — no ref (a metric, another model's column)
   assert.deepEqual(of('build_pipeline_model').leaves, one.leaves.slice(0, 4));
   assert.deepEqual([...of('build_pipeline_model').fns].sort(), Object.keys(FNS).sort());
-  // a read of stored rows: no event property and no raw — a build's
-  assert.deepEqual(of('query_pipeline_model').leaves, ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
-  assert.ok(!of('query_pipeline_model').fns.has('raw'));
+  // a query — a read of stored rows, a metric query's where: no event property and no raw — a build's
+  assert.deepEqual(of('query_model').leaves.slice(0, 3), ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
+  assert.ok(!of('query_model').leaves.includes('an event property — { property }'));
+  assert.ok(!of('query_model').fns.has('raw'));
   // a semantic declaration: its rows' leaves and no aggregate — a measure is a kind of its own, ONE
   // aggregate of the task's whose arguments are the rows' expression; a derived metric's value is another,
   // { metric } and { value } in arithmetic, its arguments of its own kind. No raw, no window, no sketch
@@ -119,10 +120,10 @@ test('every tool that takes an expression carries the row expression, $defs.expr
     for (const kind of ['expr', 'aggregate', 'metric_expr']) assert.ok(!exprDef(sem, sem.$defs[kind]).fns.has(fn), `a semantic declaration's ${kind} takes no ${fn}`);
   }
   // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — no metric, no event property, no raw
-  const sq = of('query_semantic_model').leaves;
-  for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_semantic_model: ${leaf}`);
-  for (const leaf of ['{ metric }', 'an event property — { property }']) assert.ok(!sq.includes(leaf), `query_semantic_model: no ${leaf}`);
-  assert.ok(!of('query_semantic_model').fns.has('raw'));
+  const sq = of('query_model').leaves;
+  for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_model: ${leaf}`);
+  for (const leaf of ['{ metric }', 'an event property — { property }']) assert.ok(!sq.includes(leaf), `query_model: no ${leaf}`);
+  assert.ok(!of('query_model').fns.has('raw'));
 });
 
 // A VALUE'S TYPE IS WHAT IT IS READ FROM, AND ONE FUNCTION CONVERTS IT (cast): an event property is read
@@ -188,7 +189,7 @@ test('each place takes what its row in PLACES says, and a refusal names the plac
   assert.ok(sql('source_rows', raw).sql);
   refused('source_rows', { metric: 'revenue' }, '{ metric }');
   refused('source_rows', { source: 'users', column: 'country' }, '{ source, column }');
-  assert.throws(() => sql('source_rows', { metric: 'revenue' }), /a metric is query_semantic_model's/, 'and says where it is');
+  assert.throws(() => sql('source_rows', { metric: 'revenue' }), /a metric is query_model's/, 'and says where it is');
   // a read of stored rows: no source, so no event property; no raw SQL — both a build's, from the task
   assert.ok(sql('stored_rows', { fn: 'row_number', over: OVER_S }).sql);
   assert.ok(sql('stored_rows', { now: true }).sql);
@@ -265,7 +266,7 @@ test('an aggregate folds rows only where a measure is written; a window stands o
 // folds). So a frame on a rank or a neighbour is refused by the schema, and — for a caller past it — where
 // the value is built, saying to leave it out.
 test('a window function\'s window is $defs.over, an aggregate over a window\'s $defs.over_frame: a frame on a rank or a neighbour is refused', () => {
-  for (const tool of ['build_pipeline_model', 'query_pipeline_model', 'query_semantic_model']) {
+  for (const tool of ['build_pipeline_model', 'query_model', 'query_model']) {
     const doc = schemas[tool];
     const windowed = forms(doc, doc.$defs.expr).filter((f) => f.properties?.over);
     assert.ok(windowed.length >= 4, `${tool}: its window forms`);

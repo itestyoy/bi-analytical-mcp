@@ -28,7 +28,7 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   const e = engine();
   // one tree of each level's grammar: a metric query's where step over a dimension, a pipeline where over a column
   const levels = [
-    ['query_semantic_model', { source: 'users', column: 'country' }, (conditions) => ({ context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
+    ['query_model', { source: 'users', column: 'country' }, (conditions) => ({ context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
     ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
@@ -54,14 +54,14 @@ test('a join stage says how rows match in one field, via — a top-level on is r
 
 test('a read\'s condition is the one grammar over the stored table\'s columns, and a refusal names the form it meant', () => {
   const e = engine();
-  const read = (steps) => refusal(e, 'query_pipeline_model', { context_id: 'abc123', steps });
+  const read = (steps) => refusal(e, 'query_model', { context_id: 'abc123', steps });
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'a' }, { value: 1 }] }] }]), null);
   // a column against another column, an expression on either side: a read's too
   assert.equal(read([{ stage: 'where', conditions: [{ fn: 'gt', args: [{ fn: 'length', args: [{ column: 'a' }] }, { column: 'b' }] }] }]), null);
   // a stored table has no source: a read's expression, the one definition built for a read's place
   // (PLACES.stored_rows), has no event property among its leaves, so the schema refuses one — and the
   // read's place refuses it as the step is built, for a caller past the schema (src/pipeline.js renderRead)
-  assert.match(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]), /`steps\.0\.conditions\.0\.args\.0` has an unexpected property 'property'/);
+  assert.match(read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]), /`steps\.0\.conditions\.0\.args\.0` (has an unexpected property 'property'|must be exactly one of: \{ source: "events", property \})/);
   const property = (() => { try { renderRead(e.catalog, "{{ ref('t') }}", [{ name: 'a', type: 'numeric' }], [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 1 }] }] }]); return null; } catch (err) { return err.message; } })();
   assert.match(property, /steps\[0\]: .*\{ property \} is not what a read of stored rows takes — it takes \{ column \}, \{ value \}, \{ now: true \}/);
   assert.match(property, /from_task/);
@@ -83,10 +83,10 @@ test('an aggregate takes no where — over a window as folding rows — and a fu
 test('a query is started without an offset: paging is the read\'s, by row numbers of the result', () => {
   const e = engine();
   const metrics = [{ stage: 'metrics', metrics: ['x'] }];
-  assert.match(refusal(e, 'query_semantic_model', { context_id: 'abc123', steps: metrics, offset: 10 }), /unexpected property 'offset'/);
-  assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', offset: 10 }), /unexpected property 'offset'/);
-  assert.match(refusal(e, 'query_pipeline_model', { context_id: 'abc123', queries: [{ limit: 5, offset: 10 }] }), /unexpected property 'offset'/);
+  assert.match(refusal(e, 'query_model', { context_id: 'abc123', steps: metrics, offset: 10 }), /unexpected property 'offset'/);
+  assert.match(refusal(e, 'query_model', { context_id: 'abc123', offset: 10 }), /unexpected property 'offset'/);
+  assert.match(refusal(e, 'query_model', { context_id: 'abc123', queries: [{ limit: 5, offset: 10 }] }), /unexpected property 'offset'/);
   // a start's limit is the rows its task keeps; a read's offset/limit page them
-  assert.equal(refusal(e, 'query_semantic_model', { context_id: 'abc123', steps: metrics, limit: 10 }), null);
-  assert.equal(refusal(e, 'query_semantic_model', { task_ids: ['abc123abc123'], offset: 100, limit: 10 }), null);
+  assert.equal(refusal(e, 'query_model', { context_id: 'abc123', steps: metrics, limit: 10 }), null);
+  assert.equal(refusal(e, 'query_model', { task_ids: ['abc123abc123'], offset: 100, limit: 10 }), null);
 });

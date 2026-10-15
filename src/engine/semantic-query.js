@@ -30,6 +30,17 @@ export const refText = (ref) => `{ ${Object.entries(ref).map(([k, v]) => `${k}: 
 /** How a ref of `groupable` is shown in a sentence: users.country (via …), events.tier. */
 const refShown = (r) => (r.source !== undefined ? `${r.source}.${r.column ?? r.property}${r.via ? ` (via ${r.via})` : ''}` : `${r.semantic_model.join(' → ')}.${r.dimension}`);
 
+/** The sides query_model reads back: a metric query's and a stored table read's. */
+const QUERY_SIDES = ['semantic', 'pipeline'];
+
+/** A query without a metrics step reads a stored table: it takes its steps, limit and dry_run — what
+ *  belongs to a metric query alone is refused, naming it. */
+function readOnly(q) {
+  const extra = ['time_range', 'materialize', 'include'].filter((k) => q[k] !== undefined);
+  if (extra.length) throw new ToolError(`${extra.join(', ')} ${extra.length > 1 ? 'belong' : 'belongs'} to a metric query — one with a metrics step; a query without one reads the context's stored table, and takes its steps, limit and dry_run`, { stage: 'validate', field: extra[0] });
+  return q;
+}
+
 export const semanticQueryMethods = {
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
   _taskDimMap(ctx) {
@@ -239,33 +250,50 @@ export const semanticQueryMethods = {
     return (ctx.state.additions?.[model]?.dimensions || []).find((d) => d._attribute === attribute) || null;
   },
 
-  async query_semantic_model(input) {
-    this._validate('query_semantic_model', input);
-    // the read half: { task_ids } waits for semantic tasks (a model being parsed, a query) and returns each
-    if (input.cancel) return this._cancelTasks(input, 'semantic');
-    if (input.task_ids) return this._pollTasks(input, 'semantic');
+  /**
+   * QUERY A CONTEXT — one tool for both kinds of query, told apart by their steps: a query with a metrics
+   * step computes the context's metrics (the semantic layer; the steps before it filter, the steps after
+   * it work on the result); one without reads the table the context's pipeline stored, through steps of
+   * the pipeline's own read stages. { task_ids } reads tasks of either kind back, { task_ids, cancel }
+   * stops them, { queries } starts several — of either kind — side by side.
+   */
+  async query_model(input) {
+    this._validate('query_model', input);
+    if (input.cancel) return this._cancelTasks(input, QUERY_SIDES);
+    if (input.task_ids) return this._pollTasks(input, QUERY_SIDES);
     const ctx = this._ctx(input.context_id);
-
-    // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
-    // the result: read them from its build's task, or re-slice them with a pipeline started from it.
-    if (ctx.state.engine === 'pipeline') {
-      const built = ctx.state.pipeline_model?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_ids: ['${built}'] } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', steps } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+    // a metric query has a metrics step; a context that holds no pipeline table has nothing else to read,
+    // so a query of it without one is a metric query too — refused there, naming the metrics it offers
+    const pipelineContext = ctx.state.engine === 'pipeline' || !!ctx.state.draft || !!ctx.state.pipeline_model;
+    const metricQuery = (q) => !pipelineContext || (q.steps || []).some((st) => st?.stage === METRICS_STEP.stage);
+    // A BATCH (queries): every query is validated before any starts, and they run side by side — one
+    // task each, of the kind its steps say, read together with { task_ids }.
+    if (input.queries) {
+      return this._startBatch(ctx, (q) => (metricQuery(q) ? 'query_semantic_model' : 'query_pipeline_model'), input.queries,
+        (q) => (metricQuery(q) ? this._metricQueryWork(ctx, { ...q, context_id: ctx.id }) : this._pipelineQueryWork(ctx, readOnly(q))));
     }
-    // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
-    const project = ctx.state.engine === 'project';
-    const work = project ? (q) => this._projectQueryWork(ctx, q) : (q) => this._semanticQueryWork(ctx, q);
-    // A BATCH (queries): every query is validated before any starts, and they run
-    // side by side — one task each, read together with { task_ids }.
-    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => work({ ...q, context_id: ctx.id }));
+    if (!metricQuery(input)) return this._startPipelineQuery(ctx, readOnly(input));
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
     // A query only compiled (dry_run) runs nothing on the warehouse: it waits for the
     // declaration it compiles, not behind the queries before it.
+    const project = ctx.state.engine === 'project';
     const compileOnly = !!input.dry_run;
     const slot = project ? { batch: { before: null } } : compileOnly ? { batch: this.tasks.afterBuilds(ctx) } : {};
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...slot }), { context_id: ctx.id });
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', this._metricQueryWork(ctx, input), { input, ...slot }), { context_id: ctx.id });
+  },
+
+  /** The work of one metric query (a query with a metrics step) on `ctx`: checked now, run by its task. */
+  _metricQueryWork(ctx, input) {
+    // A context that holds a pipeline's table and no metrics: its rows are the result — read them with
+    // steps of the pipeline's own read stages (no metrics step), or build on them from the build's task.
+    if (ctx.state.engine === 'pipeline' && !(ctx.state.metrics || []).length) {
+      const built = ctx.state.pipeline_model?.task_id;
+      throw new ToolError(`context ${ctx.id} holds a pipeline table (${ctx.state.model}), no metrics: read its rows with query_model({ request: { context_id: '${ctx.id}', steps } }) — steps without a metrics step${built ? `, or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : ''}`, { stage: 'validate', field: 'steps' });
+    }
+    // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
+    return ctx.state.engine === 'project' ? this._projectQueryWork(ctx, input) : this._semanticQueryWork(ctx, input);
   },
 
   /** The tokens any metric query causes besides what it names: metric_time at every grain, and
@@ -361,7 +389,7 @@ export const semanticQueryMethods = {
     };
     if (only) return one(only);
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ request: { context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ request: { context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // joins the project declares that no reference could name — a model joined through several keys,
@@ -854,7 +882,7 @@ export const semanticQueryMethods = {
       return out;
     };
 
-    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ request: { task_ids } }).
+    // The query is a TASK: validated above, run below, its response read with query_model({ request: { task_ids } }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
     return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond, tail });

@@ -1,5 +1,5 @@
 // THE PROJECT'S OWN SEMANTIC LAYER — a dbt project that declares its semantic models and metrics
-// itself is read at start and queried with query_semantic_model in the context "project", with no
+// itself is read at start and queried with query_model in the context "project", with no
 // build step; every number below is checked against the warehouse's own rows.
 
 import { test, before, after } from 'node:test';
@@ -99,7 +99,7 @@ const skip = (t) => {
 // each of the project's semantic models is a context of its own, named after it
 const EV = 'project_events';
 const ACQ = 'project_acquisition';
-const q = (context_id, input) => engine.query_semantic_model({ context_id, time_range: WINDOW, ...input });
+const q = (context_id, input) => engine.query_model({ context_id, time_range: WINDOW, ...input });
 const rowsOf = (r) => { assert.equal(r.ok, true, JSON.stringify(r.error)); return r.rows; };
 const num = (v) => Number(v);
 const preview = (input) => (engine.raw || engine).preview_semantic_model(input);
@@ -115,8 +115,8 @@ const noInternal = (v, what) => assert.doesNotMatch(OWN_DUNDER_COLUMNS.reduce((t
  */
 async function explainedIsTheQuery(input) {
   const raw = engine.raw || engine;
-  const rows = rowsOf(await engine.query_semantic_model(input));
-  const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, dry_run: true, include: ['plan'] })).task_id);
+  const rows = rowsOf(await engine.query_model(input));
+  const explained = await taskResult(raw, (await raw.query_model({ ...input, dry_run: true, include: ['plan'] })).task_id);
   assert.equal(explained.ok, true, JSON.stringify(explained.error));
   noInternal(explained, 'the explained query');
   const shown = (await wh.query(explained.sql)).rows;
@@ -155,16 +155,16 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.equal(described.engine, 'project');
   assert.equal(described.context_id, ACQ);
   // the tools that take one of them offer them as values, and still take any id a build returned
-  for (const tool of ['query_semantic_model', 'preview_semantic_model', 'context']) {
+  for (const tool of ['query_model', 'preview_semantic_model', 'context']) {
     const schema = engine.schemas[tool];
     const [presets, built] = field(schema, schema, 'context_id').anyOf.map((n) => deref(schema, n));
     assert.deepEqual(presets.enum, [ACQ, EV], tool);
     assert.ok(built.pattern, tool);
   }
   const cost = [{ stage: 'metrics', metrics: ['project_cost'] }];
-  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: 'Not-An-Id', steps: cost })), /context_id/);
+  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_model({ context_id: 'Not-An-Id', steps: cost })), /context_id/);
   // the parsed copy they share is nobody's to address, nor listed
-  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: PROJECT_STORE, steps: cost })), /context_id/);
+  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_model({ context_id: PROJECT_STORE, steps: cost })), /context_id/);
   assert.equal((await engine.context({ action: 'list' })).contexts?.some?.((c) => c.context_id === PROJECT_STORE) ?? false, false);
 });
 
@@ -230,7 +230,7 @@ test('a snapshot metric (non_additive_dimension) takes the last day of the perio
 test('what the project does not define is refused in the call, naming what it does', opts, async (t) => {
   if (skip(t)) return;
   const raw = engine.raw || engine;
-  const refused = (input, re) => assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: EV, ...input })), re);
+  const refused = (input, re) => assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: EV, ...input })), re);
   await refused({ steps: [{ stage: 'metrics', metrics: ['project_events_totl'] }] }, /not a metric of the context 'project_events'.*project_events_total/);
   // a metric of another semantic model is named with the context it lives in
   await refused({ steps: [{ stage: 'metrics', metrics: ['project_cost'] }] }, /not a metric of the context 'project_events' — it reads project_acquisition: query it in the context 'project_acquisition'/);
@@ -263,9 +263,9 @@ test('queries of the project\'s layer started together run side by side on a gua
   const raw = guarded.raw;
   // a: over a table the catalog requires no window for, asked with none — and with project_cost, the
   // snapshot metric over the whole period; b: the guarded source, bounded; c: another of a's metrics
-  const a = await raw.query_semantic_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_cost', 'project_impressions_last_day', 'project_impressions'] }] });
-  const b = await raw.query_semantic_model({ context_id: EV, steps: [{ stage: 'metrics', metrics: ['project_events_total'] }], time_range: WINDOW });
-  const c = await raw.query_semantic_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_clicks'] }], time_range: WINDOW });
+  const a = await raw.query_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_cost', 'project_impressions_last_day', 'project_impressions'] }] });
+  const b = await raw.query_model({ context_id: EV, steps: [{ stage: 'metrics', metrics: ['project_events_total'] }], time_range: WINDOW });
+  const c = await raw.query_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_clicks'] }], time_range: WINDOW });
   // the second is not queued behind the first: both are running before either is read
   assert.equal(raw.jobs.get(a.task_id).status, 'running', '[side by side] a');
   assert.equal(raw.jobs.get(b.task_id).status, 'running', '[side by side] b');
@@ -284,7 +284,7 @@ test('queries of the project\'s layer started together run side by side on a gua
   assert.equal(num(ra.rows[0].project_impressions_last_day), num(last.n), '[snapshot whole period] the last day');
   assert.equal(num(ra.rows[0].project_impressions), num(all.n), '[snapshot whole period] the plain total');
   // [the cost guardrail] the guarded source's metric without a window is refused in the call
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: EV, steps: [{ stage: 'metrics', metrics: ['project_events_total'] }] })), /project_events requires a bounded time window \(require_time_range\)/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: EV, steps: [{ stage: 'metrics', metrics: ['project_events_total'] }] })), /project_events requires a bounded time window \(require_time_range\)/);
 });
 
 test('a stored result of the project\'s layer outlives a restart — even one whose project does not parse — is held while a pipeline reads it, and ages out like any context\'s', opts, async (t) => {
@@ -295,7 +295,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   const stored = await q(ACQ, { steps: clicksBySource, materialize: true });
   assert.equal(stored.ok, true, JSON.stringify(stored.error));
   // a read of what is stored, not of the response still held in memory (a restart forgets that)
-  const readStored = async (id) => { raw._taskResults.delete(id); return one(raw.query_semantic_model({ task_ids: [id] })); };
+  const readStored = async (id) => { raw._taskResults.delete(id); return one(raw.query_model({ task_ids: [id] })); };
   const readBack = () => readStored(stored.task_id);
   const clicks = (r) => Object.fromEntries(r.rows.map((x) => [x.media_source, num(x.project_clicks)]));
   // a start whose project does not parse serves nothing, and keeps what earlier starts stored
@@ -372,7 +372,7 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
 
   // [a dimension of another semantic model is named by where it lives — MetricFlow makes the join — and is the warehouse's own join]
   // named as if it were the context's own, it is refused saying where it lives
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, ...costBy({ semantic_model: [ACQ], dimension: 'label' }) })), /not a dimension of project_acquisition; it is .*semantic_model: \["project_media_sources"\]/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: ACQ, ...costBy({ semantic_model: [ACQ], dimension: 'label' }) })), /not a dimension of project_acquisition; it is .*semantic_model: \["project_media_sources"\]/);
   // the numbers of the same join made by hand
   const wantLabel = Object.fromEntries((await wh.query('select upper(a.media_source) as label, sum(a.cost) as cost from fct_player_acquisition a group by 1')).rows.map((r) => [r.label, num(r.cost)]));
   const byLabel = rowsOf(await q(ACQ, costBy(joined)));
@@ -380,7 +380,7 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
   assert.deepEqual(Object.keys(byLabel[0]).sort(), ['project_cost', 'project_media_sources_label'], '[joined label] the result columns');
   for (const [label, cost] of Object.entries(wantLabel)) assert.ok(Math.abs(num(byLabel.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, `[joined label] ${label}`);
   // a path is not a thing to spell: only the chain of models
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, ...costBy({ ...joined, via: 'media_source' }) })), /via/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: ACQ, ...costBy({ ...joined, via: 'media_source' }) })), /via/);
   // a where on it, before the metrics step
   const [{ meta }] = (await wh.query("select sum(cost) as meta from fct_player_acquisition where upper(media_source) = 'META'")).rows;
   const metaOnly = rowsOf(await q(ACQ, { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ ...joined }, { value: 'META' }] }] }, { stage: 'metrics', metrics: ['project_cost'] }] }));
@@ -400,7 +400,7 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
   sumsToTotal(byChain, chain);
   sameKinds(kinds(byChain), wantChain, '[chained kind]');
   // a chain MetricFlow does not list is refused, naming the ways there are
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, ...costBy({ semantic_model: ['project_events', 'project_channels'], dimension: 'kind' }) })), /reached as .*project_media_sources/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: ACQ, ...costBy({ semantic_model: ['project_events', 'project_channels'], dimension: 'kind' }) })), /reached as .*project_media_sources/);
 
   // [by a key declared only as an entity: sums, a max and an average over nullif, a boolean sum, a ratio, and a ratio over a derived metric]
   const want = (await wh.query(`select media_source, sum(cost) as cost, sum(clicks) as clicks, sum(impressions) as impressions,
@@ -440,8 +440,8 @@ test('project_cost: every cut the preview lists is queried once and is the wareh
       { stage: 'order_by', keys: [{ key: 'project_cost', direction: 'desc' }] },
     ],
   };
-  const stepped = rowsOf(await engine.query_semantic_model(withSteps));
-  const explained = await taskResult(raw, (await raw.query_semantic_model({ ...withSteps, dry_run: true })).task_id);
+  const stepped = rowsOf(await engine.query_model(withSteps));
+  const explained = await taskResult(raw, (await raw.query_model({ ...withSteps, dry_run: true })).task_id);
   assert.equal(explained.ok, true, JSON.stringify(explained.error));
   noInternal(explained, '[steps] the explained query');
   const shown = (await wh.query(explained.sql)).rows;
@@ -473,7 +473,7 @@ test('a metric of two semantic models is cut only by what both carry: the previe
   // the metrics it is made of come with it
   assert.deepEqual(p.metrics.map((x) => x.name).sort(), ['project_clicks', 'project_events_per_click', 'project_events_total']);
   // a cut only one input has is refused in the call
-  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_events_per_click'], group_by: [{ semantic_model: [ACQ], dimension: 'campaign' }] }] })), /not a dimension project_events_per_click can be grouped by/);
+  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_events_per_click'], group_by: [{ semantic_model: [ACQ], dimension: 'campaign' }] }] })), /not a dimension project_events_per_click can be grouped by/);
   // the one they share, on data: per player, events / clicks
   const ev = new Map((await wh.query('select player_id_of_internal as p, count(event_id) as n from fct_analytics_events group by 1')).rows.map((r) => [r.p, num(r.n)]));
   const cl = new Map((await wh.query('select player_id_of_internal as p, sum(clicks) as n from fct_player_acquisition group by 1')).rows.map((r) => [r.p, num(r.n)]));
@@ -591,13 +591,13 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   // a project dimension is not addressed there: it belongs to the project's context
   // (pvw_tutorials grouped by the cuts given)
   const tutorialsBy = (...group_by) => [{ stage: 'metrics', metrics: ['pvw_tutorials'], group_by }];
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: out.context_id, steps: tutorialsBy({ semantic_model: [EV], dimension: 'event_name' }) })), /'project_events\.event_name' is named as the dbt project's own semantic layer names it.*context_id: its name/);
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: out.context_id, steps: tutorialsBy({ entity: 'media_source' }) })), /the entity 'media_source' is named as the dbt project's own semantic layer names it — query it in the context of the semantic model/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: out.context_id, steps: tutorialsBy({ semantic_model: [EV], dimension: 'event_name' }) })), /'project_events\.event_name' is named as the dbt project's own semantic layer names it.*context_id: its name/);
+  await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: out.context_id, steps: tutorialsBy({ entity: 'media_source' }) })), /the entity 'media_source' is named as the dbt project's own semantic layer names it — query it in the context of the semantic model/);
   // …and a where step before the metrics step named that way is refused the same way, with the way
   // this context names it
   const whereOf = (ref) => ({ context_id: out.context_id, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [ref, { value: 'x' }] }] }, { stage: 'metrics', metrics: ['pvw_tutorials'] }] });
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model(whereOf({ semantic_model: [EV], dimension: 'country' }))), (e) => e.name === 'ToolError' && /'project_events\.country' is named as the dbt project's own semantic layer names it.*\{ source, column \}/.test(e.message));
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model(whereOf({ entity: 'player' }))), (e) => e.name === 'ToolError' && /the entity 'player'.*\{ source, column \}/.test(e.message));
+  await assert.rejects(Promise.resolve().then(() => raw.query_model(whereOf({ semantic_model: [EV], dimension: 'country' }))), (e) => e.name === 'ToolError' && /'project_events\.country' is named as the dbt project's own semantic layer names it.*\{ source, column \}/.test(e.message));
+  await assert.rejects(Promise.resolve().then(() => raw.query_model(whereOf({ entity: 'player' }))), (e) => e.name === 'ToolError' && /the entity 'player'.*\{ source, column \}/.test(e.message));
 
   // [nothing handed back spells MetricFlow's entity__dimension] a task's context: a column through
   // a join, metric_time, and a where through the join — explained, its SQL run as shown is its own rows
@@ -621,13 +621,13 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   // query running on the context is not a build: the preview does not say it is building
   const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'tutorial'")).rows;
   const cuts = p.groupable.slice(0, 3);
-  const running = await raw.query_semantic_model({ context_id: out.context_id, steps: tutorialsBy(cuts[0]), time_range: WINDOW });
+  const running = await raw.query_model({ context_id: out.context_id, steps: tutorialsBy(cuts[0]), time_range: WINDOW });
   assert.equal(raw.jobs.get(running.task_id).status, 'running');
   assert.equal((await preview({ context_id: out.context_id })).status.building, undefined);
   const firstCut = await taskResult(raw, running.task_id);
   // (the cuts after the first, each in a query of its own)
   for (const [i, cut] of cuts.entries()) {
-    const rows = i === 0 ? rowsOf(firstCut) : rowsOf(await engine.query_semantic_model({ context_id: out.context_id, steps: tutorialsBy(cut), time_range: WINDOW }));
+    const rows = i === 0 ? rowsOf(firstCut) : rowsOf(await engine.query_model({ context_id: out.context_id, steps: tutorialsBy(cut), time_range: WINDOW }));
     assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), `[every cut gives back the whole count] ${JSON.stringify(cut)}`);
   }
   // a build that is running is
@@ -705,20 +705,20 @@ test('nothing is keyed on a name: files moved and renamed, a semantic model and 
   assert.ok(loaded3?.layer, JSON.stringify(loaded3));
   assert.deepEqual(loaded3.contexts.sort(), ['paid_spend_daily', EV]);
   const engine3 = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs3, runner: backend, project: loaded3 }));
-  const q3 = engine3.schemas.query_semantic_model;
+  const q3 = engine3.schemas.query_model;
   assert.deepEqual(deref(q3, field(q3, q3, 'context_id').anyOf[0]).enum, ['paid_spend_daily', EV]);
   // a semantic model no metric reads is no context of its own: nothing could be queried there
   assert.deepEqual(loaded3.dimension_only.sort(), ['project_channels', 'project_media_sources', 'user_profiles']);
   assert.deepEqual((await engine3.semantic_index({})).project_semantic_layer.dimension_only.sort(), ['project_channels', 'project_media_sources', 'user_profiles']);
   const want = Object.fromEntries((await wh.query('select media_source, sum(cost) as cost, sum(clicks) as clicks, sum(impressions) as imp from fct_player_acquisition group by 1')).rows.map((r) => [r.media_source, r]));
-  const got = rowsOf(await engine3.query_semantic_model({ context_id: 'paid_spend_daily', time_range: WINDOW, steps: [{ stage: 'metrics', metrics: ['zz_cost', 'zz_cost_per_touch'], group_by: [{ entity: 'media_source' }, { semantic_model: ['paid_spend_daily'], dimension: 'campaign' }] }] }));
+  const got = rowsOf(await engine3.query_model({ context_id: 'paid_spend_daily', time_range: WINDOW, steps: [{ stage: 'metrics', metrics: ['zz_cost', 'zz_cost_per_touch'], group_by: [{ entity: 'media_source' }, { semantic_model: ['paid_spend_daily'], dimension: 'campaign' }] }] }));
   const sums = {};
   for (const r of got) sums[r.media_source] = (sums[r.media_source] || 0) + num(r.zz_cost);
   for (const [src, w] of Object.entries(want)) assert.ok(Math.abs(sums[src] - num(w.cost)) < 1e-9, src);
   // the result column of a dimension carries the semantic model's own name
   assert.ok(got.every((r) => 'paid_spend_daily_campaign' in r), JSON.stringify(got[0]));
   // the old names are nobody's now
-  await assert.rejects(Promise.resolve().then(() => engine3.raw.query_semantic_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_cost'] }] })), /unknown context_id/);
+  await assert.rejects(Promise.resolve().then(() => engine3.raw.query_model({ context_id: ACQ, steps: [{ stage: 'metrics', metrics: ['project_cost'] }] })), /unknown context_id/);
 });
 
 test('a query is addressed by what and where, and nothing handed back spells MetricFlow\'s entity__dimension: an explained query\'s SQL, run as shown, is the query\'s own numbers', opts, async (t) => {
@@ -744,7 +744,7 @@ test('a query is addressed by what and where, and nothing handed back spells Met
   assert.deepEqual(byName, Object.fromEntries(want.map((r) => [r.event_name, num(r.n)])), '[by one of its dimensions]');
   await explainedIsTheQuery(ownColumn);
   // what a refusal and a failed run say names things the same way
-  const failed = await taskResult(raw, (await raw.query_semantic_model(eventsWhere({ fn: 'eq', args: [{ semantic_model: [EV], dimension: 'event_at' }, { value: 'not a date' }] }))).task_id);
+  const failed = await taskResult(raw, (await raw.query_model(eventsWhere({ fn: 'eq', args: [{ semantic_model: [EV], dimension: 'event_at' }, { value: 'not a date' }] }))).task_id);
   assert.equal(failed.ok, false, JSON.stringify(failed));
   noInternal(failed, 'a failed query');
 });
@@ -835,12 +835,12 @@ test('a semantic model joined onto through several keys is not served — said a
   assert.ok(p.status.issues.some((i) => i.severity === 'error' && i.semantic_model === 'role_channels' && /several keys/.test(i.message)), JSON.stringify(p.status.issues));
   // …and a query naming it is refused in the call, in group_by and in a where step alike
   const ref = { semantic_model: ['role_channels'], dimension: 'kind' };
-  await assert.rejects(Promise.resolve().then(() => eng.raw.query_semantic_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'], group_by: [ref] }], time_range: WINDOW })), /joined onto through several keys.*not served.*one semantic model per key/);
-  await assert.rejects(Promise.resolve().then(() => eng.raw.query_semantic_model({ context_id: 'role_spend', time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ ...ref }, { value: 'PAID' }] }] }, { stage: 'metrics', metrics: ['role_cost'] }] })), /several keys/);
+  await assert.rejects(Promise.resolve().then(() => eng.raw.query_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'], group_by: [ref] }], time_range: WINDOW })), /joined onto through several keys.*not served.*one semantic model per key/);
+  await assert.rejects(Promise.resolve().then(() => eng.raw.query_model({ context_id: 'role_spend', time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ ...ref }, { value: 'PAID' }] }] }, { stage: 'metrics', metrics: ['role_cost'] }] })), /several keys/);
   // the rest of the layer is served as before
   await runModels(dir, ['fct_role_spend']);
   const [{ cost }] = (await wh.query('select sum(cost) as cost from fct_player_acquisition')).rows;
-  const total = rowsOf(await eng.query_semantic_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'] }], time_range: WINDOW }));
+  const total = rowsOf(await eng.query_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'] }], time_range: WINDOW }));
   assert.ok(Math.abs(num(total[0].role_cost) - num(cost)) < 1e-9);
 });
 
@@ -856,7 +856,7 @@ test('declared as the fix says — one semantic model per key — each role is a
   const listed = (await eng.raw.preview_semantic_model({ context_id: 'role_spend', metric: 'role_cost' })).metrics[0].group_by.dimensions.map((d) => JSON.stringify(d));
   for (const r of refs) assert.ok(listed.includes(JSON.stringify(r)), `${JSON.stringify(r)} in ${listed}`);
   const want = (await wh.query(`select upper(${CHANNEL_OF_ROW}) as booked, upper(${CHANNEL_OF_SOURCE}) as src, sum(cost) as cost from fct_player_acquisition group by 1, 2`)).rows;
-  const got = rowsOf(await eng.query_semantic_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'], group_by: refs }], time_range: WINDOW }));
+  const got = rowsOf(await eng.query_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'], group_by: refs }], time_range: WINDOW }));
   assert.equal(got.length, want.length);
   for (const w of want) {
     const r = got.find((x) => x.booked_channels_kind === w.booked && x.source_channels_kind === w.src);

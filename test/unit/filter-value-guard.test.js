@@ -136,7 +136,7 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   });
   const country = { source: 'users', column: 'country' };
   // (a metric query filters the rows its metrics fold in where steps before its metrics step)
-  const query = (...conditions) => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['vguard_n'] }] });
+  const query = (...conditions) => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['vguard_n'] }] });
   await assert.rejects(() => query({ fn: 'eq', args: [country, { value: 'de' }] }), /different casing.*'DE'/s);
   // …and inside or / not, a member of an in
   await assert.rejects(
@@ -145,7 +145,7 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   );
   // …and in every where step before the metrics step, the second as the first
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }, { stage: 'where', conditions: [{ fn: 'neq', args: [country, { value: 'de' }] }] }, { stage: 'metrics', metrics: ['vguard_n'] }] }),
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }, { stage: 'where', conditions: [{ fn: 'neq', args: [country, { value: 'de' }] }] }, { stage: 'metrics', metrics: ['vguard_n'] }] }),
     /different casing.*'DE'/s,
   );
 });

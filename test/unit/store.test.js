@@ -52,7 +52,7 @@ test('a database an earlier server wrote is brought to the declared tables: colu
   const store = openStore({ dbPath });
   const jobs = new JobManager({ store });
   assert.equal(jobs.get('j1').status, 'ready', 'a job row is kept');
-  const id = jobs.create({ contextId: 'c2', tool: 'query_pipeline_model' });
+  const id = jobs.create({ contextId: 'c2', tool: 'query_model' });
   jobs.ready(id);
   const idx = new ValueIndex({ store });
   assert.equal(idx.stats('users', 'country'), null, 'the cache keyed by property alone is rebuilt empty');
@@ -61,7 +61,7 @@ test('a database an earlier server wrote is brought to the declared tables: colu
   store.close();
 
   const again = openStore({ dbPath });
-  assert.equal(new JobManager({ store: again }).get(id).tool, 'query_pipeline_model', 'the added column holds what is written');
+  assert.equal(new JobManager({ store: again }).get(id).tool, 'query_model', 'the added column holds what is written');
   assert.deepEqual(new ValueIndex({ store: again }).sampleValues('users', 'country'), [{ value: 'US', freq: 3 }, { value: 'GB', freq: 2 }]);
   assert.equal(again.errors.list().rows[0].context, '{}');
   again.close();
@@ -86,7 +86,7 @@ test('a table MCP_DB_RESET wipes, keyed otherwise, is refused naming the reset â
   assert.throws(() => openStore({ dbPath }), /jobs is keyed by \(context_id\).*MCP_DB_RESET=1 clears it/);
   const store = openStore({ dbPath, reset: true });
   const jobs = new JobManager({ store });
-  const id = jobs.create({ contextId: 'c1', tool: 'query_pipeline_model' });
+  const id = jobs.create({ contextId: 'c1', tool: 'query_model' });
   assert.equal(jobs.get(id).contextId, 'c1');
   assert.equal(store.memory.get('m1').note, 'kept');
   store.close();
@@ -143,8 +143,8 @@ test('a task stored before tasks recorded their tool is refused by either side, 
   old.close();
   const store = openStore({ dbPath });
   const jobs = new JobManager({ store });
-  const sides = { query_semantic_model: 'semantic', query_pipeline_model: 'pipeline' };
-  const runner = new TaskRunner({ jobs, ctxs: null, sideOf: (tool) => sides[tool] || null, readers: { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' } });
+  const sides = { query_model: 'semantic', query_model: 'pipeline' };
+  const runner = new TaskRunner({ jobs, ctxs: null, sideOf: (tool) => sides[tool] || null, readers: { semantic: 'query_model', pipeline: 'query_model' } });
   for (const side of ['semantic', 'pipeline']) assert.throws(() => runner.forSide('aaaaaaaaaaaa', side), (e) => /records no tool that started it/.test(e.message) && e.code === 'result_gone');
   // a task whose tool is no longer served (its feature off) says so, not that it records none
   const off = jobs.create({ contextId: 'c2', tool: 'query_retentioneering_model' });

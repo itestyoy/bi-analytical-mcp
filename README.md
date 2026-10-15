@@ -27,8 +27,7 @@ Design docs:
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
-| `query_semantic_model` | a metric query as `steps`: one `metrics` step (metrics + group_by) run by `mf query` against a context, `where` steps before it for the rows its metrics fold, and the pipeline's own read stages after it over its result (a where step on a metric is a having) |
-| `query_pipeline_model` | read a built pipeline's rows, or query its stored table in `steps` of the pipeline's own stages (where, compute, aggregate, pivot, …) |
+| `query_model` | a query as `steps`, reading every task back (`{ task_ids }`): with one `metrics` step (metrics + group_by) a metric query run by `mf query` against a context, `where` steps before it for the rows its metrics fold, and the pipeline's own read stages after it over its result (a where step on a metric is a having); without one, a read of the context's stored pipeline table in the same read stages (where, compute, aggregate, pivot, …) |
 | `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
 
 Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
@@ -75,7 +74,7 @@ the read steps after it work on its result:
 ```
 AI ──► build_semantic_model (enum-constrained)
           └─ compile → render YAML → .mcp/ctx/<id>/models/generated/context.yml → dbt parse
-AI ──► query_semantic_model (enum-constrained)
+AI ──► query_model (enum-constrained)
           └─ mf query (dbt Core, MetricFlow kept warm) in the context overlay → rows
 ```
 

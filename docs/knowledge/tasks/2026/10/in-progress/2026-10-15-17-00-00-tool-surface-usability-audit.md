@@ -14,7 +14,7 @@ source_of_truth:
 # Audit of the tool surface for model usability
 
 ## Status
-in-progress — preliminary audit done (read-only, no code changed); waiting for the owner to pick what to change.
+in-progress — audit done, defects and wave 1 fixed; the redesign (below) is being implemented.
 
 ## Last Reviewed
 2026-10-15
@@ -72,6 +72,15 @@ re-checked by hand). The full report (in Russian) was handed to the owner in the
   buckets), F26 / F52 (recipe titles: step reach; retention).
 - F13 (metric names in the start answer) is NOT done: a start answers with its task only (HARD RULE);
   the description's example shows the `<name>_<metric>` naming instead.
+
+## Redesign: one builder, one query, one join contract
+The owner asked for a plain, strict schema instead of more fixes; the accepted design is the decision
+note `docs/knowledge/decisions/2026/10/2026-10-15-20-30-00-one-builder-one-query-one-join-contract.md`,
+implemented step by step.
+- Step 1 (done): `query_semantic_model` + `query_pipeline_model` → `query_model`. A query with a metrics
+  step is a metric query, one without reads the stored pipeline table; one tool reads every task back.
+  Task kinds stay `query_semantic_model` / `query_pipeline_model` internally (`QUERY_KINDS`) and are said
+  as `query_model` (`TaskRunner.toolOf`). Tool list 251,942 → 223,543 chars.
 
 ## Not done
 - Evals with a model (no API key); the golden-question probes (the probe server went down with a

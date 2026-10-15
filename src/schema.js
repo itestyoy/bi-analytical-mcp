@@ -44,12 +44,12 @@ export const METHOD_CONTRACTS = new Set(['build_pipeline_model.pipeline', 'delet
  */
 export const TOOL_PLACES = {
   build_pipeline_model: { expr: ['source_rows'], stage: ['build'] },
-  query_pipeline_model: { expr: ['stored_rows'], stage: ['read'] },
   // a declaration: the row expression and a measure (ONE aggregate of it) of a semantic model, a derived
   // metric's value — each a kind of its own (src/pipeline/compute.js EXPR_KINDS)
   build_semantic_model: { expr: ['semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'] },
-  // a metric query: where steps and its metrics step, then a read of its result
-  query_semantic_model: { expr: ['metric_where', 'stored_rows'], stage: ['metric_scope', 'metric_result'], ref: ['group_by'] },
+  // a query: a metric query (where steps, its metrics step, then a read of its result) or a read of a
+  // stored table (its read steps)
+  query_model: { expr: ['metric_where', 'stored_rows'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by'] },
   // its views of the catalog's things, and the notes' filter by what they are about
   semantic_index: { ref: ['index_view', 'about'] },
   memory: { ref: ['about'] },
@@ -127,7 +127,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // item the one stage definition (`$defs.stage`).
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/compute/unnest/join/aggregate/pivot/unpivot/sample/order_by/limit/project, and the match_recognize funnel stage; window functions are compute expressions). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ request: { task_ids } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/compute/unnest/join/aggregate/pivot/unpivot/sample/order_by/limit/project, and the match_recognize funnel stage; window functions are compute expressions). Its ROWS are the result — the call returns a task_id and query_model({ request: { task_ids } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -163,7 +163,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects. The steps are added either way; a build that cannot start (one still running, say) is answered under `materialize` with why.' },
     index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the step before this position (count+1 appends).' },
     after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
-    validate: { type: 'boolean', description: VALIDATE('preview only — the draft\'s SQL runs with every input limited to zero rows (dbt run --empty), reading no data; worth it before an expensive materialize', 'query_pipeline_model') },
+    validate: { type: 'boolean', description: VALIDATE('preview only — the draft\'s SQL runs with every input limited to zero rows (dbt run --empty), reading no data; worth it before an expensive materialize', 'query_model') },
     include: { type: 'array', uniqueItems: true, items: { enum: ['columns', 'steps'] }, description: 'What else the answer shows: "columns" — the full list of available columns (by default only what a step added and removed); "steps" — every step of the draft, as preview lists them (by default only the steps just added, or the one put in place, and steps_count).' },
   };
   // what an answer about the steps shows beyond what changed: offered to the actions that change them (and
@@ -188,30 +188,19 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
       step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
       step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),
       step('fork', 'fork the draft', 'fork: branch a new draft, under a name of its own, from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; description overrides the parent\'s.', ['name'], ['description', 'after']),
-      step('preview', 'preview the draft', 'preview: the steps and the SQL that would run. With validate: true it starts a task instead (read with query_pipeline_model) that runs the SQL with every input limited to zero rows (dbt run --empty): what the warehouse refuses is said in seconds, reading no data.', [], ['validate'], []),
+      step('preview', 'preview the draft', 'preview: the steps and the SQL that would run. With validate: true it starts a task instead (read with query_model) that runs the SQL with every input limited to zero rows (dbt run --empty): what the warehouse refuses is said in seconds, reading no data.', [], ['validate'], []),
       step(['materialize', 'discard'], 'materialize or discard', 'materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', [], [], []),
     ],
   };
 
-  // a metric query is its steps — where steps, its metrics step, a read of its result: the one expression,
-  // the one stage and the one ref (`$defs.expr`, `$defs.stage`, `$defs.ref`), built for the tool's places —
-  // the steps before the metrics step and after it share the stage and the expression, each narrowed by
-  // its place as it is built (STAGE_PLACES.metric_scope / metric_result, PLACES.metric_where /
-  // stored_rows), the metrics step — no pipeline stage: the place up to it offers it (metric_scope's
-  // `offers`) — its own group of the stage, its group_by the ref (REF_PLACES.group_by)
-  const sq = TOOL_PLACES.query_semantic_model;
+  // A QUERY IS ITS STEPS — a metric query (where steps, its metrics step, a read of its result) or a read
+  // of a stored table (its read steps): the one expression, the one stage and the one ref (`$defs.expr`,
+  // `$defs.stage`, `$defs.ref`), built for the tool's places — each step narrowed by its place as it is
+  // built (STAGE_PLACES.metric_scope / metric_result / read, PLACES.metric_where / stored_rows), the
+  // metrics step — no pipeline stage: the place up to it offers it (metric_scope's `offers`) — its own
+  // group of the stage, its group_by the ref (REF_PLACES.group_by)
+  const sq = TOOL_PLACES.query_model;
   const pdefs = { ...stageDefs(catalog, { project, places: sq.stage, exprPlaces: sq.expr }), ref: refSchema(catalog, { project, places: sq.ref }) };
-  // A READ OF THE BUILT TABLE IS WRITTEN IN THE PIPELINE'S OWN STAGES — the one stage definition
-  // (`$defs.stage`), built for a read: the stages that re-slice rows without making a new table
-  // (STAGE_PLACES.read), over the table's columns, in the one expression built for stored rows (a stored
-  // table has no source: no event property, and no raw SQL — PLACES.stored_rows). The schema holds
-  // nothing else, and renderRead checks each step again as it is built.
-  const pipelineQueryFields = {
-    steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The steps run over the stored table, in order, each a stage of the pipeline\'s own — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — over its columns; nothing upstream is recomputed and nothing is stored. A where after an aggregate keeps the groups it holds for (a having); a second aggregate folds the groups again (how many passed). Omitted: the table as it is. A join, an unnest, a funnel or a python step makes a new table, so a read takes none of them: build it from the task (build_pipeline_model start with from_task).' },
-    limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the read the task keeps (default ${KEPT_ROWS}) — what a read ({ task_ids, offset, limit }) pages through. Every row of the model is in its build's task, whose stored table a read pages to the last row.` },
-    dry_run: { type: 'boolean', description: DRY_RUN('the read\'s SQL — written as dbt runs it, the stored table as {{ ref("<model>") }} (as a preview\'s model_sql) — and the columns it answers with (it waits for the context\'s build only)') },
-  };
-
   // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
   // batch (context_id + queries), read tasks (task_ids), cancel them. Told apart by the fields each
   // requires; each takes only its own.
@@ -233,20 +222,20 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // it, a read of its result after it — every rule of where a step may stand checked as the query is built
   // (src/engine/semantic-query.js _metricSteps). Its fields are the one list METRIC_QUERY_FIELDS, which
   // also tells an earlier metric query apart (src/earlier-spelling.js).
-  const semanticQueryFields = pick({
-      steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The query, in order. Its metrics step — { stage: "metrics", metrics: [...], group_by: [...] }, what the semantic layer computes — one per query. Before it, where steps: they filter the rows its metrics fold, over what group_by names, named as it names them — { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] }; a column of the rows, a metric or an aggregate is refused there. After it, steps over its result — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — by the names its rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"). A where after it filters the result (a having on a metric); { stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] } ranks it, so the rows a task keeps are the top ones. A join, an unnest, a funnel or a python step makes a new table: store the result (materialize) and build from its task (from_task).' },
+  const queryFields = pick({
+      steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The query, in order. A METRIC QUERY has one metrics step — { stage: "metrics", metrics: [...], group_by: [...] }, what the semantic layer computes. Before it, where steps: they filter the rows its metrics fold, over what group_by names, named as it names them — { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] }; a column of the rows, a metric or an aggregate is refused there. After it, steps over its result — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — by the names its rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"); a where there filters the result (a having on a metric), { stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] } ranks it, so the rows a task keeps are the top ones. WITHOUT a metrics step the steps read the context\'s built pipeline table — the same read stages over its columns (a where after an aggregate is a having; a second aggregate folds the groups again); omitted, the table as it is. Nothing upstream is recomputed. A join, an unnest, a funnel or a python step makes a new table: build it with build_pipeline_model from the task (from_task).' },
       time_range: METRIC_TIME_RANGE,
-      limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
-      materialize: { type: 'boolean', description: 'Store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
-      dry_run: { type: 'boolean', description: DRY_RUN('the query\'s SQL — MetricFlow\'s, with the steps after it — and the columns it answers with (it waits for the context\'s build only)') },
-      include: { type: 'array', uniqueItems: true, items: { enum: ['plan'] }, description: 'What else a dry_run shows: "plan" — MetricFlow\'s dataflow plan (thousands of tokens; the SQL alone is usually what is wanted).' },
+      limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them; a built table itself is in its build's task, paged to its last row. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
+      materialize: { type: 'boolean', description: 'A metric query only: store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
+      dry_run: { type: 'boolean', description: DRY_RUN('the query\'s SQL — a metric query\'s MetricFlow\'s, with the steps after it; a read\'s written over the stored table as {{ ref("<model>") }} — and the columns it answers with (it waits for the context\'s build only)') },
+      include: { type: 'array', uniqueItems: true, items: { enum: ['plan'] }, description: 'What else a metric query\'s dry_run shows: "plan" — MetricFlow\'s dataflow plan (thousands of tokens; the SQL alone is usually what is wanted).' },
   }, METRIC_QUERY_FIELDS);
-  const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and a where.`);
+  const queryContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id a build returned' : ': the context_id a build returned'}. The context decides which metrics there are and how a dimension is named in group_by and a where; its built pipeline table is what a query without a metrics step reads.`);
   const query = {
     type: 'object',
-    description: 'Start a metric query against a context (or several at once with queries) — or, with task_ids, read semantic tasks back.',
+    description: 'Start a query against a context — a metric query, or a read of its built table (or several at once with queries) — or, with task_ids, read tasks back.',
     $defs: pdefs,
-    anyOf: queryModes({ context_id: semanticContextId, fields: semanticQueryFields, required: ['steps'] }, batchOf({ type: 'object', additionalProperties: false, required: ['steps'], properties: semanticQueryFields }, 'metric queries'), readPaging),
+    anyOf: queryModes({ context_id: queryContextId, fields: queryFields }, batchOf({ type: 'object', additionalProperties: false, properties: queryFields }, 'queries'), readPaging),
   };
 
   // context reads (list, describe), delete_context removes (the context, its pipeline model, or a
@@ -287,17 +276,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     build_pipeline_model: withStageDefs(buildModel, catalog, project, TOOL_PLACES.build_pipeline_model),
     context: contextTool,
     delete_context: deleteContext,
-    query_semantic_model: query,
-    query_pipeline_model: {
-      type: 'object',
-      description: 'Query a built pipeline model in steps (or several queries at once with queries) — or, with task_ids, read pipeline tasks back.',
-      $defs: stageDefs(catalog, { project, places: TOOL_PLACES.query_pipeline_model.stage, exprPlaces: TOOL_PLACES.query_pipeline_model.expr }),
-      anyOf: queryModes(
-        { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the context_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
-        batchOf({ type: 'object', additionalProperties: false, properties: pipelineQueryFields }, 'queries over the built model'),
-        readPaging,
-      ),
-    },
+    query_model: query,
     display_model_result: {
       type: 'object', additionalProperties: false, required: ['task_id'],
       description: 'Draw a finished result as a card for the person — once.',
@@ -323,8 +302,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
         context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
         // a task's context names its semantic models after the catalog's models it loads; the project's are its own
         semantic_model: { type: 'string', enum: [...new Set([...semanticKeys, ...(project ? project.semantic_models.map((m) => m.name) : [])])].sort(), description: 'Narrow the answer to one semantic model of the context and the metrics that read it — mostly for a task\'s context, which can hold several. With metric too, the metric\'s semantic models are narrowed to this one.' },
-        metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as the group_by of query_semantic_model\'s metrics step takes it.' },
-        validate: { type: 'boolean', description: VALIDATE('MetricFlow compiles each metric in view, naming one it cannot build (with a time_range the warehouse also runs each metric and each semantic model\'s dimensions over it)', 'query_semantic_model') },
+        metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as the group_by of query_model\'s metrics step takes it.' },
+        validate: { type: 'boolean', description: VALIDATE('MetricFlow compiles each metric in view, naming one it cannot build (with a time_range the warehouse also runs each metric and each semantic model\'s dimensions over it)', 'query_model') },
         time_range: timeRange('The metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it.'),
       };
       return {

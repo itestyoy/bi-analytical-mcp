@@ -204,11 +204,11 @@ test('no text teaches a form the server retired', async () => {
     ['a condition { column | field | property, op, value }, now a function { fn, args }', /\{\s*["']?(?:column|field|property)["']?\s*:\s*(?:[^{}]*?|\{[^{}]*\}\s*),\s*["']?op["']?\s*:\s*["'](?:eq|neq|gt|gte|lt|lte|in|not_in|between|is_null|is_not_null|like|not_like|contains|starts_with|ends_with)["']/],
     ['a group of conditions { or: [...] } / { and: [...] }, now { fn: "or" | "and", args }', /\{\s*["']?(?:or|and)["']?\s*:\s*\[/],
     ['the event_property function, now the { property } leaf', /\bevent_property\b/],
-    ['a read\'s transform, now its steps', /query_pipeline_model[^\n]{0,80}\btransform\b/],
+    ['a read\'s transform, now its steps', /query_model[^\n]{0,80}\btransform\b/],
     // a list a tool runs in order is `steps`, one of them `step` (each item tagged by what it is: a SQL stage by `stage`)
     ['a list of stages written stages, now steps', /\bstages["']?\s*:\s*\[/],
     ['the step edit_step / insert_step put in place written stage, now step', /\b(?:edit_step|insert_step)\b[^\n]{0,80}\bstage["']?\s*:\s*\{/],
-    ['a metric query\'s order_by, now an order_by step after it', /query_semantic_model[^\n]{0,120}\border_by["']?\s*:/],
+    ['a metric query\'s order_by, now an order_by step after it', /query_model[^\n]{0,120}\border_by["']?\s*:/],
     ['a retentioneering read\'s detail, now offset / limit', /query_retentioneering_model[^\n]{0,160}\bdetail\b/],
     ['a fork without the name of its own it now requires', /["']?action["']?\s*:\s*["']fork["'](?:(?!\bname\b)[^{}])*\}/],
     // (a project's own MetricFlow ratio in its YAML is the project's, and a text may SAY the spelling is gone)

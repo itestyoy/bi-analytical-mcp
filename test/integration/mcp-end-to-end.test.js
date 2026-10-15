@@ -111,7 +111,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   if (skip(t)) return;
   // the protocol advertises the tools an assistant needs…
   const tools = (await client.listTools()).tools.map((x) => x.name);
-  for (const needed of ['semantic_index', 'build_semantic_model', 'query_semantic_model', 'build_pipeline_model', 'query_pipeline_model', 'experiment']) {
+  for (const needed of ['semantic_index', 'build_semantic_model', 'query_model', 'build_pipeline_model', 'query_model', 'experiment']) {
     assert.ok(tools.includes(needed), `${needed} is advertised`);
   }
   // …and only those: editing a task is a MODE of build_semantic_model, not a tool of its own —
@@ -141,7 +141,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const r = await call('query_semantic_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_ua_cost'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_ua_cost'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'e2e_ua_cost'), 'e2e_ua_cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -313,7 +313,7 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
       { name: 'crashes', type: 'simple', measure: 'crashes' },
     ],
   });
-  const r = await call('query_semantic_model', {
+  const r = await call('query_model', {
     context_id: ctx,
     steps: [{ stage: 'metrics', metrics: ['e2e_mix_cost', 'e2e_mix_evts', 'e2e_mix_crashes'], group_by: [{ time: 'metric_time', grain: 'day' }] }],
   });
@@ -407,7 +407,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   ]);
   assert.equal(num(meta.rows[0].n), 18);
   // the stored result itself pages without recomputing
-  const page = (await call('query_pipeline_model', { task_ids: [built.task_id], limit: 5, offset: 20 })).results[0];
+  const page = (await call('query_model', { task_ids: [built.task_id], limit: 5, offset: 20 })).results[0];
   assert.equal(page.rows.length, 2, 'rows 21-22 of 22');
 });
 
@@ -420,16 +420,16 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const before = await call('query_semantic_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost'] }] });
+  const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost'] }] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
   assert.ok(near(num(before.rows[0].e2e_grow_cost), 17.5));
   // a metric query is its steps: its metrics named outside a metrics step are an earlier spelling,
   // refused at the boundary with the value converted
-  const outside = await callErr('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
+  const outside = await callErr('query_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
   assert.match(outside.error.message, /earlier spelling — write .*"steps":\[\{"stage":"metrics","metrics":\["e2e_grow_cost"\]\}\]/s, JSON.stringify(outside));
 
   // the new metric does not exist yet — the boundary says so rather than answering.
-  const tooEarly = await callErr('query_semantic_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_clicks'] }] });
+  const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_clicks'] }] });
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
   // add a second amount from the SAME source, choosing its aggregation here and now — to the task
@@ -441,7 +441,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const grown = await call('build_semantic_model', { action: 'update', context_id: ctx, name: 'e2e_grow', ...addClicks });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 
-  const after = await call('query_semantic_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] }] });
+  const after = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] }] });
   assert.equal(after.ok, true, JSON.stringify(after.error));
   assert.ok(near(num(after.rows[0].e2e_grow_cost), 17.5), 'the original metric is unchanged');
   assert.equal(num(after.rows[0].e2e_grow_clicks), 64);

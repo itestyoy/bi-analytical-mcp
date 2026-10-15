@@ -72,7 +72,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
 
   // 'governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)'
   // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
-  const seg = await engine.query_semantic_model({ context_id: ctx, steps: [{ stage: 'metrics', metrics: ['scd_rev_revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
+  const seg = await engine.query_model({ context_id: ctx, steps: [{ stage: 'metrics', metrics: ['scd_rev_revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
   assert.equal(seg.status, 'done', JSON.stringify(seg));
   const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.scd_rev_revenue)) ? num(x.scd_rev_revenue) : 0), 0);
   assert.equal(total, 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
@@ -105,9 +105,9 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a derived metric over it goes with it');
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
   // a dropped metric is refused when it is asked for, before any task starts — not by MetricFlow later
-  await assert.rejects(engine.query_semantic_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_players'] }] }), /not in its semantic layer/);
+  await assert.rejects(engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_players'] }] }), /not in its semantic layer/);
   // and the surviving metric still queries to the point-in-time total
-  const r = await engine.query_semantic_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_revenue'] }] });
+  const r = await engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_revenue'] }] });
   assert.equal(r.status, 'done', JSON.stringify(r));
   assert.equal(num(r.rows[0].scd_drop_revenue), 100);
 });

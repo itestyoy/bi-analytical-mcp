@@ -75,7 +75,7 @@ test('a column reached through several relationships: via is a group_by\'s, not 
   assert.equal(view.ok, false, 'a view takes no via');
   assert.ok(view.errors.some((m) => m.includes("unexpected property 'via'")), view.errors.join(' | '));
   assert.equal(validateInput(validators.semantic_index, { source: 'users', column: 'country' }).ok, true);
-  const groupBy = (via) => validateInput(validators.query_semantic_model, { context_id: 'ctx_abcdef123456', steps: [{ stage: 'metrics', metrics: ['m'], group_by: [{ source: 'users', column: 'country', via }] }] });
+  const groupBy = (via) => validateInput(validators.query_model, { context_id: 'ctx_abcdef123456', steps: [{ stage: 'metrics', metrics: ['m'], group_by: [{ source: 'users', column: 'country', via }] }] });
   assert.equal(groupBy('user').ok, true, groupBy('user').errors?.join(' | '));
   assert.equal(groupBy('referrer').ok, true, groupBy('referrer').errors?.join(' | '));
   assert.equal(groupBy('nope').ok, false, 'via names a relationship that leads to the model');

@@ -27,7 +27,7 @@
 // events, crashlytics, acquisition, users and experiments. Nothing here names a column the model
 // could not find through semantic_index.
 
-const ANSWERING = ['query_semantic_model', 'query_pipeline_model', 'build_pipeline_model'];
+const ANSWERING = ['query_model', 'query_model', 'build_pipeline_model'];
 const PURCHASED = "event_name = 'iap_purchase_completed'";
 
 export const CASES = [
@@ -221,7 +221,7 @@ export const CASES = [
     prompt: 'How many orders did customers place in our online shop last month? Use the orders table.',
     // looking is right (the catalog says what exists); building or querying something that is not
     // there, or answering with a number, is not
-    expect: { forbid: ['build_semantic_model', 'build_pipeline_model', 'query_semantic_model', 'query_pipeline_model', 'display_model_result'] },
+    expect: { forbid: ['build_semantic_model', 'build_pipeline_model', 'query_model', 'query_model', 'display_model_result'] },
     answer: { kind: 'none' },
   },
   {

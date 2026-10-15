@@ -2,9 +2,9 @@
 // others from the catalog (src/schema.js, by the tool's name); everything else about it is here.
 //
 // WHICH SIDE A TASK BELONGS TO (`side`) — and so which query tool reads it back (`reads`). A semantic
-// task (a declared model being parsed, a metric query) is read with query_semantic_model({ request: { task_ids } }); a
-// pipeline task (a build, a query over a built model) with query_pipeline_model({ request: { task_ids } }). An
-// experiment is no task at all: its statistics come back with its call.
+// task (a declared model being parsed, a metric query) and a pipeline task (a build, a read of a built
+// table) are both read with query_model({ request: { task_ids } }). An experiment is no task at all: its
+// statistics come back with its call.
 
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { READ_PAGE, KEPT_ROWS } from '../schema/fields.js';
@@ -13,16 +13,18 @@ import { defineTool } from './define.js';
 import { OUTPUTS } from '../schema/outputs.js';
 
 /**
- * ONE MINIMAL CALL PER TOOL THAT TAKES THE GRAMMAR, written into its description — a host that cuts a
+ * ONE MINIMAL CALL PER TOOL THAT TAKES THE GRAMMAR (a list where a tool has two kinds of call), written into its description — a host that cuts a
  * schema down (Codex compacts one past 5,000 bytes to its skeleton) still hands the model its
  * description, and a model writes a call best from one it has seen. A name only the catalog knows is a
  * `<placeholder>`; test/unit/tool-examples.test.js fills each from the catalog and validates the call.
  */
 export const EXAMPLES = {
   build_semantic_model: { name: 'activity', semantic_models: [{ source: '<events source>', measures: [{ name: 'events', expr: { fn: 'count' } }] }], metrics: [{ name: 'events', type: 'simple', measure: 'events' }] },
-  query_semantic_model: { context_id: '<context_id>', steps: [{ stage: 'metrics', metrics: ['activity_events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
   build_pipeline_model: { action: 'start', name: 'per_event', source: '<events source>', steps: [{ stage: 'aggregate', group_by: ['<event-name column>'], measures: [{ name: 'n', expr: { fn: 'count' } }] }], materialize: true },
-  query_pipeline_model: { context_id: '<context_id>', steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, { stage: 'limit', limit: 10 }] },
+  query_model: [
+    { context_id: '<context_id>', steps: [{ stage: 'metrics', metrics: ['activity_events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
+    { context_id: '<context_id>', steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, { stage: 'limit', limit: 10 }] },
+  ],
 };
 
 /** An example as the descriptions write a call: its JSON, keys unquoted. */
@@ -40,7 +42,7 @@ export const CORE_TOOLS = [
     name: 'build_semantic_model',
     output: OUTPUTS.build_semantic_model,
     title: 'Build Semantic Model',
-    description: 'Declare reusable, named metrics — semantic models (items per source model, several side by side, e.g. spend next to an event measure; an item with only `source` loads a model for its columns) and metrics over them — in an isolated context, then query them many ways with query_semantic_model (group_by, grain, filters). Use it for measures such as DAU, revenue or a ratio of two counts (a derived metric dividing two metrics); a one-off table whose rows are the answer (a funnel, a conversion within a window, sessions, a pivot) is build_pipeline_model. Omit context_id to start a task; action:"update" adds to or removes from the task in a context (named by its name) without restating it. It returns { task_id, context_id } at once — parsing is a task; a query on the context can start right away and waits for it. dry_run: true compiles and shows the declaration, building nothing; preview_semantic_model shows the layer as parsed, and its validate checks it on the warehouse.'
+    description: 'Declare reusable, named metrics — semantic models (items per source model, several side by side, e.g. spend next to an event measure; an item with only `source` loads a model for its columns) and metrics over them — in an isolated context, then query them many ways with query_model (group_by, grain, filters). Use it for measures such as DAU, revenue or a ratio of two counts (a derived metric dividing two metrics); a one-off table whose rows are the answer (a funnel, a conversion within a window, sessions, a pivot) is build_pipeline_model. Omit context_id to start a task; action:"update" adds to or removes from the task in a context (named by its name) without restating it. It returns { task_id, context_id } at once — parsing is a task; a query on the context can start right away and waits for it. dry_run: true compiles and shows the declaration, building nothing; preview_semantic_model shows the layer as parsed, and its validate checks it on the warehouse.'
       + ` Example: ${callText(EXAMPLES.build_semantic_model)} — its metric is queried as activity_events (<name>_<metric>).`,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'semantic',
@@ -49,40 +51,27 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'build_pipeline_model',
     title: 'Build Pipeline Model',
-    description: 'Build a one-off table whose rows are the answer — funnels (match_recognize), sessions, window functions, pivots, whatever the named metrics of build_semantic_model cannot express (reusable metrics sliced many ways belong there). Compose it step by step — each step a stage ({ stage: "where" | "compute" | "join" | …, … }), checked as it is added and answered with what it changed (include: ["columns", "steps"] adds every column the next step sees and every step); nothing runs in the warehouse until materialize (or materialize: true beside the steps), which returns a task_id. A recipe\'s pipeline_payload is a start request as it stands. query_pipeline_model reads the rows ({ task_ids }) and filters or regroups the built table later in steps of the same stages ({ context_id, steps }). A join names a relationship the schema declares (via), not columns, and joins stack. start with from_task re-slices the stored table of a finished task without recomputing it. Where the warehouse runs Python, a python stage is offered; its own description holds its rules.'
-      + ` Example: ${callText(EXAMPLES.build_pipeline_model)} → { task_id }, read with query_pipeline_model({ request: { task_ids } }).`,
+    description: 'Build a one-off table whose rows are the answer — funnels (match_recognize), sessions, window functions, pivots, whatever the named metrics of build_semantic_model cannot express (reusable metrics sliced many ways belong there). Compose it step by step — each step a stage ({ stage: "where" | "compute" | "join" | …, … }), checked as it is added and answered with what it changed (include: ["columns", "steps"] adds every column the next step sees and every step); nothing runs in the warehouse until materialize (or materialize: true beside the steps), which returns a task_id. A recipe\'s pipeline_payload is a start request as it stands. query_model reads the rows ({ task_ids }) and filters or regroups the built table later in steps of the same stages ({ context_id, steps }). A join names a relationship the schema declares (via), not columns, and joins stack. start with from_task re-slices the stored table of a finished task without recomputing it. Where the warehouse runs Python, a python stage is offered; its own description holds its rules.'
+      + ` Example: ${callText(EXAMPLES.build_pipeline_model)} → { task_id }, read with query_model({ request: { task_ids } }).`,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'pipeline',
     run: (engine, input) => engine.build_pipeline_model(input),
   }),
   defineTool({
-    name: 'query_semantic_model',
-    title: 'Query Semantic Model',
-    description: `Start a metric query on a context, or read semantic tasks back. Use it for the metrics build_semantic_model declared (or the dbt project's own semantic models); a table build_pipeline_model built is queried with query_pipeline_model. A query is its steps: one metrics step ({ stage: "metrics", metrics, group_by }); before it, where steps that filter the rows its metrics fold; after it, the read steps of query_pipeline_model (where, compute, aggregate, order_by, limit, …) over its result, by its columns as the rows come back — a where there filters the result (a having), an order_by ranks it. The query is checked in the call — a mistake is refused with the fix — and returns { task_id } without waiting. Joins are applied for you: group or filter by a model's column { source, column } (a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension }) and the declared key is used, for a slowly-changing model the version valid at each row's time. dry_run: true compiles the query and shows its SQL, reading nothing. { task_ids } waits up to ${MAX_WAIT_SECONDS}s and returns a page of each result (call again while it is running): ${READ_PAGE} rows from offset — a row number of the result, 0 its first — unless limit says otherwise, saying whether the rows are in a stated order. A query keeps its first limit rows (${KEPT_ROWS} by default); materialize: true stores every row as a table: paged to its last row, drawable as a drill-down, a start for a pipeline (from_task). Independent queries go in one call ({ queries: [...] }), side by side. { task_ids, cancel: true } stops tasks. Each of the dbt project's own semantic models is a context named after it, queried by the project's names ({ semantic_model, dimension }, { entity }); preview_semantic_model lists what a metric there can be grouped by. Example: ${callText(EXAMPLES.query_semantic_model)}.`,
-    // every call starts a task; materialize:true persists the result into the context — a write, never a removal
+    name: 'query_model',
+    title: 'Query Model',
+    description: `Query a context, or read its tasks back. A query is its steps. With a metrics step ({ stage: "metrics", metrics, group_by }) it is a metric query over the metrics build_semantic_model declared (or one of the dbt project's own semantic models): where steps before it filter the rows its metrics fold; read steps after it (where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project) work on its result by the result's columns — a where there filters the result (a having). Without a metrics step it reads the table build_pipeline_model built, in the same read steps over its columns, recomputing nothing. Joins are applied for you: group or filter a metric by a model's column { source, column } (an event property { source, property }) and the declared key is used — for a slowly-changing model the version valid at each row's time. A join, an unnest, a funnel or a python step makes a new table: build it with build_pipeline_model (from_task starts from a stored result). It is checked in the call and returns { task_id } without waiting; dry_run: true makes the task the query's SQL instead of its rows. { task_ids } waits up to ${MAX_WAIT_SECONDS}s and returns a page of each result (call again while it is running): ${READ_PAGE} rows from offset — a row number of the result — unless limit says otherwise. A query keeps its first limit rows (${KEPT_ROWS} by default); a metric query's materialize: true stores every row as a table (paged to its last row, a start for a pipeline). Independent queries go in one call ({ queries: [...] }). { task_ids, cancel: true } stops tasks. Each of the dbt project's own semantic models is a context named after it, queried by the project's names. Examples: ${callText(EXAMPLES.query_model[0])}; a built table: ${callText(EXAMPLES.query_model[1])}.`,
+    // every call starts or reads a task; a metric query's materialize:true stores its result — a write, never a removal
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
-    side: 'semantic',
-    reads: 'semantic',
+    reads: ['semantic', 'pipeline'],
     waits: true,
-    precheck: (engine, args) => { for (const id of args.task_ids) engine.tasks.forSide(id, 'semantic'); },
-    run: (engine, input) => engine.query_semantic_model(input),
-  }),
-  defineTool({
-    name: 'query_pipeline_model',
-    title: 'Query Pipeline Model',
-    description: `Query a table build_pipeline_model built, or read pipeline tasks back; the metrics of build_semantic_model are queried with query_semantic_model. { context_id, steps? } starts a read of the stored table in steps of the pipeline's own stages — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project, over its columns; a where after an aggregate keeps the groups it holds for, a second aggregate folds them again — recomputing and storing nothing, and returns { task_id }; dry_run: true makes that task the read's SQL instead of its rows. A join, an unnest, a funnel or a python step makes a new table, and raw SQL is a build's too, so a read takes none of them: start a pipeline from the build's task (from_task) for those. An event property the build kept is a column of the stored table: read it as { column }. { task_ids } waits up to ${MAX_WAIT_SECONDS}s for a build or such a query and returns a page of its rows (call again while it is running): ${READ_PAGE} rows from offset — a row number of the result — unless limit says otherwise; a build's stored table pages to its last row, a query keeps its first limit rows (${KEPT_ROWS} by default). Several such queries go in one call ({ queries: [...] }). { task_ids, cancel: true } stops tasks. Example: ${callText(EXAMPLES.query_pipeline_model)}.`,
-    // every call starts or reads a task; a query over a built model writes nothing to the warehouse
-    annotations: { readOnlyHint: true, idempotentHint: false },
-    side: 'pipeline',
-    reads: 'pipeline',
-    waits: true,
-    precheck: (engine, args) => { for (const id of args.task_ids) engine.tasks.forSide(id, 'pipeline'); },
-    run: (engine, input) => engine.query_pipeline_model(input),
+    precheck: (engine, args) => { for (const id of args.task_ids) engine.tasks.forSide(id, ['semantic', 'pipeline']); },
+    run: (engine, input) => engine.query_model(input),
   }),
   defineTool({
     name: 'preview_semantic_model',
     title: 'Preview Semantic Model',
-    description: `Show a semantic layer as dbt parsed it, and check it — one of the dbt project's own semantic models (context_id: its name) or a context build_semantic_model built. Use it before querying a metric you do not know: what it is, how it is computed, what its query may group by. It answers at once and runs nothing: the layer's status and issues (what the declaration gets wrong), each semantic model (table, entities, dimensions), each metric (type, meta — the project's notes on reading it — filter, definition) with its group_by spelled as query_semantic_model takes it; a metric of several semantic models offers only what they share. metric narrows it to one metric in full, semantic_model to one model. validate: true checks it on the warehouse instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one and each model's dimensions, naming what fails; that is a task, read with query_semantic_model.`,
+    description: `Show a semantic layer as dbt parsed it, and check it — one of the dbt project's own semantic models (context_id: its name) or a context build_semantic_model built. Use it before querying a metric you do not know: what it is, how it is computed, what its query may group by. It answers at once and runs nothing: the layer's status and issues (what the declaration gets wrong), each semantic model (table, entities, dimensions), each metric (type, meta — the project's notes on reading it — filter, definition) with its group_by spelled as query_model takes it; a metric of several semantic models offers only what they share. metric narrows it to one metric in full, semantic_model to one model. validate: true checks it on the warehouse instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one and each model's dimensions, naming what fails; that is a task, read with query_model.`,
     // reads a parsed layer; validate starts a task that compiles and runs metrics, writing nothing
     annotations: { readOnlyHint: true, idempotentHint: true },
     side: 'semantic',
@@ -158,7 +147,7 @@ export const CORE_TOOLS = [
     name: 'time',
     output: OUTPUTS.time,
     title: 'Timer',
-    description: `Wait for \`seconds\` (at most ${MAX_WAIT_SECONDS}), then return — a timer that touches no data and follows no task. To wait for a task, call its query tool with { task_ids } instead (query_semantic_model or query_pipeline_model): it returns the moment the task is done.`,
+    description: `Wait for \`seconds\` (at most ${MAX_WAIT_SECONDS}), then return — a timer that touches no data and follows no task. To wait for a task, call its query tool with { task_ids } instead (query_model): it returns the moment the task is done.`,
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.time(input),
   }),

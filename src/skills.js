@@ -124,7 +124,7 @@ export function buildSkills(engine) {
   ].join('\n');
   addSkill('betti/analytics', {
     name: 'analytics',
-    description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (build_semantic_model + query_semantic_model) over a one-off pipeline (build_pipeline_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
+    description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (build_semantic_model + query_model) over a one-off pipeline (build_pipeline_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
   }, body, visible.map(recipeFile));
 
   // ── the research guides: how to run an investigation, and one reference per domain ──

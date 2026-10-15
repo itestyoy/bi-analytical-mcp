@@ -105,7 +105,7 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(draftOf(e, context_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
   assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
-  const peek = await one(e.query_pipeline_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
+  const peek = await one(e.query_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.
@@ -216,7 +216,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
 });
 
 // Editing a step retires the prefixes at or after it and removes their files — but a build that is
-// STILL RUNNING hands its table back through query_pipeline_model, which reads it by ref. Removing the
+// STILL RUNNING hands its table back through query_model, which reads it by ref. Removing the
 // definition mid-build would make that result unreadable for good.
 test('an edit during a build does not remove the files that build is producing', async (t) => {
   if (skipNoPy(t)) return;
@@ -251,7 +251,7 @@ test('no build holds its call — a python build and an SQL build both answer wi
   const retry = await materialize(e, py).catch((err) => err);
   // refused, and the refusal sends the caller to the task rather than to a second build
   assert.match(String(retry.message || retry), /already in flight/);
-  assert.match(String(retry.message || retry), /query_pipeline_model/);
+  assert.match(String(retry.message || retry), /query_model/);
   assert.equal(runner.held.length, 1, 'still ONE build for the same pipeline');
   runner.finish(true);
   await taskResult(e, out.task_id);

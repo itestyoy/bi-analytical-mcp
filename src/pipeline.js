@@ -265,7 +265,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
 }
 
 /**
- * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_pipeline_model and a card's
+ * A READ OVER A STORED TABLE, IN THE PIPELINE'S OWN STAGES — what query_model and a card's
  * drill run, and the steps after a metric query's metrics step: the stages a read takes (STAGE_PLACES.read
  * — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project; checked first at
  * STAGE_PLACES.metric_result after a metrics step, the same list), built by the stage builders over

@@ -12,7 +12,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const v = (tool, input) => validateInput(validators[tool], input);
 
 test('a task is addressed by its id alone — no table name or path reaches a read', () => {
-  for (const tool of ['query_semantic_model', 'query_pipeline_model', 'display_model_result']) {
+  for (const tool of ['query_model', 'query_model', 'display_model_result']) {
     const id = (x) => (tool === 'display_model_result' ? { task_id: x } : { task_ids: [x] });
     assert.equal(v(tool, id("x') }} ; drop table dim_users -- ")).ok, false, `${tool}: a task id is hex`);
     assert.equal(v(tool, { ...id('aabbccddeeff'), table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
@@ -21,8 +21,8 @@ test('a task is addressed by its id alone — no table name or path reaches a re
   assert.equal(v('drill_result', { task_id: 'aabbccddeeff', steps: [{ stage: 'limit', limit: 1 }], table: 'qr_aabbccddeeff' }).ok, false);
 });
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
-  for (const tool of ['query_semantic_model', 'delete_context.context', 'context.describe']) {
-    const base = tool === 'query_semantic_model' ? { steps: [{ stage: 'metrics', metrics: ['m'] }] } : {};
+  for (const tool of ['query_model', 'delete_context.context', 'context.describe']) {
+    const base = tool === 'query_model' ? { steps: [{ stage: 'metrics', metrics: ['m'] }] } : {};
     assert.equal(v(tool, { ...base, context_id: '../../../etc/passwd' }).ok, false, `${tool} should reject traversal`);
     assert.equal(v(tool, { ...base, context_id: 'a/b' }).ok, false, `${tool} should reject slashes`);
   }
@@ -68,10 +68,10 @@ test('a read takes no raw SQL, and no raw SQL carries a Jinja opener', () => {
   const metrics = { stage: 'metrics', metrics: ['m'] };
   for (const [at, steps] of [['measures.0.expr.args.0', nested], ['expr', raw]]) {
     const fn = (i) => new RegExp(`\`steps\\.${i}\\.${at.replace(/\./g, '\\.')}\\.fn\` must be one of`);
-    assert.match(v('query_pipeline_model', { context_id: 'abcdef123456', steps }).errors.join(' | '), fn(0), at);
-    assert.match(v('query_semantic_model', { context_id: 'abcdef123456', steps: [metrics, ...steps] }).errors.join(' | '), fn(1), at);
+    assert.match(v('query_model', { context_id: 'abcdef123456', steps }).errors.join(' | '), fn(0), at);
+    assert.match(v('query_model', { context_id: 'abcdef123456', steps: [metrics, ...steps] }).errors.join(' | '), fn(1), at);
   }
-  assert.match(v('query_semantic_model', { context_id: 'abcdef123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'raw', sql: '1' }, { value: 1 }] }] }, metrics] }).errors.join(' | '), /`steps\.0\.conditions\.0\.args\.0\.fn` must be one of/);
+  assert.match(v('query_model', { context_id: 'abcdef123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'raw', sql: '1' }, { value: 1 }] }] }, metrics] }).errors.join(' | '), /`steps\.0\.conditions\.0\.args\.0\.fn` must be one of/);
   assert.equal(v('build_pipeline_model', { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } }] }).ok, true, 'raw is a build\'s');
   const build = (sql) => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql, args: [{ column: 'event_name' }] } }], { physicalCols: new Set(['event_name']) });
   for (const sql of ["upper({1}) || '{{ env_var(\"X\") }}'", '{% if true %}{1}{% endif %}', '{1} {# a note #}']) assert.throws(() => build(sql), /may not hold \{\{, \{% or \{#/, sql);

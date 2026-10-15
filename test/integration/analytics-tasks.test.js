@@ -1,7 +1,7 @@
 // Coverage proof: EACH analytics task family in config/recipes.json can be served
 // by a dbt Semantic Layer model built through this engine. For every family we
 // build the recipe's model ONCE via engine._recipe(id).semantic_payload (writes
-// YAML + dbt parse), then run several query_semantic_model calls and assert on
+// YAML + dbt parse), then run several query_model calls and assert on
 // DATA: res.ok === true plus EXACT figures from fixtures/SEED_DATA.md and
 // invariants (grouped sum == grand total; rate in [0,1]; DAU <= MAU; completers
 // <= starters). >= 5 data assertions per family. Metrics a question reads side by side are asked
@@ -73,7 +73,7 @@ async function buildRecipe(t, id) {
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }
-const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
+const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
 
 // ── 1. metric_types: measure_over_metric_time ────────────────────────────────
 // #6: a numeric value that arrives as STRING is aggregable once it is read as a number (cast).
@@ -472,7 +472,7 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const query = { context_id: created.context_id, time_range: { start: '2026-01-03', end: '2026-01-05' } };
   const cumulative = { stage: 'metrics', metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
   const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];
-  const r = await engine.query_semantic_model({ ...query, steps: [cumulative, ...byDay] });
+  const r = await engine.query_model({ ...query, steps: [cumulative, ...byDay] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const got = r.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]);
   const days = ['2026-01-03', '2026-01-04', '2026-01-05'];
@@ -483,7 +483,7 @@ test('a cumulative metric over a time_range sums the days before the range that 
   // a where step after the metrics step filters the RESULT, not the rows a metric folds (that is a where
   // step before it, or the window): the days it keeps carry the sums the whole query gave them, the days
   // before them included
-  const later = await engine.query_semantic_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
+  const later = await engine.query_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
   assert.equal(later.ok, true, JSON.stringify(later.error));
   assert.deepEqual(later.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
 });

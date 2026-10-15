@@ -52,7 +52,7 @@ for (const name of new Set([TEST_ENV, 'dbt-v2'])) {
     // the whole table page by page, twice
     const reads = [];
     for (const offset of [0, PAGE, 2 * PAGE, 0, PAGE, 2 * PAGE]) {
-      const page = await one(engine.query_pipeline_model({ task_ids: [built.task_id], limit: PAGE, offset }));
+      const page = await one(engine.query_model({ task_ids: [built.task_id], limit: PAGE, offset }));
       assert.equal(page.status, 'done', JSON.stringify(page.error || page));
       reads.push(page.rows);
     }

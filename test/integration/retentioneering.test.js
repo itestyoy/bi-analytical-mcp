@@ -260,7 +260,7 @@ test('what cannot run is refused before anything starts', opts, async (t) => {
   await assert.rejects(engine.query_retentioneering_model({ context_id: ctx, eventstream: 'paths', analyses: [{ kind: 'funnel', steps: ['first_launch', 'no_such_event'] }] }), (e) => e.field === 'analyses.steps');
   await assert.rejects(engine.query_retentioneering_model({ context_id: ctx, eventstream: 'paths', analyses: [{ kind: 'segment_overview', segment_col: 'country' }] }), (e) => e.field === 'analyses.segment_col');
   // a task of another side is read by its own tool
-  await assert.rejects(one(engine.query_pipeline_model({ task_ids: [analyses.task_id] })), /query_retentioneering_model/);
+  await assert.rejects(one(engine.query_model({ task_ids: [analyses.task_id] })), /query_retentioneering_model/);
 });
 
 // A top N's names and its "other" are counted in retentioneering-steps.test.js (the path-key test's
@@ -728,7 +728,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
     { stage: 'project', keep: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
   ] });
   const m = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
-  const firstBuild = await one(engine.query_pipeline_model({ task_ids: [m.task_id] }));
+  const firstBuild = await one(engine.query_model({ task_ids: [m.task_id] }));
   assert.equal(firstBuild.status, 'done', `T41 the draft's first build: ${JSON.stringify(firstBuild.error)}`);
   // the start's steps run over the task's table as over a source: here a compute copying a column under the segment's name
   const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, steps: [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }], segments: ['app'] });
@@ -750,7 +750,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const n = Number((await wh.query("select count(*) as n from fct_analytics_events where event_name <> 'first_launch'")).rows[0].n);
   await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
   const second = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
-  const rebuilt = await one(engine.query_pipeline_model({ task_ids: [second.task_id] }));
+  const rebuilt = await one(engine.query_model({ task_ids: [second.task_id] }));
   assert.equal(rebuilt.status, 'done', `T43 the draft's rebuild: ${JSON.stringify(rebuilt.error)}`);
   const rb = await engine.build_retentioneering_model({ name: 'from_rebuild', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } });
   const rr = await readDone(rb.task_id);
@@ -759,7 +759,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const pq = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
   await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   const pm = await engine.build_pipeline_model({ action: 'materialize', context_id: pq.context_id });
-  const counted = await one(engine.query_pipeline_model({ task_ids: [pm.task_id] }));
+  const counted = await one(engine.query_model({ task_ids: [pm.task_id] }));
   assert.equal(counted.status, 'done', `T43 on_rebuild: ${JSON.stringify(counted.error)}`);
   assert.equal(Number(counted.rows[0].n), n, 'T43: a pipeline started from the rebuild finds its table');
 });

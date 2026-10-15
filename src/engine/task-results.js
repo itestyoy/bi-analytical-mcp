@@ -1,5 +1,5 @@
 // READING A TASK BACK, AND SHOWING IT — what a finished task reads as (a stored table paged, the rows
-// held in memory, a card hint), the query tools' read and cancel, query_pipeline_model's start, and the
+// held in memory, a card hint), the query tools' read and cancel, query_model's start, and the
 // one tool that draws a model result (display_model_result) with its drill-down reads. The lifecycle
 // itself is src/task-runner.js. Methods of the Engine (src/engine/helpers.js — mixin).
 
@@ -22,7 +22,7 @@ export const taskResultMethods = {
    * materialized='table' dbt model named after the task (`qr_<task_id>`), build it, and keep its first
    * `limit` rows as the task's answer (what a plain card draws — the count is kept with the task, for a
    * card drawn once the answer is gone). The table is the durable result: a read
-   * (query_semantic_model({ request: { task_ids, offset, limit } })) pages it to its last row, after the
+   * (query_model({ request: { task_ids, offset, limit } })) pages it to its last row, after the
    * in-memory answer is gone too, a card drills into it, and a pipeline can start from it (from_task).
    * A query with read steps after its metrics step (`steps`) stores what they leave: the result, under
    * the caller's names, read by them (renderRead) — `columns` the result's columns as the steps name them,
@@ -149,7 +149,7 @@ export const taskResultMethods = {
 
   /** How to have rows past what a task keeps — said in the terms of the tool that ran it. */
   _pageHint(job) {
-    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_pipeline_model({ request: { context_id, steps, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
+    if (job.tool === 'query_pipeline_model') return 'query the model again with a larger limit — query_model({ request: { context_id, steps, limit } }) — or read the build\'s own task, whose stored table a read ({ task_ids, offset, limit }) pages to its last row';
     if (this._taskSide(job) === 'pipeline') return 'build it again — a pipeline build stores its table, which a read then pages to its last row';
     return 'run the query again with a larger limit, or with materialize: true to store every row as a table that a read ({ task_ids, offset, limit }) pages to its last row';
   },
@@ -160,8 +160,8 @@ export const taskResultMethods = {
   },
 
   /**
-   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ request: { task_ids } }) / query_pipeline_model({ request: {
-   * task_id } }): wait for a task of THAT side (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
+   * THE READ HALF OF THE QUERY TOOL — query_model({ request: { task_ids } }): wait for a task of a side it
+   * reads (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
    * returning the moment it is done) and return its finished response — the rows of a query or a
    * build, a parsed model, or the error it ended in. Still running → `status: 'running'`: call
    * again. A task that stored a table (a materialized query, a pipeline build) can be PAGED with
@@ -187,7 +187,7 @@ export const taskResultMethods = {
     // a read hands the model a PAGE of each task's result (READ_PAGE rows from `offset` unless it asks for
     // another number): the task keeps what it keeps — what a card draws — and the rest is a next_offset away
     for (const id of ids) results.push(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }));
-    return TaskRunner.readAnswer(results, this._readers[side], { waited_seconds: waited });
+    return TaskRunner.readAnswer(results, this._readers[[].concat(side)[0]], { waited_seconds: waited });
   },
 
   _knownTask(id) {
@@ -222,19 +222,13 @@ export const taskResultMethods = {
   },
 
   /**
-   * QUERY A BUILT PIPELINE MODEL — the pipeline side's twin of query_semantic_model. Two modes:
-   * with a query ({ context_id, steps?, limit?, dry_run? }) it STARTS a task that reads the context's
-   * built model, optionally through steps in the pipeline's own stages (where, compute, aggregate … run
-   * read-only over the stored table, nothing upstream recomputed), keeps its first `limit` rows and
-   * returns its task_id at once — with dry_run, the read's SQL instead of its rows; with { task_ids } it
-   * waits for pipeline tasks (a build, or such a query) and returns a page of each.
+   * READ A STORED TABLE — query_model's query without a metrics step ({ context_id, steps?, limit?,
+   * dry_run? }): it STARTS a task that reads the context's built pipeline model, optionally through steps
+   * in the pipeline's own stages (where, compute, aggregate … run read-only over the stored table, nothing
+   * upstream recomputed), keeps its first `limit` rows and returns its task_id at once — with dry_run, the
+   * read's SQL instead of its rows.
    */
-  async query_pipeline_model(input) {
-    this._validate('query_pipeline_model', input);
-    if (input.cancel) return this._cancelTasks(input, 'pipeline');
-    if (input.task_ids) return this._pollTasks(input, 'pipeline');
-    const ctx = this._ctx(input.context_id);
-    if (input.queries) return this._startBatch(ctx, 'query_pipeline_model', input.queries, (q) => this._pipelineQueryWork(ctx, q));
+  _startPipelineQuery(ctx, input) {
     // A read only compiled (dry_run) runs nothing on the warehouse: it waits for the build it reads,
     // not behind the reads queued before it — as a metric query only compiled does.
     const slot = input.dry_run ? { batch: this.tasks.afterBuilds(ctx) } : {};
@@ -251,7 +245,10 @@ export const taskResultMethods = {
     const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? this._storedColumns(ctx.id, ctx.state.model, ctx.state.pipeline_model?.task_id) : null;
     const columns = buildingCp ? buildingCp.columns : building ? (standing || []) : standing;
     if (!columns) {
-      throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
+      const metrics = ctx.state.engine === 'project' || (ctx.state.metrics || []).length;
+      throw new ToolError(metrics
+        ? `context ${ctx.id} holds metrics and no stored table: a query of it has a metrics step — query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: "metrics", metrics: [...], group_by: [...] }] } })`
+        : `context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize), then read it here`, { stage: 'validate', field: 'context_id' });
     }
     // the steps are built HERE, over the model's columns, by the compiler the read runs through: a
     // mistake is refused in the call (the columns are unknown only while a first build whose plan was

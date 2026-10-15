@@ -31,7 +31,7 @@ export const semanticIndexMethods = {
       ...(payload ? { pipeline_payload: payload } : {}),
       ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its steps — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_semantic_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its steps — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
     };
   },
 

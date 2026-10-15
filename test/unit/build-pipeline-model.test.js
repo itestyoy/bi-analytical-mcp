@@ -436,7 +436,7 @@ test('drill_result reads only a drawn task, by the path and level of its card â€
   await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, stages: [{ stage: 'limit', limit: 3 }] }), /unexpected property 'stages'/);
   await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, steps: [{ stage: 'limit', limit: 3 }] }), /unexpected property 'steps'/);
   // a task that was never drawn is not a card's to read
-  const task_id = e.jobs.create({ tool: 'query_semantic_model' });
+  const task_id = e.jobs.create({ tool: 'query_model' });
   e.jobs.ready(task_id);
   await assert.rejects(() => e.drill_result({ task_id }), /not drawn/);
 });

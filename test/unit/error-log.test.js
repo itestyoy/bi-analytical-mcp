@@ -19,14 +19,14 @@ const payload = (r) => JSON.parse(r.result.content[0].text);
 test('a refused call is kept with its arguments, and explore_errors reads it back — newest first, filtered, one in full', async () => {
   const engine = makeEngine({ recipes: false });
   const bad = { context_id: 'ctx_nope', steps: [{ stage: 'metrics', metrics: ['x'] }] };
-  assert.equal((await runTool(engine, 'query_semantic_model', { request: bad })).result.isError, true);
+  assert.equal((await runTool(engine, 'query_model', { request: bad })).result.isError, true);
   assert.equal((await runTool(engine, 'no_such_tool', { request: { a: 1 } })).result.isError, true);
   await runTool(engine, 'time', { request: { seconds: 0 } }); // a call that works is not an error
   const page = payload(await runTool(engine, 'explore_errors', { request: {} }));
   assert.equal(page.total, 2);
-  assert.deepEqual(page.errors.map((e) => e.tool), ['no_such_tool', 'query_semantic_model']);
+  assert.deepEqual(page.errors.map((e) => e.tool), ['no_such_tool', 'query_model']);
   assert.equal(page.errors[1].context_id, 'ctx_nope');
-  assert.deepEqual(page.by_source.map((g) => [g.source, g.tool, g.count]).sort(), [['tool', 'no_such_tool', 1], ['tool', 'query_semantic_model', 1]]);
+  assert.deepEqual(page.by_source.map((g) => [g.source, g.tool, g.count]).sort(), [['tool', 'no_such_tool', 1], ['tool', 'query_model', 1]]);
   // one in full: the call's arguments as they were given
   const one = payload(await runTool(engine, 'explore_errors', { request: { id: page.errors[1].id } }));
   assert.deepEqual(one.error.args, { request: bad }, 'as the call gave them — replaying them repeats it');
@@ -35,12 +35,12 @@ test('a refused call is kept with its arguments, and explore_errors reads it bac
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { search: 'CTX_NOPE' } })).total, 1);
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { time_range: { end: '2000-01-01' } } })).total, 0);
   // a summary page names each by its message; include: ["details"] carries the arguments too
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model' } })).errors[0].args, undefined);
-  assert.deepEqual(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', include: ['details'] } })).errors[0].args, { request: bad });
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_model' } })).errors[0].args, undefined);
+  assert.deepEqual(payload(await runTool(engine, 'explore_errors', { request: { tool: 'query_model', include: ['details'] } })).errors[0].args, { request: bad });
   // paged
   const first = payload(await runTool(engine, 'explore_errors', { request: { limit: 1 } }));
   assert.equal(first.next_offset, 1);
-  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { limit: 1, offset: 1 } })).errors[0].tool, 'query_semantic_model');
+  assert.equal(payload(await runTool(engine, 'explore_errors', { request: { limit: 1, offset: 1 } })).errors[0].tool, 'query_model');
   // reading the log is not itself an error
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: {} })).total, 2);
 });
@@ -55,9 +55,9 @@ test('bad input to explore_errors is refused, and that refusal is kept too', asy
   // the earlier spellings are no fields of this tool
   for (const request of [{ since: '2026-01-01' }, { text: 'x' }, { detail: true }]) assert.equal((await runTool(engine, 'explore_errors', { request })).result.isError, true, JSON.stringify(request));
   // the earlier level of detail is the one list `include` now: refused with the request it is, never served
-  const detail = await runTool(engine, 'explore_errors', { request: { tool: 'query_semantic_model', detail: 'full' } });
+  const detail = await runTool(engine, 'explore_errors', { request: { tool: 'query_model', detail: 'full' } });
   assert.equal(detail.result.isError, true);
-  assert.ok(payload(detail).error.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ tool: 'query_semantic_model', include: ['details'] })}`), payload(detail).error.message);
+  assert.ok(payload(detail).error.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ tool: 'query_model', include: ['details'] })}`), payload(detail).error.message);
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 8);
 });
 
@@ -110,7 +110,7 @@ test('a task that ends in an error is kept once, with its input — its reads ar
   const tasks = engine.explore_errors({ source: 'task' });
   assert.deepEqual(tasks.errors.map((e) => e.task_id).sort(), [id, thrown].sort());
   assert.deepEqual(engine.explore_errors({ task_id: id, include: ['details'] }).errors[0].args, { steps: [{ stage: 'limit', limit: 1 }] });
-  await runTool(engine, 'query_pipeline_model', { request: { task_ids: [id] } });
+  await runTool(engine, 'query_model', { request: { task_ids: [id] } });
   assert.equal(engine.explore_errors({}).total, 2);
 });
 
@@ -144,7 +144,7 @@ test('an error carries what reproduces it: the draft a refused step was added to
 
 test('a call refused for leaving out the envelope is kept with the ids it carried at the top', async () => {
   const engine = makeEngine({ recipes: false });
-  const r = await runTool(engine, 'query_semantic_model', { task_id: 'abcdef123456' });
+  const r = await runTool(engine, 'query_model', { task_id: 'abcdef123456' });
   assert.equal(r.result.isError, true);
   const page = payload(await runTool(engine, 'explore_errors', { request: { task_id: 'abcdef123456' } }));
   assert.equal(page.total, 1, 'found by the task it named');

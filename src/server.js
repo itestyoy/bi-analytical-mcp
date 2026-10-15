@@ -165,7 +165,7 @@ export async function makeEngine(opts = {}) {
   // that is not a whole number of days is the default, as for every setting (src/config.js).
   const tableExpirationDays = S.MCP_TABLE_EXPIRATION_DAYS;
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
-  // schema names them, and query_semantic_model runs them in their own context with no build
+  // schema names them, and query_model runs them in their own context with no build
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
   if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);

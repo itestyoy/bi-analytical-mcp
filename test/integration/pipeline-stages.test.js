@@ -829,7 +829,7 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
   if (skip(t)) return;
   const { context_id } = await condPipe([{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }]);
   const want = await truth("select count(*) as n from fct_analytics_events where event_name like 'level%' or event_name = 'tutorial'");
-  const read = await engine.query_pipeline_model({ context_id, steps: [
+  const read = await engine.query_model({ context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'starts_with', args: [{ column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
   ] });
@@ -837,7 +837,7 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
   // the names whose count is the smallest or the largest: a where on the measure the aggregate made
   const counts = (await wh.query('select event_name, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => num(r.n));
   const lo = Math.min(...counts); const hi = Math.max(...counts);
-  const kept = await engine.query_pipeline_model({ context_id, steps: [
+  const kept = await engine.query_model({ context_id, steps: [
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'n' }] } }] },
     { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ column: 'n' }, { value: lo }] }, { fn: 'eq', args: [{ column: 'n' }, { value: hi }] }] }] },
   ] });
@@ -865,13 +865,13 @@ test('a semantic measure over a case and a where step before the metrics step ta
   const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   const pickedLevels = await truth('select sum(level_id_of_event_data) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   assert.ok(picked > 0 && pickedLevels > picked, '[measure over a case] the fixture has such rows, some above level 1');
-  const r = await engine.query_semantic_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['cond_sem_picked', 'cond_sem_picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  const r = await engine.query_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['cond_sem_picked', 'cond_sem_picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.deepEqual([num(r.rows[0].cond_sem_picked), num(r.rows[0].cond_sem_picked_levels)], [picked, pickedLevels], '[count / sum over a case] the rows either condition holds for, and their level ids');
 
   // 'a where step before the metrics step names what it compares as group_by does, and takes the text operators and or too'
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
-  const w = await engine.query_semantic_model({
+  const w = await engine.query_model({
     context_id: built.context_id, time_range: { start: '2020-01-01', end: '2030-12-31' },
     steps: [
       { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }] },
@@ -916,7 +916,7 @@ test('a query over a built model computes a sample stddev, variance, median and 
   const { context_id } = await condPipe([{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'session_number' }] }] }]);
   const md = await truth('select quantile_cont(session_number, 0.5) as n from fct_analytics_events');
   const p9 = await truth('select quantile_cont(session_number, 0.9) as n from fct_analytics_events');
-  const read = await engine.query_pipeline_model({ context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'sd', expr: { fn: 'stddev', args: [{ column: 'session_number' }] } }, { name: 'vr', expr: { fn: 'variance', args: [{ column: 'session_number' }] } }, { name: 'md', expr: { fn: 'median', args: [{ column: 'session_number' }] } }, { name: 'p9', expr: { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 } }] }] });
+  const read = await engine.query_model({ context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'sd', expr: { fn: 'stddev', args: [{ column: 'session_number' }] } }, { name: 'vr', expr: { fn: 'variance', args: [{ column: 'session_number' }] } }, { name: 'md', expr: { fn: 'median', args: [{ column: 'session_number' }] } }, { name: 'p9', expr: { fn: 'percentile', args: [{ column: 'session_number' }], percentile: 0.9 } }] }] });
   assert.equal(read.status, 'done', JSON.stringify(read.error));
   assert.ok(sd > 0, 'the fixture has spread');
   assert.ok(Math.abs(num(read.rows[0].sd) - sd) < 1e-9 && Math.abs(num(read.rows[0].vr) - vr) < 1e-9);
@@ -931,7 +931,7 @@ test('a query over a built model reads columns named with reserved words (order,
     { stage: 'compute', name: 'group', expr: { column: 'event_name' } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
   ]);
-  const read = await engine.query_pipeline_model({ context_id, steps: [
+  const read = await engine.query_model({ context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'group' }, { value: 'tutorial' }] }] },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'select', expr: { fn: 'sum', args: [{ column: 'order' }] } }] },
     { stage: 'order_by', keys: [{ key: 'select', direction: 'desc' }] },
@@ -995,7 +995,7 @@ test('preview with validate runs the draft\'s SQL against the warehouse with no 
   // a function the warehouse does not have: only the warehouse can say so
   await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
   const bad = await engine.raw.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
-  const read = await engine.raw.query_pipeline_model({ task_ids: [bad.task_id] });
+  const read = await engine.raw.query_model({ task_ids: [bad.task_id] });
   assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
   assert.ok(!engine.ctxs.generatedFiles(s.context_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
 });
@@ -1864,7 +1864,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['jtut_s1', 'jtut_sj'] }] });
+  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['jtut_s1', 'jtut_sj'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(Number(r.rows[0].jtut_s1), 8, 'the control: 8 players at step_1');
   assert.equal(Number(r.rows[0].jtut_sj ?? 0), 0, 'evaluated, the Jinja value would have counted the same 8');

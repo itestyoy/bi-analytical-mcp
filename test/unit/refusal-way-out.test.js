@@ -37,7 +37,7 @@ test('a declaration whose only metric reads a measure on the slowly-changing use
 
 test('an id that names no context says how to list those that exist', async () => {
   await assert.rejects(
-    engine.query_pipeline_model({ context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
+    engine.query_model({ context_id: 'nope12345678', steps: [{ stage: 'limit', limit: 1 }] }),
     /unknown context_id: nope12345678\. No context has that id .*context\(\{ request: \{ action: 'list' \} \}\)/,
   );
   const r = await engine.delete_context({ context_id: 'zzzzzzzzzzzz' });

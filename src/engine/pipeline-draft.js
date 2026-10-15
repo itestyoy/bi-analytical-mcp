@@ -143,7 +143,7 @@ export const pipelineDraftMethods = {
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
-          + `Wait for it with query_pipeline_model({ request: { task_ids: ['${st.building}'] } }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or delete_context({ request: { what: 'pipeline_model' } }) — and materialize again.`,
+          + `Wait for it with query_model({ request: { task_ids: ['${st.building}'] } }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or delete_context({ request: { what: 'pipeline_model' } }) — and materialize again.`,
           { stage: 'validate', field: 'context_id' },
         );
       }
@@ -198,11 +198,11 @@ export const pipelineDraftMethods = {
     for (const cp of checkpoints) {
       if (cp.owner !== ctx.id) continue; // another context's model: not ours to remove
       // The context's REGISTERED result keeps its definition even when the prefix it stood for is
-      // retired: `ctx.state.model` still advertises that table and query_pipeline_model reads it
+      // retired: `ctx.state.model` still advertises that table and query_model reads it
       // through `{{ ref() }}`, which needs the file. A later build of the same name cleans it.
       if (cp.model === ctx.state.model) continue;
       // Nor one whose build is STILL RUNNING here: the task will hand its table back through
-      // query_pipeline_model, which reads it by ref — removing the definition mid-build would make the
+      // query_model, which reads it by ref — removing the definition mid-build would make the
       // result unreadable for good.
       if (cp.task_id && this.jobs.isLive?.(cp.task_id) && this.jobs.get(cp.task_id)?.status === 'running') continue;
       if ((ctx.state.checkpoint_consumers?.[cp.model] || []).some((id) => this.ctxs.has(id))) continue;
@@ -647,7 +647,7 @@ export const pipelineDraftMethods = {
 
   /**
    * THE DRAFT CHECKED BY THE WAREHOUSE, READING NO DATA — preview with validate: a task (read with
-   * query_pipeline_model) that writes the SQL a materialize would build, under names of its own, and
+   * query_model) that writes the SQL a materialize would build, under names of its own, and
    * runs it with `dbt run --empty`: every ref and source limited to zero rows, so the warehouse
    * compiles and plans the very SQL (a type mismatch, an unknown name, a syntax error is refused as
    * it would be) and reads nothing. The models are removed afterwards whatever the outcome — a

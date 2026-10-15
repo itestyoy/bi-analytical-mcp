@@ -71,7 +71,7 @@ export const semanticBuildMethods = {
    */
   async _buildPipeline(input) {
     this._validate('build_pipeline_model.pipeline', input);
-    // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_ids } })
+    // a build is a task: the id now, the rows from query_model({ request: { task_ids } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'build_pipeline_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
@@ -166,7 +166,7 @@ export const semanticBuildMethods = {
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
       next: render.metricNames.length
-        ? `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
+        ? `Query it: query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
         : `This context has no metric to query yet: declare one with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [...], metrics: [...] } }).`,
       recommendations: [
         `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
@@ -264,7 +264,7 @@ export const semanticBuildMethods = {
       return {
         context_id: ctx.id, semantic_models: models, files: [file], ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
-        next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [...] }] } }) — \`metrics\` above is the current full list.`,
+        next: `Query the updated task: query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [...] }] } }) — \`metrics\` above is the current full list.`,
       };
     }, { input });
     return this._taskStarted(taskId, { context_id: ctx.id });

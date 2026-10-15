@@ -18,11 +18,13 @@ for (const file of ['config/catalog.yml', 'test/integration/fixtures/catalog.yml
     .replaceAll('<events source>', fact)
     .replaceAll('<event-name column>', catalog.eventNameColumn(fact))
     .replaceAll('<context_id>', 'abcdef123456'));
-  for (const [tool, example] of Object.entries(EXAMPLES)) {
-    test(`${file}: the example call in ${tool}'s description validates`, () => {
-      const r = validateInput(validators[tool], fill(example));
-      assert.ok(r.ok, JSON.stringify(r.errors));
-      assert.ok(CORE_TOOLS.find((t) => t.name === tool).description.includes(callText(example)), 'the description shows it');
+  for (const [tool, examples] of Object.entries(EXAMPLES)) {
+    test(`${file}: the example calls in ${tool}'s description validate`, () => {
+      for (const example of [].concat(examples)) {
+        const r = validateInput(validators[tool], fill(example));
+        assert.ok(r.ok, JSON.stringify(r.errors));
+        assert.ok(CORE_TOOLS.find((t) => t.name === tool).description.includes(callText(example)), 'the description shows it');
+      }
     });
   }
 }

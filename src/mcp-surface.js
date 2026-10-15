@@ -21,7 +21,7 @@ import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
-In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ request: { task_ids } }) or query_pipeline_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with query_model({ request: { task_ids } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 
 /** Where the skills are served: the root every skill URI shares, so the core names it at one length however many there are. */
 function skillRoot(uris) {
@@ -42,7 +42,7 @@ function skillRoot(uris) {
  */
 function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = {}) {
   return [
-    `Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool. ${SELF_REFUSAL_BRIEF}.`,
+    `Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_model. Warehouse work returns a task_id at once; read it back with query_model. ${SELF_REFUSAL_BRIEF}.`,
     '',
     'Every tool takes its input as tool({ request: { … } }); a bare shape below is its content.',
     `semantic_index({ request: {} }) lists the catalog\'s sources and models; { guide: true } the workflow and which tool fits a question. A read ({ task_ids }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
@@ -81,7 +81,7 @@ WHERE THE DETAIL IS
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Semantic layer for product analytics over a fixed data catalog (events sources, a user-attributes dimension, experiment assignments, spend): declare reusable metrics, or build one-off tables — funnels, sessions, pivots — and query them by name; the server writes and runs the SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
+const SERVER_SUMMARY = 'Semantic layer for product analytics over a fixed data catalog (events sources, a user-attributes dimension, experiment assignments, spend): declare reusable metrics, or build one-off tables — funnels, sessions, pivots — and query them by name; the server writes and runs the SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_model.';
 
 // WHAT A TOOL IS — its title, description, annotations, the task side it starts
 // and reads, whether it draws — is its definition (src/tools/define.js): the core's in
@@ -211,7 +211,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   if (!renders && def.appsOnly && !def.appCallable) {
     logLine(name, '✗ from a client without the Apps extension');
     failed(name, `${name} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate' });
-    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_ids })`, 'validate'), raw: null };
+    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_model ({ task_ids })`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
   // (only a card ASKED for: `false` asks for none, which every client already gets)

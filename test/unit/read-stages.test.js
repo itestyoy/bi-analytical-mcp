@@ -78,7 +78,7 @@ test('a stage that makes a new table is refused in a read, naming the stages a r
   // join is no stage there, refused by the schema; the read's place refuses it as the step is built
   // (above), for a caller past the schema (a card's drill)
   const v = makeValidators(buildSchemas(catalog));
-  const q = (request) => validateInput(v.query_pipeline_model, request);
+  const q = (request) => validateInput(v.query_model, request);
   assert.equal(q({ context_id: 'abcdef123456', steps: [{ stage: 'limit', limit: 3 }] }).ok, true);
   assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
   assert.match(q({ context_id: 'abcdef123456', steps: [{ stage: 'nope' }] }).errors.join(' | '), /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
@@ -122,10 +122,10 @@ test('a stored table has no source: an event property, a ref and a declared rela
   // …and the read's tool, whose one expression is built for its place, has no such leaf: its schema
   // refuses it before the place is asked
   const v = makeValidators(buildSchemas(catalog));
-  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
   // …nor a window restarting per a declared relationship (a source's rows alone have one)
-  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, false);
-  assert.equal(validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, false);
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
 });
 
 // input-validation guards (allowed by the test rules): unsafe input is rejected, a name not a column of
@@ -153,7 +153,7 @@ test('a read written as an earlier `transform` is refused with the steps it is n
     { stage: 'where', conditions: [cond('eq', 'user__country', 'US')] },
     { stage: 'aggregate', group_by: ['day'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
   ];
-  const refused = validateInput(v.query_pipeline_model, { context_id: 'abcdef123456', transform });
+  const refused = validateInput(v.query_model, { context_id: 'abcdef123456', transform });
   assert.equal(refused.ok, false);
   assert.ok(refused.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ context_id: 'abcdef123456', steps })}`), refused.errors.join(' | '));
   // having is a where after the aggregate, order_by its stage, then a second level; a group_by alone counts its rows

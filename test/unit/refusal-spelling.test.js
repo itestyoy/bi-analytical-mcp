@@ -109,10 +109,10 @@ test('sum_boolean is refused with the list of functions, and no word-for-word ad
 // and a context is `context_id` in every tool: the earlier spellings are refused, with this server's
 // name in the refusal (a hint, not an alias).
 test("a read's measure list is `measures`, and `aggregations` is refused with that name", () => {
-  const res = check('query_pipeline_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const res = check('query_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], aggregations: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.equal(res.ok, false);
   assert.match(text(res), /'aggregations' — here that field is called 'measures'/);
-  assert.equal(check('query_pipeline_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
+  assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] }).ok, true);
 });
 
 // A list a tool runs in order is `steps` in every tool, its items tagged by what they are. What changed
@@ -121,33 +121,33 @@ test("a read's measure list is `measures`, and `aggregations` is refused with th
 // step before it and an order_by step after it — is shown as it is written now, in a batch at the query
 // that wrote it.
 test("a read's transform and a metric query's metrics, group_by, where and order_by are shown as the steps they are now", () => {
-  const read = check('query_pipeline_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } });
+  const read = check('query_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } });
   assert.equal(read.ok, false);
   assert.ok(text(read).includes(`request is written in an earlier spelling — write ${JSON.stringify({ context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] })}`), text(read));
   const keys = [{ key: 'revenue', direction: 'desc' }];
   const revenue = { stage: 'metrics', metrics: ['revenue'] };
   const said = (res, at, now) => { assert.equal(res.ok, false); assert.ok(text(res).includes(`${at} is written in an earlier spelling — write ${JSON.stringify(now)}`), text(res)); };
   // its metrics alone: the metrics step
-  said(check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'] }), 'request', { context_id: 'ctxabc123456', steps: [revenue] });
-  said(check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'], order_by: keys, limit: 5 }), 'request', { context_id: 'ctxabc123456', limit: 5, steps: [revenue, { stage: 'order_by', keys }] });
+  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'] }), 'request', { context_id: 'ctxabc123456', steps: [revenue] });
+  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'], order_by: keys, limit: 5 }), 'request', { context_id: 'ctxabc123456', limit: 5, steps: [revenue, { stage: 'order_by', keys }] });
   // all of it: its where before the metrics step, its group_by in it, its steps and then its order_by after it
   const country = { source: 'users', column: 'country' };
   const US = { fn: 'eq', args: [country, { value: 'US' }] };
   const window = { start: '2026-01-01', end: '2026-01-31' };
-  said(check('query_semantic_model', { context_id: 'ctxabc123456', metrics: ['revenue'], group_by: [country], where: [US], steps: [{ stage: 'limit', limit: 3 }], order_by: keys, time_range: window }), 'request', {
+  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'], group_by: [country], where: [US], steps: [{ stage: 'limit', limit: 3 }], order_by: keys, time_range: window }), 'request', {
     context_id: 'ctxabc123456', time_range: window,
     steps: [{ stage: 'where', conditions: [US] }, { ...revenue, group_by: [country] }, { stage: 'limit', limit: 3 }, { stage: 'order_by', keys }],
   });
   // in a batch, at the query that wrote it — or the whole request, when every query did
-  said(check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] }), '`queries.1`', { steps: [revenue, { stage: 'order_by', keys }] });
-  said(check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ metrics: ['revenue'] }, { metrics: ['revenue'], order_by: keys }] }), 'request', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { steps: [revenue, { stage: 'order_by', keys }] }] });
+  said(check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] }), '`queries.1`', { steps: [revenue, { stage: 'order_by', keys }] });
+  said(check('query_model', { context_id: 'ctxabc123456', queries: [{ metrics: ['revenue'] }, { metrics: ['revenue'], order_by: keys }] }), 'request', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { steps: [revenue, { stage: 'order_by', keys }] }] });
   // …and what it says now is taken: the order_by step, a where step on a metric (a having), the time
   for (const steps of [
     [{ stage: 'order_by', keys }],
     [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }],
     [{ stage: 'compute', name: 'recent', expr: { fn: 'gte', args: [{ column: 'metric_time_day' }, { now: true }] } }],
-  ]) assert.equal(check('query_semantic_model', { context_id: 'ctxabc123456', steps: [revenue, ...steps] }).ok, true, JSON.stringify(steps));
-  assert.equal(check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue, { stage: 'order_by', keys }] }] }).ok, true);
+  ]) assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [revenue, ...steps] }).ok, true, JSON.stringify(steps));
+  assert.equal(check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue, { stage: 'order_by', keys }] }] }).ok, true);
   // a list of names that is no query — the metrics an update removes — is not read as one
   assert.equal(check('build_semantic_model', { action: 'update', context_id: 'ctxabc123456', remove: { metrics: ['revenue'] } }).ok, true);
 });
@@ -160,7 +160,7 @@ test("a read's transform and a metric query's metrics, group_by, where and order
 // asked for with `include_plan` is the one list `include`.
 test("a metric query's { model, attribute } is shown as the ref it is now, in its metrics step's group_by and in a where step", () => {
   const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['revenue'], ...extra });
-  const q = (steps, extra = {}) => check('query_semantic_model', { context_id: 'ctxabc123456', steps, ...extra });
+  const q = (steps, extra = {}) => check('query_model', { context_id: 'ctxabc123456', steps, ...extra });
   const where = (...conditions) => ({ stage: 'where', conditions });
   const country = { source: 'users', column: 'country' };
   assert.equal(q([where({ fn: 'eq', args: [country, { value: 'US' }] }), metrics({ group_by: [country] })]).ok, true);
@@ -177,7 +177,7 @@ test("a metric query's { model, attribute } is shown as the ref it is now, in it
     assert.ok(text(filtered).includes(`\`steps.0.conditions.0.args.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), text(filtered));
   }
   // …in a batch, at the query that wrote it
-  const batch = check('query_semantic_model', { context_id: 'ctxabc123456', queries: [{ steps: [metrics()] }, { steps: [metrics({ group_by: [{ model: 'users', attribute: 'country' }] })] }] });
+  const batch = check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [metrics()] }, { steps: [metrics({ group_by: [{ model: 'users', attribute: 'country' }] })] }] });
   assert.equal(batch.ok, false);
   assert.ok(text(batch).includes(`\`queries.1.steps.0.group_by.0\` is written in an earlier spelling — write ${JSON.stringify(country)}`), text(batch));
   // the plan of an explained query

@@ -154,7 +154,7 @@ a later stage can only use columns that exist at that point. `compute` adds colu
 without changing grain — put window functions / `date_diff` / `case` before the `aggregate` that
 consumes them, and put a post-aggregate `where` after `aggregate` to filter on a
 computed measure. A built table is read later in the same stages:
-`query_pipeline_model({ request: { context_id, steps: [...] } })` runs where, compute,
+`query_model({ request: { context_id, steps: [...] } })` (no metrics step) runs where, compute,
 aggregate, pivot, unpivot, order_by, limit, sample and project over it, storing nothing
 (`dry_run: true` returns that read's SQL instead); a metric query takes the same steps over
-its result, after its `metrics` step (`query_semantic_model`).
+its result, after its `metrics` step.

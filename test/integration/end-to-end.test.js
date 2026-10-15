@@ -5,10 +5,10 @@
 //    property → value search, and { status } after a refresh — are value-index.test.js's,
 //    which builds the index over the same fixture.)
 //   3. PIPELINE — build_pipeline_model (start/add_steps/preview/commit) builds the
-//                    activation funnel; rows read back via query_pipeline_model (12/8/5/3,
+//                    activation funnel; rows read back via query_model (12/8/5/3,
 //                    the same counts the funnels of pipeline-stages.test.js prove on the
 //                    all-at-once build).
-//   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
+//   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_model by
 //                    country → build_semantic_model action update adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
 //   5. A/B         — build_pipeline_model fed the conversion recipe's steps one-at-a-
@@ -105,9 +105,9 @@ test('3a. build_pipeline_model: start → add_steps (funnel) → preview → com
   assert.ok(typeof c.provenance?.data_freshness === 'string' && c.provenance.data_freshness.length > 0, 'data freshness = latest event time');
 });
 
-test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_model (same 12/8/5/3)', opts, async (t) => {
+test('3b. the build task\'s stored table is re-read (paged) with query_model (same 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await one(engine.query_pipeline_model({ task_ids: [S.pipeTask], limit: 1000 }));
+  const r = await one(engine.query_model({ task_ids: [S.pipeTask], limit: 1000 }));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(reached(r.rows, 'launch'), 12);
   assert.equal(reached(r.rows, 'tut1'), 8);
@@ -133,7 +133,7 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.e2e_mon_revenue)]));
   assert.equal(by.US, 35);
@@ -172,7 +172,7 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
   const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers', ...names] }] });
+  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers', ...names] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].e2e_mon_payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
   const [payers] = (await wh.query(`select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'iap_purchase_completed'`)).rows;
@@ -186,7 +186,7 @@ test('4b. build_semantic_model action update adds a payers metric (re-query = 7 
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);
 
   // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
-  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
+  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 

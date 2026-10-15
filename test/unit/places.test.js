@@ -43,7 +43,7 @@ test('a build takes every stage, a read the ones that keep it one table — the 
   // the semantic layer's step (a metric query's metrics) is no stage of the registry: only the place that
   // offers it takes it — not a build's "every stage", not a read; it makes no table, so the refusal says
   // where it belongs instead of "build it from the task"
-  const semantic = /a metrics step is what the semantic layer computes, one per metric query \(query_semantic_model\)$/;
+  const semantic = /a metrics step is what the semantic layer computes, one per metric query \(query_model\)$/;
   assert.equal(stageDef('metrics'), null, 'the metrics step is no pipeline stage');
   assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), /^steps\[0\]: a pipeline build takes every stage over a table's rows — /);
   assert.match(message(() => stageAt('build', { stage: 'metrics' }, 'steps[0]')), semantic);
@@ -173,7 +173,7 @@ test('a metric query refuses in the call what its group_by and its where steps d
   const e = engine();
   const { context_id } = await e.build_semantic_model({ name: 'plc', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
   const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['plc_n'], ...extra });
-  const query = (...steps) => e.query_semantic_model({ context_id, steps });
+  const query = (...steps) => e.query_model({ context_id, steps });
   const where = (...conditions) => ({ stage: 'where', conditions });
   // a source, an event, a metric: no ref the tool's group_by takes, so no form of its $defs.ref
   for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'plc_n' }]) {
@@ -202,7 +202,7 @@ test('a pipeline step over a source\'s rows refuses a metric and another model\'
     await assert.rejects(() => e.build_pipeline_model({ action: 'add_steps', context_id, steps: where(leaf) }), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.conditions\.0\.args\.0`/.test(err.message), JSON.stringify(leaf));
     // …and the step's place refuses it as it is built, for a caller past the schema
     await assert.rejects(() => (e.raw || e)._draftAddSteps(ctx, ctx.state.draft, where(leaf)),
-      (err) => err.field === 'steps[0]' && said.test(err.message) && /is not what a step over a source's rows takes — it takes \{ column \}, \{ property \}, \{ value \}, \{ now: true \}, and every function\. A column of another model arrives by a join stage \(its attrs\), and a metric is query_semantic_model's/.test(err.message), JSON.stringify(leaf));
+      (err) => err.field === 'steps[0]' && said.test(err.message) && /is not what a step over a source's rows takes — it takes \{ column \}, \{ property \}, \{ value \}, \{ now: true \}, and every function\. A column of another model arrives by a join stage \(its attrs\), and a metric is query_model's/.test(err.message), JSON.stringify(leaf));
   }
   assert.equal(ctx.state.draft.stages.length, 0, 'nothing refused was added');
 });

@@ -128,7 +128,7 @@ declares what the machinery needs to know about it (`available` on this warehous
 names a stage.
 
 A metric query's `metrics` step — its metrics broken down by `group_by`, one row per
-combination, computed by MetricFlow — is in `query_semantic_model`'s `$defs.stage` beside these
+combination, computed by MetricFlow — is in `query_model`'s `$defs.stage` beside these
 stages, but it is no stage of the registry: a build never reaches it. Its one definition
 (`METRICS_STEP`, `src/schema/fields.js`: its form, its group, what another place says of it) is
 offered by the place that takes it (`STAGE_PLACES.metric_scope`: the steps up to it, `where` steps and
@@ -217,11 +217,11 @@ with the YAML config header. Two consumption modes, unchanged:
 
 1. **Semantic layer on top.** A MetricFlow semantic model is declared over the
    pipeline's output (shared `user` entity → joins to `dim_users` at query time).
-   Metrics/dimensions are queried via `query_semantic_model`, a query of `steps`: where steps,
+   Metrics/dimensions are queried via `query_model`, a query of `steps`: where steps,
    one `metrics` step, then the same read stages re-slicing the metric result (a where step on a
    metric is a having). This is
    how the `match_recognize` pipeline is consumed today.
-2. **Direct materialization.** `query_semantic_model(materialize:true)` stores a
+2. **Direct materialization.** `query_model(materialize:true)` stores a
    result (after its steps) as a table named after its task; a pipeline started from that task
    (`build_pipeline_model({ action: 'start', name, from_task })`) re-slices it with the same
    stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
@@ -231,8 +231,8 @@ the **scalar** two-source models. **A pipeline built in one call (`_buildPipelin
 creator**: it accepts a `pipeline` (`source` + ordered stages — where/compute/unnest/join/
 aggregate/pivot/unpivot/sample/order_by/limit/project and the `match_recognize` funnel stage;
 window functions are compute expressions). A `pipeline` is materialized as a dbt model whose rows ARE the
-result (the build is a task: `query_pipeline_model({ task_ids: [id] })` returns and pages its rows,
-`query_pipeline_model({ context_id, steps })` filters and regroups the built model in steps of the
+result (the build is a task: `query_model({ task_ids: [id] })` returns and pages its rows,
+`query_model({ context_id, steps })` filters and regroups the built model in steps of the
 pipeline's own stages — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project,
 rendered by `renderRead` into one statement over the stored table; `dry_run: true` returns that
 statement instead of its rows — and a pipeline started from it

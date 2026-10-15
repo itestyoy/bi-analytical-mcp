@@ -602,7 +602,7 @@ function stagePlacesOf(places) {
  * stages this warehouse offers that one of them takes, each the closed form(s) its schema writes, tagged
  * by `stage` (so the refusal of a bad step is that stage's, not every stage's: src/validate.js), grouped
  * by what it needs (a titled union per group; a group left empty is left out). The steps a place offers of
- * its own (`offers`: the metrics step, query_semantic_model's) join the group each names, as `runtime` —
+ * its own (`offers`: the metrics step, query_model's) join the group each names, as `runtime` —
  * the forms a feature adds to ITS tools' runtime group, its library's steps tagged by what they are — joins
  * that one; the core's tools pass none, so nothing of a feature is in their definition. One definition per
  * tool: the one step and the list of steps point at it, and where its places take different stages, each

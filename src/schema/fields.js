@@ -164,7 +164,7 @@ export function metricSchema(catalog) {
 /** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
 export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.');
 
-/** The fields a metric query takes beside its context — the one list query_semantic_model's start form
+/** The fields a metric query takes beside its context — the one list query_model's start form
  *  and a batch's item are built from (src/schema.js), and what tells an earlier metric query apart from
  *  a bare list of metric names (src/earlier-spelling.js). */
 export const METRIC_QUERY_FIELDS = ['steps', 'time_range', 'limit', 'materialize', 'dry_run', 'include'];
@@ -177,12 +177,12 @@ export const METRIC_QUERY_FIELDS = ['steps', 'time_range', 'limit', 'materialize
  * is refused: its form (`schema`; `project` — the dbt project's own layer, whose contexts name their
  * dimensions its way), the group of `$defs.stage` it is listed under (STAGE_GROUPS, src/pipeline/stages.js),
  * the place that takes it and offers it — the steps of a metric query up to it (STAGE_PLACES.metric_scope),
- * which puts it in query_semantic_model's `$defs.stage` — and what any other place says of it (`elsewhere`).
+ * which puts it in query_model's `$defs.stage` — and what any other place says of it (`elsewhere`).
  */
 export const METRICS_STEP = {
   stage: 'metrics',
   group: 'semantic',
-  elsewhere: 'a metrics step is what the semantic layer computes, one per metric query (query_semantic_model)',
+  elsewhere: 'a metrics step is what the semantic layer computes, one per metric query (query_model)',
   schema: (_catalog, { project = null } = {}) => ({
     type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
     description: 'What the semantic layer computes: the metrics, one column each, broken down by group_by — one row per combination of its items. MetricFlow writes the SQL and makes every join. A query has one; the where steps before it filter the rows its metrics fold, the steps after it work on its result.',

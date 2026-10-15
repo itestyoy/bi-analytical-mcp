@@ -327,7 +327,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the library's ops, the feature's own runtime group), in the semantic layer (the metrics step — no
   pipeline stage, so not in the registry a build reads: its one definition, `METRICS_STEP`
   (src/schema/fields.js — its form, its group, what another place says of it), is offered by the place
-  that takes it, query_semantic_model's `STAGE_PLACES.metric_scope`, as a feature passes its runtime
+  that takes it, query_model's `STAGE_PLACES.metric_scope`, as a feature passes its runtime
   group)), `$defs.ref` (`refSchema`, src/schema/refs.js —
   the catalog: `{ source }`, `{ source, event }`, `{ source, column, via? }` a model's column (`via`
   where a place reads one), `{ source, property }` an event property; the semantic layer:
@@ -394,7 +394,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   that says none claims none; a read never does. What each place takes (`PLACES`): a step over a
   source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field? }`
   (an event property read where it is stored, while the rows are that source's events), `{ value }` (a
-  scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_pipeline_model,
+  scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_model without a metrics step,
   the steps after a metrics step, a drill — and filter_events, the eventstream's columns) the same
   without `{ property }` and `raw`; a semantic model's where, dimensions and measures `{ column }` (a
   column, an entity key, a declared amount), `{ property }` on an events source, `{ value }` and
@@ -460,8 +460,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   expression — a `;`, a comment or a parenthesis that does not balance outside quoted text is refused —
   and with no Jinja opener (`{{`, `{%`, `{#` — dbt would run it); a text holding one is a constant in
   `args`. It is a
-  build's escape hatch: a read (query_pipeline_model, the steps after a metrics step, a drill) takes
-  no raw (`PLACES.stored_rows`), and neither query tool's schema holds it. A constant
+  build's escape hatch: a read (query_model without a metrics step, the steps after a metrics step, a drill) takes
+  no raw (`PLACES.stored_rows`), and the query tool's schema does not hold it. A constant
   is written in the type of the first argument that is not a constant, one rule for every comparison
   (`typedValue`, src/conditions.js — a number or a flag against a text is its text, a moment written
   with an offset of its own (Z, ±hh[:mm]) against a moment the UTC instant it names, to the microsecond
@@ -502,12 +502,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   only the views of what it drew (no other tools/call, resource, model message, link or network) — a
   test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
-- BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
-  tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
-  `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
-  pipeline materialize) or a query
-  (`query_semantic_model({ context_id, steps })`, `query_pipeline_model({ context_id, steps })` — a
-  QUERY IS ITS STEPS on both sides. A metric query's hold ONE metrics step `{ stage: "metrics",
+- BUILD, QUERY, SHOW (HARD RULE). Two builders — `build_semantic_model` (the semantic side) and
+  `build_pipeline_model` (the pipeline side) — and ONE query tool, `query_model`, for both. A call that
+  STARTS warehouse work — a build (incl. action:update, a pipeline materialize) or a query
+  (`query_model({ context_id, steps })` — a QUERY IS ITS STEPS: with a metrics step it is a METRIC
+  QUERY (a semantic task), without one a READ of the context's stored pipeline table (a pipeline task;
+  `time_range`, `materialize` and `include` belong to a metric query and are refused there). A metric
+  query's steps hold ONE metrics step `{ stage: "metrics",
   metrics, group_by? }` — what the semantic layer computes (`STAGE_PLACES.metric_scope`, its own group of
   `$defs.stage`); before it only where steps, the rows its metrics fold (their leaves what group_by names
   — `PLACES.metric_where` —, every one ANDed into MetricFlow's where); after it a read
@@ -522,13 +523,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   query`; any other steps after it run over the SQL MetricFlow compiles for it, its columns renamed to the
   caller's names, rendered by the one read compiler (`renderRead`, src/pipeline.js) and run through
   the dbt client's `show` — the same answer, paging and KEPT_ROWS either way, and `materialize: true`
-  stores the result after the steps. A query tool also takes a
-  BATCH — `{ context_id, queries: [...] }`, of any size — which checks EVERY query before
+  stores the result after the steps. The query tool also takes a
+  BATCH — `{ context_id, queries: [...] }`, of any size, metric queries and reads mixed — which checks EVERY query before
   any starts (one mistake refuses the batch), starts one task per query and returns ONLY
   `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process
   with a target directory of its own), after what was queued before them and before what is
-  queued after. The query tool of the SAME
-  side reads tasks back (the started answer names it in `read_with`) with ONE form, `{ task_ids }` —
+  queued after. query_model reads tasks of both sides back (the started answer names it in
+  `read_with`) with ONE form, `{ task_ids }` —
   one id or several: it waits (≤ MAX_WAIT_SECONDS per call) and returns each one's result under
   `results`, in the order asked (`TaskRunner.readAnswer`; a read whose every task failed is a tool
   error), `offset`/`limit` paging each one's result by its row numbers (READ_PAGE rows unless
@@ -536,15 +537,16 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   table (materialize, a pipeline build) pages to its last row; a start takes no `offset`;
   `{ task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
-  refuses a task of the other side — before any wait — and it never draws. The side is
-  the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
+  refuses a task of a feature's side — before any wait — and it never draws. The side is
+  the kind of work that started the task, persisted with it (the jobs table's `tool`: a builder's name,
+  or a query's kind — `QUERY_KINDS`, src/engine.js), never guessed.
   `preview_semantic_model` is the semantic side's INSPECTOR, for the project's own layer (no build
   to report it) and a task's context alike: it reads the context's PARSED manifest
   (`src/semantic-manifest.js`, one reader for both YAML specs) and answers in the call — semantic
   models, each metric's definition and its `group_by` — what it can be grouped by, spelled as that
   context's query takes it
   (a metric of several semantic models only what every input reaches), the declaration's own
-  mistakes; with `validate` it starts a semantic task instead (read with query_semantic_model), in
+  mistakes; with `validate` it starts a semantic task instead (read with query_model), in
   which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
   each semantic model's dimensions, one by one where all at once fails, to name what fails.
   NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
@@ -560,14 +562,14 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   named with `__` (measure__…), and SQL with them renamed would not run. Each occurrence is renamed
   alike, so the SQL as shown runs to the same rows.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
-  query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
+  query tool does (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, only when `buildViewModel(...).kind !== 'none'` — and by every
   successful answer of a tool that declares an `outputSchema` (`output` on its definition,
   src/schema/outputs.js: time, context, delete_context, memory, explore_errors, build_semantic_model —
   an answer of one shape, from a tool with no view, since a host draws a card for every answer that
-  carries structuredContent). A tool that answers with a result's rows (the query tools, a pipeline
+  carries structuredContent). A tool that answers with a result's rows (the query tool, a pipeline
   build) declares none: the rows would be carried twice. Every other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
   fits a picture has its card, a kind that does not has no card code at all (no view-model branch, no
   renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
@@ -802,10 +804,10 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "<semantic model>";
   `ContextManager.createShared` — no copy or parse per model; pinned: never gc'd, built on or
   dropped). There is no context for the layer as a whole. Where one of them is a valid context_id
-  (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to
+  (query_model, preview_semantic_model, context), the schema offers them as an enum next to
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
-  query_semantic_model({ context_id: "<semantic model>", steps }) — `{ semantic_model, dimension, grain? }`,
+  query_model({ context_id: "<semantic model>", steps }) — `{ semantic_model, dimension, grain? }`,
   `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
   the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
   one spelling per item — and `{ entity }` in the metrics step's group_by and a where step before it:

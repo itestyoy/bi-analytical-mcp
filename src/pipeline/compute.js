@@ -468,7 +468,7 @@ const NOT_OVER_DIMENSIONS = new Set(['raw', 'json_parse_array', 'json_field', 'a
 export const PLACES = {
   source_rows: {
     what: 'a step over a source\'s rows', leaves: ['column', 'property', 'value', 'now'], fns: Object.keys(FNS), windows: true, entities: true,
-    hint: 'A column of another model arrives by a join stage (its attrs), and a metric is query_semantic_model\'s',
+    hint: 'A column of another model arrives by a join stage (its attrs), and a metric is query_model\'s',
   },
   stored_rows: {
     what: 'a read of stored rows', leaves: ['column', 'value', 'now'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,

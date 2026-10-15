@@ -1,5 +1,5 @@
-// A call that STARTS work (build_semantic_model, query_semantic_model, build_pipeline_model
-// materialize, query_pipeline_model, a pipeline built in one call) returns only { task_id, … }; what it
+// A call that STARTS work (build_semantic_model, query_model, build_pipeline_model
+// materialize, query_model, a pipeline built in one call) returns only { task_id, … }; what it
 // produced is read back with the query tool of its side ({ task_ids }). Most tests are about what the work produced, so they run their engine through
 // `settle(engine)`: the same engine, where a call that started a task returns that task's result
 // (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
@@ -21,7 +21,7 @@ export function one(answer) {
 /** The public read of a task: the query tool of its side (the engine's own mapping), with { task_ids: [id] }. */
 export function readTask(engine, taskId, extra = {}) {
   const raw = engine.raw || engine;
-  const tool = raw._taskSide(raw.jobs.get(taskId)) === 'pipeline' ? 'query_pipeline_model' : 'query_semantic_model';
+  const tool = raw._taskSide(raw.jobs.get(taskId)) === 'pipeline' ? 'query_model' : 'query_model';
   return one(raw[tool]({ task_ids: [taskId], ...extra }));
 }
 
@@ -43,7 +43,7 @@ function refusal(r) {
   return Object.assign(new Error(r.error.message), { stage: r.error.stage, field: r.error.field, code: r.error.code });
 }
 
-const TASK_TOOLS = new Set(['build_semantic_model', 'query_semantic_model', '_buildPipeline', 'build_pipeline_model', 'query_pipeline_model']);
+const TASK_TOOLS = new Set(['build_semantic_model', 'query_model', '_buildPipeline', 'build_pipeline_model', 'query_model']);
 
 /** The engine, with every started task settled into its result. */
 export function settle(engine) {
@@ -107,7 +107,7 @@ export const stepEffect = (r) => r.step_effects[r.step_effects.length - 1];
 /**
  * A pipeline started with its steps and built in the same call — build_pipeline_model({ request:
  * { …start, materialize: true } }), what a recipe's pipeline_payload is handed over for — and its build
- * read back: the build's result, as query_pipeline_model returns it.
+ * read back: the build's result, as query_model returns it.
  */
 export async function startAndBuild(engine, request) {
   const raw = engine.raw || engine;

@@ -262,7 +262,7 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   assert.equal(deref(bnm, stepsField.items), bnm.$defs.stage, 'and so does every item of the list of steps');
   // the steps are the one stage definition in both query tools, built for their places: a pipeline read's,
   // and a metric query's — its where steps, its metrics step and the read after it
-  for (const tool of ['query_pipeline_model', 'query_semantic_model']) {
+  for (const tool of ['query_model', 'query_model']) {
     const s = schemas[tool];
     const steps = deref(s, forms(s, s).map((f) => f.properties?.steps).find(Boolean));
     assert.equal(deref(s, steps.items), s.$defs.stage, `${tool}: every step is the one stage`);
@@ -281,9 +281,8 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
   const takes = {
     build_pipeline_model: ['expr', 'over', 'over_frame', 'stage'],
     'build_pipeline_model.pipeline': ['expr', 'over', 'over_frame', 'stage'],
-    query_pipeline_model: ['expr', 'over', 'over_frame', 'stage'],
     build_semantic_model: ['expr', 'aggregate', 'metric_expr'],
-    query_semantic_model: ['expr', 'over', 'over_frame', 'stage', 'ref'],
+    query_model: ['expr', 'over', 'over_frame', 'stage', 'ref'],
     semantic_index: ['ref'],
     memory: ['ref'],
     build_retentioneering_model: ['expr', 'over', 'over_frame', 'stage'],
@@ -306,14 +305,13 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
   const RUNTIME = 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows';
   const SEMANTIC = 'in the semantic layer — needs MetricFlow';
   assert.deepEqual(groups(all.build_pipeline_model), [SQL, 'over a source\'s events — needs the rows still that source\'s events']);
-  assert.deepEqual(groups(all.query_pipeline_model), [SQL], 'a read\'s stages are SQL over rows');
-  assert.deepEqual(groups(all.query_semantic_model), [SQL, SEMANTIC], 'a metric query\'s: a read\'s, and its metrics step');
-  const semanticGroup = deref(all.query_semantic_model, all.query_semantic_model.$defs.stage).anyOf.map((g) => deref(all.query_semantic_model, g)).find((g) => g.title === SEMANTIC);
-  assert.deepEqual(forms(all.query_semantic_model, semanticGroup).flatMap((f) => pinned(all.query_semantic_model, f, 'stage')), ['metrics']);
+  assert.deepEqual(groups(all.query_model), [SQL, SEMANTIC], 'a metric query\'s: a read\'s, and its metrics step');
+  const semanticGroup = deref(all.query_model, all.query_model.$defs.stage).anyOf.map((g) => deref(all.query_model, g)).find((g) => g.title === SEMANTIC);
+  assert.deepEqual(forms(all.query_model, semanticGroup).flatMap((f) => pinned(all.query_model, f, 'stage')), ['metrics']);
   assert.deepEqual(groups(all.build_retentioneering_model), [SQL, RUNTIME]);
   // the ref is grouped by what it names: the catalog, the semantic layer — a tool's holding what its places take
   const refGroups = (schema) => deref(schema, schema.$defs.ref).anyOf.map((g) => deref(schema, g).title.split(':')[0]);
-  assert.deepEqual(refGroups(all.query_semantic_model), ['the catalog', 'the semantic layer'], 'a metric query groups by a column, a property and the semantic layer\'s names');
+  assert.deepEqual(refGroups(all.query_model), ['the catalog', 'the semantic layer'], 'a metric query groups by a column, a property and the semantic layer\'s names');
   for (const tool of ['semantic_index', 'memory']) assert.deepEqual(refGroups(all[tool]), ['the catalog'], `${tool}: a view and a note's about name things of the catalog`);
 });
 
@@ -440,14 +438,14 @@ test('the card declaration (display) is structural: each kind is a closed branch
   assert.match(displayProblems({ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, ['d', 'a', 'b', 'c']).join(' | '), /declare a single y/, 'a split with two value columns');
   // the declaration lives on display_model_result alone: no other tool takes one
   const metrics = [{ stage: 'metrics', metrics: ['m'] }];
-  assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', steps: metrics, display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
-  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
+  assert.equal(validateInput(validators.query_model, { context_id: 'abc123abc123', steps: metrics, display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
+  for (const tool of ['query_model', 'query_model']) assert.equal(validateInput(validators[tool], { task_ids: ['abc123abc123'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
   // a query tool either starts a query or reads a task back — never both in one call
-  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', steps: metrics }).ok, false, 'task_ids with a query');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], steps: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with steps');
+  assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], context_id: 'abc123abc123', steps: metrics }).ok, false, 'task_ids with a query');
+  assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], steps: [{ stage: 'limit', limit: 5 }] }).ok, false, 'task_ids with steps');
   // a read is only compiled at its start, never at a read of its task
-  assert.equal(validateInput(validators.query_pipeline_model, { context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');
-  assert.equal(validateInput(validators.query_pipeline_model, { task_ids: ['abc123abc123'], dry_run: true }).ok, false, 'task_ids with dry_run');
-  assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
-  assert.equal(validateInput(validators.query_semantic_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
+  assert.equal(validateInput(validators.query_model, { context_id: 'abc123abc123', steps: [{ stage: 'limit', limit: 5 }], dry_run: true }).ok, true, 'a query compiled only');
+  assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], dry_run: true }).ok, false, 'task_ids with dry_run');
+  assert.equal(validateInput(validators.query_model, {}).ok, false, 'neither a query nor a task');
+  assert.equal(validateInput(validators.query_model, { task_ids: ['abc123abc123'], offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

@@ -79,7 +79,7 @@ before(async () => {
 
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
+const q = (input) => engine.query_model({ context_id: ctx, ...input });
 
 // EVERY AGGREGATION THE TASK CHOSE over the marked amounts, asked in ONE ungrouped query (MetricFlow
 // takes all eight metrics in one call); each check is named by the question it answers.
@@ -207,13 +207,13 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // (test/helpers/recipe-coverage.js).
   const out = await engine.build_semantic_model(recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'] }] });
+  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
 
   // it groups like any other measure — by the source's own attribute, and through a declared
   // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
-  const g = await engine.query_semantic_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
+  const g = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'gov_total_spend');
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);

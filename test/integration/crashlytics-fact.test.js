@@ -71,7 +71,7 @@ before(async () => {
 
 after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
+const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
 
 // SEED_DATA §10: fatal crashes by issue -> NullPointer 4, OutOfMemory 2. The dimension is an
 // event-scoped PAYLOAD property of the crash fact, resolved against that fact only.

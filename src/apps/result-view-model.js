@@ -17,7 +17,7 @@
 export const PIVOT_LEVEL_ROWS = 200;
 
 /**
- * ONE VIEW OF A STORED RESULT, AS A READ: the pipeline's own stages over the table (query_pipeline_model
+ * ONE VIEW OF A STORED RESULT, AS A READ: the pipeline's own stages over the table (query_model
  * reads in the same words) — a where keeping the rows under the path taken (a key that is missing is
  * matched by is_null, since no value equals it), an aggregate grouping them by what the view draws and
  * folding each value column with `fn` under its own name, and the order the view lists them in.

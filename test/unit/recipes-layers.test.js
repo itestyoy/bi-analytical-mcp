@@ -105,7 +105,7 @@ test('every shipped pipeline_payload is a build_pipeline_model start request the
 
 // …and every shipped example query is a metric query the tool accepts beside a context — its steps,
 // a metrics step among them — whatever spelling the file holds it in.
-test('every shipped example query is a query_semantic_model start the tool accepts beside a context', async () => {
+test('every shipped example query is a query_model start the tool accepts beside a context', async () => {
   await import('../../src/engine.js');
   const { loadCatalog } = await import('../../src/catalog.js');
   const { buildSchemas } = await import('../../src/schema.js');
@@ -114,7 +114,7 @@ test('every shipped example query is a query_semantic_model start the tool accep
   const queries = loadRecipes(SYSTEM).list.flatMap((r) => (r.example_queries || []).map((q) => [r.id, q]));
   assert.ok(queries.length > 10, 'the shipped set has example queries');
   for (const [id, q] of queries) {
-    const res = validateInput(validators.query_semantic_model, { context_id: 'abcdef123456', ...q });
+    const res = validateInput(validators.query_model, { context_id: 'abcdef123456', ...q });
     assert.equal(res.ok, true, `${id}: ${(res.errors || []).join(' | ')}`);
     assert.equal(q.steps.filter((st) => st.stage === 'metrics').length, 1, `${id}: one metrics step`);
   }

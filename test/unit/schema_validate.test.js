@@ -85,23 +85,23 @@ test('create: a ratio is no metric type of its own — it is a derived metric di
 
 // A METRIC QUERY IS ITS STEPS: a context and a list of steps that holds its metrics step — { stage:
 // "metrics", metrics, group_by? } — in a single query and in each of a batch's alike.
-test('query: requires context_id and steps, its metrics in a metrics step', () => {
+test('query: requires context_id, its metrics in a metrics step', () => {
   const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['x'], ...extra });
-  assert.equal(v('query_semantic_model', { steps: [metrics()] }).ok, false);
-  assert.ok(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics()] }).ok);
-  assert.ok(v('query_semantic_model', { context_id: 'abcd12', queries: [{ steps: [metrics()] }, { steps: [metrics(), { stage: 'limit', limit: 3 }] }] }).ok);
-  // a single query names its steps as a batch item does
-  assert.match(v('query_semantic_model', { context_id: 'abcd12' }).errors.join(' | '), /missing required property 'steps'/);
-  for (const bad of [[], [metrics({ metrics: [] })], [metrics({ metrics: ['x', 'x'] })], [{ stage: 'metrics' }]]) assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: bad }).ok, false, JSON.stringify(bad));
+  assert.equal(v('query_model', { steps: [metrics()] }).ok, false);
+  assert.ok(v('query_model', { context_id: 'abcd12', steps: [metrics()] }).ok);
+  assert.ok(v('query_model', { context_id: 'abcd12', queries: [{ steps: [metrics()] }, { steps: [metrics(), { stage: 'limit', limit: 3 }] }] }).ok);
+  // no steps: a read of the context's stored table as it is (the engine refuses one where none is stored)
+  assert.ok(v('query_model', { context_id: 'abcd12' }).ok);
+  for (const bad of [[], [metrics({ metrics: [] })], [metrics({ metrics: ['x', 'x'] })], [{ stage: 'metrics' }]]) assert.equal(v('query_model', { context_id: 'abcd12', steps: bad }).ok, false, JSON.stringify(bad));
   // a field nothing reads is refused, not ignored
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics()], task: 'mon' }).ok, false);
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ task: 'mon' })] }).ok, false);
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', queries: [{ steps: [metrics()], task: 'mon' }] }).ok, false);
+  assert.equal(v('query_model', { context_id: 'abcd12', steps: [metrics()], task: 'mon' }).ok, false);
+  assert.equal(v('query_model', { context_id: 'abcd12', steps: [metrics({ task: 'mon' })] }).ok, false);
+  assert.equal(v('query_model', { context_id: 'abcd12', queries: [{ steps: [metrics()], task: 'mon' }] }).ok, false);
   // the same group_by item twice would be two identical columns
-  assert.equal(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'day' }] })] }).ok, false);
-  assert.ok(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }] })] }).ok);
+  assert.equal(v('query_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'day' }] })] }).ok, false);
+  assert.ok(v('query_model', { context_id: 'abcd12', steps: [metrics({ group_by: [{ time: 'metric_time', grain: 'day' }, { time: 'metric_time', grain: 'week' }] })] }).ok);
   // a step that makes a new table is no step of a metric query: its schema holds none
-  assert.match(v('query_semantic_model', { context_id: 'abcd12', steps: [metrics(), { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.1\.stage` must be one of: .*\bmetrics\b/);
+  assert.match(v('query_model', { context_id: 'abcd12', steps: [metrics(), { stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] }).errors.join(' | '), /`steps\.1\.stage` must be one of: .*\bmetrics\b/);
 });
 
 // A METRIC QUERY'S WHERE is a where step before its metrics step: the one expression over what the query
@@ -112,7 +112,7 @@ test('query: requires context_id and steps, its metrics in a metrics step', () =
 // (expression-grammar.test.js).
 test('query: a where step before the metrics step is conditions over the refs group_by takes, nested to any depth', () => {
   const country = { source: 'users', column: 'country' };
-  const q = (where) => v('query_semantic_model', { context_id: 'abcd12', steps: [{ stage: 'where', conditions: where }, { stage: 'metrics', metrics: ['x'] }] });
+  const q = (where) => v('query_model', { context_id: 'abcd12', steps: [{ stage: 'where', conditions: where }, { stage: 'metrics', metrics: ['x'] }] });
   for (const ok of [
     [{ fn: 'eq', args: [country, { value: 'US' }] }],
     [{ fn: 'or', args: [{ fn: 'in', args: [country, { value: 'US' }, { value: 'DE' }] }, { fn: 'not', args: [{ fn: 'is_null', args: [country] }] }] }],

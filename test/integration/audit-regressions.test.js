@@ -71,7 +71,7 @@ const marginal = (rows, keyCol, valCol) => {
 };
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
-const q = (ctx, input, eng = engine) => eng.query_semantic_model({ context_id: ctx, ...input });
+const q = (ctx, input, eng = engine) => eng.query_model({ context_id: ctx, ...input });
 const dayOf = (v) => String(v).slice(0, 10);
 
 /** A catalog variant over the same warehouse: mutate the fixture document, load, wrap in an Engine. */

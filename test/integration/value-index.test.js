@@ -416,7 +416,7 @@ test('semantic_index({ source: "users", column: "country" }) returns the column\
   const maxFreq = Math.max(...out.sample_values.map((v) => v.freq));
   assert.equal(valOf(out.sample_values, out.value_stats.top_value).freq, maxFreq);
   // the guidance names the JOIN path (user attributes are reached via the users join).
-  assert.ok(out.recommendations.some((r) => r.includes('users_country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
+  assert.ok(out.recommendations.some((r) => r.includes("join: [{ source: 'users', on }]") && r.includes("{ stage: 'join', source: 'users', on, attrs }")), JSON.stringify(out.recommendations));
   // unknown column → clear error, not a silent empty result.
   await assert.rejects(() => engine.semantic_index({ source: 'users', column: 'nope' }), /`column` must be one of: .*country/s);
   // a model's column written as an event property is refused with the field's name here

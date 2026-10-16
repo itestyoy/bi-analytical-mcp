@@ -229,7 +229,7 @@ export function buildViewModel(toolName, result, toolInput) {
     const catIdx = columns.map((c, i) => (c.type === 'category' ? i : -1)).filter((i) => i >= 0);
     // the result TABLE's name is generated (qr_<task_id>, pipe_<name>_<context>) — an address, not a
     // title: the card names what it shows, and the chart names its metric
-    const title = toolName === 'query_semantic_model' ? 'Metric query' : 'Query result';
+    const title = 'Query result';
 
     // ── no declaration: a FUNNEL, ordered steps whose counts never grow. Recognised only on an explicit signal —
     // step-like names, or ordinal step labels — so a breakdown sorted by size never becomes one.

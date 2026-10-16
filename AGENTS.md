@@ -522,7 +522,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   materialized again, which replaces what the context held. Its measures fold the main model's rows, or —
   with `source` — another model's own, compared beside them on metric_time; its `join` names the models
   whose attributes the metrics are grouped by, each on its join contract, checked against the key
-  MetricFlow joins it on. A call that
+  MetricFlow joins it on. Its metrics, measures and computed dimensions are stored under the names they
+  are declared by (no prefix: nothing else in the context shares them), so what MetricFlow refuses of a
+  name — a grain or a reserved word, a name another element of the layer holds as another kind, a
+  governed measure's — is refused when the step is added (src/compile.js, src/yaml-render.js); a
+  dimension declared over a column takes the place of that column's own. A call that
   STARTS warehouse work — a build (a materialize, a semantic layer's included) or a query
   (`query_model({ context_id, steps })` — a QUERY IS ITS STEPS: with a metrics step it is a METRIC
   QUERY (a semantic task), without one a READ of the context's stored pipeline table (a pipeline task;

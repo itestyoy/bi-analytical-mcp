@@ -84,16 +84,16 @@ const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
 // would inflate its total as it would either split's.
 test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2, and by users.country attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal'], group_by: [{ source: 'crashlytics', property: 'issue_title_of_event_data' }, { source: 'users', column: 'country' }] }] });
+  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['fatal'], group_by: [{ source: 'crashlytics', property: 'issue_title_of_event_data' }, { source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const byIssue = marginal(r.rows, r.group_by_resolved['crashlytics.issue_title_of_event_data'], 'stab_fatal');
+  const byIssue = marginal(r.rows, r.group_by_resolved['crashlytics.issue_title_of_event_data'], 'fatal');
   assert.equal(byIssue.NullPointer, 4, '[by issue] NullPointer');
   assert.equal(byIssue.OutOfMemory, 2, '[by issue] OutOfMemory');
-  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, '[by issue] 6 fatal crashes');
-  const byCountry = marginal(r.rows, r.group_by_resolved['users.country'], 'stab_fatal');
+  assert.equal(sumCol(r.rows, 'fatal'), 6, '[by issue] 6 fatal crashes');
+  const byCountry = marginal(r.rows, r.group_by_resolved['users.country'], 'fatal');
   assert.equal(byCountry.US, 2, '[point-in-time country] u2 only — u1 had already moved to GB');
   assert.equal(byCountry.GB, 4, '[point-in-time country] u1 x3 (after the move) + u3');
-  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, '[point-in-time country] still 6 crashes: no version fan-out');
+  assert.equal(sumCol(r.rows, 'fatal'), 6, '[point-in-time country] still 6 crashes: no version fan-out');
 });
 
 // SEED_DATA §10: anr_duration_of_event_data exists ONLY on `anr` (3 rows, 5.5+8.0+12.5 = 26).
@@ -112,17 +112,17 @@ test('governed metrics on the crash fact, and a payload property scoped to ONE e
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const governed = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal', 'stab_crashed_users'] }] });
+  const governed = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['fatal', 'crashed_users'] }] });
   assert.equal(governed.ok, true, JSON.stringify(governed.error));
   // 'governed metrics on the crash fact: fatal = 6 from 3 distinct players'
-  assert.equal(num(governed.rows[0].stab_fatal), 6, '[governed crash metrics] fatal');
-  assert.equal(num(governed.rows[0].stab_crashed_users), 3, '[governed crash metrics] distinct players');
-  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['anr_events', 'anr_secs', 'anr_avg_secs'] }] });
+  assert.equal(num(governed.rows[0].fatal), 6, '[governed crash metrics] fatal');
+  assert.equal(num(governed.rows[0].crashed_users), 3, '[governed crash metrics] distinct players');
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['events', 'secs', 'avg_secs'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // the payload property scoped to anr
-  assert.equal(num(r.rows[0].anr_events), 3, '[anr scope] rows');
-  assert.equal(num(r.rows[0].anr_secs), 26, '[anr scope] seconds');
-  assert.ok(Math.abs(num(r.rows[0].anr_avg_secs) - 26 / 3) < 1e-6, `[anr scope] avg=${r.rows[0].anr_avg_secs}`);
+  assert.equal(num(r.rows[0].events), 3, '[anr scope] rows');
+  assert.equal(num(r.rows[0].secs), 26, '[anr scope] seconds');
+  assert.ok(Math.abs(num(r.rows[0].avg_secs) - 26 / 3) < 1e-6, `[anr scope] avg=${r.rows[0].avg_secs}`);
 });
 
 // SEED_DATA §10: every crash row carries app_version -> 1.0 has 7 rows, 1.1 has 6.
@@ -135,12 +135,12 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
     metrics: [{ name: 'reports', type: 'simple', measure: 'reports' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'ver_reports'), 'ver_reports');
+  const by = mapCol(r.rows, groupCol(r, 'reports'), 'reports');
   assert.equal(by['1.0.0'], 7);
   assert.equal(by['1.1.0'], 6);
-  assert.equal(sumCol(r.rows, 'ver_reports'), 13);
+  assert.equal(sumCol(r.rows, 'reports'), 13);
 });
 
 // The two facts are NEVER mixed, yet both answer in ONE query: 12 first_launch rows on the
@@ -285,10 +285,10 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
   // It slices like any other measure: only the ANR reports carry the column, and their versions
   // split 5.5 on 1.0.0 against 8.0 + 12.5 on 1.1.0 (SEED_DATA §10) — 26 in all, the total the
   // ungrouped query read.
-  const g = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['gov_anr_seconds'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
+  const g = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['anr_seconds'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
-  const by = mapCol(g.rows, groupCol(g, 'gov_anr_seconds'), 'gov_anr_seconds');
+  const by = mapCol(g.rows, groupCol(g, 'anr_seconds'), 'anr_seconds');
   assert.equal(by['1.0.0'], 5.5);
   assert.equal(by['1.1.0'], 20.5);
-  assert.equal(sumCol(g.rows, 'gov_anr_seconds'), 26, 'the schema fixed sum(anr_duration_of_event_data)');
+  assert.equal(sumCol(g.rows, 'anr_seconds'), 26, 'the schema fixed sum(anr_duration_of_event_data)');
 });

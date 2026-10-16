@@ -134,16 +134,16 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.e2e_mon_revenue)]));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.revenue)]));
   assert.equal(by.US, 35);
   assert.equal(by.GB, 25);
   assert.equal(by.BR, 25);
   assert.equal(Object.values(by).reduce((s, n) => s + n, 0), 85); // grand total revenue
   // Provenance: a metric query is tagged tier=governed_metric with the metrics + data freshness.
   assert.equal(r.provenance?.tier, 'governed_metric');
-  assert.deepEqual(r.provenance?.metrics, ['e2e_mon_revenue']);
+  assert.deepEqual(r.provenance?.metrics, ['revenue']);
   assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
@@ -161,24 +161,24 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
     metrics: [...st.metrics, { name: 'payers', type: 'simple', measure: 'payers' }],
   }));
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
-  assert.ok(upd.metrics.includes('e2e_mon_payers'), '[payers] new metric registered');
+  assert.ok(upd.metrics.includes('payers'), '[payers] new metric registered');
 
   const derived = await editLayer(engine, S.semCtx, (st) => ({
     ...st,
     metrics: [...st.metrics,
-      { name: 'per_payer_stored', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'e2e_mon_payers' }] } },
+      { name: 'per_payer_stored', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'payers' }] } },
       { name: 'per_payer_declared', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'payers' }] } },
-      { name: 'per_payer_mixed', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'payers' }] } },
+      { name: 'per_payer_mixed', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'payers' }] } },
     ],
   }));
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
-  const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
-  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers', ...names] }] });
+  const names = ['per_payer_stored', 'per_payer_declared', 'per_payer_mixed'];
+  const r = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers', ...names] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].e2e_mon_payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
+  assert.equal(num(r.rows[0].payers), 7, '[payers] distinct payers = 7 (SEED_DATA §3)');
   const [payers] = (await wh.query(`select count(distinct player_id_of_internal) as n from fct_analytics_events where event_name = 'iap_purchase_completed'`)).rows;
-  assert.equal(num(r.rows[0].e2e_mon_payers), num(payers.n), '[count_distinct over a case] the warehouse\'s distinct payers');
+  assert.equal(num(r.rows[0].payers), num(payers.n), '[count_distinct over a case] the warehouse\'s distinct payers');
   // Provenance #1: real data_freshness (latest event time) + an open-ended window flags
   // staleness (the tail past the latest data is empty/partial).
   assert.equal(r.provenance.tier, 'governed_metric');
@@ -188,7 +188,7 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);
 
   // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
-  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
+  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
 });
 
@@ -196,8 +196,8 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
   if (skip(t)) return;
   const dc = await engine.context({ action: 'describe', context_id: S.semCtx });
   assert.equal(dc.engine, 'core');
-  assert.ok(dc.metrics.includes('e2e_mon_revenue') && dc.metrics.includes('e2e_mon_payers'), 'both metrics in context');
-  assert.ok(dc.measures.includes('e2e_mon_revenue') && dc.measures.includes('e2e_mon_payers'), 'both measures in context');
+  assert.ok(dc.metrics.includes('revenue') && dc.metrics.includes('payers'), 'both metrics in context');
+  assert.ok(dc.measures.includes('revenue') && dc.measures.includes('payers'), 'both measures in context');
 
   const status = await engine.semantic_index({ status: true });
   assert.ok(Array.isArray(status.tasks.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned

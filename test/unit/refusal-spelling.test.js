@@ -43,8 +43,8 @@ test("a pipeline measure refuses `avg` (and `mean`, `quantile`) and says how it 
 
 test("a governed measure refuses `avg` and says it is spelled `average` here", () => {
   const payload = (fn) => layer('events', {
-    measures: [{ name: 'm', expr: { fn, args: [{ column: 'price_in_usd_of_event_data' }] } }],
-    metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
+    measures: [{ name: 'price', expr: { fn, args: [{ column: 'price_in_usd_of_event_data' }] } }],
+    metrics: [{ name: 'price', type: 'simple', measure: 'price' }],
   });
   const res = payload('avg');
   assert.equal(res.ok, false);

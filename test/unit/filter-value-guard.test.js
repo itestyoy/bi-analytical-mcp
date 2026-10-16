@@ -132,12 +132,12 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   e.valueIndex.upsertProperty('users', 'country', { distinctCount: 2, totalCount: 20, values: [{ value: 'DE', freq: 12 }, { value: 'US', freq: 8 }] });
   const out = await declare(e, {
     name: 'vguard',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'users' }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   const country = { source: 'users', column: 'country' };
   // (a metric query filters the rows its metrics fold in where steps before its metrics step)
-  const query = (...conditions) => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['vguard_n'] }] });
+  const query = (...conditions) => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['rows'] }] });
   await assert.rejects(() => query({ fn: 'eq', args: [country, { value: 'de' }] }), /different casing.*'DE'/s);
   // …and inside or / not, a member of an in
   await assert.rejects(
@@ -146,7 +146,7 @@ test('the value guard checks a joined attribute path against the owner\'s indexe
   );
   // …and in every where step before the metrics step, the second as the first
   await assert.rejects(
-    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }, { stage: 'where', conditions: [{ fn: 'neq', args: [country, { value: 'de' }] }] }, { stage: 'metrics', metrics: ['vguard_n'] }] }),
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [country, { value: 'US' }] }] }, { stage: 'where', conditions: [{ fn: 'neq', args: [country, { value: 'de' }] }] }, { stage: 'metrics', metrics: ['rows'] }] }),
     /different casing.*'DE'/s,
   );
 });

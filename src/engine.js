@@ -679,8 +679,7 @@ export class Engine {
           ...(openDraft.building ? { building: openDraft.building } : {}),
         },
       } : {}),
-      // Per task, what its author said it computes — a name namespaces the metrics, it does not
-      // explain them.
+      // Per task, what its author said it computes — a name does not explain the metrics.
       ...(Object.keys(ctx.state.task_notes || {}).length ? { task_notes: ctx.state.task_notes } : {}),
       semantic_models: Object.keys(additions),
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),

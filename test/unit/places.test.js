@@ -55,7 +55,7 @@ test('a build takes every stage, a read the ones that keep it one table — the 
   // by that place's check, never by building it; a stage name nothing has is told the stages there are,
   // the metrics step not among them
   const physicalCols = new Set(['player_id_of_internal']);
-  assert.match(message(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'metrics', metrics: ['m'] }], { physicalCols })), new RegExp(`^a build takes every stage over a table's rows — ${semantic.source}`));
+  assert.match(message(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'metrics', metrics: ['val'] }], { physicalCols })), new RegExp(`^a build takes every stage over a table's rows — ${semantic.source}`));
   const unknown = message(() => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'transmogrify' }], { physicalCols }));
   assert.match(unknown, /^unknown pipeline stage: transmogrify \(known: where, compute, /);
   assert.doesNotMatch(unknown, /metrics/);
@@ -172,16 +172,16 @@ models:
 // naming it.
 test('a metric query refuses in the call what its group_by and its where steps do not take, naming the place', async () => {
   const e = engine();
-  const { context_id } = await declare(e, { name: 'plc', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
-  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['plc_n'], ...extra });
+  const { context_id } = await declare(e, { name: 'plc', semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'users' }], metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }] });
+  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['rows'], ...extra });
   const query = (...steps) => e.query_model({ context_id, steps });
   const where = (...conditions) => ({ stage: 'where', conditions });
   // a source, an event, a metric: no ref the tool's group_by takes, so no form of its $defs.ref
-  for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'plc_n' }]) {
+  for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'rows' }]) {
     await assert.rejects(() => query(metrics({ group_by: [ref] })), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.group_by\.0`/.test(err.message), JSON.stringify(ref));
   }
   // a metric in a where step: no leaf any place of the tool takes
-  await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'plc_n' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.conditions\.0\.args\.0`/.test(err.message));
+  await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'rows' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.conditions\.0\.args\.0`/.test(err.message));
   // a column of the rows and an aggregate: the steps' after the metrics step (a read of the result),
   // refused at the place of a where before it
   const at = PLACES.metric_where.what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

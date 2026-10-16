@@ -86,33 +86,33 @@ const q = (input) => engine.query_model({ context_id: ctx, ...input });
 // takes all eight metrics in one call); each check is named by the question it answers.
 test('every aggregation the task chose over the marked amounts, in one ungrouped query: cost / impressions / clicks, max / mean / p90, the mean per-row cost per click, CPC', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ steps: [{ stage: 'metrics', metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks', 'uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost', 'uacq_avg_cost_per_click', 'uacq_cpc'] }] });
+  const r = await q({ steps: [{ stage: 'metrics', metrics: ['cost', 'impressions', 'clicks', 'max_daily_cost', 'avg_daily_cost', 'p90_daily_cost', 'avg_cost_per_click', 'cpc'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
 
   // [a marked amount is aggregated the way the task asks] SEED_DATA §11: 13 rows, cost 17.50,
   // impressions 1280, clicks 64.
-  assert.ok(near(num(row.uacq_cost), 17.5), `[marked amount: cost 17.50] cost=${row.uacq_cost}`);
-  assert.equal(num(row.uacq_impressions), 1280, '[marked amount: impressions 1280]');
-  assert.equal(num(row.uacq_clicks), 64, '[marked amount: clicks 64]');
+  assert.ok(near(num(row.cost), 17.5), `[marked amount: cost 17.50] cost=${row.cost}`);
+  assert.equal(num(row.impressions), 1280, '[marked amount: impressions 1280]');
+  assert.equal(num(row.clicks), 64, '[marked amount: clicks 64]');
 
   // [the same amount under three measures] THE SAME marked field, three different aggregations
   // chosen by the task — including one that carries a parameter. Over the 13 daily costs: max 3.00,
   // mean 17.50/13, and percentile_cont(0.9) interpolating between 2.50 and 2.75 → 2.70. Nothing in
   // the schema decided any of these.
-  assert.ok(near(num(row.uacq_max_daily_cost), 3.0), `[three measures: max 3.00] max=${row.uacq_max_daily_cost}`);
-  assert.ok(near(num(row.uacq_avg_daily_cost), 17.5 / 13, 1e-6), `[three measures: mean 17.50/13] avg=${row.uacq_avg_daily_cost}`);
-  assert.ok(near(num(row.uacq_p90_daily_cost), 2.7, 1e-4), `[three measures: p90 2.70] p90=${row.uacq_p90_daily_cost}`);
+  assert.ok(near(num(row.max_daily_cost), 3.0), `[three measures: max 3.00] max=${row.max_daily_cost}`);
+  assert.ok(near(num(row.avg_daily_cost), 17.5 / 13, 1e-6), `[three measures: mean 17.50/13] avg=${row.avg_daily_cost}`);
+  assert.ok(near(num(row.p90_daily_cost), 2.7, 1e-4), `[three measures: p90 2.70] p90=${row.p90_daily_cost}`);
 
   // [an aggregatable expression] A model-level entry is an aggregatable EXPRESSION over the model's
   // columns, equally free of a fixed function. cost_per_click = cost / clicks per row; the four rows
   // with no clicks are NULL, so the mean is over the nine that have them.
   const perRow = [[1.50, 5], [2.00, 8], [1.25, 6], [3.00, 10], [0.50, 2], [2.50, 9], [1.75, 7], [2.25, 8], [2.75, 9]].map(([c, k]) => c / k);
   const expected = perRow.reduce((a, b) => a + b, 0) / perRow.length;
-  assert.ok(near(num(row.uacq_avg_cost_per_click), expected, 1e-6), `[aggregatable expression: mean per-row cost per click] avg cpc=${row.uacq_avg_cost_per_click} want ${expected}`);
+  assert.ok(near(num(row.avg_cost_per_click), expected, 1e-6), `[aggregatable expression: mean per-row cost per click] avg cpc=${row.avg_cost_per_click} want ${expected}`);
 
   // [a derived metric dividing two task metrics] 17.50 / 64.
-  assert.ok(near(num(row.uacq_cpc), 17.5 / 64, 1e-6), `[div of two task metrics: CPC = 17.50/64] cpc=${row.uacq_cpc}`);
+  assert.ok(near(num(row.cpc), 17.5 / 64, 1e-6), `[div of two task metrics: CPC = 17.50/64] cpc=${row.cpc}`);
 });
 
 // SEED_DATA §11: cost by channel — meta 5.75, applovin 8.25, google 3.50, organic 0.
@@ -123,21 +123,21 @@ test('every aggregation the task chose over the marked amounts, in one ungrouped
 // split is the unwindowed one.
 test('grouped by an attribute of the same source: cost by media_source; and the declared time axis drives metric_time on a non-events source', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ steps: [{ stage: 'metrics', metrics: ['uacq_cost'], group_by: [{ source: 'acquisition', column: 'media_source' }, { time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
+  const r = await q({ steps: [{ stage: 'metrics', metrics: ['cost'], group_by: [{ source: 'acquisition', column: 'media_source' }, { time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-05' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = marginal(r.rows, (row) => String(row[r.group_by_resolved['acquisition.media_source']]), 'uacq_cost');
+  const by = marginal(r.rows, (row) => String(row[r.group_by_resolved['acquisition.media_source']]), 'cost');
   assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);
   assert.ok(near(by.google, 3.5), `[by media_source] google=${by.google}`);
   assert.ok(near(by.organic, 0), `[by media_source] organic=${by.organic}`);
-  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), '[by media_source] the channels sum to 17.50');
-  const byDay = marginal(r.rows, (row) => String(row.metric_time_day).slice(0, 10), 'uacq_cost');
+  assert.ok(near(sumCol(r.rows, 'cost'), 17.5), '[by media_source] the channels sum to 17.50');
+  const byDay = marginal(r.rows, (row) => String(row.metric_time_day).slice(0, 10), 'cost');
   assert.ok(near(byDay['2026-01-01'], 1.5), `[time axis] ${JSON.stringify(byDay)}`);
   assert.ok(near(byDay['2026-01-02'], 3.25), `[time axis] ${JSON.stringify(byDay)}`);
   assert.ok(near(byDay['2026-01-03'], 3.5), `[time axis] ${JSON.stringify(byDay)}`);
   assert.ok(near(byDay['2026-01-04'], 4.25), `[time axis] ${JSON.stringify(byDay)}`);
   assert.ok(near(byDay['2026-01-05'], 5.0), `[time axis] ${JSON.stringify(byDay)}`);
-  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), '[time axis] the days sum to 17.50');
+  assert.ok(near(sumCol(r.rows, 'cost'), 17.5), '[time axis] the days sum to 17.50');
 });
 
 // (Spend by users.country, attributed POINT-IN-TIME to the install version valid on the spend day —

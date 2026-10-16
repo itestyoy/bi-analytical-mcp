@@ -168,7 +168,7 @@ test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / mon
   const r = await q(evUsersCtx, {
     steps: [{
       stage: 'metrics',
-      metrics: ['aeu_evts'],
+      metrics: ['evts'],
       group_by: [
         { source: 'users', column: 'country' },
         { source: 'events', column: 'bundle_id' },
@@ -184,17 +184,17 @@ test('S1 (A/C/J/K/N). one events x users query: country / bundle / ad_type / mon
     `2: the response echoes the path each structured reference resolved to: ${JSON.stringify(res)}`);
   assert.ok(r.columns.some((c) => c.name.includes('country')), '2: the result column carries the resolved name');
   // 1/17. { source: users, column: country } returns what users.country holds — the governed path the users model promises
-  assert.deepEqual(marginal(r.rows, res['users.country'], 'aeu_evts'), { US: 67, GB: 57, DE: 31, BR: 29 }, '1/17: events per users.country');
+  assert.deepEqual(marginal(r.rows, res['users.country'], 'evts'), { US: 67, GB: 57, DE: 31, BR: 29 }, '1/17: events per users.country');
   // 10/17. a structured attribute and a time grain together: one month, four countries, 184 events
-  assert.equal(sumCol(r.rows, 'aeu_evts'), 184, '10/17: every event counted once across the splits');
+  assert.equal(sumCol(r.rows, 'evts'), 184, '10/17: every event counted once across the splits');
   const monthCol = r.columns.map((c) => c.name).find((n) => n.startsWith('metric_time'));
   assert.ok(monthCol, `10: the month is a result column: ${r.columns.map((c) => c.name)}`);
   assert.equal(new Set(r.rows.map((row) => String(row[monthCol]))).size, 1, '10: the events fall in one month');
   assert.equal(new Set(r.rows.map((row) => row[res['users.country']])).size, 4, '10: four countries in the one month');
   // 4/38. the source's OWN attribute under its identity: bundle_id splits 131 / 53
-  assert.deepEqual(marginal(r.rows, res['events.bundle_id'], 'aeu_evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 }, '4/38: bundle_id splits 131 / 53');
+  assert.deepEqual(marginal(r.rows, res['events.bundle_id'], 'evts'), { 'com.omg.wordsearch': 131, 'com.omg.colorfit': 53 }, '4/38: bundle_id splits 131 / 53');
   // 40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8 / banner 6
-  const byAd = marginal(r.rows, res['events.ad_type_of_event_data'], 'aeu_evts');
+  const byAd = marginal(r.rows, res['events.ad_type_of_event_data'], 'evts');
   assert.equal(byAd.rewarded, 10, `40: rewarded 10 (${JSON.stringify(byAd)})`);
   assert.equal(byAd.interstitial, 8, '40: interstitial 8');
   assert.equal(byAd.banner, 6, '40: banner 6');
@@ -213,7 +213,7 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   // own argument (an in lists several)
   const filtered = (ref, op, values, group_by) => ({ steps: [
     { stage: 'where', conditions: [{ fn: op, args: [ref, ...[].concat(values).map((value) => ({ value }))] }] },
-    { stage: 'metrics', metrics: ['aeu_evts'], ...(group_by ? { group_by } : {}) },
+    { stage: 'metrics', metrics: ['evts'], ...(group_by ? { group_by } : {}) },
   ] });
   // the guard reads the keys the REAL indexer wrote: (users, country) and (events, bundle_id)
   await assert.rejects(() => q(evUsersCtx, filtered(country, 'eq', 'gb')), /different casing.*'GB'/s, '11: a wrong-cased country on users.country is rejected with the real casing');
@@ -224,14 +224,14 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
   // …and the correctly cased values answer
   const r = await q(evUsersCtx, filtered(country, 'in', ['GB', 'US', 'DE'], [country]));
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, r.group_by_resolved['users.country'], 'aeu_evts');
+  const by = mapCol(r.rows, r.group_by_resolved['users.country'], 'evts');
   assert.equal(by.GB, 57, `3/12: a where addressed by source + column keeps GB's 57 events (${JSON.stringify(by)})`);
   assert.equal(by.GB + by.US, 124, '13: the IN list GB + US = 124');
   assert.equal(by.DE, 31, '15: the correctly cased DE returns 31');
   assert.ok(!('BR' in by), `3: the where keeps only the listed countries (${JSON.stringify(by)})`);
   const own = await q(evUsersCtx, filtered(bundle, 'eq', 'com.omg.colorfit'));
   assert.equal(own.ok, true, JSON.stringify(own.error));
-  assert.equal(num(own.rows[0].aeu_evts), 53, "16: the source's own attribute, correctly cased, returns 53");
+  assert.equal(num(own.rows[0].evts), 53, "16: the source's own attribute, correctly cased, returns 53");
 });
 
 // ═══════════ S3 / 19. RELATIONSHIP LABELLING AND THE PATH IT GIVES ═══════════
@@ -292,20 +292,20 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   assert.ok(pruned.experiments.includes('(time axis)'), `27: the time axis over a missing column is pruned: ${JSON.stringify(pruned)}`);
   assert.equal(cat.getModel('experiments').time, undefined, '27: the model has no time axis left');
   // 25. a measure over the pruned amount is refused at validation, not in the warehouse
-  await assert.rejects(() => declare(eng, { name: 'agr2', semantic_models: [{ source: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
+  await assert.rejects(() => declare(eng, { name: 'agr2', semantic_models: [{ source: 'acquisition', measures: [{ name: 'bonus', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'bonus', type: 'simple', measure: 'bonus' }] }),
     /bonus_spend|invalid input/, '25: a measure over the pruned amount is refused at validation');
   // what survives builds and answers: the real amount, the surviving governed measure, the renamed source's count
   const c = await declare(eng, {
     name: 'agr',
-    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'analytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
-    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'analytics', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }],
+    metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'cnt', type: 'simple', measure: 'cnt' }],
   });
   assert.equal(c.parse.ok, true, `26/33: the surviving measures and the renamed source parse: ${JSON.stringify(c.parse)}`);
-  const r = await q(c.context_id, { steps: [{ stage: 'metrics', metrics: ['agr_cost', 'agr_total_spend', 'agr_n'] }] }, eng);
+  const r = await q(c.context_id, { steps: [{ stage: 'metrics', metrics: ['cost', 'total_spend', 'cnt'] }] }, eng);
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(Math.abs(num(r.rows[0].agr_cost) - 17.5) < 1e-6, `24: the real amount still sums to 17.50 (${r.rows[0].agr_cost})`);
-  assert.ok(Math.abs(num(r.rows[0].agr_total_spend) - 17.5) < 1e-6, `26: the surviving governed measure answers 17.50 (${r.rows[0].agr_total_spend})`);
-  assert.equal(num(r.rows[0].agr_n), 184, "33: the source whose role is not called 'events' counts 184");
+  assert.ok(Math.abs(num(r.rows[0].cost) - 17.5) < 1e-6, `24: the real amount still sums to 17.50 (${r.rows[0].cost})`);
+  assert.ok(Math.abs(num(r.rows[0].total_spend) - 17.5) < 1e-6, `26: the surviving governed measure answers 17.50 (${r.rows[0].total_spend})`);
+  assert.equal(num(r.rows[0].cnt), 184, "33: the source whose role is not called 'events' counts 184");
   // 27. …and the model without its time axis still joins
   const rows = await pipeRows('analytics', [
     { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
@@ -318,16 +318,16 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
 
 test('S6 (F/N). clicks is both an amount and an attribute; a spend task joined to installs is as fresh as spend', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['aclk_cost', 'aclk_click_total'], group_by: [{ source: 'acquisition', column: 'clicks' }] }] }, bothEngine);
+  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['cost', 'click_total'], group_by: [{ source: 'acquisition', column: 'clicks' }] }] }, bothEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 28. cost grouped by the clicks VALUE: 9 clicks cost 5.25, 8 clicks 4.25, 0 clicks 0
-  const by = mapCol(r.rows, r.group_by_resolved['acquisition.clicks'], 'aclk_cost');
+  const by = mapCol(r.rows, r.group_by_resolved['acquisition.clicks'], 'cost');
   assert.ok(Math.abs(by['9'] - 5.25) < 1e-6, `28: 9 clicks cost 5.25 (${JSON.stringify(by)})`);
   assert.ok(Math.abs(by['8'] - 4.25) < 1e-6, '28: 8 clicks cost 4.25');
   assert.equal(by['0'], 0, '28: 0 clicks cost 0');
-  assert.ok(Math.abs(sumCol(r.rows, 'aclk_cost') - 17.5) < 1e-6, '28: the groups sum to the 17.50 spent');
+  assert.ok(Math.abs(sumCol(r.rows, 'cost') - 17.5) < 1e-6, '28: the groups sum to the 17.50 spent');
   // 29. …and clicks still sums as an amount: 64
-  assert.equal(sumCol(r.rows, 'aclk_click_total'), 64, '29: clicks still sums as an amount');
+  assert.equal(sumCol(r.rows, 'click_total'), 64, '29: clicks still sums as an amount');
   // 48. a spend task joined to installs takes its freshness from spend, not from installs
   assert.equal(r.provenance.source, 'acquisition', '48: users contributes attributes, not measures');
   assert.equal(dayOf(r.provenance.data_freshness), '2026-01-05', '48: current through the latest spend day');
@@ -359,15 +359,15 @@ test('S9 (J/N). the crash source in a two-source task: device_model and event_na
   assert.deepEqual([...new Set(s.column_matches.filter((d) => d.column === 'device_model').map((d) => d.source))].sort(), ['crashlytics', 'users'], '39: device_model is found on users and on crashlytics');
   const truth = Object.fromEntries((await wh.query('select event_name, count(*) as n from fct_crashlytics_events group by 1')).rows.map((row) => [row.event_name, Number(row.n)]));
   const r = await q(evCrashCtx, {
-    steps: [{ stage: 'metrics', metrics: ['aboth_reports'], group_by: [{ source: 'crashlytics', column: 'device_model' }, { source: 'crashlytics', column: 'event_name' }] }],
+    steps: [{ stage: 'metrics', metrics: ['reports'], group_by: [{ source: 'crashlytics', column: 'device_model' }, { source: 'crashlytics', column: 'event_name' }] }],
     time_range: { start: '2020-01-01', end: '2030-12-31' },
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aboth_reports'), { iphone: 7, pixel: 4, galaxy: 2 }, '39: the crash copy of device_model counts 7 / 4 / 2');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'reports'), { iphone: 7, pixel: 4, galaxy: 2 }, '39: the crash copy of device_model counts 7 / 4 / 2');
   // 49d. a metric grouped by the event name the schema offers as an attribute: the counts the warehouse holds
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.event_name'], 'aboth_reports'), truth, '49d: reports per crash event, as the warehouse holds them');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.event_name'], 'reports'), truth, '49d: reports per crash event, as the warehouse holds them');
   // 49. two events sources: per-source freshness, headline = the staler (crashes, 2026-01-08)
-  const f = await q(evCrashCtx, { steps: [{ stage: 'metrics', metrics: ['aboth_launches', 'aboth_reports'] }] });
+  const f = await q(evCrashCtx, { steps: [{ stage: 'metrics', metrics: ['launches', 'reports'] }] });
   assert.equal(f.ok, true, JSON.stringify(f.error));
   assert.deepEqual([...f.provenance.source].sort(), ['crashlytics', 'events'], '49: both sources contribute measures');
   assert.equal(dayOf(f.provenance.data_freshness_by_source.events), '2026-01-09', '49: events are current through 2026-01-09');

@@ -85,7 +85,7 @@ before(async () => {
       { name: 'conv_1_2', type: 'derived', expr: { fn: 'div', args: [{ metric: 'p2' }, { metric: 'p1' }] } },
     ],
   });
-  // (the stored-results section reads mon_revenue from the 'mon' model above: it built a model of its
+  // (the stored-results section reads revenue from the 'mon' model above: it built a model of its
   // own holding that one metric, the same revenue over the same rows)
 }, opts);
 
@@ -116,29 +116,29 @@ after(async () => { backend?.close?.(); if (wh) await wh.stop(); });
 // own, 'monetization: total revenue = 85, payers = 7, purchases = 8', and payers = 7 another).
 test('monetization: revenue 85 / payers 7 / purchases 8; ARPPU == revenue/payers and AOV == revenue/purchases', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['mon_revenue', 'mon_payers', 'mon_purchases', 'mon_arppu', 'mon_aov'] }] });
+  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['revenue', 'payers', 'purchases', 'arppu', 'aov'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
-  assert.equal(numOrNaN(row.mon_revenue), 85, '[totals] revenue 85');
-  assert.equal(numOrNaN(row.mon_payers), 7, '[totals] payers 7 (distinct buyers across the whole month)');
-  assert.equal(numOrNaN(row.mon_purchases), 8, '[totals] purchases 8');
-  const rev = numOrNaN(row.mon_revenue); const pay = numOrNaN(row.mon_payers); const pur = numOrNaN(row.mon_purchases);
-  assert.ok(Math.abs(numOrNaN(row.mon_arppu) - rev / pay) < 1e-6, `[ARPPU] arppu=${row.mon_arppu}`);
-  assert.ok(Math.abs(numOrNaN(row.mon_aov) - rev / pur) < 1e-6, `[AOV] aov=${row.mon_aov}`);
+  assert.equal(numOrNaN(row.revenue), 85, '[totals] revenue 85');
+  assert.equal(numOrNaN(row.payers), 7, '[totals] payers 7 (distinct buyers across the whole month)');
+  assert.equal(numOrNaN(row.purchases), 8, '[totals] purchases 8');
+  const rev = numOrNaN(row.revenue); const pay = numOrNaN(row.payers); const pur = numOrNaN(row.purchases);
+  assert.ok(Math.abs(numOrNaN(row.arppu) - rev / pay) < 1e-6, `[ARPPU] arppu=${row.arppu}`);
+  assert.ok(Math.abs(numOrNaN(row.aov) - rev / pur) < 1e-6, `[AOV] aov=${row.aov}`);
 });
 
 test('monetization: revenue by users.media_source = meta 25 / organic 30 / google 20 / applovin 10', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'media_source' }] }] });
+  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'media_source' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'users_media_source', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_media_source', 'revenue');
   assert.equal(by.meta, 25); assert.equal(by.organic, 30); assert.equal(by.google, 20); assert.equal(by.applovin, 10);
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
+  assert.equal(sumCol(r.rows, 'revenue'), 85);
   // an aggregate step folds a finer result again: by media source and country, summed back to media source
   const refolded = await q('mon', {
     steps: [
-      { stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'media_source' }, { source: 'users', column: 'country' }] },
-      { stage: 'aggregate', group_by: ['users_media_source'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
+      { stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'media_source' }, { source: 'users', column: 'country' }] },
+      { stage: 'aggregate', group_by: ['users_media_source'], measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }] },
     ],
   });
   assert.equal(refolded.ok, true, JSON.stringify(refolded.error));
@@ -148,16 +148,16 @@ test('monetization: revenue by users.media_source = meta 25 / organic 30 / googl
 test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 50', opts, async (t) => {
   if (skip(t)) return;
   // GB paid payers: u3(5), u7(10); US paid payers: u1(15), u10(20) -> 5+10+15+20 = 50
-  const r = await q('mon', { steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ source: 'users', column: 'country' }, { value: 'US' }, { value: 'GB' }] }, { fn: 'eq', args: [{ source: 'users', column: 'acquisition_type' }, { value: 'paid' }] }] }, { stage: 'metrics', metrics: ['mon_revenue'] }] });
+  const r = await q('mon', { steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ source: 'users', column: 'country' }, { value: 'US' }, { value: 'GB' }] }, { fn: 'eq', args: [{ source: 'users', column: 'acquisition_type' }, { value: 'paid' }] }] }, { stage: 'metrics', metrics: ['revenue'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 50);
+  assert.equal(sumCol(r.rows, 'revenue'), 50);
 });
 
 test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { steps: [{ stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }, { fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'BR' }] }] }] }, { stage: 'metrics', metrics: ['mon_revenue'] }] });
+  const r = await q('mon', { steps: [{ stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }, { fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'BR' }] }] }] }, { stage: 'metrics', metrics: ['revenue'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 60);
+  assert.equal(sumCol(r.rows, 'revenue'), 60);
 });
 
 // (the plain revenue by product_id, p1 15 / p2 30 / p3 40, is analytics-tasks' ratio_metric task)
@@ -166,14 +166,14 @@ test('monetization: revenue by product_id, an order_by step + limit 1: the top p
   const top = await q('mon', {
     steps: [
       { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ source: 'events', property: 'product_id_of_event_data' }] }] },
-      { stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'events', property: 'product_id_of_event_data' }] },
-      { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] },
+      { stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'events', property: 'product_id_of_event_data' }] },
+      { stage: 'order_by', keys: [{ key: 'revenue', direction: 'desc' }] },
     ],
     limit: 1,
   });
   assert.equal(top.ok, true, JSON.stringify(top.error));
   assert.equal(top.row_count, 1);
-  assert.equal(numOrNaN(top.rows[0].mon_revenue), 40);
+  assert.equal(numOrNaN(top.rows[0].revenue), 40);
 });
 
 // THE STEPS AFTER THE METRICS STEP run over its result, by the names its rows come back with: a ratio of
@@ -184,26 +184,26 @@ test('monetization: revenue by product_id, an order_by step + limit 1: the top p
 // is gone) and only compiled (dry_run: its SQL, run as shown, gives the same rows).
 test('monetization: steps after the metrics step — revenue per payer by media source, a having on revenue, ranked (organic 30 / meta 25 / google 20) — run, stored and compiled alike', opts, async (t) => {
   if (skip(t)) return;
-  const metrics = { stage: 'metrics', metrics: ['mon_revenue', 'mon_payers', 'mon_arppu'], group_by: [{ source: 'users', column: 'media_source' }] };
+  const metrics = { stage: 'metrics', metrics: ['revenue', 'payers', 'arppu'], group_by: [{ source: 'users', column: 'media_source' }] };
   const plain = await q('mon', { steps: [metrics] });
   assert.equal(plain.ok, true, JSON.stringify(plain.error));
-  const want = plain.rows.filter((r) => numOrNaN(r.mon_revenue) >= 20)
-    .sort((a, b) => numOrNaN(b.mon_revenue) - numOrNaN(a.mon_revenue))
-    .map((r) => [String(r.users_media_source), numOrNaN(r.mon_revenue), numOrNaN(r.mon_revenue) / numOrNaN(r.mon_payers)]);
+  const want = plain.rows.filter((r) => numOrNaN(r.revenue) >= 20)
+    .sort((a, b) => numOrNaN(b.revenue) - numOrNaN(a.revenue))
+    .map((r) => [String(r.users_media_source), numOrNaN(r.revenue), numOrNaN(r.revenue) / numOrNaN(r.payers)]);
   assert.deepEqual(want.map(([source, revenue]) => [source, revenue]), [['organic', 30], ['meta', 25], ['google', 20]], 'the plain rows the steps work on');
   const steps = [
-    { stage: 'compute', name: 'per_payer', expr: { fn: 'div', args: [{ column: 'mon_revenue' }, { column: 'mon_payers' }] } },
-    { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'mon_revenue' }, { value: 20 }] }] },
-    { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }] },
+    { stage: 'compute', name: 'per_payer', expr: { fn: 'div', args: [{ column: 'revenue' }, { column: 'payers' }] } },
+    { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 20 }] }] },
+    { stage: 'order_by', keys: [{ key: 'revenue', direction: 'desc' }] },
   ];
   const same = (rows, what) => {
-    assert.deepEqual(rows.map((r) => [String(r.users_media_source), numOrNaN(r.mon_revenue)]), want.map(([source, revenue]) => [source, revenue]), `${what}: the having and the order`);
+    assert.deepEqual(rows.map((r) => [String(r.users_media_source), numOrNaN(r.revenue)]), want.map(([source, revenue]) => [source, revenue]), `${what}: the having and the order`);
     for (const [i, r] of rows.entries()) assert.ok(Math.abs(numOrNaN(r.per_payer) - want[i][2]) < 1e-9, `${what}: ${r.users_media_source} revenue per payer`);
   };
   const ran = await q('mon', { steps: [metrics, ...steps] });
   assert.equal(ran.ok, true, JSON.stringify(ran.error));
   same(ran.rows, '[run]');
-  for (const r of ran.rows) assert.ok(Math.abs(numOrNaN(r.per_payer) - numOrNaN(r.mon_arppu)) < 1e-9, `[run] ${r.users_media_source}: the ratio is the governed ARPPU`);
+  for (const r of ran.rows) assert.ok(Math.abs(numOrNaN(r.per_payer) - numOrNaN(r.arppu)) < 1e-9, `[run] ${r.users_media_source}: the ratio is the governed ARPPU`);
   // stored: the table holds the rows after the steps; once the held answer is gone a read pages the
   // table by row number, and two pages together are the whole of it
   const stored = await q('mon', { steps: [metrics, ...steps], materialize: true });
@@ -235,9 +235,9 @@ test('a metric window on a partitioned source: the numbers of the rows, the same
   const window = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
   const run = async (name) => {
     await create(decl(name));
-    const r = await q(name, { steps: [{ stage: 'metrics', metrics: [`${name}_events`], group_by: [{ time: 'metric_time', grain: 'day' }, { source: 'users', column: 'platform' }] }], time_range: window });
+    const r = await q(name, { steps: [{ stage: 'metrics', metrics: ['events'], group_by: [{ time: 'metric_time', grain: 'day' }, { source: 'users', column: 'platform' }] }], time_range: window });
     assert.equal(r.ok, true, JSON.stringify(r.error));
-    return Object.fromEntries(r.rows.map((x) => [`${String(x.metric_time_day).slice(0, 10)}|${x.users_platform}`, numOrNaN(x[`${name}_events`])]));
+    return Object.fromEntries(r.rows.map((x) => [`${String(x.metric_time_day).slice(0, 10)}|${x.users_platform}`, numOrNaN(x.events)]));
   };
   const pruned = await run('part_on');
   const model = engine.catalog.getModel('events');
@@ -262,19 +262,19 @@ test('a metric window on a partitioned source: the numbers of the rows, the same
 test('monetization: time_range 2026-01-04..05 (day grain) -> 10+5+20+10 = 45', opts, async (t) => {
   if (skip(t)) return;
   // o5 u7 10 (01-04), o6 u9 5 (01-04), o7 u10 20 (01-05), o8 u11 10 (01-05)
-  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-04', end: '2026-01-05' } });
+  const r = await q('mon', { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-04', end: '2026-01-05' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(sumCol(r.rows, 'mon_revenue'), 45);
+  assert.equal(sumCol(r.rows, 'revenue'), 45);
 });
 
 // (revenue by metric_time day, summing to 85, is analytics-tasks' ratio_metric task)
 test('monetization: revenue by week/month sums to 85, in a single month', opts, async (t) => {
   if (skip(t)) return;
-  const week = await q('mon', { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'week' }] }] });
-  const month = await q('mon', { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ time: 'metric_time', grain: 'month' }] }] });
+  const week = await q('mon', { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ time: 'metric_time', grain: 'week' }] }] });
+  const month = await q('mon', { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ time: 'metric_time', grain: 'month' }] }] });
   for (const r of [week, month]) assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(sumCol(week.rows, 'mon_revenue'), 85, '[week] sums to 85');
-  assert.equal(sumCol(month.rows, 'mon_revenue'), 85, '[month] sums to 85');
+  assert.equal(sumCol(week.rows, 'revenue'), 85, '[week] sums to 85');
+  assert.equal(sumCol(month.rows, 'revenue'), 85, '[month] sums to 85');
   // single month in the seed
   assert.equal(month.row_count, 1, '[month] a single month in the seed');
 });
@@ -284,18 +284,18 @@ test('monetization: revenue by week/month sums to 85, in a single month', opts, 
 // One query carries both of the level funnel's former tests (multistep-funnel.test.js).
 test('level funnel: per-level starts 12 / 6 / 3 and the L1->L2 player share', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('lvlf', { steps: [{ stage: 'metrics', metrics: ['lvlf_s1', 'lvlf_s2', 'lvlf_s3', 'lvlf_p1', 'lvlf_p2', 'lvlf_conv_1_2'] }] });
+  const r = await q('lvlf', { steps: [{ stage: 'metrics', metrics: ['s1', 's2', 's3', 'p1', 'p2', 'conv_1_2'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const row = r.rows[0];
   // 'level funnel: level_started counts by level_id = 12 / 6 / 3 (monotonic)'
-  assert.equal(numOrNaN(row.lvlf_s1), 12, '[level counts] L1');
-  assert.equal(numOrNaN(row.lvlf_s2), 6, '[level counts] L2');
-  assert.equal(numOrNaN(row.lvlf_s3), 3, '[level counts] L3');
-  assert.ok(numOrNaN(row.lvlf_s1) >= numOrNaN(row.lvlf_s2) && numOrNaN(row.lvlf_s2) >= numOrNaN(row.lvlf_s3), '[level counts] monotonic');
+  assert.equal(numOrNaN(row.s1), 12, '[level counts] L1');
+  assert.equal(numOrNaN(row.s2), 6, '[level counts] L2');
+  assert.equal(numOrNaN(row.s3), 3, '[level counts] L3');
+  assert.ok(numOrNaN(row.s1) >= numOrNaN(row.s2) && numOrNaN(row.s2) >= numOrNaN(row.s3), '[level counts] monotonic');
   // 'level funnel: the L1->L2 share of players is the L2 players over the L1 players, in (0,1)'
-  const v = numOrNaN(row.lvlf_conv_1_2);
-  assert.ok(numOrNaN(row.lvlf_p2) > 0 && numOrNaN(row.lvlf_p2) < numOrNaN(row.lvlf_p1), `[L1->L2 share] 0 < L2 players < L1 players: ${JSON.stringify(row)}`);
-  assert.ok(Math.abs(v - numOrNaN(row.lvlf_p2) / numOrNaN(row.lvlf_p1)) < 1e-9, `[L1->L2 share] conv_1_2=${v}`);
+  const v = numOrNaN(row.conv_1_2);
+  assert.ok(numOrNaN(row.p2) > 0 && numOrNaN(row.p2) < numOrNaN(row.p1), `[L1->L2 share] 0 < L2 players < L1 players: ${JSON.stringify(row)}`);
+  assert.ok(Math.abs(v - numOrNaN(row.p2) / numOrNaN(row.p1)) < 1e-9, `[L1->L2 share] conv_1_2=${v}`);
 });
 
 // ───────────────────────── Visit -> purchase conversion ─────────────────────────
@@ -335,12 +335,12 @@ test('conversion by users.country: the countries add up to the whole, each a sha
 
 test('materialize: the query is a task whose result is a stored table — rows read back = total revenue 85', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['mon_revenue'] }], materialize: true });
+  const r = await engine.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['revenue'] }], materialize: true });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(r.status, 'done');
   assert.ok(r.task_id && r.table, 'the task and the table it left');
   assert.equal(r.table, `qr_${r.task_id}`);
-  assert.equal(num(r.rows[0].mon_revenue), 85);
+  assert.equal(num(r.rows[0].revenue), 85);
   globalThis.__matTask = r.task_id;
 });
 
@@ -350,7 +350,7 @@ test('resilient re-read: once the in-memory response is gone, query_model({ task
   const r = await one(engine.query_model({ task_ids: [globalThis.__matTask] }));
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(r.status, 'done');
-  assert.equal(num(r.rows[0].mon_revenue), 85); // recomputes nothing — reads the table
+  assert.equal(num(r.rows[0].revenue), 85); // recomputes nothing — reads the table
 });
 
 // ONE materialized revenue-by-country task carries what three tests each materialized it for: the call
@@ -359,12 +359,12 @@ test('resilient re-read: once the in-memory response is gone, query_model({ task
 test('one materialized revenue-by-country task: started without waiting, read back (sum 85), re-sliced by pipelines from its task, and paged to its end', opts, async (t) => {
   if (skip(t)) return;
   // 'the call that starts a query never waits: a task_id now, the rows from query_model({ task_id })'
-  const started = await engine.raw.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }], materialize: true });
+  const started = await engine.raw.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }], materialize: true });
   assert.ok(isStartedTask(started), `[never waits] a task_id now: ${JSON.stringify(started)}`);
   const m = await taskResult(engine, started.task_id);
   assert.equal(m.ok, true, JSON.stringify(m.error));
   assert.equal(m.status, 'done', '[never waits] the rows from the task');
-  assert.equal(m.rows.reduce((s, x) => s + num(x.mon_revenue), 0), 85, '[never waits] revenue by country sums to the grand total');
+  assert.equal(m.rows.reduce((s, x) => s + num(x.revenue), 0), 85, '[never waits] revenue by country sums to the grand total');
 
   // 'a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)'
   const from = async (name, steps) => {
@@ -376,14 +376,14 @@ test('one materialized revenue-by-country task: started without waiting, read ba
     return built.rows;
   };
   // (a) compress to a single total
-  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] }]);
+  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }] }]);
   assert.equal(num(total.total), 85, '[from_task] (a) the total');
   // (b) one country -> exact seed value (US revenue = 35)
-  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'users_country' }, { value: 'US' }] }] }, { stage: 'aggregate', measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] }]);
+  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'users_country' }, { value: 'US' }] }] }, { stage: 'aggregate', measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }] }]);
   assert.equal(num(us.rev), 35, '[from_task] (b) US');
   // (c) group, then keep the groups whose total clears a bar
   const big = await from('big', [
-    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
+    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'revenue' }] } }] },
     { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'rev' }, { value: 25 }] }] },
   ]);
   assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25), '[from_task] (c) the groups that clear the bar');
@@ -404,20 +404,20 @@ test('one materialized revenue-by-country task: started without waiting, read ba
   } while (last.page.has_more && guard++ < 20);
   assert.equal(last.page.has_more, false, '[paged] terminates on the last page');
   assert.equal(collected.length, rowCount, '[paged] pages cover every row exactly');
-  assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85, '[paged] the pages sum to the total');
+  assert.equal(collected.reduce((s, x) => s + num(x.revenue), 0), 85, '[paged] the pages sum to the total');
 });
 
 test('a drawn card reads its views from its own task: a row opens into a level that adds up to it, a path value is bound as a literal', opts, async (t) => {
   if (skip(t)) return;
-  const m = await engine.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }] }], materialize: true });
-  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'mon_revenue', fn: 'sum' }] } });
+  const m = await engine.query_model({ context_id: ctxOf.mon, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }, { source: 'users', column: 'platform' }] }], materialize: true });
+  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }, { column: 'users_platform' }], values: [{ column: 'revenue', fn: 'sum' }] } });
   assert.equal(card.drawn, true, JSON.stringify(card).slice(0, 300));
-  assert.equal(card.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85, 'the top level is the whole result, folded by country');
+  assert.equal(card.rows.reduce((s, r) => s + num(r.revenue), 0), 85, 'the top level is the whole result, folded by country');
   // the card opens the US row: the path taken, and the server reads the next level (platform) under it
   const us = await engine.drill_result({ task_id: m.task_id, path: [{ column: 'users_country', value: 'US' }] });
   assert.equal(us.ok, true, JSON.stringify(us.error));
   assert.ok(us.rows.length >= 1);
-  assert.equal(us.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 35, 'US by platform adds up to US');
+  assert.equal(us.rows.reduce((s, r) => s + num(r.revenue), 0), 35, 'US by platform adds up to US');
   // injection/escaping proven on DATA: a path value containing a quote+SQL is bound as a literal ->
   // the read runs safely and simply matches nothing.
   const inj = await engine.drill_result({ task_id: m.task_id, path: [{ column: 'users_country', value: "US'); drop table x; --" }] });
@@ -535,7 +535,7 @@ test('query_model: conditional aggregates and a second aggregate stage count the
 // last row, its first answer included — a page past the rows the task holds is read from the table.
 test('a held result pages by its row numbers, and a page past the rows it kept says how to have them', opts, async (t) => {
   if (skip(t)) return;
-  const steps = [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }, { stage: 'order_by', keys: [{ key: 'users_country', direction: 'asc' }] }];
+  const steps = [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }, { stage: 'order_by', keys: [{ key: 'users_country', direction: 'asc' }] }];
   const full = await engine.query_model({ context_id: ctxOf.mon, steps });
   assert.ok(full.rows.length >= 3, `expected at least 3 country rows, got ${full.rows.length}`);
   const countries = full.rows.map((r) => r.users_country);
@@ -544,7 +544,7 @@ test('a held result pages by its row numbers, and a page past the rows it kept s
   await taskResult(engine.raw, started.task_id);
   const second = await one(engine.query_model({ task_ids: [started.task_id], offset: 1, limit: 1 }));
   assert.deepEqual(second.rows.map((r) => r.users_country), [countries[1]], 'offset 1 is the result\'s second row');
-  assert.equal(Number(second.rows[0].mon_revenue), Number(full.rows[1].mon_revenue));
+  assert.equal(Number(second.rows[0].revenue), Number(full.rows[1].revenue));
   assert.equal(second.page.offset, 1);
   // a page that reaches past the 2 rows kept: the rows kept, more exist, and no row number reads them
   const page = await one(engine.query_model({ task_ids: [started.task_id] }));
@@ -557,7 +557,7 @@ test('a held result pages by its row numbers, and a page past the rows it kept s
 
 test('a stored result pages to its last row: a page past the rows the task holds is read from its table', opts, async (t) => {
   if (skip(t)) return;
-  const steps = [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ source: 'users', column: 'country' }] }];
+  const steps = [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }] }];
   // the task holds 1 row of its result; the table stores them all
   const m = await engine.raw.query_model({ context_id: ctxOf.mon, steps, materialize: true, limit: 1 });
   const held = await taskResult(engine.raw, m.task_id);
@@ -566,7 +566,7 @@ test('a stored result pages to its last row: a page past the rows the task holds
   assert.ok(all.rows.length >= 3, 'the first page is the result\'s, not the one row held');
   assert.equal(all.page.has_more, false);
   assert.equal(all.page.total_rows, all.rows.length);
-  assert.equal(all.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85);
+  assert.equal(all.rows.reduce((s, r) => s + num(r.revenue), 0), 85);
   // row by row, by row number: the same rows as that page, in its order
   const one1 = await one(engine.query_model({ task_ids: [m.task_id], offset: 1, limit: 1 }));
   assert.deepEqual(one1.rows, [all.rows[1]]);
@@ -575,16 +575,16 @@ test('a stored result pages to its last row: a page past the rows the task holds
   const past = await one(engine.query_model({ task_ids: [m.task_id], offset: all.rows.length + 10 }));
   assert.deepEqual([past.rows, past.page.total_rows, past.page.has_more], [[], all.rows.length, false]);
   // a card draws the rows the task keeps
-  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'bar', x: 'users_country', y: ['mon_revenue'] } });
+  const card = await engine.display_model_result({ task_id: m.task_id, display: { kind: 'bar', x: 'users_country', y: ['revenue'] } });
   assert.equal(card.rows.length, 1);
   // …once its answer is gone too (a restart): the task's 2 rows, read from the table, not a default
   const two = await engine.raw.query_model({ context_id: ctxOf.mon, steps, materialize: true, limit: 2 });
   assert.equal((await taskResult(engine.raw, two.task_id)).status, 'done');
   engine.raw._taskResults.delete(two.task_id);
-  const late = await engine.display_model_result({ task_id: two.task_id, display: { kind: 'bar', x: 'users_country', y: ['mon_revenue'] } });
+  const late = await engine.display_model_result({ task_id: two.task_id, display: { kind: 'bar', x: 'users_country', y: ['revenue'] } });
   assert.equal(late.drawn, true, JSON.stringify(late.error));
   assert.equal(late.rows.length, 2);
-  for (const r of late.rows) assert.ok(all.rows.some((a) => a.users_country === r.users_country && num(a.mon_revenue) === num(r.mon_revenue)), JSON.stringify(r));
+  for (const r of late.rows) assert.ok(all.rows.some((a) => a.users_country === r.users_country && num(a.revenue) === num(r.revenue)), JSON.stringify(r));
 });
 
 test('a pipeline build pages its stored table to the last row, and a read of it in steps keeps its first limit rows', opts, async (t) => {

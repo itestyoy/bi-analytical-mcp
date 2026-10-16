@@ -206,6 +206,37 @@ export function slowlyChangingNoMeasures(catalog, models) {
   return `${models.map((m) => `'${m}'`).join(', ')} ${models.length > 1 ? 'are' : 'is'} slowly-changing (several versions per key, each with a validity window), so ${models.length > 1 ? 'they take' : 'it takes'} no measures; ${instead}.`;
 }
 
+/**
+ * A name MetricFlow takes as ONE kind of element across the layer (its ElementConsistencyRule): a measure
+ * named as a dimension or an entity of any semantic model — of the same model or another — is refused at
+ * parse. Said here, when the step is checked, naming what the step declared and what already holds the
+ * name. `additions`: what the step declared, per model.
+ */
+function refuseElementConflicts(semanticModels, additions) {
+  const kinds = new Map(); // name → Map(kind → semantic model)
+  const note = (name, kind, sm) => {
+    if (!kinds.has(name)) kinds.set(name, new Map());
+    if (!kinds.get(name).has(kind)) kinds.get(name).set(kind, sm);
+  };
+  for (const sm of semanticModels) {
+    for (const e of sm.entities || []) note(e.name, 'entity', sm.name);
+    if (sm.primary_entity) note(sm.primary_entity, 'entity', sm.name);
+    for (const d of sm.dimensions || []) note(d.name, 'dimension', sm.name);
+    for (const me of sm.measures || []) note(me.name, 'measure', sm.name);
+  }
+  const declared = (kind) => new Set(Object.values(additions).flatMap((a) => (a[`${kind}s`] || []).map((x) => x.name)));
+  const own = { measure: declared('measure'), dimension: declared('dimension') };
+  for (const [name, byKind] of kinds) {
+    if (byKind.size < 2) continue;
+    const mine = own.measure.has(name) ? 'measure' : own.dimension.has(name) ? 'dimension' : null;
+    if (!mine) continue;
+    const other = [...byKind].filter(([k]) => k !== mine).map(([k, sm]) => `${k === 'entity' ? 'an entity' : `a ${k}`} of '${sm}'`).join(' and ');
+    const e = new Error(`${mine} '${name}': '${name}' is already ${other}, and MetricFlow takes a name as one kind of thing across the semantic layer — give the ${mine} a name of its own`);
+    e.field = `${mine}s.name`;
+    throw e;
+  }
+}
+
 export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);
   // always include any model that received additions
@@ -219,12 +250,16 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     const scd = !!catalog.getModel(key).scd;
     const add = state.additions?.[key];
     if (add) {
-      // A task may re-declare an attribute the base model already carries (it is offered in the
-      // schema either way). Two dimensions with one name is a manifest dbt rejects, so the base
-      // one stands and the duplicate is dropped.
-      const have = new Set(sm.dimensions.map((d) => d.name));
+      // A step may declare an attribute the base model already carries (a column, with a label or a
+      // grain of its own): it is stored under the column's name, so it takes the base one's place —
+      // two dimensions with one name is a manifest dbt rejects.
       // a task's time dimension over a column of the model reads it as the base model's own do
-      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(d.type === 'time' && d._attribute ? { ...manifestOnly(d), expr: timeExpr(catalog, key, d.expr) } : manifestOnly(d)); }
+      for (const d of add.dimensions || []) {
+        const dim = d.type === 'time' && d._attribute ? { ...manifestOnly(d), expr: timeExpr(catalog, key, d.expr) } : manifestOnly(d);
+        const at = sm.dimensions.findIndex((x) => x.name === d.name);
+        if (at === -1) sm.dimensions.push(dim);
+        else sm.dimensions[at] = dim;
+      }
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
@@ -236,6 +271,8 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
     }
     semanticModels.push(sm);
   }
+
+  refuseElementConflicts(semanticModels, state.additions || {});
 
   // Drop metrics that reference a measure we removed from an SCD model — otherwise dbt fails parse
   // with "a semantic model having a measure `X` does not exist but was referenced".

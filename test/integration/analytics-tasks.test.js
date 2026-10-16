@@ -89,10 +89,10 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse.error || out.parse));
-  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['castq_sum_ct', 'castq_avg_ct'] }] });
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['sum_ct', 'avg_ct'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  assert.equal(num(r.rows[0].castq_sum_ct), 1263);            // exact Σ complete_time
-  assert.ok(Math.abs(num(r.rows[0].castq_avg_ct) - 50.52) < 1e-6);
+  assert.equal(num(r.rows[0].sum_ct), 1263);            // exact Σ complete_time
+  assert.ok(Math.abs(num(r.rows[0].avg_ct) - 50.52) < 1e-6);
   // the same aggregation WITHOUT a cast is rejected (string is not numeric)
   await assert.rejects(declare(engine, {
     name: 'castbad',
@@ -277,13 +277,13 @@ test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers g
 // { semantic_model: [<its source>], dimension: <its name> }.
 test('a task dimension over a time column is read at its grain (week), or at the catalog\'s (day); a computed one by its name', opts, async (t) => {
   if (skip(t)) return;
-  const events = { source: 'events', measures: [{ name: 'n', expr: { fn: 'count' }, label: 'Events counted' }] };
+  const events = { source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' }, label: 'Events counted' }] };
   const task = (name, dims, eventDims) => declare(engine, {
     name,
     semantic_models: eventDims
       ? [{ ...events, dimensions: eventDims }, { source: 'users' }]
       : [{ source: 'users', ...(dims ? { dimensions: dims } : {}) }, events],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n', label: 'Events' }],
+    metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt', label: 'Events' }],
   });
   // (a build over the events computes a dimension of its own on them: whether the event is a completed purchase)
   const purchased = [{ name: 'purchased', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }];
@@ -294,7 +294,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
     built[name] = out.context_id;
   }
   const cohorts = async (name) => {
-    const r = await q(built[name], { steps: [{ stage: 'metrics', metrics: [`${name}_n`], group_by: [{ source: 'users', column: 'install_date' }] }] });
+    const r = await q(built[name], { steps: [{ stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'users', column: 'install_date' }] }] });
     assert.equal(r.ok, true, JSON.stringify(r.error || r));
     assert.ok(r.columns.some((c) => c.name === 'users_install_date'), `the column is named for the reference: ${JSON.stringify(r.columns)}`);
     return r.rows;
@@ -302,7 +302,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
   const day = (v) => (v == null ? null : new Date(v).toISOString().slice(0, 10));
   const byKey = (rows, name, key = day) => {
     const out = {};
-    for (const r of rows) { const k = key(r.users_install_date); out[k] = (out[k] || 0) + num(r[`${name}_n`]); }
+    for (const r of rows) { const k = key(r.users_install_date); out[k] = (out[k] || 0) + num(r.cnt); }
     return out;
   };
   const isoWeek = (v) => { if (v == null) return null; const d = new Date(v); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
@@ -318,16 +318,16 @@ test('a task dimension over a time column is read at its grain (week), or at the
   assert.deepEqual(weekly, byKey(dailyRows, 'coh_dy', isoWeek));
   assert.equal(Object.keys(weekly).filter((k) => k !== 'null').length, 2, 'Jan 1-4 and Jan 5 2026 are two ISO weeks');
   // filtered on the same column: only the cohort of the week of Jan 5
-  const late = await q(built.coh_wk, { steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ source: 'users', column: 'install_date' }, { value: '2026-01-05' }] }] }, { stage: 'metrics', metrics: ['coh_wk_n'], group_by: [{ source: 'users', column: 'install_date' }] }] });
+  const late = await q(built.coh_wk, { steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ source: 'users', column: 'install_date' }, { value: '2026-01-05' }] }] }, { stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'users', column: 'install_date' }] }] });
   assert.equal(late.ok, true, JSON.stringify(late.error || late));
   assert.deepEqual(byKey(late.rows, 'coh_wk'), { '2026-01-05': weekly['2026-01-05'] });
 
   // the computed dimension splits the events into the completed purchases and the rest, as the
   // warehouse counts them by hand
-  const split = await q(built.coh_buy, { steps: [{ stage: 'metrics', metrics: ['coh_buy_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] }] });
+  const split = await q(built.coh_buy, { steps: [{ stage: 'metrics', metrics: ['cnt'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] }] });
   assert.equal(split.ok, true, JSON.stringify(split.error || split));
   const flag = split.group_by_resolved['events.purchased'];
-  const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.coh_buy_n)]));
+  const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.cnt)]));
   const { rows: [byHand] } = await wh.query("select count(*) filter (where event_name = 'iap_purchase_completed') as yes, count(*) filter (where event_name <> 'iap_purchase_completed') as no from fct_analytics_events");
   assert.deepEqual(bySplit, { true: num(byHand.yes), false: num(byHand.no) }, `[computed dimension] ${JSON.stringify(split.rows)}`);
   assert.equal(num(byHand.yes), 8, '[computed dimension] the 8 completed purchases');
@@ -335,11 +335,11 @@ test('a task dimension over a time column is read at its grain (week), or at the
   // the labels went with what they were given on, into the layer dbt parsed
   const p = await engine.context({ action: 'describe', context_id: built.coh_wk });
   const users = p.semantic_models.find((sm) => sm.name === 'users');
-  assert.equal(users.dimensions.find((d) => d.name === 'coh_wk_install_date').label, 'Install week');
+  assert.equal(users.dimensions.find((d) => d.name === 'install_date').label, 'Install week');
   // (a measure is listed by the legacy spec; the latest spec has none — a simple metric carries its own)
-  const measure = (p.semantic_models.find((sm) => sm.name === 'events').measures || []).find((m) => m.name === 'coh_wk_n');
+  const measure = (p.semantic_models.find((sm) => sm.name === 'events').measures || []).find((m) => m.name === 'cnt');
   if (measure) assert.equal(measure.label, 'Events counted');
-  assert.equal(p.metrics.find((m) => m.name === 'coh_wk_n').label, 'Events');
+  assert.equal(p.metrics.find((m) => m.name === 'cnt').label, 'Events');
 });
 
 // ── 5c. a semantic layer over a table the build made ──
@@ -367,21 +367,21 @@ test('a semantic layer over a built table: sessions and events per session, by t
   assert.equal(parsed.parse?.ok, true, JSON.stringify(parsed.parse || parsed.error));
   const ctx = started.context_id;
   const { rows: [all] } = await wh.query(`select count(*) as sessions, sum(n) as events from (select player_id_of_internal, session_number, count(*) as n from fct_analytics_events group by 1, 2) s`);
-  const total = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions', 'sess_events', 'sess_per_session'] }] });
+  const total = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sessions', 'events', 'per_session'] }] });
   assert.equal(total.ok, true, JSON.stringify(total.error));
-  assert.equal(num(total.rows[0].sess_sessions), num(all.sessions), 'one row per session');
-  assert.equal(num(total.rows[0].sess_events), 184, 'every event in its session');
-  assert.ok(Math.abs(num(total.rows[0].sess_per_session) - 184 / num(all.sessions)) < 1e-9);
+  assert.equal(num(total.rows[0].sessions), num(all.sessions), 'one row per session');
+  assert.equal(num(total.rows[0].events), 184, 'every event in its session');
+  assert.ok(Math.abs(num(total.rows[0].per_session) - 184 / num(all.sessions)) < 1e-9);
   // by the install country valid at the session's start
   const byHand = (await wh.query(`select u.country, count(*) as n from (select player_id_of_internal, session_number, min(device_time) as start from fct_analytics_events group by 1, 2) s join dim_users u on u.player_id_of_internal = s.player_id_of_internal and s.start between u.install_time_valid_from and u.install_time_valid_until group by 1`)).rows;
-  const r = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sessions'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const got = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.sess_sessions)]));
+  const got = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.sessions)]));
   assert.deepEqual(got, Object.fromEntries(byHand.map((x) => [String(x.country), num(x.n)])));
   // a column of the built table is named by its semantic model; the built rows stay readable as a table
-  const byCount = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions'], group_by: [{ semantic_model: ['sess'], dimension: 'n_events' }] }] });
+  const byCount = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sessions'], group_by: [{ semantic_model: ['sess'], dimension: 'n_events' }] }] });
   assert.equal(byCount.ok, true, JSON.stringify(byCount.error));
-  assert.equal(byCount.rows.reduce((a, x) => a + num(x.sess_sessions), 0), num(all.sessions));
+  assert.equal(byCount.rows.reduce((a, x) => a + num(x.sessions), 0), num(all.sessions));
   const read = await q(ctx, { steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   assert.equal(num(read.rows[0].n), num(all.sessions), 'the table itself, read as a pipeline\'s');
   // the step edited alone: the next materialize stands the layer on the table already built
@@ -391,10 +391,10 @@ test('a semantic layer over a built table: sessions and events per session, by t
   const again = await raw.build_model({ action: 'materialize', context_id: ctx });
   assert.equal((await taskResult(raw, again.task_id)).parse?.ok, true);
   const { rows: [most] } = await wh.query('select max(n) as n from (select count(*) as n from fct_analytics_events group by player_id_of_internal, session_number) s');
-  const longest = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_longest', 'sess_sessions'] }] });
+  const longest = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['longest', 'sessions'] }] });
   assert.equal(longest.ok, true, JSON.stringify(longest.error));
-  assert.equal(num(longest.rows[0].sess_longest), num(most.n));
-  assert.equal(num(longest.rows[0].sess_sessions), num(all.sessions));
+  assert.equal(num(longest.rows[0].longest), num(most.n));
+  assert.equal(num(longest.rows[0].sessions), num(all.sessions));
 });
 
 // ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────
@@ -530,11 +530,11 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const at = (d) => day.get(d) || 0;
   const created = await declare(engine, CUMULATIVE_TASK);
   const query = { context_id: created.context_id, time_range: { start: '2026-01-03', end: '2026-01-05' } };
-  const cumulative = { stage: 'metrics', metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
+  const cumulative = { stage: 'metrics', metrics: ['daily', 'two_day', 'to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
   const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];
   const r = await engine.query_model({ ...query, steps: [cumulative, ...byDay] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const got = r.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]);
+  const got = r.rows.map((x) => [num(x.daily), num(x.two_day), num(x.to_date)]);
   const days = ['2026-01-03', '2026-01-04', '2026-01-05'];
   const prev = { '2026-01-03': '2026-01-02', '2026-01-04': '2026-01-03', '2026-01-05': '2026-01-04' };
   const upTo = (d) => [...day].filter(([k]) => k <= d).reduce((a, [, n]) => a + n, 0);
@@ -545,5 +545,5 @@ test('a cumulative metric over a time_range sums the days before the range that 
   // before them included
   const later = await engine.query_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
   assert.equal(later.ok, true, JSON.stringify(later.error));
-  assert.deepEqual(later.rows.map((x) => [num(x.cum_daily), num(x.cum_two_day), num(x.cum_to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
+  assert.deepEqual(later.rows.map((x) => [num(x.daily), num(x.two_day), num(x.to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
 });

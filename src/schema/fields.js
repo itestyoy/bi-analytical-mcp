@@ -17,6 +17,10 @@ export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
 export const TASK = '^[a-z][a-z0-9_]{2,40}$';
 
+/** A name the semantic layer stores as it is written — a metric's, a measure's, a computed dimension's:
+ *  MetricFlow's rule (a lowercase letter first, at least two characters, no `__`, no `_` at the end). */
+export const SEMANTIC_NAME = '^[a-z](_?[a-z0-9]){1,39}$';
+
 export const CTX = CONTEXT_ID;
 
 export const TASK_ID = TASK_ID_PATTERN;
@@ -57,22 +61,21 @@ export const DRY_RUN = (what, validateAt = null) => `Compile and show ${what}, r
 export const VALIDATE = (how, readWith) => `Check on the warehouse: ${how} — a task, read with ${readWith}.`;
 
 /** A computed dimension's name — what it is grouped and filtered by. */
-const DIMENSION_NAME = { type: 'string', pattern: NAME, description: 'The dimension\'s name — grouped and filtered as { semantic_model: [<its source>], dimension: <this name> }.' };
+const DIMENSION_NAME = { type: 'string', pattern: SEMANTIC_NAME, description: 'The dimension\'s name — grouped and filtered as { semantic_model: [<its source>], dimension: <this name> }.' };
 
 export function metricSchema(catalog) {
-  // what a metric reads is named as a string — a measure of this call or already in the context, as it
-  // was declared ('n') or as it is stored ('ret_n'), or a governed measure of the catalog — so no
-  // pattern: a stored name is longer than a declared one
+  // what a metric reads is named as a string — a measure of this step, or a governed measure of the
+  // catalog, by its name
   const ref = (description) => ({ type: 'string', minLength: 1, description });
   const fields = {
-    name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as <task>_<name>.' },
+    name: { type: 'string', pattern: SEMANTIC_NAME, description: 'The metric\'s name (lowercase snake_case), unique in the context — queried by this name.' },
     label: { type: 'string', description: D.label },
-    measure: ref('The measure it reads, by name: one declared in this call or already in the context (as declared, or as stored: <task>_<name>), or a governed measure of the catalog.'),
+    measure: ref('The measure it reads, by name: one of this step\'s measures, or a governed measure of the catalog.'),
     fill_nulls_with: { type: 'number', description: 'Value (e.g. 0) for this metric where a result row has none — beside another metric of the query, or as an input of a derived metric. It adds no rows: a time bucket with no rows at all is absent from the result.' },
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
     period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
     window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },
-    expr: { $ref: EXPR_KINDS.metric_expr.ref, description: `The metric's value over the metrics it is built from — each a { metric } leaf (of this call or already in the context, as declared or as stored), which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
+    expr: { $ref: EXPR_KINDS.metric_expr.ref, description: `The metric's value over the metrics it is built from — each a { metric } leaf naming another metric of this step, which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
   };
   // one form per kind of metric, each with exactly the fields that kind reads (src/compile.js)
   const kind = (type, title, required, optional) => form({ title, tag: ['type', type], required: ['name', ...required], properties: pick(fields, ['name', 'label', ...required, ...optional]) });
@@ -115,7 +118,7 @@ export const METRICS_STEP = {
     description: 'What the semantic layer computes: the metrics, one column each, broken down by group_by — one row per combination of its items. MetricFlow writes the SQL and makes every join. A query has one; the where steps before it filter the rows its metrics fold, the steps after it work on its result.',
     properties: {
       stage: { enum: [METRICS_STEP.stage] },
-      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as the build's semantic_model step returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (context({ request: { action: "describe", context_id } }) lists them)' : ''}.` },
+      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a build's context, the names its semantic_model step declared${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (context({ request: { action: "describe", context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array', uniqueItems: true, items: { $ref: '#/$defs/ref' },
         description: `How to break the metrics down, one result column per item, in order — each a ref, of those a group_by takes. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context: a column of a model, { source, column } — the join comes from the schema, and the context has to read the model (a semantic_models item of the build, { source } alone to load it; column <source>_<column>); an event property the task declared a dimension, { source, property } (column <source>_<property>); a dimension it computed, { semantic_model: [<its source>], dimension } (column <source>_<dimension>); an entity, { entity } (column: its name).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own; column <semantic_model>_<dimension>) — and { entity }; context({ request: { action: "describe", context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
@@ -167,7 +170,7 @@ export const SEMANTIC_MODEL_STEP = {
         measures: {
           type: 'array',
           items: measureForm({
-            ref: EXPR_KINDS.aggregate.ref, pattern: NAME,
+            ref: EXPR_KINDS.aggregate.ref, pattern: SEMANTIC_NAME,
             nameDescription: 'The measure\'s name; metrics read it by this name.',
             exprDescription: 'ONE aggregate of the rows — sum, average, min, max, median, percentile (with `percentile`), count_distinct, or count (with no args it counts the rows) — over a row expression; the rows a condition holds for are folded by an aggregate over a case: { fn: "count", args: [{ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }], then: { value: 1 } }] }] }. A formula over several aggregates is several measures and a derived metric.',
             extra: { label, source: { enum: loadable, description: 'Fold the rows of this model of the semantic layer instead of the main model\'s — computed on its own rows and compared beside the main model\'s on metric_time and the group_by (its spend beside the events\' revenue). Omitted: the main model.' } },

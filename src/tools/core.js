@@ -24,7 +24,7 @@ export const EXAMPLES = {
     { action: 'start', name: 'activity', source: '<events source>', steps: [{ stage: 'semantic_model', measures: [{ name: 'events', expr: { fn: 'count' } }], metrics: [{ name: 'events', type: 'simple', measure: 'events' }] }], materialize: true },
   ],
   query_model: [
-    { context_id: '<context_id>', steps: [{ stage: 'metrics', metrics: ['activity_events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
+    { context_id: '<context_id>', steps: [{ stage: 'metrics', metrics: ['events'], group_by: [{ time: 'metric_time', grain: 'day' }] }], time_range: { start: '2026-01-01', end: '2026-01-31' } },
     { context_id: '<context_id>', steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, { stage: 'limit', limit: 10 }] },
   ],
 };
@@ -44,7 +44,7 @@ export const CORE_TOOLS = [
     name: 'build_model',
     title: 'Build Model',
     description: 'Build what a question is answered from, step by step: a table whose rows are the answer — funnels (match_recognize), sessions, window functions, pivots — or, as the last step, a semantic layer of reusable named metrics ({ stage: "semantic_model", measures, metrics, join? }) over the build\'s source or the table the steps before it built, queried many ways with query_model (group_by, grain, filters): DAU, revenue, a ratio of two counts. Each step is a stage ({ stage: "where" | "compute" | "join" | …, … }), checked as it is added and answered with what it changed (include: ["columns", "steps"] adds every column the next step sees and every step); nothing runs in the warehouse until materialize (or materialize: true beside the steps), which returns a task_id. A recipe\'s payload is a start request as it stands. query_model reads the rows ({ task_ids }), filters or regroups a built table ({ context_id, steps }), and computes the metrics of a semantic layer (a metrics step). A join names a model\'s join contract ({ source, on }), and joins stack. start with from_task builds on the stored table of a finished task without recomputing it. Where the warehouse runs Python, a python stage is offered; its own description holds its rules.'
-      + ` Examples: ${callText(EXAMPLES.build_model[0])}; a semantic layer: ${callText(EXAMPLES.build_model[1])} — its metric is queried as activity_events (<name>_<metric>). Each → { task_id }, read with query_model({ request: { task_ids } }).`,
+      + ` Examples: ${callText(EXAMPLES.build_model[0])}; a semantic layer: ${callText(EXAMPLES.build_model[1])} — its metric is queried by its own name, events. Each → { task_id }, read with query_model({ request: { task_ids } }).`,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     run: (engine, input) => engine.build_model(input),
   }),

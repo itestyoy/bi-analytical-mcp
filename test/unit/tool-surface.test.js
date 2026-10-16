@@ -107,7 +107,7 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   const r = await e.semantic_index({ recipe: 'conversion_metric_window' });
   assert.equal(r.id, 'conversion_metric_window');
   assert.ok(r.hack && (r.semantic_payload || r.pipeline_payload), 'recipe payload + hack returned');
-  assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
+  assert.ok(r.building_block, 'carries how to use it');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
   await assert.rejects(() => e.semantic_index({ recipe: 'conversion_metric_window', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
@@ -119,7 +119,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
   const e = engine();
   const s = await e.build_model({ action: 'start', name: 'sampled', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'sample', share: 0.1 }] });
-  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   const out = await e.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
   assert.equal(out.sampling.approximate, true);
@@ -127,7 +127,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
   assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
   // a non-sampled pipeline has neither flag.
   const s2 = await e.build_model({ action: 'start', name: 'exact', source: 'events' });
-  await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   const out2 = await e.build_model({ action: 'materialize', context_id: s2.context_id });
   assert.equal(out2.provenance.approximate, undefined);
   assert.equal(out2.sampling, undefined);
@@ -153,17 +153,17 @@ test('add_steps warns when an event-specific property is used without its event 
   ] });
   const s = await e.build_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
-  const a = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const a = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   assert.ok(stepNotes(a).some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(stepNotes(a)));
   // with an upstream where scoping event_name to those events → no NULL warning.
   const s2 = await e.build_model({ action: 'start', name: 'scoped', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'ad_started' }, { value: 'ad_finished' }] }] }] });
-  const a2 = await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const a2 = await e.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   assert.ok(!stepNotes(a2).some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
   const warnFor = async (cond) => {
     const d = await e.build_model({ action: 'start', name: 'scoped2', source: 'events' });
     await e.build_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'where', conditions: [cond] }] });
-    const r = await e.build_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+    const r = await e.build_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
     return (stepNotes(r) || []).find((x) => x.includes('populated only on event'));
   };
   // a scope WITHIN the field's events is the right choice: every row it keeps carries the field
@@ -214,11 +214,11 @@ test('a group-by path onto an unloaded FACT is refused with the fix: a measure o
   const e = engine();
   const out = await declare(e, {
     name: 'evonly',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   await assert.rejects(
-    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['rows'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
     (err) => err.field === 'steps' && /needs model 'crashlytics'.*a measure of the build's semantic_model step with source: 'crashlytics' loads it/s.test(err.message),
   );
 });
@@ -233,29 +233,29 @@ test('a group-by column or via the model does not have is refused, listing the r
   const e = engine();
   const evu = await declare(e, {
     name: 'evu',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users' }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'users' }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   // (the metrics step's group_by: a refusal names it as the query numbers its steps)
   const groupBy = (eng, contextId, metric, ref) => eng.query_model({ context_id: contextId, steps: [{ stage: 'metrics', metrics: [metric], group_by: [ref] }] });
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'users', column: 'shoe_size' }),
+  await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { source: 'users', column: 'shoe_size' }),
     /`steps\.0\.group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
   assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', column: 'session_number' }),
+  await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { source: 'events', column: 'session_number' }),
     (err) => /`steps\.0\.group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop()), 'the session key is not a groupable column of the events source');
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { semantic_model: ['users'], dimension: 'country' }),
+  await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { semantic_model: ['users'], dimension: 'country' }),
     (err) => err.field === 'steps' && /^steps\[0\] group_by\[0\]: 'users\.country' is a column of 'users', named where it lives in the catalog — write \{ source: 'users', column: 'country' \}/.test(err.message));
-  await assert.rejects(() => groupBy(e, evu.context_id, 'evu_n', { source: 'events', property: 'level_id_of_event_data' }),
+  await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { source: 'events', property: 'level_id_of_event_data' }),
     (err) => err.field === 'steps' && /is not a dimension of this context — declare it one — \{ property: 'level_id_of_event_data' \} in the dimensions of the build's semantic_model step/.test(err.message));
   // a dimension the task computes is named by its semantic model and its name
   const computed = await declare(e, {
     name: 'evc',
-    semantic_models: [{ source: 'events', dimensions: [{ name: 'is_launch', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] } }], measures: [{ name: 'n', expr: { fn: 'count' } }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', dimensions: [{ name: 'is_launch', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] } }], measures: [{ name: 'rows', expr: { fn: 'count' } }] }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   const ctx = e.ctxs.get(computed.context_id);
   assert.equal(e._taskRef(ctx, { semantic_model: ['events'], dimension: 'is_launch' }).column, 'events_is_launch');
-  await assert.rejects(() => groupBy(e, computed.context_id, 'evc_n', { semantic_model: ['events'], dimension: 'is_eu' }),
+  await assert.rejects(() => groupBy(e, computed.context_id, 'rows', { semantic_model: ['events'], dimension: 'is_eu' }),
     (err) => err.field === 'steps' && /'events\.is_eu' is not a dimension this context computed on 'events'/.test(err.message));
   // the crash source OWNS ad_funnel here (type: unique): ad_funnel is a relationship onto it, 'session' is not
   const doc = yaml.load(readFileSync(CATALOG, 'utf8'));
@@ -267,10 +267,10 @@ test('a group-by column or via the model does not have is refused, listing the r
   const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const own = await declare(owner, {
     name: 'own',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
-  await assert.rejects(() => groupBy(owner, own.context_id, 'own_n', { source: 'crashlytics', column: 'app_version', via: 'session' }),
+  await assert.rejects(() => groupBy(owner, own.context_id, 'rows', { source: 'crashlytics', column: 'app_version', via: 'session' }),
     /`steps\.0\.group_by\.0\.via` must be one of: .*ad_funnel/s, 'a via that is not a relationship onto that model is refused, listing the real ones');
 });
 
@@ -347,7 +347,7 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
   assert.deepEqual(deref(bpm, entityBranch.properties.entity).enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
   assert.ok(branches.some((b) => b.type === 'string'), 'a plain column is still a column');
 
-  const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
+  const steps = [{ name: 'aa', event_name: ['first_launch'] }, { name: 'bb', event_name: ['new_session'] }];
   const start = await e.build_model({ action: 'start', name: 'fnl_part', source: 'events' });
   const add = (partition_by) => e.build_model({ action: 'add_steps', context_id: start.context_id, steps: [{ stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) }] });
   // a relationship written as a bare word is not a column — and the message says what to write

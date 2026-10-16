@@ -191,8 +191,8 @@ test('groupable and the example only name models this context loaded', async () 
   const e = engine();
   const out = await declare(e, {
     name: 'evonly',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   const loaded = new Set(out.joined_models);
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
@@ -395,11 +395,11 @@ test('an attribute of a model no source of the context reaches is refused here, 
   // events points at a key it owns (two facts do not point at each other) — so the layer does not load it
   const out = await declare(e, {
     name: 'evonly',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
+    metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }],
   });
   await assert.rejects(
-    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
+    () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['rows'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
     /needs model 'crashlytics', which this context does not read/,
   );
   // …while the REACHABLE model of the same context still resolves under its relationship (the fix
@@ -449,7 +449,7 @@ test('unnest is refused when the payload column it explodes is gone', async () =
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
   const agg = await e.build_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  await e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] });
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),
     /unknown column 'event_data' at this stage/,

@@ -154,8 +154,8 @@ export const semanticQueryMethods = {
       }
       return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${name}`, label, type: 'unknown' };
     }
-    // 1. a column the TASK declared on this model → its task-namespaced copy (a time column at the grain
-    //    it was declared with)
+    // 1. a column the step declared on this model → that dimension (a time column at the grain it was
+    //    declared with)
     if (declaredRef?.column !== undefined) {
       const grain = declared.type === 'time' ? declared.type_params?.time_granularity || 'day' : null;
       return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}`, label, type: grain ? 'time' : 'unknown' };

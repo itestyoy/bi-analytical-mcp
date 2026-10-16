@@ -34,8 +34,8 @@ const TASK = {
 const byCountry = [{ source: 'users', column: 'country' }];
 // a where step before the metrics step, on a dimension the result is not grouped by
 const iosOnly = { stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'platform' }, { value: 'ios' }] }] };
-const largestFirst = { stage: 'order_by', keys: [{ key: 'mon_revenue', direction: 'desc' }, { key: 'users_country' }] };
-const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_country), num(r.mon_revenue)]));
+const largestFirst = { stage: 'order_by', keys: [{ key: 'revenue', direction: 'desc' }, { key: 'users_country' }] };
+const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_country), num(r.revenue)]));
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -68,26 +68,26 @@ test('a batch started right after the declaration waits for its parse, runs ever
   const started = await engine.raw.query_model({
     context_id: created.context_id,
     queries: [
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'] }] },
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }] },
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }], materialize: true },
-      { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }, { stage: 'metrics', metrics: ['mon_revenue'] }] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'] }] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }], materialize: true },
+      { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }, { stage: 'metrics', metrics: ['revenue'] }] },
       // steps after the metrics step, over its result: the countries whose revenue reaches 25 (a having), the largest first
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'mon_revenue' }, { value: 25 }] }] }, largestFirst] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 25 }] }] }, largestFirst] },
       // grouped by an entity the measure source carries: one row per value of its key there
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: [{ entity: 'user' }] }] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ entity: 'user' }] }] },
       // steps on both sides of the metrics step: a where before it (the iOS players' purchases — the rows
       // the metric folds), a where after it on the result (a having) and an order_by
-      { steps: [iosOnly, { stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'mon_revenue' }, { value: 20 }] }] }, largestFirst] },
+      { steps: [iosOnly, { stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'revenue' }, { value: 20 }] }] }, largestFirst] },
       // the metrics step and only an order_by after it: MetricFlow orders it itself (mf query)
-      { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }, largestFirst] },
+      { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }, largestFirst] },
     ],
   });
   assert.deepEqual(Object.keys(started).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
   assert.equal(started.task_ids.length, 8);
   const [total, grouped, stored, us, ranked, byUser, iosRanked, mfOrdered] = await readAll('query_model', started.task_ids);
   for (const r of [total, grouped, stored, us, ranked, byUser, iosRanked, mfOrdered]) assert.equal(r.status, 'done', JSON.stringify(r.error));
-  assert.equal(num(total.rows[0].mon_revenue), 85);
+  assert.equal(num(total.rows[0].revenue), 85);
   const g = revenueBy(grouped.rows);
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
   // the truth, read from the warehouse by hand: each completed purchase's price under the country of
@@ -99,11 +99,11 @@ test('a batch started right after the declaration waits for its parse, runs ever
     where e.event_name = 'iap_purchase_completed' group by 1`)).rows.map((r) => [String(r.country), num(r.revenue)]));
   // (a country with no purchase has no revenue there — a NULL here)
   assert.deepEqual(Object.fromEntries(Object.entries(g).filter(([, v]) => v !== 0)), truth, '[grouped by users.country] the warehouse\'s revenue per country');
-  assert.equal(num(us.rows[0].mon_revenue), truth.US, '[filtered by users.country] the warehouse\'s US revenue');
+  assert.equal(num(us.rows[0].revenue), truth.US, '[filtered by users.country] the warehouse\'s US revenue');
   // { entity: 'user' }: the user key events carry (player_id_of_internal), the column named for the entity
   const perPlayer = Object.fromEntries((await wh.query(`select player_id_of_internal as player, sum(price_in_usd_of_event_data) as revenue
     from fct_analytics_events where event_name = 'iap_purchase_completed' group by 1`)).rows.map((r) => [String(r.player), num(r.revenue)]));
-  assert.deepEqual(Object.fromEntries(byUser.rows.map((r) => [String(r.user), num(r.mon_revenue)]).filter(([, v]) => v !== 0)), perPlayer, '[grouped by { entity: user }] the warehouse\'s revenue per player');
+  assert.deepEqual(Object.fromEntries(byUser.rows.map((r) => [String(r.user), num(r.revenue)]).filter(([, v]) => v !== 0)), perPlayer, '[grouped by { entity: user }] the warehouse\'s revenue per player');
   // the materialized member left its table, which pages like any stored result
   assert.equal(stored.table, `qr_${stored.task_id}`);
   const s = revenueBy(stored.rows);
@@ -111,9 +111,9 @@ test('a batch started right after the declaration waits for its parse, runs ever
   const page = await one(engine.query_model({ task_ids: [stored.task_id], limit: 2 }));
   assert.equal(page.rows.length, 2);
   assert.equal(page.page.has_more, true);
-  assert.equal(num(us.rows[0].mon_revenue), 35);
+  assert.equal(num(us.rows[0].revenue), 35);
   // the member with steps: the grouped rows, those under 25 (DE, with none) dropped, ranked
-  assert.deepEqual(ranked.rows.map((r) => [String(r.users_country), num(r.mon_revenue)]), [['US', 35], ['BR', 25], ['GB', 25]]);
+  assert.deepEqual(ranked.rows.map((r) => [String(r.users_country), num(r.revenue)]), [['US', 35], ['BR', 25], ['GB', 25]]);
   // the same question asked of the warehouse by hand, for the members with steps on both sides of the
   // metrics step and with a lone order_by after it: the purchases, each under the country (and the
   // platform) of the install version valid at its time
@@ -123,14 +123,14 @@ test('a batch started right after the declaration waits for its parse, runs ever
     where e.event_name = 'iap_purchase_completed' ${filter} group by 1 ${having} order by 2 desc, 1`)).rows.map((r) => [String(r.country), num(r.revenue)]);
   const iosTruth = await ranks(`and u.platform = 'ios'`, 'having sum(e.price_in_usd_of_event_data) >= 20');
   assert.deepEqual(iosTruth, [['BR', 25], ['GB', 25]], '[the truth] iOS revenue per country: US 15 under the having, BR and GB 25');
-  assert.deepEqual(iosRanked.rows.map((r) => [String(r.users_country), num(r.mon_revenue)]), iosTruth, '[where → metrics → where → order_by] the warehouse\'s iOS revenue per country reaching 20, the largest first');
+  assert.deepEqual(iosRanked.rows.map((r) => [String(r.users_country), num(r.revenue)]), iosTruth, '[where → metrics → where → order_by] the warehouse\'s iOS revenue per country reaching 20, the largest first');
   // MetricFlow's own order: every country with revenue as the warehouse ranks it, the one with none (a NULL) after them
-  const priced = mfOrdered.rows.filter((r) => r.mon_revenue != null);
-  assert.deepEqual(priced.map((r) => [String(r.users_country), num(r.mon_revenue)]), await ranks('', ''), '[metrics → order_by] the warehouse\'s revenue per country, the largest first');
-  assert.ok(mfOrdered.rows.slice(priced.length).every((r) => r.mon_revenue == null), '[metrics → order_by] a NULL revenue sorts last');
+  const priced = mfOrdered.rows.filter((r) => r.revenue != null);
+  assert.deepEqual(priced.map((r) => [String(r.users_country), num(r.revenue)]), await ranks('', ''), '[metrics → order_by] the warehouse\'s revenue per country, the largest first');
+  assert.ok(mfOrdered.rows.slice(priced.length).every((r) => r.revenue == null), '[metrics → order_by] a NULL revenue sorts last');
   // each member is a task of its own: it is drawn on its own, once
-  const card = await engine.display_model_result({ task_id: grouped.task_id, display: { kind: 'bar', x: 'users_country', y: ['mon_revenue'] } });
-  assert.deepEqual(card.rows.map((r) => num(r.mon_revenue)).sort((a, b) => a - b), [0, 25, 25, 35]);
+  const card = await engine.display_model_result({ task_id: grouped.task_id, display: { kind: 'bar', x: 'users_country', y: ['revenue'] } });
+  assert.deepEqual(card.rows.map((r) => num(r.revenue)).sort((a, b) => a - b), [0, 25, 25, 35]);
 });
 
 test('a batch of reads over a built pipeline model, each in steps of the pipeline\'s own stages: count, non-NULL count, sums, a where on a measure, a count and a sum over a case, and a share and an any over a case with an else, read back together', opts, async (t) => {
@@ -200,19 +200,19 @@ test('a batch of reads over a built pipeline model, each in steps of the pipelin
 test('a cancelled query ends as cancelled and the context goes on; a query issued after a batch runs once the whole batch is done — each reads the warehouse\'s numbers', opts, async (t) => {
   if (skip(t)) return;
   const context_id = await monContext();
-  const doomed = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }] }, { steps: [{ stage: 'metrics', metrics: ['mon_revenue'] }] }] });
+  const doomed = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }, { steps: [{ stage: 'metrics', metrics: ['revenue'] }] }] });
   const out = await engine.raw.query_model({ task_ids: doomed.task_ids, cancel: true });
   assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] both end as cancelled');
   const read = await engine.raw.query_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
   assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled'], '[cancel] and read back as cancelled');
   // the context goes on: a batch, and a query issued after it
-  const batch = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['mon_revenue'] }] }, { steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }] }] });
-  const after = await engine.query_model({ context_id, steps: [{ stage: 'metrics', metrics: ['mon_revenue'], group_by: byCountry }] });
+  const batch = await engine.raw.query_model({ context_id, queries: [{ steps: [{ stage: 'metrics', metrics: ['revenue'] }] }, { steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] }] });
+  const after = await engine.query_model({ context_id, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: byCountry }] });
   // by the time the later query is done, every member of the batch is too
   const peek = await engine.raw.query_model({ task_ids: batch.task_ids, wait_seconds: 0 });
   assert.equal(peek.status, 'done', '[after a batch] the batch is done');
   assert.deepEqual(peek.results.map((r) => r.status), ['done', 'done'], '[after a batch] every member is done');
-  assert.equal(num(peek.results[0].rows[0].mon_revenue), 85, '[after a batch] the batch total');
+  assert.equal(num(peek.results[0].rows[0].revenue), 85, '[after a batch] the batch total');
   const g = revenueBy(after.rows);
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25], '[cancel] the next query reads the warehouse\'s numbers');
   assert.deepEqual(revenueBy(peek.results[1].rows), g, '[after a batch] the batch member grouped the same way reads the same numbers');

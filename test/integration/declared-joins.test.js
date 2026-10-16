@@ -286,9 +286,9 @@ test('9. events meet their player\'s assignment in the experiment named: control
 // 10. The SCD join also works in a FILTER, not just a group-by: GB spend is 5.00.
 test('10. filtering a metric by a point-in-time attribute: GB spend = 5.00', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(acqCtx, { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'GB' }] }] }, { stage: 'metrics', metrics: ['jacq_cost'] }] });
+  const r = await q(acqCtx, { steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'GB' }] }] }, { stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].jacq_cost), 5.0), `GB=${r.rows[0].jacq_cost}`);
+  assert.ok(near(num(r.rows[0].cost), 5.0), `GB=${r.rows[0].cost}`);
 });
 
 // ═══════════ C. installs is SCD for every source, not just acquisition ═══════════
@@ -363,9 +363,9 @@ test('21. a phantom validity window is dropped and the source still queries: cos
   assert.match(String(phantomPruned.acquisition || ''), /ghost_valid_from/);
   assert.match(String(phantomPruned.acquisition || ''), /no longer treated as slowly-changing/);
   assert.ok(!phantom.getModel('acquisition').scd, 'the flag went with the columns');
-  const r = await phantomEngine.query_model({ context_id: phantomCostCtx, steps: [{ stage: 'metrics', metrics: ['jph_cost'] }] });
+  const r = await phantomEngine.query_model({ context_id: phantomCostCtx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].jph_cost), 17.5), `cost=${r.rows[0].jph_cost}`);
+  assert.ok(near(num(r.rows[0].cost), 17.5), `cost=${r.rows[0].cost}`);
 });
 
 // 22. HALF a window is not a window: one bound survived, the other did not, so the model is not
@@ -390,9 +390,9 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
-  const res = await phantomEngine.query_model({ context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['jphev_evts'] }] });
+  const res = await phantomEngine.query_model({ context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(res.ok, true, JSON.stringify(res.error));
-  assert.equal(sumCol(res.rows, 'jphev_evts'), 184);
+  assert.equal(sumCol(res.rows, 'evts'), 184);
 });
 
 // 23. A relationship whose key column is missing stops being offered to the semantic layer.
@@ -462,7 +462,7 @@ test('relationships are discoverable, with their key columns and what they point
 // key. Asking for one must be refused rather than silently answered from some other join.
 test('an unowned relationship offers no governed group-by path', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(evCtx, { steps: [{ stage: 'metrics', metrics: ['jev_evts'], group_by: [{ source: 'users', column: 'country', via: 'ad_funnel_rewarded' }] }] }).catch((e) => ({ ok: false, error: String(e.message || e) }));
+  const r = await q(evCtx, { steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country', via: 'ad_funnel_rewarded' }] }] }).catch((e) => ({ ok: false, error: String(e.message || e) }));
   assert.equal(r.ok, false, 'the funnel key must not be groupable in a metric query');
   // (…while the owned player key is, and answers: the same query is 41's, by country — 14's numbers.)
 });
@@ -643,7 +643,7 @@ test('32. what preview shows is what materialize builds', opts, async (t) => {
 //     as the hand-written one, or the generated YAML describes the wrong key.
 test('33. the semantic layer generates the point-in-time join correctly', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(acqCtx, { steps: [{ stage: 'metrics', metrics: ['jacq_cost'], group_by: [{ source: 'users', column: 'country' }] }], dry_run: true });
+  const r = await q(acqCtx, { steps: [{ stage: 'metrics', metrics: ['cost'], group_by: [{ source: 'users', column: 'country' }] }], dry_run: true });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(r.sql, 'dry_run returns the SQL the semantic layer generated');
   const rows = await runSql(r.sql);
@@ -752,19 +752,19 @@ test('40. governed: spend and events from two sources, sliced by the same instal
   assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
   const r = await engine.query_model({
     context_id: task.context_id,
-    steps: [{ stage: 'metrics', metrics: ['jmix_cost', 'jmix_evts', 'jmix_cost_per_event'], group_by: [{ source: 'users', column: 'country' }] }],
+    steps: [{ stage: 'metrics', metrics: ['cost', 'evts', 'cost_per_event'], group_by: [{ source: 'users', column: 'country' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const key = r.columns.map((c) => c.name).find((n) => n.includes('country'));
   const by = Object.fromEntries(r.rows.map((x) => [String(x[key]), x]));
   for (const [country, cost, evts] of [['US', 6.75, 67], ['GB', 5.0, 57], ['DE', 4.0, 31], ['BR', 1.75, 29]]) {
-    assert.ok(near(num(by[country].jmix_cost), cost), `${country} cost=${by[country].jmix_cost}`);
-    assert.equal(num(by[country].jmix_evts), evts, `${country} evts`);
-    assert.ok(near(num(by[country].jmix_cost_per_event), cost / evts, 1e-6), `${country} cpe=${by[country].jmix_cost_per_event}`);
+    assert.ok(near(num(by[country].cost), cost), `${country} cost=${by[country].cost}`);
+    assert.equal(num(by[country].evts), evts, `${country} evts`);
+    assert.ok(near(num(by[country].cost_per_event), cost / evts, 1e-6), `${country} cpe=${by[country].cost_per_event}`);
   }
   // neither source fanned the other out: the totals are still the honest per-source totals.
-  assert.ok(near(sumCol(r.rows, 'jmix_cost'), 17.5));
-  assert.equal(sumCol(r.rows, 'jmix_evts'), 184);
+  assert.ok(near(sumCol(r.rows, 'cost'), 17.5));
+  assert.equal(sumCol(r.rows, 'evts'), 184);
 });
 
 // ═══════════ I. THE GOVERNED SIDE OF THE SAME RULES ═══════════
@@ -786,28 +786,28 @@ test('41. a join path without its owning model is refused, and works once loaded
   });
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
   await assert.rejects(
-    () => engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'], group_by: [{ source: 'users', column: 'country' }] }] }),
+    () => engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] }),
     /needs model 'users', which this context does not read.*join it in the build's semantic_model step — \{ source: 'users', on: \{ … \} \}/s,
   );
   // the metric itself answers fine — it is the PATH that needed the model, not the measure.
-  const flat = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'] }] });
+  const flat = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
-  assert.equal(num(flat.rows[0].jbare_evts), 184);
+  assert.equal(num(flat.rows[0].evts), 184);
   // the fix the refusal names — the model joined in the semantic_model step on its contract — loads it
   // into this context, and the same group_by now answers, every event counted once
   const loadedNow = await editLayer(engine, bare.context_id, (st) => ({ ...st, join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }] }));
   assert.equal(loadedNow.parse.ok, true, JSON.stringify(loadedNow.parse));
-  const viaUpdate = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const viaUpdate = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(viaUpdate.ok, true, JSON.stringify(viaUpdate.error));
-  assert.equal(sumCol(viaUpdate.rows, 'jbare_evts'), 184);
+  assert.equal(sumCol(viaUpdate.rows, 'evts'), 184);
   // '14. governed = pipeline for events too': the point-in-time breakdown by country, as 13's pipeline
   // attributes it — MetricFlow applies the window itself
-  const by = mapCol(viaUpdate.rows, groupCol(viaUpdate, 'jbare_evts'), 'jbare_evts');
+  const by = mapCol(viaUpdate.rows, groupCol(viaUpdate, 'evts'), 'evts');
   assert.equal(by.US, 67, '[14] US');
   assert.equal(by.GB, 57, '[14] GB');
   assert.equal(by.DE, 31, '[14] DE');
   assert.equal(by.BR, 29, '[14] BR');
-  assert.equal(sumCol(viaUpdate.rows, 'jbare_evts'), 184, '[14] every event once');
+  assert.equal(sumCol(viaUpdate.rows, 'evts'), 184, '[14] every event once');
 });
 
 // 42. A part names a column of the ROWS as they are at that step — a column an earlier join brought
@@ -958,16 +958,16 @@ test('50. a fact that owns a key exposes its attributes to a governed group-by; 
   if (skip(t)) return;
   assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', '[50] the crash source is the target');
   const r = await ownerEngine.query_model({
-    context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['jown_evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
+    context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(splitBy(r, 'app_version', 'jown_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '[50] events per crash app_version, via ad_funnel');
+  assert.deepEqual(splitBy(r, 'app_version', 'evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '[50] events per crash app_version, via ad_funnel');
 
-  const flat = await ownerEngine.query_model({ context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['jown_evts'] }] });
+  const flat = await ownerEngine.query_model({ context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
-  assert.equal(num(flat.rows[0].jown_evts), 184, '[51] ungrouped, nothing is joined and the count is honest');
+  assert.equal(num(flat.rows[0].evts), 184, '[51] ungrouped, nothing is joined and the count is honest');
 
-  assert.equal(sumCol(r.rows, 'jown_evts'), 184, '[51] grouped through the join, the count is the same: no event meets two reports');
+  assert.equal(sumCol(r.rows, 'evts'), 184, '[51] grouped through the join, the count is the same: no event meets two reports');
   // the key is unique on the owning side, as declared — which is why.
   const dup = await wh.query(`SELECT count(*) AS n FROM (
     SELECT rewarded_tracking_id, player_id_of_internal FROM main.fct_crashlytics_events

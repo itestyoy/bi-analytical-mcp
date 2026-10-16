@@ -127,7 +127,7 @@ export function refForms(catalog, { project = null, via: offerVia = true } = {})
       },
     })],
     entity: entities.length ? [form({ title: '{ entity }', required: ['entity'], description: 'An entity — a key a semantic model declares (a relationship of the catalog, an entity of the project) — by name: grouped by, one row per key value.', properties: { entity: { enum: entities, description: 'The entity\'s name.' } } })] : [],
-    metric: [form({ title: '{ metric }', required: ['metric'], properties: { metric: { type: 'string', minLength: 1, description: 'A metric, by name (as declared, or as stored: <task>_<name>).' } } })],
+    metric: [form({ title: '{ metric }', required: ['metric'], properties: { metric: { type: 'string', minLength: 1, description: 'A metric, by its name.' } } })],
     time: [form({ title: '{ time: "metric_time" }', required: ['time'], properties: { time: { const: 'metric_time', description: 'The metric time axis.' }, grain } })],
   };
 }

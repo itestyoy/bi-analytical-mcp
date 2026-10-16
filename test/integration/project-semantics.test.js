@@ -240,7 +240,7 @@ test('what the project does not define is refused in the call, naming what it do
   // an entity only the acquisition model carries is not one the events metric reaches
   await refused({ steps: [{ stage: 'metrics', metrics: ['project_events_total'], group_by: [{ entity: 'media_source' }] }] }, /not one project_events_total can be grouped by.*player/);
   // the project's contexts are read as they are: not built on, not dropped
-  await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', context_id: ACQ, name: 'xyz', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'n', expr: { fn: 'count' } }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }] })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', context_id: ACQ, name: 'xyz', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'cnt', expr: { fn: 'count' } }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] }] })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.delete_context({ context_id: ACQ })), /nothing to drop/);
   // …by any tool that would write into it
   await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
@@ -587,13 +587,13 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   // the context holds its own layer only: the project's is served from its own contexts
   assert.deepEqual(backend.semanticManifest(ctxs.dir(out.context_id)).semantic_models.map((sm) => sm.name).filter((n) => n.startsWith('project_')), [], '[own layer only]');
   // a project dimension is not addressed there: it belongs to the project's context
-  // (pvw_tutorials grouped by the cuts given)
-  const tutorialsBy = (...group_by) => [{ stage: 'metrics', metrics: ['pvw_tutorials'], group_by }];
+  // (tutorials grouped by the cuts given)
+  const tutorialsBy = (...group_by) => [{ stage: 'metrics', metrics: ['tutorials'], group_by }];
   await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: out.context_id, steps: tutorialsBy({ semantic_model: [EV], dimension: 'event_name' }) })), /'project_events\.event_name' is named as the dbt project's own semantic layer names it.*context_id: its name/);
   await assert.rejects(Promise.resolve().then(() => raw.query_model({ context_id: out.context_id, steps: tutorialsBy({ entity: 'media_source' }) })), /the entity 'media_source' is named as the dbt project's own semantic layer names it — query it in the context of the semantic model/);
   // …and a where step before the metrics step named that way is refused the same way, with the way
   // this context names it
-  const whereOf = (ref) => ({ context_id: out.context_id, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [ref, { value: 'x' }] }] }, { stage: 'metrics', metrics: ['pvw_tutorials'] }] });
+  const whereOf = (ref) => ({ context_id: out.context_id, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [ref, { value: 'x' }] }] }, { stage: 'metrics', metrics: ['tutorials'] }] });
   await assert.rejects(Promise.resolve().then(() => raw.query_model(whereOf({ semantic_model: [EV], dimension: 'country' }))), (e) => e.name === 'ToolError' && /'project_events\.country' is named as the dbt project's own semantic layer names it.*\{ source, column \}/.test(e.message));
   await assert.rejects(Promise.resolve().then(() => raw.query_model(whereOf({ entity: 'player' }))), (e) => e.name === 'ToolError' && /the entity 'player'.*\{ source, column \}/.test(e.message));
 
@@ -605,12 +605,12 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   const p = await preview({ context_id: out.context_id });
   assert.equal(p.layer, 'task');
   assert.equal(p.status.valid, true, JSON.stringify(p.status.issues));
-  assert.deepEqual(p.metrics.map((m) => m.name).sort(), ['pvw_per_player', 'pvw_players', 'pvw_tutorials']);
+  assert.deepEqual(p.metrics.map((m) => m.name).sort(), ['per_player', 'players', 'tutorials']);
   // the derived metric reads the two metrics its expression names (its value is checked below, on the rows)
-  assert.deepEqual(p.metrics.find((m) => m.name === 'pvw_per_player').definition.inputs.map((x) => x.metric).sort(), ['pvw_players', 'pvw_tutorials']);
+  assert.deepEqual(p.metrics.find((m) => m.name === 'per_player').definition.inputs.map((x) => x.metric).sort(), ['players', 'tutorials']);
   // one metric of it: its group_by names the context's dimensions and entities in full, and its time axis
-  const one = await preview({ context_id: out.context_id, metric: 'pvw_tutorials' });
-  const tut = one.metrics.find((m) => m.name === 'pvw_tutorials');
+  const one = await preview({ context_id: out.context_id, metric: 'tutorials' });
+  const tut = one.metrics.find((m) => m.name === 'tutorials');
   assert.deepEqual(tut.group_by.dimensions, p.groupable);
   assert.ok(tut.group_by.entities.some((x) => x.entity === 'user'), JSON.stringify(tut.group_by.entities));
   assert.ok(!tut.group_by.entities.some((x) => x.entity === 'event'), 'an events source\'s own primary entity is no key to group by');
@@ -626,7 +626,7 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   // (the cuts after the first, each in a query of its own)
   for (const [i, cut] of cuts.entries()) {
     const rows = i === 0 ? rowsOf(firstCut) : rowsOf(await engine.query_model({ context_id: out.context_id, steps: tutorialsBy(cut), time_range: WINDOW }));
-    assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), `[every cut gives back the whole count] ${JSON.stringify(cut)}`);
+    assert.equal(rows.reduce((a, r) => a + num(r.tutorials ?? 0), 0), num(n), `[every cut gives back the whole count] ${JSON.stringify(cut)}`);
   }
   // a build that is running is
   const { steps: built } = await raw.build_model({ action: 'preview', context_id: out.context_id });
@@ -640,9 +640,9 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   assert.equal(v.valid, true, JSON.stringify(v));
   const [{ players }] = (await wh.query("select count(distinct player_id_of_internal) as players from fct_analytics_events where event_name = 'tutorial'")).rows;
   const value = (name) => num(v.ran.metrics.find((x) => x.metric === name).value);
-  assert.equal(value('pvw_tutorials'), num(n));
-  assert.equal(value('pvw_players'), num(players));
-  assert.ok(Math.abs(value('pvw_per_player') - num(n) / num(players)) < 1e-9);
+  assert.equal(value('tutorials'), num(n));
+  assert.equal(value('players'), num(players));
+  assert.ok(Math.abs(value('per_player') - num(n) / num(players)) < 1e-9);
 });
 
 test('a describe refuses what the context does not have, naming what it does', opts, async (t) => {

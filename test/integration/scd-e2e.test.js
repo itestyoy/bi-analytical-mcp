@@ -73,16 +73,16 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
 
   // 'governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)'
   // 'governed SCD join: metric_time series works (time spine auto-built), Jan month = 100'
-  const seg = await engine.query_model({ context_id: ctx, steps: [{ stage: 'metrics', metrics: ['scd_rev_revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
+  const seg = await engine.query_model({ context_id: ctx, steps: [{ stage: 'metrics', metrics: ['revenue'], group_by: [{ source: 'users', column: 'country' }, { time: 'metric_time', grain: 'month' }] }] });
   assert.equal(seg.status, 'done', JSON.stringify(seg));
-  const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.scd_rev_revenue)) ? num(x.scd_rev_revenue) : 0), 0);
+  const total = seg.rows.reduce((s, x) => s + (Number.isFinite(num(x.revenue)) ? num(x.revenue) : 0), 0);
   assert.equal(total, 100, '[point-in-time] total revenue = 100 (a fan-out join would give 130)');
-  const by = marginalOf(seg.rows, 'users_country', 'scd_rev_revenue');
+  const by = marginalOf(seg.rows, 'users_country', 'revenue');
   assert.equal(by.US, 50, `[point-in-time] US = u1's pre-move $10 + u3 $40 = 50 (got ${JSON.stringify(by)})`);
   assert.equal(by.GB, 20, "[point-in-time] GB = u1's post-move $20");
   assert.equal(by.DE, 30, '[point-in-time] DE = u2 $30');
   assert.equal(Object.values(by).reduce((a, b) => a + b, 0), 100, '[point-in-time] segments sum to the point-in-time total');
-  const months = marginalOf(seg.rows, 'metric_time_month', 'scd_rev_revenue');
+  const months = marginalOf(seg.rows, 'metric_time_month', 'revenue');
   assert.equal(Object.values(months).reduce((a, b) => a + b, 0), 100, '[time spine] all revenue lands in the month buckets, summing to 100');
 });
 
@@ -102,15 +102,15 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   });
   assert.equal(created.parse.ok, true, `parse must still succeed after dropping the SCD measure: ${JSON.stringify(created.parse)}`);
   assert.ok((created.warnings || []).some((w) => /slowly-changing/i.test(w) && /player_count/.test(w)), `expected a drop warning naming player_count, got ${JSON.stringify(created.warnings)}`);
-  assert.ok(!created.metrics.includes('scd_drop_players'), 'the metric depending on the dropped measure is gone');
-  assert.ok(!created.metrics.includes('scd_drop_revenue_per_player'), 'a derived metric over it goes with it');
-  assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
+  assert.ok(!created.metrics.includes('players'), 'the metric depending on the dropped measure is gone');
+  assert.ok(!created.metrics.includes('revenue_per_player'), 'a derived metric over it goes with it');
+  assert.ok(created.metrics.includes('revenue'), 'the events metric survives');
   // a dropped metric is refused when it is asked for, before any task starts — not by MetricFlow later
-  await assert.rejects(engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_players'] }] }), /not in its semantic layer/);
+  await assert.rejects(engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['players'] }] }), /not in its semantic layer/);
   // and the surviving metric still queries to the point-in-time total
-  const r = await engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['scd_drop_revenue'] }] });
+  const r = await engine.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['revenue'] }] });
   assert.equal(r.status, 'done', JSON.stringify(r));
-  assert.equal(num(r.rows[0].scd_drop_revenue), 100);
+  assert.equal(num(r.rows[0].revenue), 100);
 });
 
 // 4) PIPELINE point-in-time join via the users contract's time: same point-in-time numbers as governed.

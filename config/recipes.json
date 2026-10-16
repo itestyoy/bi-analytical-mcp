@@ -78,7 +78,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "active_users_dau"
+                "dau"
               ],
               "group_by": [
                 {
@@ -94,7 +94,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "active_users_dau"
+                "dau"
               ],
               "group_by": [
                 {
@@ -110,7 +110,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "active_users_dau"
+                "dau"
               ],
               "group_by": [
                 {
@@ -227,7 +227,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "rev_segment_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -243,7 +243,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "rev_segment_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -259,7 +259,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "rev_segment_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -275,7 +275,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "rev_segment_arppu"
+                "arppu"
               ],
               "group_by": [
                 {
@@ -291,7 +291,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "rev_segment_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -511,9 +511,9 @@
             {
               "stage": "metrics",
               "metrics": [
-                "tut_funnel_step1",
-                "tut_funnel_step2",
-                "tut_funnel_step3"
+                "step1",
+                "step2",
+                "step3"
               ]
             }
           ]
@@ -523,7 +523,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "tut_funnel_conv_1_2"
+                "conv_1_2"
               ]
             }
           ]
@@ -533,7 +533,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "tut_funnel_conv_2_3"
+                "conv_2_3"
               ]
             }
           ]
@@ -801,7 +801,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "cohort_grid_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -821,7 +821,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "cohort_grid_buyers"
+                "buyers"
               ],
               "group_by": [
                 {
@@ -940,7 +940,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "behavior_purchases"
+                "purchases"
               ]
             }
           ]
@@ -950,7 +950,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "behavior_sessions"
+                "sessions"
               ],
               "group_by": [
                 {
@@ -1130,8 +1130,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "progression_starts",
-                "progression_completes"
+                "starts",
+                "completes"
               ],
               "group_by": [
                 {
@@ -1147,7 +1147,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "progression_completion_rate"
+                "completion_rate"
               ],
               "group_by": [
                 {
@@ -1293,7 +1293,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "monetization_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -1309,7 +1309,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "monetization_revenue"
+                "revenue"
               ],
               "group_by": [
                 {
@@ -1325,7 +1325,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "monetization_arppu"
+                "arppu"
               ],
               "group_by": [
                 {
@@ -1341,7 +1341,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "monetization_aov"
+                "aov"
               ]
             }
           ]
@@ -1453,7 +1453,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ads_ad_revenue"
+                "ad_revenue"
               ],
               "group_by": [
                 {
@@ -1469,7 +1469,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ads_impressions"
+                "impressions"
               ],
               "group_by": [
                 {
@@ -1485,7 +1485,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ads_rev_per_imp"
+                "rev_per_imp"
               ],
               "group_by": [
                 {
@@ -1628,7 +1628,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "economy_net_coins"
+                "net_coins"
               ],
               "group_by": [
                 {
@@ -1644,8 +1644,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "economy_coins_in",
-                "economy_coins_out"
+                "coins_in",
+                "coins_out"
               ]
             }
           ]
@@ -1655,7 +1655,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "economy_coins_in"
+                "coins_in"
               ],
               "group_by": [
                 {
@@ -1737,7 +1737,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "stickiness_active_users"
+                "active_users"
               ],
               "group_by": [
                 {
@@ -1753,7 +1753,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "stickiness_active_users"
+                "active_users"
               ],
               "group_by": [
                 {
@@ -2009,7 +2009,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "cumulative_rev_running_revenue"
+                "running_revenue"
               ],
               "group_by": [
                 {
@@ -2025,7 +2025,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "cumulative_rev_mtd_revenue"
+                "mtd_revenue"
               ],
               "group_by": [
                 {
@@ -2171,7 +2171,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "blended_total_revenue"
+                "total_revenue"
               ],
               "group_by": [
                 {
@@ -2187,8 +2187,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "blended_iap_revenue",
-                "blended_ad_revenue_cents"
+                "iap_revenue",
+                "ad_revenue_cents"
               ]
             }
           ]
@@ -6067,8 +6067,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ua_spend_cost",
-                "ua_spend_cost_per_click"
+                "cost",
+                "cost_per_click"
               ]
             }
           ]
@@ -6078,7 +6078,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ua_spend_cost"
+                "cost"
               ],
               "group_by": [
                 {
@@ -6094,7 +6094,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ua_spend_cost"
+                "cost"
               ],
               "group_by": [
                 {
@@ -6110,9 +6110,9 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ua_spend_max_daily_cost",
-                "ua_spend_avg_daily_cost",
-                "ua_spend_p90_daily_cost"
+                "max_daily_cost",
+                "avg_daily_cost",
+                "p90_daily_cost"
               ]
             }
           ]
@@ -6122,7 +6122,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "ua_spend_cost"
+                "cost"
               ],
               "group_by": [
                 {
@@ -6182,7 +6182,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "gov_total_spend"
+                "total_spend"
               ]
             }
           ]
@@ -6192,7 +6192,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "gov_total_spend"
+                "total_spend"
               ],
               "group_by": [
                 {
@@ -6208,7 +6208,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "gov_total_spend"
+                "total_spend"
               ],
               "group_by": [
                 {
@@ -6224,7 +6224,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "gov_total_spend"
+                "total_spend"
               ],
               "group_by": [
                 {
@@ -6324,8 +6324,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "mix_launches",
-                "mix_fatal"
+                "launches",
+                "fatal"
               ]
             }
           ]
@@ -6335,8 +6335,8 @@
             {
               "stage": "metrics",
               "metrics": [
-                "mix_launches",
-                "mix_fatal"
+                "launches",
+                "fatal"
               ],
               "group_by": [
                 {
@@ -6352,7 +6352,7 @@
             {
               "stage": "metrics",
               "metrics": [
-                "mix_fatal"
+                "fatal"
               ],
               "group_by": [
                 {

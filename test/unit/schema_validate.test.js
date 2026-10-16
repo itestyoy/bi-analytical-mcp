@@ -13,12 +13,12 @@ function v(tool, input) {
   return validateInput(validators[tool], input);
 }
 
-const COUNT = { name: 'n', expr: { fn: 'count' } };
+const COUNT = { name: 'rows', expr: { fn: 'count' } };
 const eventIs = (value) => ({ fn: 'eq', args: [{ column: 'event_name' }, { value }] });
 /** A build whose only step is its semantic layer, over `source` (events unless said). */
 const layer = (step, source = 'events') => ({ action: 'start', name: 'task_a', source, steps: [{ stage: 'semantic_model', ...step }] });
 const vl = (step, source) => v('build_model', layer(step, source));
-const N = [{ name: 'n', type: 'simple', measure: 'n' }];
+const N = [{ name: 'rows', type: 'simple', measure: 'rows' }];
 
 test('semantic_model: accepts a valid step', () => {
   // Derive valid names from the catalog so this stays correct as the catalog
@@ -39,12 +39,12 @@ test('semantic_model: an unknown event in a condition on the event name is refus
   assert.throws(() => compileDeclaration(catalog, {
     name: 'task_a',
     semantic_models: [{ source: 'events', where: [eventIs('not_an_event')], measures: [COUNT] }],
-    metrics: [{ name: 'm', type: 'simple', measure: 'n' }],
+    metrics: [{ name: 'val', type: 'simple', measure: 'rows' }],
   }), /not_an_event/);
 });
 
 test('semantic_model: a percentile measure without its percentile is refused', () => {
-  const r = vl({ measures: [{ name: 'p', expr: { fn: 'percentile', args: [{ property: 'complete_time_of_event_data' }] } }], metrics: [{ name: 'm', type: 'simple', measure: 'p' }] });
+  const r = vl({ measures: [{ name: 'pct', expr: { fn: 'percentile', args: [{ property: 'complete_time_of_event_data' }] } }], metrics: [{ name: 'val', type: 'simple', measure: 'pct' }] });
   assert.equal(r.ok, false);
   assert.match(r.errors.join(' | '), /missing required property 'percentile'/);
 });
@@ -62,18 +62,18 @@ test('semantic_model: a field it does not take is refused', () => {
 });
 
 test('semantic_model: a ratio is no metric type of its own — it is a derived metric dividing two', () => {
-  const r = vl({ metrics: [{ name: 'r', type: 'ratio', numerator: 'a', denominator: 'b' }] });
+  const r = vl({ metrics: [{ name: 'ratio', type: 'ratio', numerator: 'aa', denominator: 'bb' }] });
   assert.equal(r.ok, false);
   // refused in the earlier spelling it is, with the derived metric it is now — never a fuzzy 'cumulative'
-  assert.match(r.errors.join(' | '), /`steps\.0\.metrics\.0` is written in an earlier spelling — write \{"name":"r","type":"derived","expr":\{"fn":"div","args":\[\{"metric":"a"\},\{"metric":"b"\}\]\}\}/);
+  assert.match(r.errors.join(' | '), /`steps\.0\.metrics\.0` is written in an earlier spelling — write \{"name":"ratio","type":"derived","expr":\{"fn":"div","args":\[\{"metric":"aa"\},\{"metric":"bb"\}\]\}\}/);
   assert.doesNotMatch(r.errors.join(' | '), /Did you mean/);
-  assert.ok(vl({ metrics: [{ name: 'r', type: 'derived', expr: { fn: 'div', args: [{ metric: 'a' }, { metric: 'b' }] } }] }).ok);
+  assert.ok(vl({ metrics: [{ name: 'ratio', type: 'derived', expr: { fn: 'div', args: [{ metric: 'aa' }, { metric: 'bb' }] } }] }).ok);
 });
 
 // A METRIC QUERY IS ITS STEPS: a context and a list of steps that holds its metrics step — { stage:
 // "metrics", metrics, group_by? } — in a single query and in each of a batch's alike.
 test('query: requires context_id, its metrics in a metrics step', () => {
-  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['x'], ...extra });
+  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['xx'], ...extra });
   assert.equal(v('query_model', { steps: [metrics()] }).ok, false);
   assert.ok(v('query_model', { context_id: 'abcd12', steps: [metrics()] }).ok);
   assert.ok(v('query_model', { context_id: 'abcd12', queries: [{ steps: [metrics()] }, { steps: [metrics(), { stage: 'limit', limit: 3 }] }] }).ok);
@@ -99,7 +99,7 @@ test('query: requires context_id, its metrics in a metrics step', () => {
 // (expression-grammar.test.js).
 test('query: a where step before the metrics step is conditions over the refs group_by takes, nested to any depth', () => {
   const country = { source: 'users', column: 'country' };
-  const q = (where) => v('query_model', { context_id: 'abcd12', steps: [{ stage: 'where', conditions: where }, { stage: 'metrics', metrics: ['x'] }] });
+  const q = (where) => v('query_model', { context_id: 'abcd12', steps: [{ stage: 'where', conditions: where }, { stage: 'metrics', metrics: ['xx'] }] });
   for (const ok of [
     [{ fn: 'eq', args: [country, { value: 'US' }] }],
     [{ fn: 'or', args: [{ fn: 'in', args: [country, { value: 'US' }, { value: 'DE' }] }, { fn: 'not', args: [{ fn: 'is_null', args: [country] }] }] }],
@@ -149,16 +149,16 @@ test('a model with no primary entity is no join and no measure source of the ste
 // A METRIC READS BY NAME: a simple metric's measure is a string; a derived metric is an expression whose
 // leaves are the metrics it reads ({ metric }), numbers and the arithmetic a derived metric computes with.
 test('a metric names what it reads by a string; a derived metric reads its inputs off its expression', () => {
-  const measures = [COUNT, { name: 'u', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }];
+  const measures = [COUNT, { name: 'users', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }];
   const ok = (metrics) => vl({ measures, metrics });
-  assert.ok(ok([{ name: 'n', type: 'simple', measure: 'n' }, { name: 'u', type: 'simple', measure: 'u' }, { name: 'r', type: 'derived', expr: { fn: 'div', args: [{ metric: 'n' }, { metric: 'u' }] } }, { name: 'd', type: 'derived', expr: { fn: 'round', args: [{ fn: 'mul', args: [{ metric: 'n' }, { value: 2 }] }], places: 1 }, fill_nulls_with: 0 }]).ok);
+  assert.ok(ok([{ name: 'rows', type: 'simple', measure: 'rows' }, { name: 'users', type: 'simple', measure: 'users' }, { name: 'ratio', type: 'derived', expr: { fn: 'div', args: [{ metric: 'rows' }, { metric: 'users' }] } }, { name: 'dbl', type: 'derived', expr: { fn: 'round', args: [{ fn: 'mul', args: [{ metric: 'rows' }, { value: 2 }] }], places: 1 }, fill_nulls_with: 0 }]).ok);
   // a stored name is longer than a declared one: no name pattern on a reference
-  assert.ok(ok([{ name: 'x', type: 'simple', measure: 'a_task_with_a_long_name_of_forty_letters_a_measure_name' }]).ok);
+  assert.ok(ok([{ name: 'xx', type: 'simple', measure: 'a_task_with_a_long_name_of_forty_letters_a_measure_name' }]).ok);
   for (const metrics of [
-    [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+    [{ name: 'rows', type: 'simple', measure: { name: 'rows' } }],
     // the earlier text over a list of inputs, an input list beside the expression
-    [{ name: 'd', type: 'derived', expr: 'n * 2', metrics: ['n'] }],
-    [{ name: 'd', type: 'derived', expr: { fn: 'mul', args: [{ metric: 'n' }, { value: 2 }] }, metrics: ['n'] }],
+    [{ name: 'dbl', type: 'derived', expr: 'n * 2', metrics: ['rows'] }],
+    [{ name: 'dbl', type: 'derived', expr: { fn: 'mul', args: [{ metric: 'rows' }, { value: 2 }] }, metrics: ['rows'] }],
   ]) assert.equal(ok(metrics).ok, false, JSON.stringify(metrics));
 });
 
@@ -170,24 +170,24 @@ test('a metric names what it reads by a string; a derived metric reads its input
 // not say: a constant there is a number.
 test('a derived metric reads metrics and numbers in arithmetic: anything else is refused by its kind, and at its place', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
-  const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }, { name: 'd', type: 'derived', expr }] });
+  const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }, { name: 'dbl', type: 'derived', expr }] });
   const step = (expr) => ({ measures: [COUNT], metrics: decl(expr).metrics });
   const place = /is not what a derived metric's expr takes — it takes \{ metric \}, \{ value \}, and add, sub, mul, div, round, floor, ceil, abs, coalesce, least, greatest/;
   const fns = /`steps\.0\.metrics\.1\.expr\.fn` must be one of: add, sub, mul, div, round, floor, ceil, abs, coalesce, least, greatest/;
   for (const [expr, said, refusal] of [
     [{ fn: 'mul', args: [{ column: 'n' }, { value: 2 }] }, /\{ column \} /, /`steps\.0\.metrics\.1\.expr\.args\.0` must be exactly one of: a constant — \{ value \} \| \{ metric \} \| fn: add/],
     [{ fn: 'mul', args: [{ source: 'users', column: 'country' }, { value: 2 }] }, /\{ source, column \} /, /`steps\.0\.metrics\.1\.expr\.args\.0`/],
-    [{ fn: 'add', args: [{ metric: 'n' }, { semantic_model: ['users'], dimension: 'is_us' }] }, /\{ semantic_model, dimension \} /, /`steps\.0\.metrics\.1\.expr\.args\.1`/],
-    [{ fn: 'sum', args: [{ metric: 'n' }] }, /sum /, new RegExp(`${fns.source}\\. 'sum' is not taken here: it stands in a measure's expr — ONE aggregate of the rows`)],
-    [{ fn: 'gt', args: [{ metric: 'n' }, { value: 2 }] }, /gt /, fns],
+    [{ fn: 'add', args: [{ metric: 'rows' }, { semantic_model: ['users'], dimension: 'is_us' }] }, /\{ semantic_model, dimension \} /, /`steps\.0\.metrics\.1\.expr\.args\.1`/],
+    [{ fn: 'sum', args: [{ metric: 'rows' }] }, /sum /, new RegExp(`${fns.source}\\. 'sum' is not taken here: it stands in a measure's expr — ONE aggregate of the rows`)],
+    [{ fn: 'gt', args: [{ metric: 'rows' }, { value: 2 }] }, /gt /, fns],
   ]) {
     const r = vl(step(expr));
     assert.equal(r.ok, false, `${JSON.stringify(expr)}: no form of a derived metric's expr`);
     assert.match(r.errors.join(' | '), refusal, JSON.stringify(expr));
     assert.throws(() => compileDeclaration(catalog, decl(expr)), (e) => e.field === 'metrics.expr' && said.test(e.message) && place.test(e.message), JSON.stringify(expr));
   }
-  for (const expr of [{ fn: 'div', args: [{ metric: 'n' }, { metric: 'n' }] }, { fn: 'round', args: [{ fn: 'mul', args: [{ metric: 'n' }, { value: 100 }] }], places: 1 }]) assert.ok(vl(step(expr)).ok, JSON.stringify(expr));
-  assert.throws(() => compileDeclaration(catalog, decl({ fn: 'add', args: [{ metric: 'n' }, { value: 'x' }] })), (e) => e.field === 'metrics.expr' && /a derived metric computes with numbers/.test(e.message));
+  for (const expr of [{ fn: 'div', args: [{ metric: 'rows' }, { metric: 'rows' }] }, { fn: 'round', args: [{ fn: 'mul', args: [{ metric: 'rows' }, { value: 100 }] }], places: 1 }]) assert.ok(vl(step(expr)).ok, JSON.stringify(expr));
+  assert.throws(() => compileDeclaration(catalog, decl({ fn: 'add', args: [{ metric: 'rows' }, { value: 'x' }] })), (e) => e.field === 'metrics.expr' && /a derived metric computes with numbers/.test(e.message));
 });
 
 // A SEMANTIC MODEL'S EXPRESSIONS ARE OF TWO KINDS: a value of each row (`$defs.expr` — an item's where, a
@@ -200,8 +200,8 @@ test('a derived metric reads metrics and numbers in arithmetic: anything else is
 // a measure is still refused with its value as it is now.
 test('a semantic measure is ONE aggregate over row expressions, and a row takes none', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
-  const decl = ({ measures = [COUNT], dims } = {}) => ({ measures, ...(dims ? { dimensions: dims } : {}), metrics: [{ name: 'n', type: 'simple', measure: 'n' }] });
-  const m = (expr) => decl({ measures: [{ name: 'n', expr }] });
+  const decl = ({ measures = [COUNT], dims } = {}) => ({ measures, ...(dims ? { dimensions: dims } : {}), metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }] });
+  const m = (expr) => decl({ measures: [{ name: 'rows', expr }] });
   const refused = (input, ...said) => {
     const r = vl(input);
     assert.equal(r.ok, false, JSON.stringify(input));
@@ -217,7 +217,7 @@ test('a semantic measure is ONE aggregate over row expressions, and a row takes 
   // call, and the aggregates in it when the step is compiled)
   const ratio = { fn: 'div', args: [{ fn: 'count' }, { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] }] };
   refused(m(ratio), new RegExp(`${at}\\.fn\` must be one of: sum, average, min, max, count_distinct, median, count, percentile\\. 'div' is not taken here`));
-  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: ratio }] }], metrics: N }), /aggregate/);
+  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: ratio }] }], metrics: N }), /aggregate/);
   // a measure written as a value of the row — a formula over its columns or properties, a case, a cast — is
   // what the ONE aggregate folds: said as its argument, never as a derived metric's (which reads no column)
   for (const expr of [
@@ -230,8 +230,8 @@ test('a semantic measure is ONE aggregate over row expressions, and a row takes 
     assert.doesNotMatch(vl(m(expr)).errors.join(' | '), /derived metric/, JSON.stringify(expr));
   }
   // an aggregate of an aggregate, an aggregate in a row: an item's where, a computed dimension
-  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ fn: 'count' }] } }] }], metrics: N }), /count/);
-  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT], dimensions: [{ name: 'x', expr: { fn: 'max', args: [{ column: 'event_name' }] } }] }], metrics: N }), /max/);
+  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'sum', args: [{ fn: 'count' }] } }] }], metrics: N }), /count/);
+  assert.throws(() => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT], dimensions: [{ name: 'xx', expr: { fn: 'max', args: [{ column: 'event_name' }] } }] }], metrics: N }), /max/);
   // the measures there are: a conditional aggregate (over a case), a count of the rows, a percentile, an
   // aggregate over a computed row value
   const first = eventIs(catalog.eventNames('events')[0]);
@@ -245,8 +245,8 @@ test('a semantic measure is ONE aggregate over row expressions, and a row takes 
   refused(m({ fn: 'percentile', args: [{ column: 'session_number' }] }), new RegExp(`${at}\` is missing required property 'percentile'`));
   // a measure in an earlier spelling — { name, agg, column } — is refused with the measure it is now
   for (const [earlier, now] of [
-    [{ name: 'n', agg: 'sum', column: 'session_number' }, { name: 'n', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }],
-    [{ name: 'n', agg: 'count' }, { name: 'n', expr: { fn: 'count', args: [] } }],
+    [{ name: 'rows', agg: 'sum', column: 'session_number' }, { name: 'rows', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }],
+    [{ name: 'rows', agg: 'count' }, { name: 'rows', expr: { fn: 'count', args: [] } }],
   ]) {
     const r = vl(decl({ measures: [earlier] }));
     assert.ok(r.errors.join(' ').includes(`\`steps.0.measures.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
@@ -256,22 +256,22 @@ test('a semantic measure is ONE aggregate over row expressions, and a row takes 
 
 test('a derived metric that reads no metric, an unknown one or itself is refused when it is compiled', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
-  const decl = (metrics) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }, ...metrics] });
+  const decl = (metrics) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics: [{ name: 'rows', type: 'simple', measure: 'rows' }, ...metrics] });
   const derived = (name, expr) => ({ name, type: 'derived', expr });
-  assert.throws(() => compileDeclaration(catalog, decl([derived('a', { fn: 'add', args: [{ value: 2 }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /reads no metric/.test(e.message));
-  assert.throws(() => compileDeclaration(catalog, decl([derived('a', { fn: 'add', args: [{ metric: 'zzz' }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /no metric named 'zzz'/.test(e.message));
-  assert.throws(() => compileDeclaration(catalog, decl([derived('a', { fn: 'add', args: [{ metric: 'b' }, { value: 1 }] }), derived('b', { fn: 'add', args: [{ metric: 'a' }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /built from each other/.test(e.message));
+  assert.throws(() => compileDeclaration(catalog, decl([derived('aa', { fn: 'add', args: [{ value: 2 }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /reads no metric/.test(e.message));
+  assert.throws(() => compileDeclaration(catalog, decl([derived('aa', { fn: 'add', args: [{ metric: 'zzz' }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /no metric named 'zzz'/.test(e.message));
+  assert.throws(() => compileDeclaration(catalog, decl([derived('aa', { fn: 'add', args: [{ metric: 'bb' }, { value: 1 }] }), derived('bb', { fn: 'add', args: [{ metric: 'aa' }, { value: 1 }] })])), (e) => e.field === 'metrics.expr' && /built from each other/.test(e.message));
   // a ratio is refused with the way to write it
-  assert.throws(() => compileDeclaration(catalog, decl([{ name: 'r', type: 'ratio', numerator: 'n', denominator: 'n' }])), (e) => e.field === 'metrics.type' && /a ratio is a derived metric dividing one metric by another/.test(e.message));
+  assert.throws(() => compileDeclaration(catalog, decl([{ name: 'ratio', type: 'ratio', numerator: 'rows', denominator: 'rows' }])), (e) => e.field === 'metrics.type' && /a ratio is a derived metric dividing one metric by another/.test(e.message));
   // its inputs are what its leaves name
-  const out = compileDeclaration(catalog, decl([derived('a', { fn: 'div', args: [{ metric: 'n' }, { fn: 'add', args: [{ metric: 'n' }, { value: 1 }] }] })]));
-  assert.deepEqual(out.metrics.find((m) => m.name === 'task_a_a').type_params.metrics.map((m) => m.name), ['task_a_n']);
+  const out = compileDeclaration(catalog, decl([derived('aa', { fn: 'div', args: [{ metric: 'rows' }, { fn: 'add', args: [{ metric: 'rows' }, { value: 1 }] }] })]));
+  assert.deepEqual(out.metrics.find((m) => m.name === 'aa').type_params.metrics.map((m) => m.name), ['rows']);
 });
 
 // CUMULATIVE: all history or a trailing window, or to date within a grain — two forms, as MetricFlow
 // takes one of the two; a window is counted in the grains metric_time is offered at.
 test('cumulative takes a window or a grain_to_date, never both; a window is in days or longer', () => {
-  const check = (m) => vl({ measures: [COUNT], metrics: [{ name: 'c', type: 'cumulative', measure: 'n', ...m }] });
+  const check = (m) => vl({ measures: [COUNT], metrics: [{ name: 'cum', type: 'cumulative', measure: 'rows', ...m }] });
   for (const ok of [{}, { window: '7 days' }, { window: '1 month', period_agg: 'last' }, { grain_to_date: 'month' }]) assert.ok(check(ok).ok, JSON.stringify(ok));
   for (const bad of [{ window: '7 days', grain_to_date: 'month' }, { window: '12 hours' }, { window: '30 minutes' }]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
 });
@@ -282,7 +282,7 @@ test('cumulative takes a window or a grain_to_date, never both; a window is in d
 // checked when the step is compiled.
 test('a dimension takes a grain only on a column the catalog types as time, and no as_type; a computed one is { name, expr }', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
-  const check = (dims) => vl({ measures: [{ name: 'n', expr: { fn: 'count' } }], dimensions: dims, metrics: N }, 'users');
+  const check = (dims) => vl({ measures: [{ name: 'rows', expr: { fn: 'count' } }], dimensions: dims, metrics: N }, 'users');
   assert.ok(check([{ column: 'install_date', grain: 'week', label: 'Install week' }, { column: 'country', label: 'Country' }, { name: 'is_us', expr: { fn: 'eq', args: [{ column: 'country' }, { value: 'US' }] }, label: 'US' }]).ok);
   for (const bad of [[{ column: 'install_date', as_type: 'time' }], [{ column: 'country', as_type: 'categorical' }], [{ name: 'is_us' }]]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
   const compiled = (dims) => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }, { source: 'users', dimensions: dims }], metrics: N });
@@ -294,7 +294,7 @@ test('a dimension takes a grain only on a column the catalog types as time, and 
 // ONE MEASURE: a task's measure is { name, expr }, its expr ONE aggregate of the task's (sum_boolean is a
 // count over a case), and a value read as a number first is a cast inside its argument.
 test('a task measure is one of the task\'s aggregates — no sum_boolean, no sketch, no window — and a cast is an argument', async () => {
-  const check = (expr) => vl({ measures: [{ name: 'm', expr }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const check = (expr) => vl({ measures: [{ name: 'val', expr }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
   const asNumber = (type) => ({ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type });
   const first = eventIs(catalog.eventNames('events')[0]);
   for (const ok of [
@@ -306,7 +306,7 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
   // the tool's expression holds what its places take: what a semantic model's measure leaves out — a
   // sketch, a window, raw SQL — is no form of it, so the schema refuses it; and the declaration's own
   // compile refuses it too, for a caller that skips the schema (its place, PLACES.semantic_model)
-  const compiled = async (expr) => (await import('../../src/compile.js')).compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const compiled = async (expr) => (await import('../../src/compile.js')).compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'val', expr }] }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
   for (const [bad, said] of [
     [{ fn: 'hll_init', args: [{ column: 'event_name' }] }, /hll_init is not what a semantic model's where, dimension or measure takes/],
     [{ fn: 'approx_count_distinct', args: [{ column: 'event_name' }] }, /approx_count_distinct is not what a semantic model's where, dimension or measure takes/],
@@ -317,15 +317,15 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
     await assert.rejects(() => compiled(bad), (e) => e.field === 'measures.expr' && said.test(e.message), JSON.stringify(bad));
   }
   // the earlier { agg, field, cast } is refused with the measure written today
-  const earlier = vl({ measures: [{ name: 'm', agg: 'count' }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
-  assert.ok(earlier.errors.join(' ').includes('is written in an earlier spelling — write {"name":"m","expr":{"fn":"count","args":[]}}'), earlier.errors.join(' | '));
+  const earlier = vl({ measures: [{ name: 'val', agg: 'count' }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
+  assert.ok(earlier.errors.join(' ').includes('is written in an earlier spelling — write {"name":"val","expr":{"fn":"count","args":[]}}'), earlier.errors.join(' | '));
   // …an aggregate's where with the case it folds, a typed read with the read (cast where it named a type
   // the catalog does not read it as; without the catalog to ask, a cast)
   const said = (r, path, now) => assert.ok(r.errors.join(' ').includes(`\`${path}\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
   said(check({ fn: 'count', where: [first] }), 'steps.0.measures.0.expr', { fn: 'count', args: [{ fn: 'case', cases: [{ when: [first], then: { value: 1 } }] }] });
   const price = { property: 'price_in_usd_of_event_data', type: 'numeric' };
   said(check({ fn: 'sum', args: [price] }), 'steps.0.measures.0.expr.args.0', { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'numeric' });
-  const typedBy = validateInput(validators.build_model, layer({ measures: [{ name: 'm', expr: { fn: 'sum', args: [price] } }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] }), { propertyType: propertyTypes(catalog) });
+  const typedBy = validateInput(validators.build_model, layer({ measures: [{ name: 'val', expr: { fn: 'sum', args: [price] } }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] }), { propertyType: propertyTypes(catalog) });
   said(typedBy, 'steps.0.measures.0.expr.args.0', { property: 'price_in_usd_of_event_data' });
 });
 
@@ -336,7 +336,7 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
 test('a semantic measure over a case with an else is refused under count and count_distinct only', async () => {
   const { compileDeclaration } = await import('../../src/compile.js');
   const first = eventIs(catalog.eventNames('events')[0]);
-  const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const decl = (expr) => ({ name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'val', expr }] }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
   const over = (fn, then, other) => ({ fn, args: [{ fn: 'case', cases: [{ when: [first], then }], ...(other ? { else: other } : {}) }] });
   for (const fn of ['count', 'count_distinct']) {
     assert.throws(() => compileDeclaration(catalog, decl(over(fn, { column: 'session_number' }, { value: 0 }))), (e) => e.field === 'measures.expr' && new RegExp(`${fn} over a case with an else — an else under count, count_distinct, approx_count_distinct, hll_init always changes what is counted.*Leave the else out`).test(e.message), fn);
@@ -349,6 +349,6 @@ test('a semantic measure over a case with an else is refused under count and cou
 // DESCRIBE: a window goes with validate: true; the semantic model named is one a context can hold.
 test('context describe: show or validate over a window; a window without validate is refused', () => {
   const check = (body) => v('context', { action: 'describe', context_id: 'ctxabc123456', ...body });
-  for (const ok of [{}, { metric: 'm' }, { semantic_model: 'events' }, { metric: 'm', semantic_model: 'events' }, { validate: true }, { validate: false }, { validate: true, time_range: { start: '2026-01-01', end: '2026-01-02' } }]) assert.ok(check(ok).ok, JSON.stringify(ok));
+  for (const ok of [{}, { metric: 'val' }, { semantic_model: 'events' }, { metric: 'val', semantic_model: 'events' }, { validate: true }, { validate: false }, { validate: true, time_range: { start: '2026-01-01', end: '2026-01-02' } }]) assert.ok(check(ok).ok, JSON.stringify(ok));
   for (const bad of [{ time_range: { start: '2026-01-01' } }, { validate: false, time_range: { start: '2026-01-01' } }, { semantic_model: 'No-such' }]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
 });

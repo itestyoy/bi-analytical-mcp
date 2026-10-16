@@ -1,6 +1,6 @@
-// Compile a declarative create/update payload into resolved dbt semantic
-// objects (measures/dimensions/metrics) for a single context. All physical SQL
-// and namespacing happens here; the renderer just serializes.
+// Compile a declaration (what a build's semantic_model step makes — src/pipeline/semantic-stage.js) into
+// resolved dbt semantic objects (measures/dimensions/metrics) for a single context. All physical SQL is
+// written here; the renderer just serializes.
 //
 // Every value a declaration computes is written in the ONE expression (src/pipeline/compute.js) and
 // turned into SQL by its one writer, at its PLACE: a semantic model's where, a computed dimension, a
@@ -18,10 +18,17 @@ import { exprSql, conditionListSql, eachNode, isAggregateCall } from './pipeline
 import { refKind } from './schema/refs.js';
 import { rankFuzzy } from './fuzzy.js';
 
-// dbt 1.11 forbids dunders (__) in object names; use a single underscore.
-// (The __ separator is reserved for MetricFlow query *paths* like user__country.)
-// Exported so an update names what it removes by the same rule (src/engine/semantic-build.js).
-export const NS = (task, name) => `${task}_${name}`;
+// A metric, a measure and a computed dimension are stored under the name they are declared by: a context
+// holds one semantic layer (its build's semantic_model step), so nothing else in it shares the names.
+// What MetricFlow refuses of a name is refused here first, naming it as declared: a time grain or a word
+// it reserves, and a name another element of the layer already holds as something else (a measure named
+// as a dimension or an entity) — its ElementConsistencyRule and UniqueAndValidNameRule.
+const RESERVED_NAMES = new Set(['metric_time', 'mf_internal_uuid']);
+const GRAIN_NAMES = new Set(['nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year']);
+function checkName(kind, name, field) {
+  if (GRAIN_NAMES.has(name)) fail(`${kind} '${name}': a time grain is no name — MetricFlow reads '${name}' as the grain; give it a name of its own (e.g. '${name}_n')`, field);
+  if (RESERVED_NAMES.has(name)) fail(`${kind} '${name}': MetricFlow reserves the name '${name}' — give it a name of its own`, field);
+}
 
 /** Throw a compile error that CARRIES the input field it refers to — the engine
  *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
@@ -154,8 +161,9 @@ function argumentType(catalog, modelKey, arg) {
  * a case where it folds only the rows a condition holds for); MetricFlow is handed that aggregate's
  * function and the argument it folds, with the model's where baked in as the scope.
  */
-function compileMeasure(catalog, task, modelKey, decl, smScope) {
-  const name = NS(task, decl.name);
+function compileMeasure(catalog, modelKey, decl, smScope) {
+  const name = decl.name;
+  checkName('measure', name, 'measures.name');
   const field = 'measures.expr';
   const at = `measure '${decl.name}'`;
   const e = decl.expr;
@@ -191,11 +199,10 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 }
 
 /**
- * One declared dimension → its manifest form. `_attribute` records what the caller DECLARED (the
- * attribute name it was given) next to the namespaced name
- * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
- * stripped before the manifest is written (see yaml-render). Recovering them from the generated
- * identifier instead would mis-split the moment one task name is a prefix of another.
+ * One declared dimension → its manifest form, stored under the name it was declared by (a column's or a
+ * property's own, a computed one's `name`). `_attribute` records what the caller DECLARED — the column,
+ * the property or the name — which the tools read back to describe or resolve the dimension, and which
+ * is stripped before the manifest is written (see yaml-render).
  *
  * A dimension is a column ({ column }: a column the catalog types as time is a time dimension, at `grain`
  * — default: the catalog's granularity for it — any other is categorical), an event property
@@ -204,17 +211,18 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
  * booleans …) is never missing, false where it cannot be decided, as a compute stage stores it). What a
  * column or a property IS comes from the catalog, never from the caller.
  */
-function compileDimension(catalog, task, modelKey, decl) {
+function compileDimension(catalog, modelKey, decl) {
   const label = decl.label ? { label: decl.label } : {};
   const columns = catalog.modelDimensionColumns(modelKey);
   const props = catalog.isFact(modelKey) ? catalog.scalarEventProps(modelKey) : [];
   if (decl.expr !== undefined) {
     // a name of its own: as an attribute it would stand beside the column or property it shadows
+    checkName('dimension', decl.name, 'dimensions.name');
     if ([...columns, ...props].includes(decl.name)) fail(`dimension '${decl.name}': '${modelKey}' already has an attribute of that name — give the computed dimension a name of its own, or declare that one as { ${columns.includes(decl.name) ? 'column' : 'property'}: '${decl.name}' }`, 'dimensions.name');
     checkLeaves(catalog, modelKey, decl.expr, 'dimensions.expr', `dimension '${decl.name}'`);
     const { d, opts } = modelWriter(catalog, modelKey);
     const r = attempt('dimensions.expr', () => exprSql(d, null, decl.expr, `dimension '${decl.name}'`, opts));
-    return { name: NS(task, decl.name), type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name };
+    return { name: decl.name, type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name };
   }
   if (decl.column !== undefined) {
     if (!columns.includes(decl.column)) fail(`dimension: '${decl.column}' is not a groupable column of '${modelKey}'.${nearest(decl.column, columns)} Its groupable columns: ${columns.join(', ') || '(none)'}; a value computed from the row is { name, expr }.`, 'dimensions.column');
@@ -223,10 +231,10 @@ function compileDimension(catalog, task, modelKey, decl) {
       // `expr` stays the bare column: the render reads it as the base model's own time dimensions are
       // read (the dialect's semanticTimeExpr, yaml-render.js renderContext) — for a context stored
       // earlier too, whose additions hold the column as it was compiled then
-      return { name: NS(task, decl.column), type: 'time', expr: decl.column, type_params: { time_granularity: decl.grain || known.granularity || 'day' }, ...label, _attribute: decl.column };
+      return { name: decl.column, type: 'time', expr: decl.column, type_params: { time_granularity: decl.grain || known.granularity || 'day' }, ...label, _attribute: decl.column };
     }
     if (decl.grain !== undefined) fail(`dimension '${decl.column}' is categorical — a grain goes with a time column of '${modelKey}'`, 'dimensions.grain');
-    return { name: NS(task, decl.column), type: 'categorical', expr: decl.column, ...label, _attribute: decl.column };
+    return { name: decl.column, type: 'categorical', expr: decl.column, ...label, _attribute: decl.column };
   }
   if (decl.property !== undefined) {
     if (!props.includes(decl.property)) {
@@ -234,7 +242,7 @@ function compileDimension(catalog, task, modelKey, decl) {
       fail(`dimension: '${decl.property}' is not a scalar event property of '${modelKey}'.${nearest(decl.property, props)} semantic_index({ request: { source: '${modelKey}' } }) lists them.`, 'dimensions.property');
     }
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name };
+    return { name: found.name, type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name };
   }
   return fail(`a dimension is { column }, { property } or { name, expr } — ${JSON.stringify(decl)} is none of them`, 'dimensions');
 }
@@ -294,21 +302,18 @@ export function measureRefs(metric, metrics = []) {
 /**
  * Compile a full declaration. Returns resolved additions per model, metric
  * specs, used models, and the
- * declared measure/metric names (namespaced). What the context declared into already holds (an
- * update's, or a declaration beside a task already there): `measures`, the stored names of its
- * measures, which a metric reads by the name it was declared under or the stored one; `metrics`,
- * its compiled metrics, which a derived metric may be built from;
- * `models`, the models it reads already (an update compiles against them, so metrics or removals
- * alone have a source). Neither measures nor metrics may be declared again under the same stored
- * name: the context would keep one of the two.
+ * declared measure/metric names, each stored as declared. What the context holds already: `measures`,
+ * the names of its measures, which a metric may read; `metrics`, its compiled metrics, which a derived
+ * metric may be built from; `models`, the models it reads already. Neither measures nor metrics may be
+ * declared again under the same name: the context would keep one of the two.
  */
 export function compileDeclaration(catalog, decl, { measures = [], metrics: contextMetrics = [], models = [] } = {}) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
 
   const additions = {}; // modelKey -> { measures:[], dimensions:[] }
-  const existingMeasures = new Set(measures); // namespaced, declared before this call
-  const declaredMeasures = new Set(); // namespaced
+  const existingMeasures = new Set(measures); // declared before this call
+  const declaredMeasures = new Set();
   const ensure = (k) => (additions[k] ||= { measures: [], dimensions: [] });
   // what a refusal lists, each name said as what it is: declared in this call, or already in the context
   const inScope = (kind, inCall, inContext) => [
@@ -320,6 +325,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
   // the sources it was asked for, so a task on one events source does not drag in another. An item
   // of semantic_models loads its model: one with only `source` loads it for its columns alone.
   const usedModels = new Set(models);
+  const baseMeasureRefs = new Set(catalog.baseMeasureRefs());
 
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.source;
@@ -331,24 +337,19 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
     usedModels.add(modelKey);
     // Each semantic model scopes its OWN measures: its where is baked into every measure expr below.
     const scope = conditionsOf(catalog, modelKey, sm.where, `${modelKey} where`, 'semantic_models.where');
-    for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
+    for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, modelKey, d));
     for (const m of sm.measures || []) {
-      const cm = compileMeasure(catalog, task, modelKey, m, scope);
+      const cm = compileMeasure(catalog, modelKey, m, scope);
       // two measures of one name would both be written, and dbt refuses the duplicate at parse
-      if (declaredMeasures.has(cm.name)) fail(`measure '${m.name}' is declared twice in this call (stored as '${cm.name}')`, 'measures.name');
-      if (existingMeasures.has(cm.name)) {
-        fail(`measure '${m.name}' is already in this context, as '${cm.name}'. Each name is declared once in the semantic_model step`, 'measures.name');
-      }
+      if (declaredMeasures.has(cm.name)) fail(`measure '${m.name}' is declared twice in this step`, 'measures.name');
+      if (existingMeasures.has(cm.name)) fail(`measure '${m.name}' is already in this context. Each name is declared once in the semantic_model step`, 'measures.name');
+      if (baseMeasureRefs.has(cm.name)) fail(`measure '${m.name}': the catalog governs a measure of that name on '${catalog.modelOwningMeasure(cm.name)}' — a metric reads it as it is ({ type: 'simple', measure: '${cm.name}' }); give yours a name of its own`, 'measures.name');
       declaredMeasures.add(cm.name);
       ensure(modelKey).measures.push(cm);
     }
   }
 
-  const baseMeasureRefs = new Set(catalog.baseMeasureRefs());
   const resolveMeasure = (ref) => {
-    const nsName = NS(task, ref);
-    if (declaredMeasures.has(nsName) || existingMeasures.has(nsName)) return nsName;
-    // …or by the stored name a context describes it under ('ret_n'), as remove takes it too
     if (declaredMeasures.has(ref) || existingMeasures.has(ref)) return ref;
     if (baseMeasureRefs.has(ref)) { // base measure (already a global name) — load its own model
       const owner = catalog.modelOwningMeasure(ref);
@@ -367,9 +368,9 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
   // the context would keep one and drop the other without a word.
   const declareMetric = (m, md) => {
     if (existingMetrics.has(m.name)) {
-      fail(`metric '${md.name}' is already in this context, as '${m.name}'. Each name is declared once in the semantic_model step`, 'metrics.name');
+      fail(`metric '${md.name}' is already in this context. Each name is declared once in the semantic_model step`, 'metrics.name');
     }
-    if (metricNames.has(m.name)) fail(`metric '${md.name}' is declared twice in this call (stored as '${m.name}')`, 'metrics.name');
+    if (metricNames.has(m.name)) fail(`metric '${md.name}' is declared twice in this step`, 'metrics.name');
     if (!m.label) m.label = m.name; // dbt 1.11+ requires a label on every metric (the caller's, or its name)
     metricNames.add(m.name);
     metrics.push(m);
@@ -378,7 +379,8 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
   // what a metric reads is named by a string — a measure as `measure`; a derived metric's inputs are the
   // { metric } leaves of its expression
   for (const md of decl.metrics || []) {
-    const name = NS(task, md.name);
+    const name = md.name;
+    checkName('metric', name, 'metrics.name');
     // the caller's label goes with the metric (declareMetric defaults a missing one to its name)
     const label = md.label ? { label: md.label } : {};
     if (md.type === 'simple') {
@@ -396,8 +398,8 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
       declareMetric({ name, type: 'cumulative', ...label, type_params: { measure: { name: resolveMeasure(md.measure) }, cumulative_type_params: ctp } }, md);
     } else if (md.type === 'derived') {
       if (!isObj(md.expr)) fail(`derived metric '${md.name}': expr is an expression of the metrics it reads — e.g. { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }`, 'metrics.expr');
-      // An input is named as it was declared ('n') or as it is stored ('ret_n'), as a measure is; it is
-      // resolved once every metric of this declaration is known, so the order they are written in is free
+      // An input is named as it was declared; it is resolved once every metric of this declaration is
+      // known, so the order they are written in is free
       const derived = { name, type: 'derived', ...label, type_params: { expr: null, metrics: [] } };
       derivedInputs.push({ derived, md });
       declareMetric(derived, md);
@@ -414,8 +416,8 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
     const from = [...metricNames].filter((n) => n !== derived.name); // a metric is not built from itself
     const reads = new Set();
     const stored = (x) => {
-      const s = [NS(task, x), x].find((n) => from.includes(n) || existingMetrics.has(n));
-      if (!s) fail(`derived metric '${md.name}': no metric named '${x}' or '${NS(task, x)}' to build it from. ${inScope('metric', from, [...existingMetrics.keys()])}`, 'metrics.expr');
+      const s = from.includes(x) || existingMetrics.has(x) ? x : null;
+      if (!s) fail(`derived metric '${md.name}': no metric named '${x}' to build it from. ${inScope('metric', from, [...existingMetrics.keys()])}`, 'metrics.expr');
       reads.add(s);
       return s;
     };

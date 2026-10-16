@@ -58,7 +58,7 @@ test('compile errors name the offending field', () => {
     assert.fail('expected unknown-measure error');
   } catch (e) {
     assert.match(e.message, /unknown measure 'nope'/);
-    assert.match(e.message, /t_n/); // lists what IS declared
+    assert.match(e.message, /Declared in this call: n\b/); // lists what IS declared
     assert.equal(e.field, 'metrics.measure');
   }
   try {

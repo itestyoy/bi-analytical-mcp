@@ -25,7 +25,6 @@ export const semanticIndexMethods = {
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
-      naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
       building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload or a pipeline_payload is a build_model start request: build_model({ request: <payload> }) starts the build with its steps (a semantic_payload\'s last, its semantic_model step) — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
     };
   },

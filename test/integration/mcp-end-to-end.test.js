@@ -144,14 +144,14 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const r = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_ua_cost'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const r = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'e2e_ua_cost'), 'e2e_ua_cost');
+  const by = mapCol(r.rows, groupCol(r, 'cost'), 'cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
   assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
   assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
   assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
-  assert.ok(near(sumCol(r.rows, 'e2e_ua_cost'), 17.5), 'and the total is untouched by the join');
+  assert.ok(near(sumCol(r.rows, 'cost'), 17.5), 'and the total is untouched by the join');
 });
 
 // ═══════════ 2. four sources in one pipeline, stage by stage ═══════════
@@ -310,14 +310,14 @@ test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13
   });
   const r = await call('query_model', {
     context_id: ctx,
-    steps: [{ stage: 'metrics', metrics: ['e2e_mix_cost', 'e2e_mix_evts', 'e2e_mix_crashes'], group_by: [{ time: 'metric_time', grain: 'day' }] }],
+    steps: [{ stage: 'metrics', metrics: ['cost', 'evts', 'crashes'], group_by: [{ time: 'metric_time', grain: 'day' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // A day may carry spend but no crash and the other way round, so the series has holes — that
   // is the honest shape of an outer alignment. Each source keeps its own total.
-  assert.ok(near(sumCol(r.rows, 'e2e_mix_cost'), 17.5), `cost=${sumCol(r.rows, 'e2e_mix_cost')}`);
-  assert.equal(sumCol(r.rows, 'e2e_mix_evts'), 184);
-  assert.equal(sumCol(r.rows, 'e2e_mix_crashes'), 13);
+  assert.ok(near(sumCol(r.rows, 'cost'), 17.5), `cost=${sumCol(r.rows, 'cost')}`);
+  assert.equal(sumCol(r.rows, 'evts'), 184);
+  assert.equal(sumCol(r.rows, 'crashes'), 13);
   assert.ok(r.rows.length > 1, 'a real day-by-day series');
 });
 
@@ -406,16 +406,16 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
     measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
-  const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost'] }] });
+  const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
-  assert.ok(near(num(before.rows[0].e2e_grow_cost), 17.5));
+  assert.ok(near(num(before.rows[0].cost), 17.5));
   // a metric query is its steps: its metrics named outside a metrics step are an earlier spelling,
   // refused at the boundary with the value converted
-  const outside = await callErr('query_model', { context_id: ctx, metrics: ['e2e_grow_cost'] });
-  assert.match(outside.error.message, /earlier spelling — write .*"steps":\[\{"stage":"metrics","metrics":\["e2e_grow_cost"\]\}\]/s, JSON.stringify(outside));
+  const outside = await callErr('query_model', { context_id: ctx, metrics: ['cost'] });
+  assert.match(outside.error.message, /earlier spelling — write .*"steps":\[\{"stage":"metrics","metrics":\["cost"\]\}\]/s, JSON.stringify(outside));
 
   // the new metric does not exist yet — the boundary says so rather than answering.
-  const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_clicks'] }] });
+  const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['clicks'] }] });
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
   // add a second amount from the SAME source, choosing its aggregation here and now: the build's
@@ -427,14 +427,14 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
   const grown = await call('build_model', { action: 'materialize', context_id: ctx });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 
-  const after = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] }] });
+  const after = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost', 'clicks'] }] });
   assert.equal(after.ok, true, JSON.stringify(after.error));
-  assert.ok(near(num(after.rows[0].e2e_grow_cost), 17.5), 'the original metric is unchanged');
-  assert.equal(num(after.rows[0].e2e_grow_clicks), 64);
+  assert.ok(near(num(after.rows[0].cost), 17.5), 'the original metric is unchanged');
+  assert.equal(num(after.rows[0].clicks), 64);
 
   // the context describes what it now holds — both metrics, one task.
   const described = await call('context', { action: 'describe', context_id: ctx });
   const metrics = JSON.stringify(described.metrics || described);
-  assert.match(metrics, /e2e_grow_cost/);
-  assert.match(metrics, /e2e_grow_clicks/);
+  assert.match(metrics, /cost/);
+  assert.match(metrics, /clicks/);
 });

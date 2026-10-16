@@ -334,14 +334,14 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
 // A draft started from a task's table asks the warehouse for that table's own column types — whoever
 // built it, and whether or not a checkpoint still records them. The stub warehouse answers for the
 // source and, with `tables`, for every table a task built: a flag stored as text, a count as a number.
-const FLAG_TYPES = { event_id: 'VARCHAR', player_id_of_internal: 'VARCHAR', event_name: 'VARCHAR', device_time: 'TIMESTAMP', event_date: 'DATE', event_data: 'JSON', is_clicked_of_event_data: 'VARCHAR', task_cnt: 'BIGINT', events_event_name: 'VARCHAR' };
+const FLAG_TYPES = { event_id: 'VARCHAR', player_id_of_internal: 'VARCHAR', event_name: 'VARCHAR', device_time: 'TIMESTAMP', event_date: 'DATE', event_data: 'JSON', is_clicked_of_event_data: 'VARCHAR', cnt: 'BIGINT', events_event_name: 'VARCHAR' };
 function flagRunner({ tables = true } = {}) {
   const sourceModel = loadCatalog(CATALOG, {}).getModel('events').dbt_model;
   return {
     async parse() { return { ok: true }; },
     async query() { return { ok: true, sql: 'select 1' }; },
     async run() { return { ok: true, stdout: '', stderr: '' }; },
-    async show() { return { ok: true, columns: [{ name: 'task_cnt' }, { name: 'events_event_name' }], rows: [{ task_cnt: 3, events_event_name: 'level_started' }] }; },
+    async show() { return { ok: true, columns: [{ name: 'cnt' }, { name: 'events_event_name' }], rows: [{ cnt: 3, events_event_name: 'level_started' }] }; },
     async relationColumns(_dir, model) {
       if (!tables && model !== sourceModel) return { ok: false };
       return { ok: true, columns: Object.entries(FLAG_TYPES).map(([name, dtype]) => ({ name, dtype })) };
@@ -390,13 +390,13 @@ test('a draft started from a semantic query run with materialize: true has its t
   const e = flagEngine(flagRunner());
   const created = await declare(e, { name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] });
   await taskResult(e, created.task_id);
-  const stored = await e.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['task_cnt'], group_by: [{ source: 'events', column: 'event_name' }] }], materialize: true });
+  const stored = await e.query_model({ context_id: created.context_id, steps: [{ stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'events', column: 'event_name' }] }], materialize: true });
   assert.equal((await taskResult(e, stored.task_id)).status, 'done');
   const from = await e.build_model({ action: 'start', name: 'slice', from_task: stored.task_id, include: ['columns'] });
-  assert.deepEqual(from.available_columns, [{ name: 'task_cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
+  assert.deepEqual(from.available_columns, [{ name: 'cnt', type: 'numeric' }, { name: 'events_event_name', type: 'string' }]);
   await assert.rejects(
-    () => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 'many' }] }] }] }),
-    /'task_cnt' is a number: compare it with a number/,
+    () => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 'many' }] }] }] }),
+    /'cnt' is a number: compare it with a number/,
   );
   await assert.rejects(
     () => e.build_model({ action: 'add_steps', context_id: from.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'events_event_name' }, { value: true }] }] }] }),

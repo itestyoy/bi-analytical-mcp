@@ -865,9 +865,9 @@ test('a semantic measure over a case and a where step before the metrics step ta
   const picked = await truth('select count(*) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   const pickedLevels = await truth('select sum(level_id_of_event_data) as n from fct_analytics_events where level_id_of_event_data = 1 or level_id_of_event_data >= 3');
   assert.ok(picked > 0 && pickedLevels > picked, '[measure over a case] the fixture has such rows, some above level 1');
-  const r = await engine.query_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['cond_sem_picked', 'cond_sem_picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
+  const r = await engine.query_model({ context_id: built.context_id, steps: [{ stage: 'metrics', metrics: ['picked', 'picked_levels'] }], time_range: { start: '2020-01-01', end: '2030-12-31' } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual([num(r.rows[0].cond_sem_picked), num(r.rows[0].cond_sem_picked_levels)], [picked, pickedLevels], '[count / sum over a case] the rows either condition holds for, and their level ids');
+  assert.deepEqual([num(r.rows[0].picked), num(r.rows[0].picked_levels)], [picked, pickedLevels], '[count / sum over a case] the rows either condition holds for, and their level ids');
 
   // 'a where step before the metrics step names what it compares as group_by does, and takes the text operators and or too'
   const named = await truth("select count(*) as n from fct_analytics_events where event_name like '%level%' or event_name = 'tutorial'");
@@ -875,11 +875,11 @@ test('a semantic measure over a case and a where step before the metrics step ta
     context_id: built.context_id, time_range: { start: '2020-01-01', end: '2030-12-31' },
     steps: [
       { stage: 'where', conditions: [{ fn: 'or', args: [{ fn: 'contains', args: [{ source: 'events', column: 'event_name' }, { value: 'level' }] }, { fn: 'eq', args: [{ source: 'events', column: 'event_name' }, { value: 'tutorial' }] }] }] },
-      { stage: 'metrics', metrics: ['cond_sem_rows'] },
+      { stage: 'metrics', metrics: ['rows'] },
     ],
   });
   assert.equal(w.ok, true, JSON.stringify(w.error));
-  assert.equal(num(w.rows[0].cond_sem_rows), named, '[where before the metrics step] the rows the or of text operators keeps');
+  assert.equal(num(w.rows[0].rows), named, '[where before the metrics step] the rows the or of text operators keeps');
 });
 
 test('a time window whose bounds carry their own offset is those instants, whatever timezone is named beside them', opts, async (t) => {
@@ -1867,10 +1867,10 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],
   });
   assert.equal(out.parse?.ok, true, JSON.stringify(out.parse || out.error));
-  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['jtut_s1', 'jtut_sj'] }] });
+  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['s1', 'sj'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(Number(r.rows[0].jtut_s1), 8, 'the control: 8 players at step_1');
-  assert.equal(Number(r.rows[0].jtut_sj ?? 0), 0, 'evaluated, the Jinja value would have counted the same 8');
+  assert.equal(Number(r.rows[0].s1), 8, 'the control: 8 players at step_1');
+  assert.equal(Number(r.rows[0].sj ?? 0), 0, 'evaluated, the Jinja value would have counted the same 8');
 });
 
 // ════════════ GUARDED JSON READS (was duckdb-json-guard.test.js) ═══════════════════════════════

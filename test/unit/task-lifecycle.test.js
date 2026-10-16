@@ -27,9 +27,9 @@ function orderedRunner() {
     log: [],
     parses: [],
     parse() { r.log.push('parse:start'); return new Promise((resolve) => { r.parses.push(() => { r.log.push('parse:end'); resolve({ ok: true }); }); }); },
-    async query() { r.log.push('query'); return { ok: true, columns: [{ name: 'task_cnt' }], rows: [{ task_cnt: 3 }] }; },
+    async query() { r.log.push('query'); return { ok: true, columns: [{ name: 'cnt' }], rows: [{ cnt: 3 }] }; },
     async run() { return { ok: true, stdout: '', stderr: '' }; },
-    async show() { return { ok: true, columns: [{ name: 'task_cnt' }], rows: [{ task_cnt: 3 }] }; },
+    async show() { return { ok: true, columns: [{ name: 'cnt' }], rows: [{ cnt: 3 }] }; },
     async relationColumns() { return { ok: false }; },
   };
   return r;
@@ -38,8 +38,8 @@ function orderedRunner() {
 const engine = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('tasks') }), runner });
 const TASK = { name: 'task', semantic_models: [{ source: 'events', measures: [{ name: 'cnt', expr: { fn: 'count' } }] }], metrics: [{ name: 'cnt', type: 'simple', measure: 'cnt' }] };
 // a metric query is its steps: these metrics steps, and the steps a test puts before or after one
-const CNT = { stage: 'metrics', metrics: ['task_cnt'] };
-const CNT2 = { stage: 'metrics', metrics: ['task_cnt2'] };
+const CNT = { stage: 'metrics', metrics: ['cnt'] };
+const CNT2 = { stage: 'metrics', metrics: ['cnt2'] };
 const DAILY = { ...CNT, group_by: [{ time: 'metric_time', grain: 'day' }] };
 const tick = () => new Promise((r) => { setTimeout(r, 5); });
 
@@ -110,8 +110,8 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   await assert.rejects(() => start(stored.task_id, { time_range: { start: '2024-01-01' } }), /time_range/);
   const draft = await start(stored.task_id, { include: ['columns'] });
   assert.equal(draft.reads, done.table);
-  assert.deepEqual(draft.available_columns.map((c) => c.name), ['task_cnt']);
-  const step = await e.build_model({ action: 'add_steps', context_id: draft.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }] });
+  assert.deepEqual(draft.available_columns.map((c) => c.name), ['cnt']);
+  const step = await e.build_model({ action: 'add_steps', context_id: draft.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }] }] });
   assert.equal(step.column_count, 1);
   // the table's owner cannot be dropped under the draft that reads it
   assert.throws(() => e._dropContext({ context_id: created.context_id }), /reads|READS|consumer|force/i);
@@ -124,7 +124,7 @@ test('display_model_result draws a model\'s rows once — and nothing else; an e
   runner.parses.shift()();
   await taskResult(e, created.task_id);
   await assert.rejects(() => e.display_model_result({ task_id: created.task_id }), /no rows to draw/);
-  const kpi = { kind: 'kpi', values: [{ column: 'task_cnt' }] };
+  const kpi = { kind: 'kpi', values: [{ column: 'cnt' }] };
   const q = await e.query_model({ context_id: created.context_id, steps: [CNT] });
   await taskResult(e, q.task_id);
   const drawn = await e.display_model_result({ task_id: q.task_id, display: kpi });
@@ -242,9 +242,9 @@ function tailRunner(rows) {
     async run() { return { ok: true, stdout: '', stderr: '' }; },
     async query(_dir, opts) {
       if (opts.explain) return { ok: true, sql: 'select 1' };
-      return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'task_cnt' }], rows: rows.map((x) => ({ metric_time__day: x.metric_time_day, task_cnt: x.task_cnt })) };
+      return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'cnt' }], rows: rows.map((x) => ({ metric_time__day: x.metric_time_day, cnt: x.cnt })) };
     },
-    async show() { return { ok: true, columns: [{ name: 'metric_time_day' }, { name: 'task_cnt' }], rows }; },
+    async show() { return { ok: true, columns: [{ name: 'metric_time_day' }, { name: 'cnt' }], rows }; },
     async relationColumns() { return { ok: false }; },
   };
   return r;
@@ -258,22 +258,22 @@ test('the steps after the metrics step are checked against the result\'s columns
   // (a refusal names the step as the query numbers it: the metrics step is steps[0])
   for (const key of ['nonsense', 'metric_time__day', 'metric_time']) {
     await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'order_by', keys: [{ key }] }) }),
-      (err) => err.field === 'steps' && new RegExp(`^steps\\[1\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, task_cnt\\)`).test(err.message), key);
+      (err) => err.field === 'steps' && new RegExp(`^steps\\[1\\]: .*unknown column '${key}' at this stage \\(available: metric_time_day, cnt\\)`).test(err.message), key);
   }
   // a column a step makes is there for the steps after it, and gone after an aggregate that drops it
-  await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'task_cnt' }] } }] }, { stage: 'order_by', keys: [{ key: 'metric_time_day' }] }) }),
+  await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'aggregate', measures: [{ name: 'total', expr: { fn: 'sum', args: [{ column: 'cnt' }] } }] }, { stage: 'order_by', keys: [{ key: 'metric_time_day' }] }) }),
     (err) => err.field === 'steps' && /^steps\[2\]: .*unknown column 'metric_time_day' at this stage \(available: total\)/.test(err.message));
   await assert.rejects(() => e.query_model({ context_id, queries: [daily(), daily({ stage: 'order_by', keys: [{ key: 'nonsense' }] })] }),
     (err) => err.field === 'queries[1].steps' && /^queries\[1\]: steps\[1\]: .*unknown column 'nonsense'/.test(err.message));
   // the earlier metrics, group_by and order_by are refused with the steps they are now
-  await assert.rejects(() => e.query_model({ context_id, metrics: ['task_cnt'], group_by: DAILY.group_by, order_by: [{ key: 'task_cnt', direction: 'desc' }] }),
-    (err) => err.message.includes(`write ${JSON.stringify({ context_id, steps: [DAILY, { stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] }] })}`));
+  await assert.rejects(() => e.query_model({ context_id, metrics: ['cnt'], group_by: DAILY.group_by, order_by: [{ key: 'cnt', direction: 'desc' }] }),
+    (err) => err.message.includes(`write ${JSON.stringify({ context_id, steps: [DAILY, { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] }] })}`));
   // the steps after it are a read: what makes a new table and raw SQL are no form of the tool's
   // definitions (built for its places: the where steps', the metrics step's and the read's), refused by
   // its schema; a ref — a where step's before the metrics step — passes the schema and is refused after it
   for (const [steps, said] of [
     [[{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }], /^invalid input: .*`steps\.1\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project, metrics/],
-    [[{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'task_cnt' }] } }], /^invalid input: .*`steps\.1\.expr\.fn` must be one of/],
+    [[{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'cnt' }] } }], /^invalid input: .*`steps\.1\.expr\.fn` must be one of/],
   ]) {
     await assert.rejects(() => e.query_model({ context_id, ...daily(...steps) }), (err) => err.stage === 'validate' && said.test(err.message), JSON.stringify(steps));
   }
@@ -299,7 +299,7 @@ test('a metric query has one metrics step, only where steps before it, and the r
   const users = { ...TASK, name: 'usr', semantic_models: [...TASK.semantic_models, { source: 'users' }] };
   const { context_id } = await startDeclare(e, users);
   const query = (...steps) => e.query_model({ context_id, steps });
-  const byCountry = { stage: 'metrics', metrics: ['usr_cnt'], group_by: [{ source: 'users', column: 'country' }] };
+  const byCountry = { stage: 'metrics', metrics: ['cnt'], group_by: [{ source: 'users', column: 'country' }] };
   const where = (...conditions) => ({ stage: 'where', conditions });
   const is = (ref, value) => ({ fn: 'eq', args: [ref, { value }] });
   const refused = (said) => (err) => err.field === 'steps' && err.stage === 'validate' && said.test(err.message);
@@ -308,14 +308,14 @@ test('a metric query has one metrics step, only where steps before it, and the r
   const scope = STAGE_PLACES.metric_scope;
   const before = e._listTasks().tasks.length;
   // no metrics step, or two
-  await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none\. This context defines: usr_cnt/));
+  await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none\. This context defines: cnt/));
   await assert.rejects(() => query(byCountry, { stage: 'limit', limit: 3 }, byCountry), refused(/^steps\[2\]: a metric query has one metrics step, and steps\[0\] is one — list every metric in it, or make the other a query of its own/));
   // a step the result takes, before the metrics step: it goes after it
-  for (const st of [{ stage: 'order_by', keys: [{ key: 'usr_cnt' }] }, { stage: 'compute', name: 'x', expr: { value: 1 } }, { stage: 'limit', limit: 1 }]) {
+  for (const st of [{ stage: 'order_by', keys: [{ key: 'cnt' }] }, { stage: 'compute', name: 'x', expr: { value: 1 } }, { stage: 'limit', limit: 1 }]) {
     await assert.rejects(() => query(st, byCountry), refused(new RegExp(`^steps\\[0\\]: ${esc(scope.what)} takes ${scope.stages.join(', ')} — an? ${st.stage} stage works on the metrics' result: put it after the metrics step`)), st.stage);
   }
   // a where before it names what group_by names, not a column of the result
-  await assert.rejects(() => query(where({ fn: 'gt', args: [{ column: 'usr_cnt' }, { value: 1 }] }), byCountry), refused(new RegExp(`^steps\\[0\\] conditions\\[0\\] .*\\{ column \\} is not what ${esc(PLACES.metric_where.what)} takes`)));
+  await assert.rejects(() => query(where({ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }), byCountry), refused(new RegExp(`^steps\\[0\\] conditions\\[0\\] .*\\{ column \\} is not what ${esc(PLACES.metric_where.what)} takes`)));
   // a where after it reads the result's columns: a dimension the result carries is its column there, one it does not goes before the metrics step
   await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'country' }, 'US'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'country' \} is its column 'users_country' there \(\{ column: 'users_country' \}\); or put the where before the metrics step/));
   await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'platform' }, 'ios'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'platform' \} is a dimension the result does not carry: put it before the metrics step/));
@@ -324,25 +324,25 @@ test('a metric query has one metrics step, only where steps before it, and the r
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
   // what is taken: several where steps before it (all of them hold), a where after it on the result's column
   assert.ok(isStartedTask(await query(where(is({ source: 'users', column: 'platform' }, 'ios')), where({ fn: 'neq', args: [{ source: 'users', column: 'country' }, { value: 'DE' }] }), byCountry)));
-  assert.ok(isStartedTask(await query(byCountry, where(is({ column: 'users_country' }, 'US')), { stage: 'order_by', keys: [{ key: 'usr_cnt', direction: 'desc' }] })));
+  assert.ok(isStartedTask(await query(byCountry, where(is({ column: 'users_country' }, 'US')), { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] })));
 });
 
 test('a metric query answers in the caller\'s names whatever its steps — ordered by an order_by step, approximate after a sample', async () => {
-  const rows = [{ metric_time_day: '2026-01-02', task_cnt: 7 }, { metric_time_day: '2026-01-01', task_cnt: 3 }];
+  const rows = [{ metric_time_day: '2026-01-02', cnt: 7 }, { metric_time_day: '2026-01-01', cnt: 3 }];
   const e = engine(tailRunner(rows));
   const { context_id } = await startDeclare(e, TASK);
   const read = async (after, extra = {}) => taskResult(e, (await e.query_model({ context_id, steps: [DAILY, ...after], ...extra })).task_id);
-  const desc = { stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] };
+  const desc = { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] };
   for (const [steps, ordered] of [
     [[], false],
     [[desc], true],
-    [[{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }, desc, { stage: 'limit', limit: 10 }], true],
-    [[desc, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'task_cnt' }, { value: 1 }] }] }], false],
+    [[{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }] }, desc, { stage: 'limit', limit: 10 }], true],
+    [[desc, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }] }], false],
   ]) {
     const out = await read(steps);
     assert.equal(out.status, 'done', JSON.stringify(out.error || {}));
     assert.deepEqual(out.rows, rows, JSON.stringify(steps));
-    assert.deepEqual(out.columns.map((c) => c.name), ['metric_time_day', 'task_cnt'], JSON.stringify(steps));
+    assert.deepEqual(out.columns.map((c) => c.name), ['metric_time_day', 'cnt'], JSON.stringify(steps));
     // (a page in no stated order says so; an ordered one has nothing to warn of)
     assert.equal(out.page.ordered, ordered ? undefined : false, JSON.stringify(steps));
     assert.equal(out.sampled, undefined);
@@ -350,10 +350,10 @@ test('a metric query answers in the caller\'s names whatever its steps — order
   const sampled = await read([{ stage: 'sample', share: 0.5 }]);
   assert.deepEqual([sampled.status, sampled.sampled, typeof sampled.sampling], ['done', true, 'object'], 'with the note a sampled read carries');
   // a query only compiled: the SQL after its steps, and the columns it answers with — a read of it, paged or not
-  const dry = await e.query_model({ context_id, steps: [DAILY, { stage: 'compute', name: 'per_day', expr: { fn: 'div', args: [{ column: 'task_cnt' }, { value: 2 }] } }], dry_run: true });
+  const dry = await e.query_model({ context_id, steps: [DAILY, { stage: 'compute', name: 'per_day', expr: { fn: 'div', args: [{ column: 'cnt' }, { value: 2 }] } }], dry_run: true });
   const compiled = await taskResult(e, dry.task_id);
   assert.deepEqual([compiled.status, compiled.dry_run, typeof compiled.sql], ['done', true, 'string']);
-  assert.deepEqual(compiled.output_columns.map((c) => c.name), ['metric_time_day', 'task_cnt', 'per_day']);
+  assert.deepEqual(compiled.output_columns.map((c) => c.name), ['metric_time_day', 'cnt', 'per_day']);
   assert.equal(compiled.output_columns[0].type, 'time', 'metric_time is a time');
   assert.equal(compiled.orderable_keys, undefined, 'output_columns says what orderable_keys did');
   const paged = await one(e.query_model({ task_ids: [dry.task_id], offset: 0, limit: 5 }));
@@ -366,16 +366,16 @@ test('a metric query answers in the caller\'s names whatever its steps — order
 // ONE FORM WHICHEVER PATH RAN IT: `mf query` answers as its CSV writes (a moment as Python prints it), the
 // dbt client's show as its JSON does (the moment ISO) — the answer reads the same either way.
 test('a metric query\'s values read the same whether MetricFlow or the steps\' SQL ran it', async () => {
-  const iso = [{ metric_time_day: '2026-01-02T00:00:00', task_cnt: 7 }, { metric_time_day: '2026-01-01T00:00:00', task_cnt: 3 }];
+  const iso = [{ metric_time_day: '2026-01-02T00:00:00', cnt: 7 }, { metric_time_day: '2026-01-01T00:00:00', cnt: 3 }];
   const runner = { ...tailRunner(iso), async query(_dir, opts) {
     if (opts.explain) return { ok: true, sql: 'select 1' };
-    return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'task_cnt' }], rows: iso.map((x) => ({ metric_time__day: x.metric_time_day.replace('T', ' '), task_cnt: x.task_cnt })) };
+    return { ok: true, columns: [{ name: 'metric_time__day' }, { name: 'cnt' }], rows: iso.map((x) => ({ metric_time__day: x.metric_time_day.replace('T', ' '), cnt: x.cnt })) };
   } };
   const e = engine(runner);
   const { context_id } = await startDeclare(e, TASK);
   const read = async (after) => taskResult(e, (await e.query_model({ context_id, steps: [DAILY, after] })).task_id);
-  const byMetricFlow = await read({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc' }] });
-  const bySql = await read({ stage: 'order_by', keys: [{ key: 'task_cnt', direction: 'desc', nulls: 'first' }] });
+  const byMetricFlow = await read({ stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] });
+  const bySql = await read({ stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc', nulls: 'first' }] });
   assert.deepEqual([byMetricFlow.rows, bySql.rows], [iso, iso]);
 });
 
@@ -603,7 +603,7 @@ test('a batch answers with its task_ids only; its members run side by side, and 
   await until(() => runner.held.length === 2);
   for (let i = 0; i < 10; i += 1) await tick();
   // both members started before either finished; the later query has not started
-  assert.deepEqual(runner.log.slice().sort(), ['start:task_cnt', 'start:task_cnt2']);
+  assert.deepEqual(runner.log.slice().sort(), ['start:cnt', 'start:cnt2']);
   const peek = await e.query_model({ task_ids: batch.task_ids, wait_seconds: 0 });
   assert.deepEqual([peek.status, peek.results.map((r) => r.status)], ['running', ['running', 'running']]);
   runner.held.shift()();

@@ -15,8 +15,8 @@ import { tempDir } from '../helpers/temp-dir.js';
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = () => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('semstep') }) });
 
-const COUNT = { name: 'n', expr: { fn: 'count' } };
-const N = [{ name: 'n', type: 'simple', measure: 'n' }];
+const COUNT = { name: 'rows', expr: { fn: 'count' } };
+const N = [{ name: 'rows', type: 'simple', measure: 'rows' }];
 const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } };
 const step = (extra = {}) => ({ stage: 'semantic_model', measures: [COUNT], metrics: N, ...extra });
 const start = (e, steps, source = 'events') => e.build_model({ action: 'start', name: 'lay', source, ...(steps.length ? { steps } : {}) });
@@ -28,7 +28,7 @@ test('the step is a build\'s last, and one: refused before another step and twic
   // added after a start, it is the last step, and nothing is added after it
   const s = await start(e, []);
   const added = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step()] });
-  assert.deepEqual(added.step_effects.map((x) => [x.stage, x.metrics]), [['semantic_model', ['lay_n']]]);
+  assert.deepEqual(added.step_effects.map((x) => [x.stage, x.metrics]), [['semantic_model', ['rows']]]);
   await assert.rejects(() => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 1 }] }), /ends in its semantic_model step \(step 1\): nothing comes after it/);
 });
 
@@ -43,7 +43,7 @@ test('a join names its contract and MetricFlow\'s key: the main model\'s key col
   // a model nothing points at a key of is no join: its measures are computed beside the main model's
   await assert.rejects(() => start(e, [step({ join: [{ source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' } }] })]), /`steps\.0\.join\.0/);
   const beside = await start(e, [step({ measures: [COUNT, { name: 'spend', source: 'acquisition', expr: { fn: 'sum', args: [{ column: 'cost' }] } }], metrics: [...N, { name: 'spend', type: 'simple', measure: 'spend' }] })]);
-  assert.deepEqual(beside.step_effects[0].metrics.sort(), ['lay_n', 'lay_spend']);
+  assert.deepEqual(beside.step_effects[0].metrics.sort(), ['rows', 'spend']);
   // the main model is no source of a measure, nor joined to itself
   await assert.rejects(() => start(e, [step({ measures: [{ ...COUNT, source: 'events' }] })]), /'events' is the main model — leave source out/);
 });
@@ -58,13 +58,13 @@ test('preview shows the layer; edit_step replaces the step, a whole fork carries
   const e = engine();
   const s = await start(e, [step()]);
   const shown = await e.build_model({ action: 'preview', context_id: s.context_id });
-  assert.deepEqual(shown.metrics, ['lay_n']);
-  assert.ok(shown.yaml.includes('lay_n'), 'the YAML it writes');
+  assert.deepEqual(shown.metrics, ['rows']);
+  assert.ok(shown.yaml.includes('rows'), 'the YAML it writes');
   const { index } = shown.steps.find((x) => x.stage === 'semantic_model');
   // an edit replaces it with another semantic_model step, never with a stage
   await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: { stage: 'limit', limit: 1 } }), /is the build's semantic_model step/);
-  const edited = await e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step({ metrics: [{ name: 'events', type: 'simple', measure: 'n' }] }) });
-  assert.deepEqual(edited.step_effects[0].metrics, ['lay_events']);
+  const edited = await e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step({ metrics: [{ name: 'events', type: 'simple', measure: 'rows' }] }) });
+  assert.deepEqual(edited.step_effects[0].metrics, ['events']);
   // a whole fork carries it, a fork of the steps before it does not
   const whole = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
   assert.deepEqual(whole.steps.map((x) => x.stage), ['semantic_model']);
@@ -90,7 +90,25 @@ test('over the table of the steps before it: its time axis named, its joins keye
   const ok = await over(step({ time: 'session_start', join: [join()], measures: [COUNT, { name: 'per_session', expr: { fn: 'average', args: [{ column: 'n_events' }] } }], metrics: [...N, { name: 'per_session', type: 'simple', measure: 'per_session' }] }));
   const effect = ok.step_effects.find((x) => x.stage === 'semantic_model');
   assert.deepEqual(effect.semantic_models.sort(), ['sess', 'users']);
-  assert.deepEqual(effect.metrics.sort(), ['sess_n', 'sess_per_session']);
+  assert.deepEqual(effect.metrics.sort(), ['per_session', 'rows']);
   // a build named as a model or a key of the catalog would name its table so
   await assert.rejects(() => e.build_model({ action: 'start', name: 'users', source: 'events', steps: [...sessions, step({ time: 'session_start' })] }), /the build's name 'users' is a model or a key of the catalog/);
+});
+
+// NAMES AS DECLARED: a metric, a measure and a computed dimension are stored under the name the step gives
+// them, so what MetricFlow refuses of a name is refused when the step is added, naming it as declared.
+test('names are stored as declared: a grain, a governed measure\'s name and another element\'s are refused', async () => {
+  const e = engine();
+  const named = (name) => step({ measures: [{ name, expr: { fn: 'count' } }], metrics: [{ name: 'rows', type: 'simple', measure: name }] });
+  // the schema holds MetricFlow's spelling: two characters at least, no `__`, no `_` at the end
+  for (const bad of ['n', 'a__b', 'rows_']) await assert.rejects(() => start(e, [named(bad)]), /must match pattern/, bad);
+  await assert.rejects(() => start(e, [named('week')]), /measure 'week': a time grain is no name/);
+  await assert.rejects(() => start(e, [step({ metrics: [{ name: 'metric_time', type: 'simple', measure: 'rows' }] })]), /MetricFlow reserves the name 'metric_time'/);
+  await assert.rejects(() => start(e, [named('total_spend')]), /the catalog governs a measure of that name on 'acquisition'/);
+  // a measure named as a dimension or an entity of the layer
+  await assert.rejects(() => start(e, [named('event_name')]), /measure 'event_name': 'event_name' is already a dimension of 'events'/);
+  await assert.rejects(() => start(e, [named('session')]), /measure 'session': 'session' is already an entity of 'events'/);
+  // the stored name is the declared one, and a governed measure is read by its own
+  const ok = await start(e, [step({ metrics: [...N, { name: 'spend', type: 'simple', measure: 'total_spend' }] })]);
+  assert.deepEqual(ok.step_effects[0].metrics.sort(), ['rows', 'spend']);
 });

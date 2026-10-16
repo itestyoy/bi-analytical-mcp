@@ -141,7 +141,11 @@ export const semanticBuildMethods = {
     const compiled = this._compile(decl, undefined, catalog);
     const layer = { tasks: [], additions: {}, metrics: [], usedModels: [] };
     mergeCompiled(layer, compiled);
-    const render = renderContext(catalog, layer, { spec: this._semanticSpec() });
+    let render;
+    try { render = renderContext(catalog, layer, { spec: this._semanticSpec() }); } catch (e) {
+      if (e instanceof ToolError || !e.field) throw e;
+      throw new ToolError(e.message, { stage: 'compile', field: e.field });
+    }
     refuseIfNoMetricLeft(catalog, compiled, render);
     return { decl, compiled, render, catalog, layerModel };
   },

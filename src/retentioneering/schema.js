@@ -159,7 +159,7 @@ export function buildSchema(catalog, { project = null } = {}) {
       source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it — what its steps read event properties and relationships of.' },
       from_task: {
         type: 'string', pattern: TASK_ID_PATTERN,
-        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its steps run over that table's columns, and the time window is the pipeline's.`,
+        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_model pipeline materialize (its stages, no semantic_model step) whose stored table holds one row per event; the paths are read from it, not recomputed. A semantic layer's task, or a metric query's (its rows are aggregates), is refused. Name its path column(s) in path and its event and time columns in columns. Its steps run over that table's columns, and the time window is the pipeline's.`,
       },
       columns: columns(true),
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },

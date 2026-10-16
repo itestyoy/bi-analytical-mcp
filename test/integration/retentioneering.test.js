@@ -762,4 +762,22 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const counted = await one(engine.query_model({ task_ids: [pm.task_id] }));
   assert.equal(counted.status, 'done', `T43 on_rebuild: ${JSON.stringify(counted.error)}`);
   assert.equal(Number(counted.rows[0].n), n, 'T43: a pipeline started from the rebuild finds its table');
+
+  // T44 — an eventstream reads events: a pipeline build's task is taken (above), a semantic task is not.
+  // A semantic layer's build holds metrics, and what a metric query stores is aggregated, one row per
+  // group — refused before anything runs, naming the way to the events.
+  const semantic = /task \w+ is of a semantic layer/;
+  const coreDone = async (id) => { for (;;) { const r = await one(engine.query_model({ task_ids: [id] })); if (r.status !== 'running') return r; } };
+  const layer = await engine.build_model({ action: 'start', name: 'sem_layer', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }], materialize: true });
+  const parsed = await coreDone(layer.materialize.task_id);
+  assert.equal(parsed.status, 'done', `T44 the layer parses: ${JSON.stringify(parsed.error)}`);
+  const asStream = (from_task) => engine.build_retentioneering_model({ name: 'from_sem', from_task, path: ['player_id_of_internal'], columns: { event: 'event_name', time: 'device_time' } });
+  await assert.rejects(asStream(layer.materialize.task_id), (e) => e.field === 'from_task' && semantic.test(e.message), 'T44: a semantic layer\'s build');
+  const stored = await engine.query_model({ context_id: layer.context_id, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ time: 'metric_time', grain: 'day' }] }], materialize: true });
+  const result = await coreDone(stored.task_id);
+  assert.equal(result.status, 'done', `T44 the metric query stores its result: ${JSON.stringify(result.error)}`);
+  await assert.rejects(asStream(stored.task_id), (e) => e.field === 'from_task' && semantic.test(e.message), 'T44: a metric query stored with materialize');
+  // …while the pipeline's own build is still taken, the rows it stored counted as events
+  const again = await readDone((await engine.build_retentioneering_model({ name: 'from_pipe_again', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } })).task_id);
+  assert.equal(again.events, n, 'T44: a pipeline build stays a source of an eventstream');
 });

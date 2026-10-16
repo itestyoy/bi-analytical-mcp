@@ -203,10 +203,23 @@ async function buildAction(engine, feature, input, action) {
   return editSteps(engine, feature, ctx, name, es, action, input);
 }
 
+/**
+ * An eventstream is read from rows of events, so a task it starts from is one of the PIPELINE side: a
+ * build's table (or a read of it stored with materialize). A task of the semantic side is refused before
+ * anything is looked up — a semantic layer's build holds metrics, not rows, and a metric query's result
+ * holds them aggregated (one row per group, not per event) — with the way to the events it meant.
+ */
+function refuseSemanticTask(engine, taskId) {
+  const job = engine.jobs.get(taskId);
+  if (!job || engine.tasks.sideOf(job.tool) !== 'semantic') return;
+  throw new ToolError(`task ${taskId} is of a semantic layer — its metrics are queried with query_model, and what a metric query stores is aggregated, one row per group, not one per event. An eventstream reads events: start it from the source itself (source, with steps), or from the task of a build_model pipeline whose table holds one row per event (its stages materialized, no semantic_model step)`, { stage: 'validate', field: 'from_task' });
+}
+
 async function start(engine, feature, input) {
   // a task's stored table (a pipeline build) as the rows — found, and checked to be there, the way a
   // pipeline started from a task finds it; the source is then what its steps read properties and
-  // relationships of
+  // relationships of. A semantic task is no such table (refuseSemanticTask).
+  if (input.from_task) refuseSemanticTask(engine, input.from_task);
   const found = input.from_task ? engine.host.taskBase({ from_task: input.from_task, source: input.source }) : null;
   const spec = validateStart(engine.catalog, found ? { ...input, source: found.source } : input);
   // the source's real columns, and those of every model a join stage brings in, as a pipeline's are

@@ -28,7 +28,7 @@ import { stepOfDeclaration } from './pipeline/semantic-stage.js';
  * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage's own
  * words respelled as a kept draft's are (src/pipeline/earlier.js; with no columns known, an unnest's
  * `source` is read as an event property, the build's first choice), and then the list in the spelling a
- * NEW call is told (src/earlier-spelling.js currentOf — a typed unnest the two steps it is now, which a
+ * NEW call takes (src/earlier-spelling.js currentOf — a typed unnest the two steps it is now, which a
  * kept draft's is not; with the `catalog`, a typed read whose type is the source's own the bare read):
  * what the recipe view hands over is always a request the tool accepts as it stands.
  */

@@ -235,18 +235,22 @@ test('a measure is typed by its aggregate: the earliest or latest of a column is
   assert.deepEqual(['first_at', 'most', 'n', 'per'].map((c) => out.columns.get(c).type), [render([]).columns.get('device_time').type, 'numeric', 'int', 'numeric']);
 });
 
-test('a condition is a function: an earlier spelling is refused with the value written today; a field a function does not read is refused', async () => {
+test('a condition is a function: an earlier spelling is no form of one; a field a function does not read is refused', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const { context_id } = await e.build_model({ action: 'start', name: 'cond', source: 'events' });
   const add = (c) => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
-  const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
+  // refused by the schema, as any value it does not take — and what it is today is taken
+  const refusedNotToday = (today) => async (earlier) => {
+    await assert.rejects(() => add(earlier), /invalid input/, JSON.stringify(earlier));
+    assert.ok(await add(today), JSON.stringify(today));
+  };
   for (const [earlier, today] of [
     [{ column: 'session_number', op: 'gt', value: 1 }, { fn: 'gt', args: [col('session_number'), val(1)] }],
     [{ column: 'session_number', op: 'is_null' }, { fn: 'is_null', args: [col('session_number')] }],
     [{ left: { fn: 'length', args: [col('event_name')] }, op: 'gt', right: col('session_number') }, { fn: 'gt', args: [{ fn: 'length', args: [col('event_name')] }, col('session_number')] }],
-    [{ or: [{ column: 'session_number', op: 'gt', value: 1 }, { column: 'event_name', op: 'eq', value: 'x' }] }, { fn: 'or', args: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'eq', args: [col('event_name'), val('x')] }] }],
-    [{ fn: 'in', args: [col('event_name'), { value: ['a', 'b'] }] }, { fn: 'in', args: [col('event_name'), val('a'), val('b')] }],
-  ]) await assert.rejects(() => add(earlier), shown(today), JSON.stringify(earlier));
+    [{ or: [{ column: 'session_number', op: 'gt', value: 1 }, { column: 'event_name', op: 'eq', value: 'x' }] }, { fn: 'or', args: [{ fn: 'gt', args: [col('session_number'), val(1)] }, { fn: 'eq', args: [col('event_name'), val(catalog.eventNames('events')[0])] }] }],
+    [{ fn: 'in', args: [col('event_name'), { value: ['a', 'b'] }] }, { fn: 'in', args: [col('event_name'), ...catalog.eventNames('events').slice(0, 2).map(val)] }],
+  ]) await refusedNotToday(today)(earlier);
   // a field the function does not read, an argument too few: refused, not ignored
   await assert.rejects(() => add({ fn: 'gt', args: [col('session_number'), val(1)], value: 2 }), /unexpected property 'value'/);
   await assert.rejects(() => add({ fn: 'gt', args: [col('session_number')] }), /must have at least 2 items/);
@@ -260,41 +264,23 @@ test('a condition is a function: an earlier spelling is refused with the value w
   ]) assert.ok(await add(c), JSON.stringify(c));
 });
 
-// A READ NAMES NO TYPE, AN AGGREGATE NO WHERE: a new call written the earlier way is refused with the value
-// written today — a typed read as the read cast to its type (the type dropped where the read yields it:
-// text out of a JSON document; an element is of its array's items, so its cast stays), an aggregate's where
-// as the case it folds, an unnest naming its element's type as the unnest and a compute stage casting the
-// element (in a list of steps, where the two fit; a lone step has no one value it is now: the two steps it
-// is are said, to put where it stood — the one thing said of it, never a value that still names a type —
-// its element named `name` or, before that, `as`).
-test('a typed read, an aggregate\'s where and a typed unnest are refused with the value written today', async () => {
+// A READ NAMES NO TYPE, AN AGGREGATE NO WHERE: a new call written the earlier way — a typed read, an
+// aggregate's where, an unnest naming its element's type — is refused by the schema, as any value it does
+// not take; converting is a cast, a conditional aggregate an aggregate over a case.
+test('a typed read, an aggregate\'s where and a typed unnest are refused; what is written today is taken', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
   const { context_id } = await e.build_model({ action: 'start', name: 'typed', source: 'events' });
   const add = (...steps) => e.build_model({ action: 'add_steps', context_id, steps });
-  const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
   const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
-  for (const [earlier, today] of [
-    [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'int' } }, { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' }],
-    [{ stage: 'compute', name: 'p', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'numeric' } }, { fn: 'cast', args: [{ fn: 'json_field', args: [col('event_name')], field: 'a' }], type: 'numeric' }],
-    [{ stage: 'compute', name: 'p', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'string' } }, { fn: 'json_field', args: [col('event_name')], field: 'a' }],
-    [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [isTut] } }] }, { fn: 'count', args: [{ fn: 'case', cases: [{ when: [isTut], then: val(1) }] }] }],
-    [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'average', args: [col('session_number')], where: [isTut] } }] }, { fn: 'average', args: [{ fn: 'case', cases: [{ when: [isTut], then: col('session_number') }] }] }],
-  ]) await assert.rejects(() => add(earlier), shown(today), JSON.stringify(earlier));
+  for (const earlier of [
+    { stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data', type: 'int' } },
+    { stage: 'compute', name: 'p', expr: { fn: 'json_field', args: [col('event_name')], field: 'a', type: 'numeric' } },
+    { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', where: [isTut] } }] },
+    { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'average', args: [col('session_number')], where: [isTut] } }] },
+    { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w', type: 'int' },
+    { stage: 'unnest', property: 'words_collected', as: 'w', type: 'int' },
+  ]) await assert.rejects(() => add(earlier), /invalid input/, JSON.stringify(earlier));
   const unnest = { stage: 'unnest', expr: { property: 'words_collected' }, name: 'w' };
-  await assert.rejects(() => add({ ...unnest, type: 'int' }, { stage: 'limit', limit: 5 }), shown([{ ...unnest, name: 'w_element' }, { stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } }, { stage: 'limit', limit: 5 }]));
-  await assert.rejects(() => add({ ...unnest, type: 'string' }), shown(unnest));
-  // alone, it is said as the two steps it is, to put where it stood — and nothing else of it: no field
-  // refused one by one, no value still naming its type (its array named the earlier way alike)
-  const two = `${JSON.stringify({ ...unnest, name: 'w_element' })} in its place, then ${JSON.stringify({ stage: 'compute', name: 'w', expr: { fn: 'cast', args: [col('w_element')], type: 'int' } })} after it`;
-  for (const step of [
-    { ...unnest, type: 'int' }, { stage: 'unnest', property: 'words_collected', name: 'w', type: 'int' },
-    { stage: 'unnest', expr: { property: 'words_collected' }, as: 'w', type: 'int' }, { stage: 'unnest', property: 'words_collected', as: 'w', type: 'int' },
-  ]) {
-    await assert.rejects(() => e.build_model({ action: 'edit_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
-      && err.message.endsWith(two) && !/unexpected property|earlier spelling/.test(err.message) && !err.message.includes('"name":"w","type":"int"'), JSON.stringify(step));
-  }
-  // a long name: its element's name is cut to a name a step may make
-  await assert.rejects(() => add({ ...unnest, name: 'w'.repeat(41), type: 'int' }), shown([{ ...unnest, name: `${'w'.repeat(33)}_element` }, { stage: 'compute', name: 'w'.repeat(41), expr: { fn: 'cast', args: [col(`${'w'.repeat(33)}_element`)], type: 'int' } }]));
   // what is written today is taken
   assert.equal((await add({ stage: 'compute', name: 'p', expr: { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'int' } }, unnest, { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [isTut], then: val(1) }] }] } }] })).steps_count, 3);
 });

@@ -54,10 +54,8 @@ test('bad input to explore_errors is refused, and that refusal is kept too', asy
   assert.equal((await runTool(engine, 'explore_errors', { request: { id: 1, limit: 3 } })).result.isError, true);
   // the earlier spellings are no fields of this tool
   for (const request of [{ since: '2026-01-01' }, { text: 'x' }, { detail: true }]) assert.equal((await runTool(engine, 'explore_errors', { request })).result.isError, true, JSON.stringify(request));
-  // the earlier level of detail is the one list `include` now: refused with the request it is, never served
-  const detail = await runTool(engine, 'explore_errors', { request: { tool: 'query_model', detail: 'full' } });
-  assert.equal(detail.result.isError, true);
-  assert.ok(payload(detail).error.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ tool: 'query_model', include: ['details'] })}`), payload(detail).error.message);
+  // the earlier level of detail is the one list `include` now: refused, never served
+  assert.equal((await runTool(engine, 'explore_errors', { request: { tool: 'query_model', detail: 'full' } })).result.isError, true);
   assert.equal(payload(await runTool(engine, 'explore_errors', { request: { tool: 'explore_errors' } })).total, 8);
 });
 

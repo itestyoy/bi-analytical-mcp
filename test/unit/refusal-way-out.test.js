@@ -77,14 +77,12 @@ test('a function given a parameter under another name is refused as that functio
   }
 });
 
-test('an earlier spelling is offered as the value to write only where that value is taken', async () => {
-  // { model, attribute } is { source, column } today; a note may be about a groupable column, and the
-  // user key is not one — so the converted value is not offered as what to write
-  await assert.rejects(engine.memory({ action: 'record', notes: [{ note: 'x', about: [{ model: 'events', attribute: 'player_id_of_internal' }] }] }), (e) => {
-    assert.match(e.message, /today's spelling of it, \{"source":"events","column":"player_id_of_internal"\}, is not taken here either/);
-    assert.doesNotMatch(e.message, /write \{"source":"events","column":"player_id_of_internal"\}/);
-    return true;
-  });
-  // where it is taken, it is the value to write
-  await assert.rejects(engine.memory({ action: 'record', notes: [{ note: 'x', about: [{ model: 'users', attribute: 'country' }] }] }), /earlier spelling — write \{"source":"users","column":"country"\}/);
+test('an earlier { model, attribute } is no ref: refused by the schema as any value it does not take', async () => {
+  for (const about of [{ model: 'events', attribute: 'player_id_of_internal' }, { model: 'users', attribute: 'country' }]) {
+    await assert.rejects(engine.memory({ action: 'record', notes: [{ note: 'x', about: [about] }] }), (e) => {
+      assert.match(e.message, /invalid input/);
+      assert.doesNotMatch(e.message, /earlier spelling/);
+      return true;
+    }, JSON.stringify(about));
+  }
 });

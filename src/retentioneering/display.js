@@ -9,7 +9,6 @@ import { truncatedTables } from './results.js';
 import { retentioneeringViewModel, hasCard, diffForm, DIFF_CARD_KINDS } from './view-model.js';
 import { SIDE, QUERY, DISPLAY } from './names.js';
 import { readResult, resultOrigin, taskOutput } from './query.js';
-import { refuseEarlierDisplay } from './earlier.js';
 
 /** Whether this analysis of the task is drawn — or being drawn right now (held in memory only, so a
  *  draw that does not happen leaves nothing behind, not even across a restart). */
@@ -21,7 +20,6 @@ export function drawnAlready(engine, feature, taskId, analysis) {
 }
 
 export async function display(engine, feature, input) {
-  refuseEarlierDisplay(input);
   engine.host.validate(DISPLAY, input);
   const { analysis } = input.display;
   const job = engine.tasks.forSide(input.task_id, SIDE);

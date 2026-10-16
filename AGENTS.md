@@ -477,21 +477,14 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   text: refused, saying to cast), and the value array_contains
   looks for in the type of the array's elements (a native array's items, a JSON array's text).
   Every column name the server writes into SQL is quoted by the warehouse's dialect, in every stage and
-  every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`) is
-  told this server's (src/validate.js); a whole value in an EARLIER spelling of this server — a condition
-  `{ column, op, value }` or a group `{ or: [...] }`, a measure `{ name, agg, column }`, a read's
-  `transform`, a metric query's `metrics` / `group_by` / `where` beside its steps (its metrics step,
-  after a where step) and its `order_by` (an order_by step after it), a `{ model, attribute }` (a ref
-  now), a read naming its `type` — `{ property, type }`, json_field / element_at / array_last or an
-  unnest with one (the read, in a `cast` where the type is not known to be the read's own — an
-  element's never is: it is the array's items; an unnest of a type other than text, its element under
-  `<name>_element` — a name within the name pattern that no other step of the list makes — and a
-  compute casting it under `name`, its element named `name` or `as`, a lone step said as those two; a
-  deployment's recipe handed over so; a kept draft's builds as it did, since its steps are counted) —, an aggregate's
-  `where` (the aggregate over a case), the `include_*` flags and explore_errors' `detail` (`include`), a semantic model item's `from`
-  (`source`), an update's `task` (`name`) — is refused with the value converted, never accepted (a
-  field only renamed — `stages`, `stage`, a model column written `property` — is told its name:
-  `steps`, `step`, `column`), and what a store kept in one is carried over on read; every such converter is in ONE table (src/earlier-spelling.js). The
+  every read. A caller who brings another tool's spelling (`avg`, `q`, `agg`, `as`, `targets`, `text`, a
+  `ratio` metric) is told this server's (src/validate.js) — a hint, never an alias; a field only renamed
+  (`stages`, `stage`, a model column written `property`) is told its name (`steps`, `step`, `column`). A
+  value in an EARLIER spelling of this server is no form of its schema and is refused as any value it does
+  not take — nothing converts a call's input; what a store KEPT in one (a draft's steps, a kept eventstream,
+  a stored declaration or display, a deployment's recipe file) is carried over on read, and every such
+  converter is in ONE table (src/earlier-spelling.js; a draft's steps src/pipeline/earlier.js, an
+  eventstream's src/retentioneering/earlier.js). The
   retentioneering steps keep the LIBRARY's own grammars (its facts sheet), not this one.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine._recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
@@ -694,8 +687,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   eventstream's shape rules out. The build reaches the source's OWN columns and event properties, a
   related model's columns, and events renamed, merged or split by a parameter, through the
   pipeline's own stages (where, compute, join) — all in SQL; a kept start in an earlier spelling is
-  carried over on read (src/retentioneering/earlier.js), and a new call in one is refused with the
-  converted value. The analyses with a card are CARD_KINDS (the charted ones and a
+  carried over on read (src/retentioneering/earlier.js), and a new call in one is refused by the schema. The analyses with a card are CARD_KINDS (the charted ones and a
   distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps — which kinds have a card, and which diff keeps its analysis's own shape, is ONE
   table, `KINDS` in src/retentioneering/view-model.js, that the query spec carries to the analysis
   step and its pre-run check (`diff_charted`), and a stored diff says which form it holds); any other

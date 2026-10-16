@@ -26,7 +26,7 @@
 //   an unnest's   { property } / { column } → its `expr`, its `as` → `name`; its `type`, in a list of
 //                 steps, → the element read as it is under `<name>_element` (a name no other step of the
 //                 list makes, within the name pattern) and a compute stage casting it under `name` — on
-//                 its own, no one value: the refusal says the two steps (src/validate.js); a kept draft's
+//                 its own, no one value; a kept draft's
 //                 builds as it did: src/pipeline/earlier.js;
 //   a read's      `transform` (where, group_by + measures, having, order_by, then) → its steps;
 //   a query's     input kept with its task (currentQueryInput): a read's `stages` (or `transform`) → its
@@ -43,8 +43,8 @@
 // Each converter leaves a value already in the current spelling as it is (by what it says), so it may
 // be applied to anything a store holds. They serve whoever reads a kept value — a draft's steps
 // (src/pipeline/earlier.js), a kept eventstream, a stored declaration, a deployment's recipe file, a
-// drawn card's display — and the refusal of a NEW call in an earlier spelling, which shows the value
-// converted (src/validate.js) but never accepts it.
+// drawn card's display. A NEW call in an earlier spelling is refused by the tool's schema as any value it
+// does not take: nothing here reads a call's input.
 
 import { CROSS_PATH_SPELLING as SPELLING } from './validate.js';
 import { OPS } from './conditions.js';

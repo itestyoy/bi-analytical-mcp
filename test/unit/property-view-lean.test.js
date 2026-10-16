@@ -45,7 +45,6 @@ test('event_coverage is carriers-only by default, with an omitted count + includ
     'full table includes the always-NULL events on demand',
   );
   assert.equal(full.event_coverage_omitted, undefined, 'no omitted marker when the full table is returned');
-  // the earlier flag is refused with the request it is now, never served
-  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true }),
-    (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ source: 'events', property: 'ad_type_of_event_data', include: ['coverage'] })}`));
+  // the earlier flag is no field: refused, never served
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true }), /invalid input/);
 });

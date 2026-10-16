@@ -18,7 +18,6 @@ import { hasCard, diffForm, CHARTED_DIFF_KINDS } from './view-model.js';
 import { SIDE, BUILD, QUERY, DISPLAY, ES_COLUMNS } from './names.js';
 import { pathContext } from './contexts.js';
 import { suggest, namedColumns } from './build-input.js';
-import { refuseEarlierRead } from './earlier.js';
 import { ORDER_COL, ROLES_COL } from './steps.js';
 import { drawnAlready } from './display.js';
 
@@ -132,8 +131,6 @@ export function validateAnalyses(es, shape, analyses) {
 }
 
 export async function query(engine, feature, input) {
-  // a read in an earlier spelling is refused with how a read is made now (src/retentioneering/earlier.js)
-  refuseEarlierRead(input);
   engine.host.validate(QUERY, input);
   if (input.cancel) return engine.tasks.cancel(input, SIDE);
   if (input.task_ids) return readTasks(engine, feature, input);

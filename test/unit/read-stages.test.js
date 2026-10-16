@@ -146,16 +146,15 @@ test('a read refuses what is not a column of the table, a name that is no identi
   }
 });
 
-test('a read written as an earlier `transform` is refused with the steps it is now; its converter reads every part of one', () => {
+test('a read written as an earlier `transform` is refused; its converter (for what was kept so) reads every part of one', () => {
   const v = makeValidators(buildSchemas(catalog));
   const transform = { where: [{ column: 'user__country', op: 'eq', value: 'US' }], group_by: ['day'], measures: [{ name: 'rev', agg: 'sum', column: 'mon_revenue' }] };
   const steps = [
     { stage: 'where', conditions: [cond('eq', 'user__country', 'US')] },
     { stage: 'aggregate', group_by: ['day'], measures: [{ name: 'rev', expr: { fn: 'sum', args: [{ column: 'mon_revenue' }] } }] },
   ];
-  const refused = validateInput(v.query_model, { context_id: 'abcdef123456', transform });
-  assert.equal(refused.ok, false);
-  assert.ok(refused.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ context_id: 'abcdef123456', steps })}`), refused.errors.join(' | '));
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', transform }).ok, false);
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps }).ok, true, 'the steps it is now are taken');
   // having is a where after the aggregate, order_by its stage, then a second level; a group_by alone counts its rows
   assert.deepEqual(transformStages({ ...transform, having: [{ column: 'rev', op: 'gt', value: 10 }], order_by: [{ key: 'rev', direction: 'desc' }], then: { group_by: ['rev'] } }), [
     ...steps,

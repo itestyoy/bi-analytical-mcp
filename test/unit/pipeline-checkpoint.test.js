@@ -312,8 +312,8 @@ test('a text flag of the warehouse stays text after a checkpoint and in a draft 
   const refusedBoth = async (context_id, when) => {
     await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [ordered] }), textFlag, `${when}: the column first`);
     await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [constantFirst] }), textFlag, `${when}: a constant first`);
-    // the column written in an earlier spelling is not another way to say it: it is told the one way
-    await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ left: flag, op: 'gt', value: true }] }] }), /is written in an earlier spelling — write \{"fn":"gt","args":\[\{"column":"is_clicked_of_event_data"\},\{"value":true\}\]\}/, when);
+    // the column written in an earlier spelling is not another way to say it: no form of a condition
+    await assert.rejects(() => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ left: flag, op: 'gt', value: true }] }] }), /invalid input/, when);
   };
 
   const { context_id } = await e.build_model({ action: 'start', name: 'flg', source: 'events', steps: [keepEvents('level_started')] });

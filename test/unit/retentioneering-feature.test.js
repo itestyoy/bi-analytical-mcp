@@ -219,13 +219,11 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { name: 'x', source: 'nope' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'Bad Name', source: 'events' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'x', source: 'events', sample: { share: 0 } }, /invalid input/);
-  // a start in an earlier spelling is refused with the start written today, at the first earlier field
-  const earlier = (field, today) => (err) => err.field === field && err.message.includes(`the start is written in an earlier spelling — write ${JSON.stringify(today)}`);
+  // a start in an earlier spelling is no form of a start: its schema refuses it
   const events = { name: 'x', source: 'events' };
-  await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, earlier('events', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'level_started' }] }] }] }));
-  await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, earlier('where', { ...events, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }));
-  // a users attribute as a segment is the join stage it was, on the users model's contract at the event's time
-  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, earlier('segments', { ...events, steps: [{ stage: 'join', attrs: [{ column: 'platform' }], source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }], segments: ['platform'] }));
+  await refused('build_retentioneering_model', { ...events, events: { include: ['level_started'] } }, /invalid input/);
+  await refused('build_retentioneering_model', { ...events, where: [{ column: 'bundle_id', op: 'eq', value: 'a' }] }, /invalid input/);
+  await refused('build_retentioneering_model', { ...events, segments: [{ model: 'users', attribute: 'platform' }] }, /invalid input/);
   // a start's list of stages is its steps: the earlier name is told the field's name, the stages unchanged
   await refused('build_retentioneering_model', { ...events, stages: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'a' }] }] }] }, /request has an unexpected property 'stages' — here that field is called 'steps'/);
   // a column the start names that its rows do not have is refused with the columns there are — and how one is brought in
@@ -275,9 +273,8 @@ test('input the schema refuses is refused before anything starts', async () => {
   for (const input of [{ ...events, include: ['columns'] }, { action: 'preview', context_id: 'abc', include: ['steps'] }, { action: 'materialize', context_id: 'abc', include: ['columns'] }]) {
     await refused('build_retentioneering_model', input, /invalid input: .*unexpected property 'include'/);
   }
-  // …and the earlier flags are refused with the one list they are now
-  await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', steps: [{ type: 'collapse_events', loops: true }], include_columns: true, include_steps: true },
-    (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'add_steps', context_id: 'abc', steps: [{ type: 'collapse_events', loops: true }], include: ['columns', 'steps'] })}`));
+  // …and the earlier flags are no fields: include is the one list
+  await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', steps: [{ type: 'collapse_events', loops: true }], include_columns: true, include_steps: true }, /invalid input.*unexpected property 'include_columns'/);
   // a condition compares a metric with a constant of the metric's own kind: a date is not a time metric's value
   await refused('build_retentioneering_model', step({ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: '2026-09-26' } }), /invalid input/);
   // metric_bins is one list of bins, so a level count that disagrees with the cut points cannot be written
@@ -320,11 +317,9 @@ test('input the schema refuses is refused before anything starts', async () => {
   const col = (column) => ({ column });
   const val = (value) => ({ value });
   await refused('build_retentioneering_model', where([{ fn: 'eq', args: [col('platform'), val('ios')] }, { fn: 'or', args: [{ fn: 'between', args: [col('level'), val(1), val(3)] }, { fn: 'and', args: [{ fn: 'starts_with', args: [col('event'), val('level')] }, { fn: 'is_null', args: [col('level')] }] }] }, { fn: 'not', args: [{ fn: 'in', args: [col('event'), val('a'), val('b')] }] }]), pastSchema);
-  // the earlier tree and list are refused with the conditions written today — a negation as not(…),
-  // which keeps a missing value as the earlier one did (neq is present-and-different now)
-  const earlierWhere = (today) => (err) => err.field === 'steps[0].where' && err.message.includes(`steps[0].where is written in an earlier spelling — write ${JSON.stringify(today)}`);
-  await refused('build_retentioneering_model', where({ op: 'and', conditions: [{ column: 'platform', op: '=', value: 'ios' }] }), earlierWhere([{ fn: 'eq', args: [col('platform'), val('ios')] }]));
-  await refused('build_retentioneering_model', where([{ column: 'platform', op: 'neq', value: 'ios' }]), earlierWhere([{ fn: 'not', args: [{ fn: 'eq', args: [col('platform'), val('ios')] }] }]));
+  // the earlier tree and list are no form of the condition slot: refused by the schema
+  await refused('build_retentioneering_model', where({ op: 'and', conditions: [{ column: 'platform', op: '=', value: 'ios' }] }), /invalid input/);
+  await refused('build_retentioneering_model', where([{ column: 'platform', op: 'neq', value: 'ios' }]), /invalid input/);
   // the library runs it as SQL: no SQL of the call's own, no event property — a start's steps take them,
   // so they pass the tool's one expression, and this place (the eventstream's rows) refuses them, naming
   // what it takes; no ref of the catalog, which no place of the tool takes (no form of its expression:
@@ -351,9 +346,9 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', noPath, /invalid input.*missing required property 'path'/);
   await refused('build_retentioneering_model', { ...fromTask, columns: { event: 'e' } }, /invalid input.*missing required property 'time'/);
   await refused('build_retentioneering_model', { ...fromTask, time_range: { start: '2026-01-01' } }, /invalid input/);
-  // the path an earlier version named in columns, or as [{ column }], is refused with the start written today
-  await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, earlier('columns', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
-  await refused('build_retentioneering_model', { ...fromTask, path: [{ column: 'u' }] }, earlier('path', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
+  // the path an earlier version named in columns, or as [{ column }], is no form of a start
+  await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, /invalid input/);
+  await refused('build_retentioneering_model', { ...fromTask, path: [{ column: 'u' }] }, /invalid input/);
   await refused('build_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
   // the eventstream's own name goes into its models' file names: bounded as the core's names are
   await refused('build_retentioneering_model', { name: `e${'x'.repeat(41)}`, source: 'events' }, /invalid input/);
@@ -365,21 +360,16 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc', eventstream: longer, name: 'variant' }, pastSchema);
   await refused('query_retentioneering_model', { context_id: 'abc', eventstream: longer, analyses: [{ kind: 'describe' }] }, pastSchema);
   await refused('build_retentioneering_model', { action: 'preview', context_id: 'A-B' }, /invalid input/);
-  // an event split by a parameter is a compute stage's case, the column it makes the event column
-  await refused('build_retentioneering_model', { ...events, events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, earlier('events', {
-    ...events,
-    steps: [{ stage: 'compute', name: 'es_event', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [col('event_name'), val('level_completed')] }, { fn: 'eq', args: [{ property: 'result_of_event_data' }, val('lose')] }], then: val('lost') }], else: col('event_name'), type: 'string' } }],
-    columns: { event: 'es_event' },
-  }));
+  // an event split by a parameter is a compute stage's case now: the earlier events.split is no field
+  await refused('build_retentioneering_model', { ...events, events: { split: [{ event: 'level_completed', cases: [{ name: 'lost', when: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }] } }, /invalid input/);
   // a card is { task_id, display } — what it draws under `display`, as display_model_result takes it
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel', title: 'Onboarding funnel, Sep 1–23' } }, /unknown task_id/);
   await refused('display_retentioneering_result', { task_id: 'nope', display: { analysis: 'funnel' } }, /invalid input/); // not a task id at all
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel' } }, /unknown task_id/);
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel', edge_weight: 'nope' } }, /invalid input/);
   await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel', kind: 'bar' } }, /invalid input/);
-  // the earlier flat shape is refused with the card it is now, never drawn
-  await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel', title: 'Onboarding' },
-    (err) => err.field === 'display' && err.message.includes(`request is written in an earlier spelling — write ${JSON.stringify({ task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel', title: 'Onboarding' } })}`));
+  // the earlier flat shape is refused, never drawn: what is drawn is said under display
+  await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel', title: 'Onboarding' }, /invalid input.*unexpected property 'analysis'/);
   // a card for a client that renders none is refused like display_model_result
   const r = await runTool(e, 'display_retentioneering_result', { request: { task_id: 'a0a0a0a0a0a0', display: { analysis: 'funnel' } } }, { renders: false });
   assert.equal(r.result.isError, true);
@@ -596,16 +586,16 @@ test('a read pages each table of an analysis by its row numbers, the biggest fir
   assert.deepEqual(readView({ kind: 'funnel', error: { type: 'ValueError', message: 'x' } }), { kind: 'funnel', error: { type: 'ValueError', message: 'x' } });
 });
 
-test('a read of an eventstream pages each segment\'s levels; the read refuses detail, telling how to page', async () => {
+test('a read of an eventstream pages each segment\'s levels; the read takes no detail', async () => {
   const { withLevels } = await import('../../src/retentioneering/query.js');
   const out = { kind: 'eventstream', events: 5, segment_levels: { platform: { count: 3, levels: ['ios', 'android', 'web'], users: [5, 3, 1], complete: true } } };
   const page = withLevels(out, { offset: 1, limit: 1 }).segment_levels.platform;
   assert.deepEqual([page.count, page.levels, page.page.total_rows, page.page.has_more, page.page.next_offset, page.complete], [3, [{ level: 'android', users: 3 }], 3, true, 2, undefined]);
   assert.deepEqual(withLevels(out).segment_levels.platform.levels.map((l) => l.level), ['ios', 'android', 'web']);
-  // `detail` is no read's: refused before anything is waited on, with the read that pages instead
+  // `detail` is no read's: refused before anything is waited on — a read pages by offset / limit
   const e = on();
   for (const detail of ['full', 'summary']) {
-    await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], detail }), (err) => err.field === 'detail' && /offset/.test(err.message) && /limit/.test(err.message));
+    await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], detail }), /invalid input.*unexpected property 'detail'/);
   }
   // the read's own fields pass the schema (and stop only at the task, which does not exist)
   await assert.rejects(e.query_retentioneering_model({ task_ids: ['a0a0a0a0a0a0'], offset: 50, limit: 10, wait_seconds: 0 }), (err) => !/invalid input/.test(err.message));

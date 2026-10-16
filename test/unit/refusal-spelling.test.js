@@ -75,10 +75,10 @@ test('the quantile is `percentile` on every path, and SQL\'s `q` / `as` and the 
   assert.equal(gov.ok, false);
   assert.match(text(gov), /here that field is called 'percentile'/);
 
-  // a measure written as the earlier { name, agg } is shown as the expression it is now
+  // a measure written as the earlier { name, agg } is no form of a measure: it is { name, expr }
   const agg = check('build_model', stage({ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }));
   assert.equal(agg.ok, false);
-  assert.ok(text(agg).includes('is written in an earlier spelling — write {"name":"n","expr":{"fn":"count","args":[]}}'), text(agg));
+  assert.match(text(agg), /missing required property 'expr'/);
   const as = check('build_model', stage({ stage: 'unnest', expr: { column: 'items' }, as: 'item' }));
   assert.equal(as.ok, false);
   assert.match(text(as), /here that field is called 'name'/);
@@ -117,85 +117,39 @@ test("a read's measure list is `measures`, and `aggregations` is refused with th
 
 // A list a tool runs in order is `steps` in every tool, its items tagged by what they are. What changed
 // only its name (`stages`, `stage`) is told the name (refusal-views.test.js); what changed its shape — a
-// read's `transform`, a metric query's metrics, group_by, where and order_by, now its metrics step, a where
-// step before it and an order_by step after it — is shown as it is written now, in a batch at the query
-// that wrote it.
-test("a read's transform and a metric query's metrics, group_by, where and order_by are shown as the steps they are now", () => {
-  const read = check('query_model', { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } });
-  assert.equal(read.ok, false);
-  assert.ok(text(read).includes(`request is written in an earlier spelling — write ${JSON.stringify({ context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] })}`), text(read));
+// read's `transform`, a metric query's metrics, group_by, where and order_by beside its steps, the earlier
+// { model, attribute }, the include_* flags — is no form of the tool's schema, refused as any value it does
+// not take, and what it is written as today is taken.
+test("a query's earlier fields are refused; its steps say them today", () => {
   const keys = [{ key: 'revenue', direction: 'desc' }];
   const revenue = { stage: 'metrics', metrics: ['revenue'] };
-  const said = (res, at, now) => { assert.equal(res.ok, false); assert.ok(text(res).includes(`${at} is written in an earlier spelling — write ${JSON.stringify(now)}`), text(res)); };
-  // its metrics alone: the metrics step
-  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'] }), 'request', { context_id: 'ctxabc123456', steps: [revenue] });
-  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'], order_by: keys, limit: 5 }), 'request', { context_id: 'ctxabc123456', limit: 5, steps: [revenue, { stage: 'order_by', keys }] });
-  // all of it: its where before the metrics step, its group_by in it, its steps and then its order_by after it
   const country = { source: 'users', column: 'country' };
   const US = { fn: 'eq', args: [country, { value: 'US' }] };
-  const window = { start: '2026-01-01', end: '2026-01-31' };
-  said(check('query_model', { context_id: 'ctxabc123456', metrics: ['revenue'], group_by: [country], where: [US], steps: [{ stage: 'limit', limit: 3 }], order_by: keys, time_range: window }), 'request', {
-    context_id: 'ctxabc123456', time_range: window,
-    steps: [{ stage: 'where', conditions: [US] }, { ...revenue, group_by: [country] }, { stage: 'limit', limit: 3 }, { stage: 'order_by', keys }],
-  });
-  // in a batch, at the query that wrote it — or the whole request, when every query did
-  said(check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] }), '`queries.1`', { steps: [revenue, { stage: 'order_by', keys }] });
-  said(check('query_model', { context_id: 'ctxabc123456', queries: [{ metrics: ['revenue'] }, { metrics: ['revenue'], order_by: keys }] }), 'request', { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { steps: [revenue, { stage: 'order_by', keys }] }] });
-  // …and what it says now is taken: the order_by step, a where step on a metric (a having), the time
-  for (const steps of [
-    [{ stage: 'order_by', keys }],
-    [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }],
-    [{ stage: 'compute', name: 'recent', expr: { fn: 'gte', args: [{ column: 'metric_time_day' }, { now: true }] } }],
-  ]) assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [revenue, ...steps] }).ok, true, JSON.stringify(steps));
-  assert.equal(check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue, { stage: 'order_by', keys }] }] }).ok, true);
-});
-
-// What a metric query groups and filters by is the one ref — a model's column { source, column }, an
-// event property { source, property }, a dimension a task computed { semantic_model: [model], dimension }
-// — and its where steps and the steps after its metrics step hold the one expression. The earlier
-// { model, attribute } is shown as the ref it is now, read the way the schema takes it (an event property
-// first, then a column, then a computed dimension), wherever it stands; the plan an explained query was
-// asked for with `include_plan` is the one list `include`.
-test("a metric query's { model, attribute } is shown as the ref it is now, in its metrics step's group_by and in a where step", () => {
-  const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['revenue'], ...extra });
-  const q = (steps, extra = {}) => check('query_model', { context_id: 'ctxabc123456', steps, ...extra });
-  const where = (...conditions) => ({ stage: 'where', conditions });
-  const country = { source: 'users', column: 'country' };
-  assert.equal(q([where({ fn: 'eq', args: [country, { value: 'US' }] }), metrics({ group_by: [country] })]).ok, true);
-  for (const [attribute, now] of [
-    [{ model: 'users', attribute: 'country' }, country],
-    [{ model: 'events', attribute: 'level_id_of_event_data' }, { source: 'events', property: 'level_id_of_event_data' }],
-    [{ model: 'users', attribute: 'is_us' }, { semantic_model: ['users'], dimension: 'is_us' }],
-  ]) {
-    const grouped = q([metrics({ group_by: [attribute] })]);
-    assert.equal(grouped.ok, false);
-    assert.ok(text(grouped).includes(`\`steps.0.group_by.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), text(grouped));
-    const filtered = q([where({ fn: 'eq', args: [attribute, { value: 'US' }] }), metrics()]);
-    assert.equal(filtered.ok, false);
-    assert.ok(text(filtered).includes(`\`steps.0.conditions.0.args.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), text(filtered));
-  }
-  // …in a batch, at the query that wrote it
-  const batch = check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [metrics()] }, { steps: [metrics({ group_by: [{ model: 'users', attribute: 'country' }] })] }] });
-  assert.equal(batch.ok, false);
-  assert.ok(text(batch).includes(`\`queries.1.steps.0.group_by.0\` is written in an earlier spelling — write ${JSON.stringify(country)}`), text(batch));
-  // the plan of an explained query
-  const plan = q([metrics()], { dry_run: true, include_plan: true });
-  assert.equal(plan.ok, false);
-  assert.ok(text(plan).includes(`request is written in an earlier spelling — write ${JSON.stringify({ context_id: 'ctxabc123456', steps: [metrics()], dry_run: true, include: ['plan'] })}`), text(plan));
-  assert.equal(q([metrics()], { dry_run: true, include: ['plan'] }).ok, true);
+  for (const earlier of [
+    { context_id: 'ctxabc123456', transform: { group_by: ['event_name'] } },
+    { context_id: 'ctxabc123456', metrics: ['revenue'] },
+    { context_id: 'ctxabc123456', metrics: ['revenue'], group_by: [country], where: [US], order_by: keys },
+    { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { metrics: ['revenue'], order_by: keys }] },
+    { context_id: 'ctxabc123456', steps: [{ ...revenue, group_by: [{ model: 'users', attribute: 'country' }] }] },
+    { context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ model: 'users', attribute: 'country' }, { value: 'US' }] }] }, revenue] },
+    { context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include_plan: true },
+  ]) assert.equal(check('query_model', earlier).ok, false, JSON.stringify(earlier));
+  for (const today of [
+    { context_id: 'ctxabc123456', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'rows', expr: { fn: 'count' } }] }] },
+    { context_id: 'ctxabc123456', steps: [{ stage: 'where', conditions: [US] }, { ...revenue, group_by: [country] }, { stage: 'order_by', keys }] },
+    { context_id: 'ctxabc123456', queries: [{ steps: [revenue] }, { steps: [revenue, { stage: 'order_by', keys }] }] },
+    { context_id: 'ctxabc123456', steps: [revenue], dry_run: true, include: ['plan'] },
+    { context_id: 'ctxabc123456', steps: [revenue, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'revenue' }, { value: 100 }] }] }, { stage: 'limit', limit: 3 }] },
+  ]) assert.equal(check('query_model', today).ok, true, JSON.stringify(today));
   // a list of no steps says nothing: there is no query without its metrics step
-  assert.equal(q([]).ok, false);
+  assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [] }).ok, false);
 });
 
-// The builders' "show me more" is the one list `include` too: include_columns / include_steps are shown
-// as it, and an action that answers with no shape (preview) takes none.
-test('build_model: include_columns and include_steps are shown as the one list include', () => {
+// The builders' "show me more" is the one list `include`; an action that answers with no shape (preview)
+// takes none.
+test('build_model: include is one list; include_columns and include_steps are no fields', () => {
   const add = { action: 'add_steps', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }] };
-  const res = check('build_model', { ...add, include_columns: true, include_steps: true });
-  assert.equal(res.ok, false);
-  assert.ok(text(res).includes(`request is written in an earlier spelling — write ${JSON.stringify({ ...add, include: ['columns', 'steps'] })}`), text(res));
-  // a flag set to false asked for nothing: the request is shown without it
-  assert.ok(text(check('build_model', { ...add, include_columns: false })).includes(`write ${JSON.stringify(add)}`));
+  assert.match(text(check('build_model', { ...add, include_columns: true, include_steps: true })), /unexpected property 'include_columns'/);
   assert.equal(check('build_model', { ...add, include: ['columns', 'steps'] }).ok, true);
   assert.equal(check('build_model', { ...add, include: ['columns', 'columns'] }).ok, false, 'each item once');
   assert.equal(check('build_model', { ...add, include: ['yaml'] }).ok, false, 'the builder\'s own enum');

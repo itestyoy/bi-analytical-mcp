@@ -35,7 +35,6 @@ import { OPS, predicateSql, typedValue } from '../conditions.js';
 import { form, strEnum, SCALAR, conditionSlot } from '../schema-kit.js';
 import { REFS, VALUE_REFS, REF_PLACES, refKind, valueRefForms } from '../schema/refs.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { currentOf } from '../earlier-spelling.js';
 
 // ── The function names, by kind — what a level picks its vocabulary from ──────────────────────────
 /** The conditions: comparisons, membership, a range, the null tests, the text tests (src/conditions.js OPS). */
@@ -727,13 +726,6 @@ const said = (r) => (r.constant ? `the constant ${JSON.stringify(r.value)}` : r.
 /** Whether a written argument is a boolean — or may be one: nothing is known of its type. */
 const mayBeBoolean = (r) => (r.constant ? typeof r.value === 'boolean' : r.type === 'boolean' || r.type == null || r.type === 'unknown');
 
-/** A refusal of a value written in an earlier spelling of the grammar, with the value it is now — a
- *  typed property read converted as the catalog of the rows types the property (`opts`: catalog, source). */
-function earlier(e, at, opts = {}) {
-  const now = currentOf(e, { propertyType: propertyTypes(opts.catalog, opts.source) });
-  return now !== e && JSON.stringify(now) !== JSON.stringify(e) ? new Error(`${at}: ${JSON.stringify(e)} is an earlier spelling — write ${JSON.stringify(now)}`) : null;
-}
-
 /** Whether an expression is the constant null — what a case yields where no branch holds. */
 const isNull = (x) => isObj(x) && x.fn === undefined && Object.keys(x).length === 1 && Object.hasOwn(x, 'value') && x.value === null;
 
@@ -785,7 +777,7 @@ function writer(d, cols, opts) {
     const def = kind ? LEAVES[kind] || REFS[kind] : null;
     const stray = def ? Object.keys(e).filter((k) => !def.fields.includes(k)) : [];
     if (!def || stray.length) {
-      throw earlier(e, at, opts) || new Error(def
+      throw new Error(def
         ? `${at}: ${def.says} takes ${def.fields.join(', ')}, not ${stray.join(', ')}`
         : `${at}: an expression is ${(place ? place.leaves : Object.keys(ROW_LEAVES)).map((k) => LEAVES[k].says).join(', ')} — or a function { fn, args, … }`);
     }
@@ -849,8 +841,6 @@ function writer(d, cols, opts) {
     if (e.fn === undefined) return leaf(e, at, s);
     const spec = Object.hasOwn(FNS, e.fn) ? FNS[e.fn] : null;
     if (!spec) {
-      const wrong = earlier(e, at, opts);
-      if (wrong) throw wrong;
       const near = typeof e.fn === 'string' ? rankFuzzy(e.fn, Object.keys(FNS), { fields: (x) => [x], limit: 3 }).map((x) => x.item) : [];
       throw new Error(`${at}: unknown function '${e.fn}'${near.length ? ` — did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : ''} (the functions: ${Object.keys(FNS).join(', ')})`);
     }
@@ -867,7 +857,7 @@ function writer(d, cols, opts) {
     if (stray.length) {
       if (stray.includes('over') && kind !== 'window' && !spec.windowable) throw new Error(`${at}: ${fn} takes no \`over\` — a window is ${WINDOW_FNS.join(', ')}, or ${WINDOW_AGGREGATE_FNS.join(' / ')} over rows`);
       if (stray.includes('where') && window) throw new Error(`${at}: ${fn} over a window takes no \`where\` — a conditional window folds a CASE: { fn: "${fn}", args: [{ fn: "case", cases: [{ when: [...], then: <the value> }] }], over }`);
-      throw earlier(e, at, opts) || new Error(`${at}: ${fn} takes ${[...allowed].filter((k) => k !== 'fn').join(', ') || 'no field'}, not ${stray.join(', ')}`);
+      throw new Error(`${at}: ${fn} takes ${[...allowed].filter((k) => k !== 'fn').join(', ') || 'no field'}, not ${stray.join(', ')}`);
     }
     const args = e.args || [];
     if (!Array.isArray(args)) throw new Error(`${at}: ${fn} takes \`args\` as a list of expressions`);
@@ -955,7 +945,7 @@ function writer(d, cols, opts) {
  */
 export function exprSql(d, cols, e, at = 'expression', opts = {}) {
   if (opts.context === 'measure' && !isAggregateCall(e)) {
-    throw (isObj(e) && earlier(e, at, opts)) || new Error(`${at}: a measure is ONE aggregate — { fn: "sum" | "average" | "count" | …, args: [<a row expression>] } (the rows where a condition holds: a case) — a formula over several aggregates is several measures and a derived metric`);
+    throw new Error(`${at}: a measure is ONE aggregate — { fn: "sum" | "average" | "count" | …, args: [<a row expression>] } (the rows where a condition holds: a case) — a formula over several aggregates is several measures and a derived metric`);
   }
   const w = writer(d, cols, opts);
   const r = w.render(e, at, { inAggregate: false, inWindow: false, noWindows: opts.windows === false });

@@ -409,10 +409,10 @@ test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64
   const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['cost'] }] });
   assert.equal(before.ok, true, JSON.stringify(before.error));
   assert.ok(near(num(before.rows[0].cost), 17.5));
-  // a metric query is its steps: its metrics named outside a metrics step are an earlier spelling,
-  // refused at the boundary with the value converted
+  // a metric query is its steps: its metrics named outside a metrics step are no field of it, refused at
+  // the boundary
   const outside = await callErr('query_model', { context_id: ctx, metrics: ['cost'] });
-  assert.match(outside.error.message, /earlier spelling — write .*"steps":\[\{"stage":"metrics","metrics":\["cost"\]\}\]/s, JSON.stringify(outside));
+  assert.match(outside.error.message, /invalid input.*unexpected property 'metrics'/s, JSON.stringify(outside));
 
   // the new metric does not exist yet — the boundary says so rather than answering.
   const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['clicks'] }] });

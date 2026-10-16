@@ -196,8 +196,8 @@ test('query_model: the steps are checked in the call, and a query behind a build
   assert.equal((await taskResult(e, q2.task_id)).model, built2.model);
   // a sum needs its argument: refused by the schema, in the call
   await assert.rejects(() => e.query_model({ context_id, steps: [{ stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum' } }] }] }), /invalid input.*'args'/);
-  // and a read written as the earlier transform is refused with its steps
-  await assert.rejects(() => e.query_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }] } }), /invalid input.*"steps"/);
+  // and a read written as the earlier transform is no field of a query
+  await assert.rejects(() => e.query_model({ context_id, transform: { group_by: ['event_name'], measures: [{ agg: 'count', name: 'count' }] } }), /invalid input.*unexpected property 'transform'/);
 });
 
 // A read only compiled (dry_run) is a task like the read, slotted behind the context's builds only: it
@@ -265,9 +265,8 @@ test('the steps after the metrics step are checked against the result\'s columns
     (err) => err.field === 'steps' && /^steps\[2\]: .*unknown column 'metric_time_day' at this stage \(available: total\)/.test(err.message));
   await assert.rejects(() => e.query_model({ context_id, queries: [daily(), daily({ stage: 'order_by', keys: [{ key: 'nonsense' }] })] }),
     (err) => err.field === 'queries[1].steps' && /^queries\[1\]: steps\[1\]: .*unknown column 'nonsense'/.test(err.message));
-  // the earlier metrics, group_by and order_by are refused with the steps they are now
-  await assert.rejects(() => e.query_model({ context_id, metrics: ['cnt'], group_by: DAILY.group_by, order_by: [{ key: 'cnt', direction: 'desc' }] }),
-    (err) => err.message.includes(`write ${JSON.stringify({ context_id, steps: [DAILY, { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] }] })}`));
+  // the earlier metrics, group_by and order_by are no fields of a query: its steps say them
+  await assert.rejects(() => e.query_model({ context_id, metrics: ['cnt'], group_by: DAILY.group_by, order_by: [{ key: 'cnt', direction: 'desc' }] }), /invalid input.*unexpected property 'metrics'/);
   // the steps after it are a read: what makes a new table and raw SQL are no form of the tool's
   // definitions (built for its places: the where steps', the metrics step's and the read's), refused by
   // its schema; a ref — a where step's before the metrics step — passes the schema and is refused after it
@@ -389,9 +388,8 @@ test('a draft starts with its first steps, and adding steps may start its build 
   assert.deepEqual([started.steps_count, started.steps_added.map((s) => s.index)], [2, [1, 2]]);
   const listed = await e.build_model({ action: 'start', name: 'lvl2', source: 'events', steps: [WHERE_EVENT], include: ['steps'] });
   assert.deepEqual(listed.steps.map((s) => s.index), [1], 'include steps: the whole list');
-  // the earlier flag is refused with the request it is now
-  await assert.rejects(() => e.build_model({ action: 'start', name: 'lvl3', source: 'events', steps: [WHERE_EVENT], include_steps: true }),
-    (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'start', name: 'lvl3', source: 'events', steps: [WHERE_EVENT], include: ['steps'] })}`));
+  // the earlier flag is no field of a start
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'lvl3', source: 'events', steps: [WHERE_EVENT], include_steps: true }), /invalid input.*unexpected property 'include_steps'/);
   // a step that cannot compile starts nothing: no context is left for the refused call
   const contexts = e.ctxs.list().length;
   await assert.rejects(() => e.build_model({ action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such_column' }, { value: 1 }] }] }] }), (err) => /nothing was started/.test(err.message) && err.field === 'steps[0]');

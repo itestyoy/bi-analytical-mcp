@@ -76,9 +76,8 @@ test('an aggregate takes no where — over a window as folding rows — and a fu
   const add = (stage) => refusal(e, 'build_model', { action: 'add_steps', context_id: 'abc123', steps: [stage] });
   const isOne = { fn: 'eq', args: [{ column: 'a' }, { value: 1 }] };
   assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [isOne] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
-  // folding rows, a where is the earlier spelling of the case the aggregate folds: refused with it
-  const folded = add({ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'a' }], where: [isOne] } }] });
-  assert.ok(folded.includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'sum', args: [{ fn: 'case', cases: [{ when: [isOne], then: { column: 'a' } }] }] })}`), folded);
+  // folding rows, an aggregate takes no where either: the rows a condition holds for are a case it folds
+  assert.match(add({ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'sum', args: [{ column: 'a' }], where: [isOne] } }] }), /unexpected property 'where'/);
   assert.match(add({ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'a' }, { value: 1 }], over: {} }] }), /must be exactly one of: fn: eq \| neq \| gt \| gte \| lt \| lte/);
 });
 

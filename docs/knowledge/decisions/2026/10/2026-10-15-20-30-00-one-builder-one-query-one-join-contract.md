@@ -1,7 +1,7 @@
 ---
 title: One builder, one query tool, one join contract
 status: Active
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 tags: [mcp, tools, schema, joins, semantic-layer, pipeline]
 source_of_truth:
   - src/tools/core.js
@@ -17,7 +17,7 @@ supersedes: []
 Active — accepted by the owner on 2026-10-15; implemented step by step (see Order).
 
 ## Last Reviewed
-2026-10-15
+2026-10-16
 
 ## Source Of Truth
 The tool definitions (src/tools/core.js), their schemas (src/schema.js), the catalog (config/catalog.yml)
@@ -113,6 +113,19 @@ Amended while implementing (step 3, agreed with the owner on 2026-10-16):
   owns no key, so nothing joins onto it. A query names its columns `{ semantic_model: [<the build's name>],
   dimension }`. `materialize` builds the steps first, or reads the table that already stands for them,
   and then writes and parses the layer. The build is named apart from the catalog's models and keys.
+
+Amended while implementing (step 4, 2026-10-16):
+- The draft keeps `add_steps`, `edit_step` and `fork`; going back to step N is `fork` with `after: N`.
+- `context({ action: "describe" })` adds the semantic layer as dbt parsed it to a context that holds one
+  (narrowed by `metric` or `semantic_model`); with `validate: true` it starts the task the preview did. The
+  task kind keeps its stored name, `preview_semantic_model`.
+- Names are stored as declared. What MetricFlow refuses of a name is refused when the step is added: its
+  spelling in the schema (two characters at least, no `__`, no trailing `_`), a time grain or a reserved
+  word, a governed measure's name, and a name another element of the layer holds as another kind. A
+  dimension declared over a column takes that column's own place.
+- An input in an earlier spelling is refused by the schema like any value it does not take. Only kept
+  state is converted: a draft's steps, an eventstream, a stored declaration or display, a recipe file. A
+  `ratio` metric kind is hinted as `derived`.
 
 ### Removed
 Input-side earlier-spelling converters (a stored draft still reads), the `<task>_<metric>` prefix, the five

@@ -159,14 +159,11 @@ test('a read names no type — cast converts; only cast, case and raw say a type
     { stage: 'compute', name: 'result_n', expr: { fn: 'cast', args: [{ property: 'result_of_event_data' }], type: 'int' } },
   ], { physicalCols: PAYLOAD });
   assert.deepEqual(['price', 'result', 'result_n'].map((c) => built.columns.get(c).type), ['numeric', 'string', 'int']);
-  // a call that names the type is refused with the read as it is now: the property alone where the catalog
-  // reads it as that type (the converter asked, opts.propertyType), cast where it is another or not known
-  const step = (expr, opts) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr }] }, opts);
-  const shown = (r, now) => assert.ok(r.errors.join(' ').includes(`\`steps.0.expr\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
+  // a call that names the type is refused: a read names none, and converting is a cast
+  const step = (expr) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr }] });
   const price = { property: 'price_in_usd_of_event_data' };
-  shown(step({ ...price, type: 'numeric' }, { propertyType: propertyTypes(catalog) }), price);
-  shown(step({ ...price, type: 'int' }, { propertyType: propertyTypes(catalog) }), { fn: 'cast', args: [price], type: 'int' });
-  shown(step({ ...price, type: 'numeric' }), { fn: 'cast', args: [price], type: 'numeric' });
+  assert.match(step({ ...price, type: 'numeric' }).errors.join(' | '), /unexpected property 'type'/);
+  assert.equal(step({ fn: 'cast', args: [price], type: 'int' }).ok, true);
 });
 
 // What a place takes of the one expression is ONE table (PLACES), read by the writer as it builds a value:
@@ -359,10 +356,9 @@ test('a missing value is tested with is_null / is_not_null: a comparison with a 
   ]) assert.throws(() => render([where(c)]), nullRule, JSON.stringify(c));
   assert.ok(render([where({ fn: 'is_null', args: [col('event_name')] }, { fn: 'is_not_null', args: [col('session_number')] })]));
   // a constant is a scalar, never a list (an in whose members are one list is an earlier spelling: a
-  // kept step is carried over, a call refused with its members as arguments)
+  // kept step is carried over, a call refused — its members are arguments of their own)
   assert.throws(() => render([where({ fn: 'eq', args: [col('event_name'), val(['a', 'b'])] })]), /a list is written as arguments of their own/);
-  const listed = validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] });
-  assert.ok(listed.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'in', args: [col('event_name'), val('a'), val('b')] })}`), listed.errors.join(' | '));
+  assert.equal(validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] }).ok, false);
 });
 
 test('every earlier spelling converts to the one grammar — and a value in today\'s spelling is left as it is', () => {

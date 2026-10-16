@@ -64,8 +64,7 @@ test('semantic_model: a field it does not take is refused', () => {
 test('semantic_model: a ratio is no metric type of its own — it is a derived metric dividing two', () => {
   const r = vl({ metrics: [{ name: 'ratio', type: 'ratio', numerator: 'aa', denominator: 'bb' }] });
   assert.equal(r.ok, false);
-  // refused in the earlier spelling it is, with the derived metric it is now — never a fuzzy 'cumulative'
-  assert.match(r.errors.join(' | '), /`steps\.0\.metrics\.0` is written in an earlier spelling — write \{"name":"ratio","type":"derived","expr":\{"fn":"div","args":\[\{"metric":"aa"\},\{"metric":"bb"\}\]\}\}/);
+  // refused by the schema, naming the metric kinds there are — never a fuzzy 'cumulative'
   assert.doesNotMatch(r.errors.join(' | '), /Did you mean/);
   assert.ok(vl({ metrics: [{ name: 'ratio', type: 'derived', expr: { fn: 'div', args: [{ metric: 'aa' }, { metric: 'bb' }] } }] }).ok);
 });
@@ -111,12 +110,9 @@ test('query: a where step before the metrics step is conditions over the refs gr
     [{ fn: 'eq', args: [{ source: 'users', column: 'no_such' }, { value: 'US' }] }],
     [{ fn: 'eq', args: [{ source: 'users', property: 'country' }, { value: 'US' }] }],
   ]) assert.equal(q(bad).ok, false, JSON.stringify(bad));
-  // the earlier { field, op, value } and its { or } groups are refused with the condition written today,
-  // its { model, attribute } the ref it is now
+  // the earlier { field, op, value } and its { or } groups are no form of a condition
   const old = { model: 'users', attribute: 'country' };
-  const earlier = q([{ or: [{ field: old, op: 'eq', value: 'US' }, { field: old, op: 'eq', value: 'DE' }] }]);
-  assert.equal(earlier.ok, false);
-  assert.ok(earlier.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'or', args: [{ fn: 'eq', args: [country, { value: 'US' }] }, { fn: 'eq', args: [country, { value: 'DE' }] }] })}`), earlier.errors.join(' | '));
+  assert.equal(q([{ or: [{ field: old, op: 'eq', value: 'US' }, { field: old, op: 'eq', value: 'DE' }] }]).ok, false);
 });
 
 // ONE JOIN: a model whose attributes the metrics are grouped by is joined in the step on its contract —
@@ -243,13 +239,12 @@ test('a semantic measure is ONE aggregate over row expressions, and a row takes 
     { fn: 'average', args: [{ fn: 'mul', args: [{ column: 'session_number' }, { value: 2 }] }] },
   ]) assert.ok(vl(m(expr)).ok, `${JSON.stringify(expr)}: ${vl(m(expr)).errors?.join(' | ')}`);
   refused(m({ fn: 'percentile', args: [{ column: 'session_number' }] }), new RegExp(`${at}\` is missing required property 'percentile'`));
-  // a measure in an earlier spelling — { name, agg, column } — is refused with the measure it is now
+  // a measure in an earlier spelling — { name, agg, column } — is no form of a measure
   for (const [earlier, now] of [
     [{ name: 'rows', agg: 'sum', column: 'session_number' }, { name: 'rows', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }],
     [{ name: 'rows', agg: 'count' }, { name: 'rows', expr: { fn: 'count', args: [] } }],
   ]) {
-    const r = vl(decl({ measures: [earlier] }));
-    assert.ok(r.errors.join(' ').includes(`\`steps.0.measures.0\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
+    assert.equal(vl(decl({ measures: [earlier] })).ok, false, JSON.stringify(earlier));
     assert.ok(vl(decl({ measures: [now] })).ok, 'and what it is now is taken');
   }
 });
@@ -287,8 +282,8 @@ test('a dimension takes a grain only on a column the catalog types as time, and 
   for (const bad of [[{ column: 'install_date', as_type: 'time' }], [{ column: 'country', as_type: 'categorical' }], [{ name: 'is_us' }]]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
   const compiled = (dims) => compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [COUNT] }, { source: 'users', dimensions: dims }], metrics: N });
   for (const bad of [[{ column: 'country', grain: 'week' }], [{ column: 'no_such' }]]) assert.throws(() => compiled(bad), JSON.stringify(bad));
-  // the earlier { field } is refused with the dimension written today
-  assert.match(check([{ field: 'country' }]).errors.join(' | '), /`steps\.0\.dimensions\.0` is written in an earlier spelling/);
+  // the earlier { field } is no form of a dimension
+  assert.equal(check([{ field: 'country' }]).ok, false);
 });
 
 // ONE MEASURE: a task's measure is { name, expr }, its expr ONE aggregate of the task's (sum_boolean is a
@@ -316,17 +311,10 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
     assert.equal(check(bad).ok, false, JSON.stringify(bad));
     await assert.rejects(() => compiled(bad), (e) => e.field === 'measures.expr' && said.test(e.message), JSON.stringify(bad));
   }
-  // the earlier { agg, field, cast } is refused with the measure written today
-  const earlier = vl({ measures: [{ name: 'val', agg: 'count' }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
-  assert.ok(earlier.errors.join(' ').includes('is written in an earlier spelling — write {"name":"val","expr":{"fn":"count","args":[]}}'), earlier.errors.join(' | '));
-  // …an aggregate's where with the case it folds, a typed read with the read (cast where it named a type
-  // the catalog does not read it as; without the catalog to ask, a cast)
-  const said = (r, path, now) => assert.ok(r.errors.join(' ').includes(`\`${path}\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
-  said(check({ fn: 'count', where: [first] }), 'steps.0.measures.0.expr', { fn: 'count', args: [{ fn: 'case', cases: [{ when: [first], then: { value: 1 } }] }] });
-  const price = { property: 'price_in_usd_of_event_data', type: 'numeric' };
-  said(check({ fn: 'sum', args: [price] }), 'steps.0.measures.0.expr.args.0', { fn: 'cast', args: [{ property: 'price_in_usd_of_event_data' }], type: 'numeric' });
-  const typedBy = validateInput(validators.build_model, layer({ measures: [{ name: 'val', expr: { fn: 'sum', args: [price] } }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] }), { propertyType: propertyTypes(catalog) });
-  said(typedBy, 'steps.0.measures.0.expr.args.0', { property: 'price_in_usd_of_event_data' });
+  // the earlier { agg, field, cast }, an aggregate's where and a typed read are no forms of the grammar
+  assert.equal(vl({ measures: [{ name: 'val', agg: 'count' }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] }).ok, false);
+  assert.equal(check({ fn: 'count', where: [first] }).ok, false);
+  assert.equal(check({ fn: 'sum', args: [{ property: 'price_in_usd_of_event_data', type: 'numeric' }] }).ok, false);
 });
 
 // THE ELSE TRAP, IN A SEMANTIC MODEL TOO: a measure that folds only some rows folds a case with no else

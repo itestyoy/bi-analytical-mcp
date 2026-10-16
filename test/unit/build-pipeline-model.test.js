@@ -400,9 +400,9 @@ test('build_model: include is refused on preview, materialize and discard', asyn
       await assert.rejects(() => e.build_model({ action, context_id, [flag]: true }), /invalid input/, `${action} with ${flag}`);
     }
   }
-  for (const [flag, item] of [['include_columns', 'columns'], ['include_steps', 'steps']]) {
-    await assert.rejects(() => e.build_model({ action: 'fork', context_id, name: 'flag_fork', after: 1, [flag]: true }),
-      (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'fork', context_id, name: 'flag_fork', after: 1, include: [item] })}`), flag);
+  // the earlier include_* flags are no fields of a fork either: it says what it shows with include
+  for (const flag of ['include_columns', 'include_steps']) {
+    await assert.rejects(() => e.build_model({ action: 'fork', context_id, name: 'flag_fork', after: 1, [flag]: true }), /invalid input.*unexpected property/, flag);
   }
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused calls changed nothing');
 });

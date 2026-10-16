@@ -8,7 +8,6 @@ import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
 import { rankFuzzy } from './fuzzy.js';
-import { currentOf as currentOfValue, isEarlierInclude, isEarlierRef, isTypedUnnest, untypedUnnest } from './earlier-spelling.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -35,8 +34,7 @@ export function makeValidators(schemas) {
  * `aggregations`, `targets`, `text`, `since`, `stages` — or a stage's earlier field: a limit's `n`, a
  * sample's `percent`, unpivot's `name_as` / `value_as`, a funnel's `mode` —
  * and the refusal says what this server calls it, when that name is allowed where it was written.
- * A hint, never an alias: the other spelling is refused. (A whole value of an earlier spelling — a
- * condition, a measure — is shown converted instead: earlierSpellings below.)
+ * A hint, never an alias: the other spelling is refused.
  */
 export const CROSS_PATH_SPELLING = {
   avg: 'average',
@@ -49,6 +47,8 @@ export const CROSS_PATH_SPELLING = {
   explain: 'dry_run',
   draft_id: 'context_id',
   aggregations: 'measures',
+  // a metric kind of another layer: a ratio of two metrics is a derived metric dividing one by the other
+  ratio: 'derived',
   // what a note is about, a substring filter, a time window, a catalog model on its own (hinted only
   // where `source` takes the model named: HINT_WHERE_VALUE_TAKEN)
   targets: 'about',
@@ -333,8 +333,6 @@ function rebased(node) {
   return walk(node);
 }
 
-const within = (path, base) => path === base || path.startsWith(`${base}/`);
-
 /** A path and every path it lies within, itself first and the root last: '/a/b' → ['/a/b', '/a', '']. */
 function prefixes(path) {
   const out = [path];
@@ -570,141 +568,18 @@ function dedupe(errors) {
   return errors.filter((e) => { const k = `${e.keyword}|${e.instancePath}|${JSON.stringify(e.params)}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-/** How many raw errors the validator finds in `value` (0: it validates). */
-function errorCount(validator, value) {
-  return validator(value) ? 0 : (validator.errors || []).length;
-}
-
-/** Whether `input` is refused at `at` only for a name the field's values come near — a misspelt one. */
-function misspeltName(validator, input, at) {
-  const es = explain(validator.schema, validator.schema, input, new Map()).filter((e) => within(e.instancePath, at) && e.keyword !== 'oneOfNamed');
-  return es.length > 0 && es.every((e) => {
-    const vals = e.keyword === 'enum' ? e.params.allowedValues : e.keyword === 'pinnedNone' ? e.params.values : null;
-    const used = valueAt(input, e.instancePath);
-    return Array.isArray(vals) && typeof used === 'string' && rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 1 }).length > 0;
-  });
-}
-
-/** `value` with the node at `segs` replaced by `node` — copied along the path, the rest shared. */
-function replacedAt(value, segs, node) {
-  if (!segs.length) return node;
-  const [head, ...rest] = segs;
-  const key = Array.isArray(value) ? Number(head) : head;
-  const copy = Array.isArray(value) ? value.slice() : { ...value };
-  copy[key] = replacedAt(value?.[key], rest, node);
-  return copy;
-}
-
-/**
- * A VALUE IN AN EARLIER SPELLING, SHOWN AS IT IS NOW. The closed forms refuse a condition, a measure or
- * a read written as an earlier version took them, and what they say of it — a field the form does not
- * take, another it lacks — does not say what to write. So the nearest value around each refused spot
- * that converts (src/earlier-spelling.js, the converters a kept value is carried over by) is refused as
- * a whole, with its conversion: "write { fn: "eq", args: [ … ] }". A conversion is said only where the
- * input with it in place has fewer errors — a value that merely looks like an earlier one is left to the
- * forms — and where a name could be a column or an event property (or, of a { model, attribute }, a
- * dimension a task computed), the reading the schema takes is said, the first of them on a tie. A
- * relationship (`via`) the column is not reached through, and a flag asked of a form that shows nothing
- * more, are readings too — without them. A dimension a task computed is a name the schema cannot know,
- * so that reading is said only where the column reading misses on more than a misspelt name (one the
- * column's values come near: that column is meant). Never an alias: the value is refused all the same.
- * `opts` reaches every converter (`propertyType`: what a property is read as, so a typed read whose type
- * is the catalog's is shown without it rather than cast to it).
- * → Map(path → the value as it is now)
- */
-function earlierSpellings(validator, input, errors, opts = {}) {
-  const found = new Map();
-  const currentOf = (v, o = {}) => currentOfValue(v, { ...opts, ...o });
-  // nothing in the input converts, under either reading of a name: no spot of it is an earlier
-  // spelling, and trying each refused spot would revalidate the whole input for nothing
-  if (currentOf(input) === input && currentOf(input, { subject: () => 'property' }) === input) return found;
-  let working = input;
-  // the deepest spots first, so a whole request is converted only for what no spot inside it says
-  const paths = [...new Set(errors.map((e) => e.instancePath))].sort((a, b) => b.split('/').length - a.split('/').length);
-  for (const path of paths) {
-    const segs = path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
-    for (let n = segs.length; n >= 0; n -= 1) {
-      const at = n ? `/${path.split('/').filter(Boolean).slice(0, n).join('/')}` : '';
-      if ([...found.keys()].some((f) => within(at, f))) break;
-      const value = valueAt(working, at);
-      if (!value || typeof value !== 'object') continue;
-      const seen = new Set();
-      const column = currentOf(value);
-      const dimension = currentOf(value, { subject: () => 'dimension' });
-      const readings = [currentOf(value, { subject: () => 'property' }), column, dimension];
-      if (isEarlierRef(value) && value.via !== undefined) { const { via: _via, ...bare } = value; readings.push(currentOf(bare)); }
-      if (isEarlierInclude(value) && value.include === undefined) { const { include: _include, ...rest } = column; readings.push(rest); }
-      const candidates = readings.filter((c) => c !== value && !seen.has(JSON.stringify(c)) && seen.add(JSON.stringify(c)));
-      if (!candidates.length) continue;
-      const before = errorCount(validator, working);
-      const scored = candidates.map((c) => ({ c, input: replacedAt(working, segs.slice(0, n), c) })).map((x) => ({ ...x, count: errorCount(validator, x.input) }));
-      let best = scored.reduce((a, b) => (b.count < a.count ? b : a));
-      if (best.c === dimension && dimension !== column) {
-        const asColumn = scored.find((x) => x.c === column);
-        if (asColumn && misspeltName(validator, asColumn.input, at)) best = asColumn;
-      }
-      if (best.count < before) {
-        // a conversion found inside this one that this one takes further (a batch's queries, one item
-        // of which only the request's reading converts) was partial: this one says it whole
-        for (const [f, v] of [...found]) if (f !== at && within(f, at) && JSON.stringify(valueAt(best.input, f)) !== JSON.stringify(v)) found.delete(f);
-        found.set(at, best.c); working = best.input; break;
-      }
-    }
-  }
-  return found;
-}
-
-/** An input checked against its tool's schema → { ok } or { ok: false, errors }. `opts` reaches the
- *  converters of an earlier spelling (earlierSpellings: `propertyType`). */
-export function validateInput(validator, input, opts = {}) {
+/** An input checked against its tool's schema → { ok } or { ok: false, errors }. `opts` is kept for the
+ *  callers that pass the catalog's reading of a property; the refusal reads the input as it is. */
+export function validateInput(validator, input, _opts = {}) {
   const ok = validator(input);
   if (ok) return { ok: true };
   // every union read as the branch the input meant, each error as a sentence, de-duplicated
   const seen = new Set();
   const errors = [];
   const ctx = { input, schema: validator.schema };
-  const explained = explain(validator.schema, validator.schema, input, new Map());
-  // a value of an earlier spelling is refused as that, with its conversion, instead of field by field —
-  // and what the input still lacks is read off it as it is now: a misspelt name inside the converted
-  // value is said (the earlier spelling's own complaints are not)
-  const earlier = earlierSpellings(validator, input, explained, opts);
-  const segsOf = (path) => path.split('/').filter(Boolean).map((x) => x.replace(/~1/g, '/').replace(/~0/g, '~'));
-  const now = [...earlier].reduce((w, [path, v]) => replacedAt(w, segsOf(path), v), input);
-  const rest = earlier.size ? explain(validator.schema, validator.schema, now, new Map()) : explained;
-  for (const [path, value] of earlier) {
-    // a conversion is offered as the value to write only where it is taken: one this place refuses too
-    // (a column it does not list) is said as today's spelling, with what is wrong in it below — never as
-    // a value to write that the next call is refused for
-    const refusedToo = rest.some((e) => within(e.instancePath, path));
-    const msg = refusedToo
-      ? `${fieldRef(path)} is written in an earlier spelling, and today's spelling of it, ${JSON.stringify(value)}, is not taken here either`
-      : `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(value)}`;
-    seen.add(msg); errors.push(msg);
-  }
-  // a typed unnest standing alone (an edit_step `step`) has no one value it is now: in a
-  // list of steps it is two (untypedUnnest), so it is said as those two, each in today's spelling, to put
-  // where it stood — the one thing said of it: what the forms find wrong in it is read off the unnest of
-  // the two (what they put right is not said), and of its name, which the cast keeps, as written
-  const lone = new Map();
-  for (const e of rest) {
-    for (const path of prefixes(e.instancePath)) {
-      const v = valueAt(now, path);
-      const two = isTypedUnnest(v) ? untypedUnnest(v) : [];
-      if (two.length === 2) { lone.set(path, two.map((x) => currentOfValue(x, opts))); break; }
-    }
-  }
-  const inLone = (p, under = '') => [...lone.keys()].some((path) => within(p, `${path}${under}`));
-  const put = [...lone].reduce((w, [path, [unnest]]) => replacedAt(w, segsOf(path), unnest), now);
-  const toSay = [
-    ...rest.filter((e) => !inLone(e.instancePath) || inLone(e.instancePath, '/name')).map((e) => [e, now]),
-    ...(lone.size ? explain(validator.schema, validator.schema, put, new Map()).filter((e) => inLone(e.instancePath)).map((e) => [e, put]) : []),
-  ];
-  for (const [e, input] of toSay) {
-    const msg = describe(e, input !== ctx.input ? { ...ctx, input } : ctx);
+  for (const e of explain(validator.schema, validator.schema, input, new Map())) {
+    const msg = describe(e, ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }
-  }
-  for (const [path, [unnest, cast]] of lone) {
-    errors.push(`${fieldRef(path)}: an unnest takes no type — its element is read as it is stored; converting it is a step of its own, so this is two steps now: ${JSON.stringify(unnest)} in its place, then ${JSON.stringify(cast)} after it`);
   }
   if (errors.length === 0) errors.push('input did not match the expected shape');
   return { ok: false, errors };

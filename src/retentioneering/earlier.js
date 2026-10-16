@@ -28,14 +28,11 @@
 //     value does not hold now, neq's too, and not(…) keeps one: so each negation is carried over as
 //     not(eq / in / like), and a step keeps the rows it kept.
 // What is in the current spelling passes through unchanged. A NEW call in an earlier spelling is refused
-// (refuseEarlierSpelling, refuseEarlierRead, refuseEarlierDisplay), never taken as an alias — a step
-// action's include_columns / include_steps by the core's converter (src/earlier-spelling.js currentInclude,
-// as the schema refuses them), a display's { task_id, analysis, … } here.
+// by the tool's schema as any other value it does not take: these converters only read what a context
+// kept.
 
 import { storedJoin } from '../pipeline/earlier.js';
 import { ES_COLUMNS } from './names.js';
-import { ToolError } from '../validate.js';
-import { READ_PAGE } from '../schema/fields.js';
 import { NAME_RE } from '../pipeline/sql.js';
 import { currentCondition, currentConditions, currentExpression, isEarlierCondition } from '../earlier-spelling.js';
 import { propertyTypes } from '../pipeline/compute.js';
@@ -238,52 +235,6 @@ function fromFields(spec, catalog) {
     ...(segmentColumns.length ? { segments: segmentColumns } : {}),
     ...(events.top !== undefined ? { top: events.top } : {}),
   };
-}
-
-/**
- * A NEW call written in an earlier spelling is refused — never taken as an alias — with what it says now:
- * a start's fields as its steps and named columns, and filter_events' where as the expression grammar,
- * its negations as not(…). (The general hint of src/validate.js would write an earlier neq as neq, which
- * now leaves a missing value out: the hint here keeps what the caller's condition kept.) A start that only
- * names its list `stages` is left to that hint (stages → steps): the rename is all there is to say.
- */
-export function refuseEarlierSpelling(input, catalog) {
-  if (!isObj(input)) return;
-  const refuse = (what, now, field = what) => { throw new ToolError(`invalid input: ${what} is written in an earlier spelling — write ${JSON.stringify(now)}`, { stage: 'validate', field }); };
-  if ((input.action ?? 'start') === 'start' && isEarlierSpec(input)) {
-    const now = currentSpec(input, catalog);
-    // (the field named is the first the start no longer takes in that shape)
-    refuse('the start', now, ['where', 'events', 'segments', 'path', 'columns'].find((k) => input[k] !== undefined && JSON.stringify(input[k]) !== JSON.stringify(now[k])));
-  }
-  const steps = Array.isArray(input.steps) ? input.steps.map((s, i) => [`steps[${i}]`, s]) : isObj(input.step) ? [['step', input.step]] : [];
-  for (const [field, s] of steps) {
-    if (s?.type !== 'filter_events' || s.where === undefined) continue;
-    const where = currentWhere(s.where);
-    if (where !== s.where) refuse(`${field}.where`, where);
-  }
-}
-
-/**
- * A display call in the shape before `display` held what is drawn — { task_id, analysis, title?,
- * edge_weight? } — is refused with it in the one shape a card is asked for, { task_id, display }, as
- * display_model_result takes it. (A card drawn so is kept as it was: its marks name the analysis, and the
- * drawn result carries its title and weight.)
- */
-export function refuseEarlierDisplay(input) {
-  if (!isObj(input) || input.display !== undefined || input.analysis === undefined) return;
-  const { task_id: taskId, analysis, title, edge_weight: edgeWeight, ...rest } = input;
-  const now = { ...(taskId !== undefined ? { task_id: taskId } : {}), display: { analysis, ...(title !== undefined ? { title } : {}), ...(edgeWeight !== undefined ? { edge_weight: edgeWeight } : {}) }, ...rest };
-  throw new ToolError(`invalid input: request is written in an earlier spelling — write ${JSON.stringify(now)}`, { stage: 'validate', field: 'display' });
-}
-
-/**
- * A read that asks for `detail` is refused with how a read is made now: it pages each table by its row
- * numbers, as the other query tools page theirs — the whole of a table is its pages (or one page as
- * long as it is), and a card still draws every row.
- */
-export function refuseEarlierRead(input) {
-  if (!isObj(input) || input.detail === undefined || input.task_ids === undefined) return;
-  throw new ToolError(`invalid input: a read takes no detail — it pages each table of a result by its row numbers: { task_ids, offset, limit } (offset: the row a page starts at, 0 the first, next_offset the next page's; limit: how many rows, ${READ_PAGE} unless it says) — every row of a table is in its pages, and a card draws every row`, { stage: 'validate', field: 'detail' });
 }
 
 /**

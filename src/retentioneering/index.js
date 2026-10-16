@@ -33,7 +33,6 @@ import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, 
 import { SIDE, BUILD, QUERY, DISPLAY } from './names.js';
 import { contextFor, pathContext, basePaths } from './contexts.js';
 import { validateStart, checkStepPlaces } from './build-input.js';
-import { refuseEarlierSpelling, refuseEarlierDisplay } from './earlier.js';
 import { summarizeEventstream, shapeOf, editSteps, preview, fork, materializeSteps, deleteEventstream } from './steps.js';
 import { columnsFrom, pathHint, eventstreamOf, query, KEPT_ROWS } from './query.js';
 import { drawnAlready, display } from './display.js';
@@ -115,8 +114,6 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
         schema: () => displaySchema(),
         run: (engine, input) => display(engine, feature, input),
         precheck: (engine, args) => {
-          // the shape before `display` held what is drawn is refused with the one shape (src/retentioneering/earlier.js)
-          refuseEarlierDisplay(args);
           engine.host.validate(DISPLAY, args);
           engine.tasks.forSide(args.task_id, SIDE);
           const { analysis } = args.display;
@@ -188,8 +185,6 @@ function describePathContext(ctx) {
 /** A build: `start` declares the eventstream in SQL (the default); the other actions shape it with the
  *  library's steps, a draft like a pipeline's, each step checked by the library itself as it is added. */
 async function build(engine, feature, input) {
-  // a start or a step in an earlier spelling is refused with what it says now (src/retentioneering/earlier.js)
-  refuseEarlierSpelling(input, engine.catalog);
   engine.host.validate(BUILD, input);
   // each step at its place: a start's are the pipeline's stages that keep the rows events, the steps
   // added after it the library's own (src/retentioneering/build-input.js)

@@ -16,7 +16,7 @@ const refusal = (e, tool, input) => { try { e._validate(tool, input); return nul
 test('a mode left unnamed is refused as the mode the fields belong to, with the modes there are', () => {
   const e = engine();
   const edit = refusal(e, 'build_model', { context_id: 'abc123', index: 1, step: { stage: 'limit', limit: 1 } });
-  assert.match(edit, /edit or insert a step/);
+  assert.match(edit, /edit a step/);
   assert.match(edit, /missing required property 'action'/);
   assert.doesNotMatch(edit, /unexpected property 'step'/);
   const del = refusal(e, 'delete_context', { context_id: 'abc123', semantic_model: 'events' });

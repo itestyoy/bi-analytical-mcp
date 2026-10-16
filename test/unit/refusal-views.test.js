@@ -114,7 +114,7 @@ test('stages and stage are told their name, steps and step, where the form takes
     ['build_model', { action: 'add_steps', context_id: 'abc123', stages: [limit] }, 'stages'],
     ['build_model', { name: 'started', source: 'events', stages: [limit] }, 'stages'],
     ['build_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
-    ['build_model', { action: 'insert_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
+    ['build_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
     ['query_model', { context_id: 'abc123', stages: [limit] }, 'stages'],
     ['query_model', { context_id: 'abc123', stages: [{ stage: 'metrics', metrics: ['x'] }, limit] }, 'stages'],
   ]) {

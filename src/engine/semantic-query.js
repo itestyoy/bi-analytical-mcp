@@ -386,7 +386,7 @@ export const semanticQueryMethods = {
         dimensions: sm.dimensions.map((d) => ({ name: d.name, ...(d.type === 'time' ? { time: true, grain: d.grain } : {}), ...(d.description ? { description: d.description } : {}) })),
         entities: sm.entities.map((e) => e.name),
         // each metric with what MetricFlow says it can be grouped by, in short: the semantic models whose
-        // dimensions it takes, its entities, and its time axis (preview_semantic_model gives every item)
+        // dimensions it takes, its entities, and its time axis (context describe gives every item)
         metrics: this._projectMetricsOf(ctx).map((m) => {
           const items = layer.groupBys[m.name] || [];
           const time = items.find((i) => i.name === 'metric_time' && !i.semantic_model);
@@ -401,7 +401,7 @@ export const semanticQueryMethods = {
     };
     if (only) return one(only);
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ request: { context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_model({ request: { context_id: '<semantic model>', steps: [{ stage: 'metrics', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. context({ request: { action: 'describe', context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // joins the project declares that no reference could name — a model joined through several keys,
@@ -439,7 +439,7 @@ export const semanticQueryMethods = {
     const kindOf = (ref, at) => {
       let kind;
       try { kind = refAt('group_by', ref, at); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'steps' }); }
-      if (kind === 'source_column' || kind === 'source_property') throw new ToolError(`${at}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's ${REFS[kind].says}. preview_semantic_model({ request: { context_id: '${ctx.id}', metric } }) lists each exactly.`, { stage: 'validate', field: 'steps' });
+      if (kind === 'source_column' || kind === 'source_property') throw new ToolError(`${at}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's ${REFS[kind].says}. context({ request: { action: 'describe', context_id: '${ctx.id}', metric } }) lists each exactly.`, { stage: 'validate', field: 'steps' });
       return kind;
     };
     const pick = (ref, at) => {

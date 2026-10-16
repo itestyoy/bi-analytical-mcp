@@ -19,7 +19,7 @@
 //   engine/semantic-index.js      semantic_index and its catalog views, recipes
 //   engine/semantic-build.js      build / update / delete a semantic model, a pipeline model
 //   engine/semantic-query.js      query_model: references, the metric-query shell
-//   engine/semantic-preview.js    preview_semantic_model
+//   engine/semantic-preview.js    a context's semantic layer as parsed (context describe)
 //   engine/pipeline-draft.js      build_model's draft: steps, checkpoints, preview
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
 //   engine/task-results.js        reading a task back, query_model, display_model_result
@@ -79,6 +79,8 @@ export const TASK_KINDS = {
   query_pipeline_model: { side: 'pipeline', tool: 'query_model' },
   build_semantic_model: { side: 'semantic', tool: 'build_model' },
   build_pipeline_model: { side: 'pipeline', tool: 'build_model' },
+  // a semantic layer checked on the warehouse: context({ action: 'describe', validate: true })
+  preview_semantic_model: { side: 'semantic', tool: 'context' },
 };
 
 export class Engine {
@@ -436,7 +438,9 @@ export class Engine {
    */
   async context(input = {}) {
     this._validate('context', input);
-    return input.action === 'list' ? this._listContexts(input) : this._describeContext({ context_id: input.context_id });
+    if (input.action === 'list') return this._listContexts(input);
+    const { action: _describe, ...describe } = input;
+    return this._describeContext(describe);
   }
 
   /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context
@@ -602,6 +606,19 @@ export class Engine {
   async _describeContext(input) {
     this._validate('context.describe', input);
     const ctx = this._ctx(input.context_id);
+    // where the context holds a semantic layer, the layer as dbt parsed it is part of what it is
+    // (src/engine/semantic-preview.js); validate checks it on the warehouse, a task
+    const project = ctx.state.engine === 'project' && !!this.project;
+    const hasLayer = project || (ctx.state.metrics || []).length > 0;
+    const asked = ['metric', 'semantic_model', 'validate', 'time_range'].filter((k) => input[k] !== undefined && input[k] !== false);
+    if (asked.length && !hasLayer) throw new ToolError(`context ${ctx.id} holds no semantic layer — ${asked.join(', ')} describe${asked.length > 1 ? '' : 's'} one (a build's semantic_model step makes it); context({ request: { action: 'describe', context_id: '${ctx.id}' } }) shows what it holds`, { stage: 'validate', field: asked[0] });
+    if (input.validate) return this._describeLayer(ctx, input);
+    const base = await this._describeBase(ctx);
+    return hasLayer ? { ...base, ...(await this._describeLayer(ctx, input)) } : base;
+  }
+
+  /** What a context holds, without its semantic layer's parse: its steps, tasks, models and files. */
+  async _describeBase(ctx) {
     if (ctx.state.engine === 'project' && this.project) return { engine: 'project', ...this._projectOverview(ctx.id) };
     // a feature's context, as the feature describes it (its eventstreams and their steps …)
     const featured = this._featureContext(ctx);

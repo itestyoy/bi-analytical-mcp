@@ -290,7 +290,7 @@ test('a typed read, an aggregate\'s where and a typed unnest are refused with th
     { ...unnest, type: 'int' }, { stage: 'unnest', property: 'words_collected', name: 'w', type: 'int' },
     { stage: 'unnest', expr: { property: 'words_collected' }, as: 'w', type: 'int' }, { stage: 'unnest', property: 'words_collected', as: 'w', type: 'int' },
   ]) {
-    await assert.rejects(() => e.build_model({ action: 'insert_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
+    await assert.rejects(() => e.build_model({ action: 'edit_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
       && err.message.endsWith(two) && !/unexpected property|earlier spelling/.test(err.message) && !err.message.includes('"name":"w","type":"int"'), JSON.stringify(step));
   }
   // a long name: its element's name is cut to a name a step may make

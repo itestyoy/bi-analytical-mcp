@@ -681,7 +681,7 @@ export function validateInput(validator, input, opts = {}) {
       : `${fieldRef(path)} is written in an earlier spelling — write ${JSON.stringify(value)}`;
     seen.add(msg); errors.push(msg);
   }
-  // a typed unnest standing alone (an edit_step / insert_step `step`) has no one value it is now: in a
+  // a typed unnest standing alone (an edit_step `step`) has no one value it is now: in a
   // list of steps it is two (untypedUnnest), so it is said as those two, each in today's spelling, to put
   // where it stood — the one thing said of it: what the forms find wrong in it is read off the unnest of
   // the two (what they put right is not said), and of its name, which the cast keeps, as written

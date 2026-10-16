@@ -10,7 +10,7 @@
 // metric can be grouped by — which joins MetricFlow makes, through which entity, at which grain:
 // MetricFlow says that itself (src/group-by-items.js), and a second copy of its rules here would be
 // one that can disagree with it. What MetricFlow compiles and the warehouse runs is checked by running
-// them (preview_semantic_model with validate) — this is only what the declaration itself says.
+// them (context describe with validate) — this is only what the declaration itself says.
 
 
 

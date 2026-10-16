@@ -1,7 +1,7 @@
-// PREVIEW_SEMANTIC_MODEL — the semantic side's inspector: a context's parsed layer (semantic models,
-// each metric's definition and what it can be grouped by, the declaration's own mistakes) answered in
-// the call, or with `validate` a task that compiles and runs each metric to name what fails. Methods
-// of the Engine (src/engine/helpers.js — mixin).
+// A CONTEXT'S SEMANTIC LAYER, DESCRIBED — the semantic side's inspector, context({ action: 'describe' }):
+// a context's parsed layer (semantic models, each metric's definition and what it can be grouped by, the
+// declaration's own mistakes) answered in the call, or with `validate` a task that compiles and runs each
+// metric to name what fails. Methods of the Engine (src/engine/helpers.js — mixin).
 
 import { ToolError } from '../validate.js';
 import { manifestLayer } from '../semantic-manifest.js';
@@ -21,10 +21,7 @@ export const semanticPreviewMethods = {
    * STARTS a task instead (the call returns { task_id }): MetricFlow compiles every metric shown, and
    * with a time_range each metric, and each semantic model's dimensions, is run in the warehouse over it.
    */
-  async preview_semantic_model(input) {
-    this._validate('preview_semantic_model', input);
-    const ctx = this._ctx(input.context_id);
-    if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ request: { action: 'describe', context_id: '${ctx.id}' } }) lists its columns`, { stage: 'validate', field: 'context_id' });
+  async _describeLayer(ctx, input) {
     if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
     const project = ctx.state.engine === 'project';
     // the names asked for are checked in the call, against what the context declares
@@ -166,7 +163,7 @@ export const semanticPreviewMethods = {
       // what a query of THIS context names a cut by
       ...(project ? {} : { groupable }),
       ...(first ? { query_with: `query_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [{ stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
-      validate_with: `preview_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
+      validate_with: `context(${JSON.stringify({ request: { action: 'describe', context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
     };
   },
 

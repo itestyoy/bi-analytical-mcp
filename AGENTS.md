@@ -455,7 +455,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `dry_run` compiles and shows, reading nothing and building nothing (a declaration; a query, after
   the context's build — its SQL after the steps with its `output_columns`, a pipeline read's written
   over `{{ ref('<model>') }}`, as a preview's `model_sql`), `validate` checks on the warehouse, a task
-  (the pipeline preview: dbt run --empty; preview_semantic_model: MetricFlow, over a time_range the
+  (the pipeline preview: dbt run --empty; a context's describe: MetricFlow, over a time_range the
   warehouse); a week is the ISO
   week, and a date part or a difference of moments means the same on every warehouse. A computed column is ONE
   expression of that grammar (a compute stage's `expr`; one that is a condition is stored as a boolean),
@@ -559,8 +559,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   refuses a task of a feature's side — before any wait — and it never draws. The side is
   the kind of work that started the task, persisted with it (the jobs table's `tool`: a builder's name,
   or a query's kind — `QUERY_KINDS`, src/engine.js), never guessed.
-  `preview_semantic_model` is the semantic side's INSPECTOR, for the project's own layer (no build
-  to report it) and a task's context alike: it reads the context's PARSED manifest
+  `context({ action: "describe" })` is also the semantic side's INSPECTOR, for the project's own layer (no
+  build to report it) and a task's context alike: where a context holds a semantic layer it reads the context's PARSED manifest
   (`src/semantic-manifest.js`, one reader for both YAML specs) and answers in the call — semantic
   models, each metric's definition and its `group_by` — what it can be grouped by, spelled as that
   context's query takes it
@@ -823,7 +823,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "<semantic model>";
   `ContextManager.createShared` — no copy or parse per model; pinned: never gc'd, built on or
   dropped). There is no context for the layer as a whole. Where one of them is a valid context_id
-  (query_model, preview_semantic_model, context), the schema offers them as an enum next to
+  (query_model, context), the schema offers them as an enum next to
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
   query_model({ context_id: "<semantic model>", steps }) — `{ semantic_model, dimension, grain? }`,
@@ -859,7 +859,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   dbt model, and a name of one layer could shadow the other's. The overview
   (`semantic_index().project_semantic_layer.contexts`) lists each context with its dimensions and its
   metrics, each with its meta (the project's notes on reading it) and the semantic models whose
-  dimensions cut it; preview_semantic_model({ context_id, metric }) gives one metric's definition
+  dimensions cut it; context({ action: "describe", context_id, metric }) gives one metric's definition
   and its full group_by.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v1`

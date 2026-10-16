@@ -93,7 +93,7 @@ test('invalidation is positional: an edit retires the checkpoints whose prefix c
   assert.deepEqual(e.ctxs.pruneDanglingModels(context_id), [], 'and nothing in the context dangles');
 });
 
-test('truncate retires the checkpoints past the kept prefix; add_steps never retires one', async () => {
+test('an edit retires the checkpoints at and after it; add_steps never retires one', async () => {
   const e = engine();
   const { context_id } = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
   await e.build_model({ action: 'add_steps', context_id, steps: [agg('events_seen')] });
@@ -102,7 +102,7 @@ test('truncate retires the checkpoints past the kept prefix; add_steps never ret
   await e.build_model({ action: 'materialize', context_id }); // at: 2
   const added = await e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'project', keep: ['player_id_of_internal'] }] });
   assert.equal(added.checkpoints_dropped, undefined, 'appending never invalidates a prefix');
-  const tr = await e.build_model({ action: 'truncate', context_id, after: 1 });
+  const tr = await e.build_model({ action: 'edit_step', context_id, index: 2, step: { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'events_seen' }, { value: 3 }] }] } });
   assert.deepEqual(tr.checkpoints_dropped.map((d) => d.at), [2]);
   assert.deepEqual(draftOf(e, context_id).checkpoints.map((c) => c.at), [1]);
 });

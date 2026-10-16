@@ -1,7 +1,7 @@
 // THE SEMANTIC_MODEL STEP — a build's last step, the semantic layer over its source (src/pipeline/
 // semantic-stage.js). Input-validation and lifecycle checks with no warehouse: where the step may stand,
 // what its join's `on` must say (the key MetricFlow joins the model on, the main model's time axis), and
-// how edit_step / delete_step / truncate / fork treat it. What a layer computes is proven against the
+// how edit_step and fork treat it. What a layer computes is proven against the
 // warehouse by the integration tests that declare one (test/helpers/declare.js).
 
 import { test } from 'node:test';
@@ -54,7 +54,7 @@ test('a catalog source is read on its own time axis; a time the step names must 
   await assert.rejects(() => start(e, [step({ time: 'install_date' })]), /'events' is read on its own time axis, 'device_time'/);
 });
 
-test('preview shows the layer; edit_step replaces the step, delete_step and truncate remove it, a whole fork carries it', async () => {
+test('preview shows the layer; edit_step replaces the step, a whole fork carries it and a fork before it does not', async () => {
   const e = engine();
   const s = await start(e, [step()]);
   const shown = await e.build_model({ action: 'preview', context_id: s.context_id });
@@ -65,16 +65,11 @@ test('preview shows the layer; edit_step replaces the step, delete_step and trun
   await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: { stage: 'limit', limit: 1 } }), /is the build's semantic_model step/);
   const edited = await e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step({ metrics: [{ name: 'events', type: 'simple', measure: 'n' }] }) });
   assert.deepEqual(edited.step_effects[0].metrics, ['lay_events']);
-  // a whole fork carries it, a fork of fewer steps does not
+  // a whole fork carries it, a fork of the steps before it does not
   const whole = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
   assert.deepEqual(whole.steps.map((x) => x.stage), ['semantic_model']);
   const none = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_none', after: 0, include: ['steps'] });
   assert.deepEqual(none.steps, []);
-  // truncate before it, and delete_step, take it away
-  const cut = await e.build_model({ action: 'truncate', context_id: whole.context_id, after: 0, include: ['steps'] });
-  assert.deepEqual(cut.steps, []);
-  const gone = await e.build_model({ action: 'delete_step', context_id: s.context_id, index });
-  assert.equal(gone.steps_count, 0);
 });
 
 // OVER A TABLE THE STEPS BEFORE IT BUILT: the table is a model of the context, read on the time axis the

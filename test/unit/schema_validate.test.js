@@ -346,9 +346,9 @@ test('a semantic measure over a case with an else is refused under count and cou
   assert.ok(compileDeclaration(catalog, decl(over('count', { value: 1 }))));
 });
 
-// PREVIEW: a window goes with validate: true; the semantic model named is one a context can hold.
-test('preview_semantic_model: show or validate over a window; a window without validate is refused', () => {
-  const check = (body) => v('preview_semantic_model', { context_id: 'ctxabc123456', ...body });
+// DESCRIBE: a window goes with validate: true; the semantic model named is one a context can hold.
+test('context describe: show or validate over a window; a window without validate is refused', () => {
+  const check = (body) => v('context', { action: 'describe', context_id: 'ctxabc123456', ...body });
   for (const ok of [{}, { metric: 'm' }, { semantic_model: 'events' }, { metric: 'm', semantic_model: 'events' }, { validate: true }, { validate: false }, { validate: true, time_range: { start: '2026-01-01', end: '2026-01-02' } }]) assert.ok(check(ok).ok, JSON.stringify(ok));
-  for (const bad of [{ time_range: { start: '2026-01-01' } }, { validate: false, time_range: { start: '2026-01-01' } }, { semantic_model: 'no_such_model' }]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
+  for (const bad of [{ time_range: { start: '2026-01-01' } }, { validate: false, time_range: { start: '2026-01-01' } }, { semantic_model: 'No-such' }]) assert.equal(check(bad).ok, false, JSON.stringify(bad));
 });

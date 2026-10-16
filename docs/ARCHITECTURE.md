@@ -250,9 +250,8 @@ clustering) is therefore paid for once, and several materializations chain into
 several checkpoints.
 
 Because the draft owns the edit sequence, invalidation is **positional** and needs
-no hashing: `edit_step(i)` / `insert_step(i)` / `delete_step(i)` retire every
-checkpoint with `at >= i`, `truncate(after)` those with `at > after`, and appending
-retires none. Freshness is not positional, so it rides on the value index's own run
+no hashing: `edit_step(i)` retires every checkpoint with `at >= i`, a fork keeps
+those with `at <= after`, and appending retires none. Freshness is not positional, so it rides on the value index's own run
 marker: a completed index scan (whatever it found) means the source data may have
 moved, and every checkpoint taken before it is retired. Each build takes its own
 model name (`_c2`, `_c3`, …) so a rebuild never overwrites the table it reads.

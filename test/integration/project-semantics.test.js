@@ -103,7 +103,7 @@ const ACQ = 'project_acquisition';
 const q = (context_id, input) => engine.query_model({ context_id, time_range: WINDOW, ...input });
 const rowsOf = (r) => { assert.equal(r.ok, true, JSON.stringify(r.error)); return r.rows; };
 const num = (v) => Number(v);
-const preview = (input) => (engine.raw || engine).preview_semantic_model(input);
+const preview = (input) => (engine.raw || engine).context({ action: 'describe', ...input });
 
 // the project's OWN columns may carry `__` (measure__impressions here, as a project names its amounts):
 // they are its names, not MetricFlow's, and stay as they are — the SQL below runs only if they do
@@ -156,7 +156,7 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.equal(described.engine, 'project');
   assert.equal(described.context_id, ACQ);
   // the tools that take one of them offer them as values, and still take any id a build returned
-  for (const tool of ['query_model', 'preview_semantic_model', 'context']) {
+  for (const tool of ['query_model', 'context']) {
     const schema = engine.schemas[tool];
     const [presets, built] = field(schema, schema, 'context_id').anyOf.map((n) => deref(schema, n));
     assert.deepEqual(presets.enum, [ACQ, EV], tool);
@@ -332,7 +332,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   assert.equal(gone.error.code, 'result_gone');
 });
 
-// ---- preview_semantic_model: a context's layer as dbt parsed it, and checked by running it ----
+// ---- context describe: a context's layer as dbt parsed it, and checked by running it ----
 
 // ONE PREVIEW OF project_cost, EVERY CUT IT LISTS QUERIED ONCE: each sums to the warehouse's total,
 // and the cuts that say more are checked further against the same rows read by hand — a dimension of
@@ -556,7 +556,7 @@ test('validate names the metric and the dimension whose column the warehouse doe
   const loaded2 = await loadProjectSemantics({ runner: backend, contextManager: ctxs2 });
   assert.ok(loaded2?.layer, JSON.stringify(loaded2));
   const engine2 = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs2, runner: backend, project: loaded2 });
-  const started = await engine2.preview_semantic_model({ context_id: 'project_broken', validate: true, time_range: WINDOW });
+  const started = await engine2.context({ action: 'describe', context_id: 'project_broken', validate: true, time_range: WINDOW });
   const v = await taskResult(engine2, started.task_id);
   assert.equal(v.ok, true, JSON.stringify(v.error));
   assert.equal(v.valid, false);
@@ -645,14 +645,15 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
   assert.ok(Math.abs(value('pvw_per_player') - num(n) / num(players)) < 1e-9);
 });
 
-test('a preview refuses what the context does not have, naming what it does', opts, async (t) => {
+test('a describe refuses what the context does not have, naming what it does', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, metric: 'project_cots' })), /not a metric of context 'project_acquisition'.*project_cost/);
-  // a name no context can hold is refused by the schema; one this context does not hold, naming what it does
-  await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, semantic_model: 'nope' })), /`semantic_model` must be one of/);
+  // a name no semantic model can have is refused by the schema; one this context does not hold, naming what it does
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, semantic_model: 'No-pe' })), /semantic_model/);
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, semantic_model: 'nope' })), /not a semantic model of context 'project_acquisition'/);
   await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, semantic_model: 'crashlytics' })), /not a semantic model of context 'project_acquisition'.*project_events/);
   // a window is what a validation runs over: without validate: true it is refused
-  await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, time_range: WINDOW })), /validate over a window.*missing required property 'validate'/s);
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, time_range: WINDOW })), /validate a context over a window.*missing required property 'validate'/s);
   await assert.rejects(Promise.resolve().then(() => preview({ context_id: 'project' })), /unknown context_id/);
 });
 
@@ -830,7 +831,7 @@ test('a semantic model joined onto through several keys is not served — said a
   assert.match(b.fix, /one semantic model per key.*ref\('fct_role_channels'\)/);
   assert.deepEqual((await eng.semantic_index({})).project_semantic_layer.joins_not_served.map((x) => x.semantic_model), ['role_channels']);
   // the preview does not offer it, and says why as an error of the declaration
-  const p = await eng.raw.preview_semantic_model({ context_id: 'role_spend', metric: 'role_cost' });
+  const p = await eng.raw.context({ action: 'describe', context_id: 'role_spend', metric: 'role_cost' });
   assert.deepEqual(p.metrics[0].group_by.dimensions.filter((d) => d.dimension === 'kind'), []);
   assert.equal(p.status.valid, false);
   assert.ok(p.status.issues.some((i) => i.severity === 'error' && i.semantic_model === 'role_channels' && /several keys/.test(i.message)), JSON.stringify(p.status.issues));
@@ -854,7 +855,7 @@ test('declared as the fix says — one semantic model per key — each role is a
   const { out, eng } = await loadedFrom(dir);
   assert.deepEqual(out.layer.blocked, []);
   const refs = [{ semantic_model: ['booked_channels'], dimension: 'kind' }, { semantic_model: ['source_channels'], dimension: 'kind' }];
-  const listed = (await eng.raw.preview_semantic_model({ context_id: 'role_spend', metric: 'role_cost' })).metrics[0].group_by.dimensions.map((d) => JSON.stringify(d));
+  const listed = (await eng.raw.context({ action: 'describe', context_id: 'role_spend', metric: 'role_cost' })).metrics[0].group_by.dimensions.map((d) => JSON.stringify(d));
   for (const r of refs) assert.ok(listed.includes(JSON.stringify(r)), `${JSON.stringify(r)} in ${listed}`);
   const want = (await wh.query(`select upper(${CHANNEL_OF_ROW}) as booked, upper(${CHANNEL_OF_SOURCE}) as src, sum(cost) as cost from fct_player_acquisition group by 1, 2`)).rows;
   const got = rowsOf(await eng.query_model({ context_id: 'role_spend', steps: [{ stage: 'metrics', metrics: ['role_cost'], group_by: refs }], time_range: WINDOW }));

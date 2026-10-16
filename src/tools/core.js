@@ -60,15 +60,6 @@ export const CORE_TOOLS = [
     run: (engine, input) => engine.query_model(input),
   }),
   defineTool({
-    name: 'preview_semantic_model',
-    title: 'Preview Semantic Model',
-    description: `Show a semantic layer as dbt parsed it, and check it — one of the dbt project's own semantic models (context_id: its name) or a context a build's semantic_model step built. Use it before querying a metric you do not know: what it is, how it is computed, what its query may group by. It answers at once and runs nothing: the layer's status and issues (what the declaration gets wrong), each semantic model (table, entities, dimensions), each metric (type, meta — the project's notes on reading it — filter, definition) with its group_by spelled as query_model takes it; a metric of several semantic models offers only what they share. metric narrows it to one metric in full, semantic_model to one model. validate: true checks it on the warehouse instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one and each model's dimensions, naming what fails; that is a task, read with query_model.`,
-    // reads a parsed layer; validate starts a task that compiles and runs metrics, writing nothing
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    side: 'semantic',
-    run: (engine, input) => engine.preview_semantic_model(input),
-  }),
-  defineTool({
     name: 'display_model_result',
     title: 'Display Model Result',
     description: 'Show a finished model result — a semantic query or a pipeline — to the person as a card. It is the only tool that draws a model\'s rows, in a host that renders MCP Apps; any other client is refused, and there you answer in words. Use it once, for the result the person should see; reading a task for your own analysis needs no card. Each task is drawn once (a second call is refused). display says how the rows are drawn — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot… — over the result\'s columns. A task still running is refused: read it with its query tool first. An experiment draws its own card (card: true).',
@@ -93,8 +84,9 @@ export const CORE_TOOLS = [
     name: 'context',
     output: OUTPUTS.context,
     title: 'Read Contexts',
-    description: 'Read the isolated contexts that build_model creates: action:"list" gives a page of contexts, the most recently used first, each with its description (offset pages through them, search narrows them — the server keeps every conversation\'s); action:"describe" gives one context\'s tasks, models, metrics and group-by paths. It changes nothing; to remove a context or a model in it, use delete_context.',
-    // list / describe read the contexts; removing is delete_context
+    description: 'Read the isolated contexts that build_model creates: action:"list" gives a page of contexts, the most recently used first, each with its description (offset pages through them, search narrows them — the server keeps every conversation\'s); action:"describe" gives one context in depth — its steps and tasks and, where it holds a semantic layer (one of the dbt project\'s own semantic models, or a build\'s semantic_model step), that layer as dbt parsed it: its status and issues, each semantic model, each metric (type, meta — the notes on reading it — filter, definition) with its group_by spelled as query_model takes it. Use it before querying a metric you do not know. metric narrows it to one metric in full, semantic_model to one model; validate: true checks the layer on the warehouse instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one and each model\'s dimensions, naming what fails; that is a task, read with query_model. It changes nothing; to remove a context or a model in it, use delete_context.',
+    // list / describe read the contexts (validate starts a task that compiles and runs metrics, writing
+    // nothing); removing is delete_context
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.context(input),
   }),

@@ -116,11 +116,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     from_task: { type: 'string', pattern: TASK_ID, description: 'Begin from the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) without recomputing it.' },
     source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
     time_range: pipelineWindow,
-    step: { $ref: '#/$defs/stage', description: 'One step — a stage { stage: "where" | "compute" | …, … } — placed at `index` (edit_step replaces it, insert_step goes before it), validated against the columns available at that point.' },
+    step: { $ref: '#/$defs/stage', description: 'One step — a stage { stage: "where" | "compute" | …, … } — that replaces step `index`, validated against the columns available at that point.' },
     steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'Steps to append in order, each a stage { stage: "where" | "compute" | …, … } — one or several; with start, the draft\'s first ones. All or none; the response reports each step\'s effect on the data. A logical chunk at a time (scope, then the funnel, then the aggregate) shows how each changes the data.' },
     materialize: { type: 'boolean', description: 'Build right after the steps are added — what a materialize call does: its task_id comes back beside the steps\' effects. The steps are added either way; a build that cannot start (one still running, say) is answered under `materialize` with why.' },
-    index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the step before this position (count+1 appends).' },
-    after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
+    index: { type: 'integer', minimum: 1, description: 'The step to replace (1-based, per steps[].index).' },
+    after: { type: 'integer', minimum: 0, description: 'The steps the fork keeps: 1..after (omitted: every step; 0: none).' },
     validate: { type: 'boolean', description: VALIDATE('preview only — the draft\'s SQL runs with every input limited to zero rows (dbt run --empty), reading no data; worth it before an expensive materialize', 'query_model') },
     include: { type: 'array', uniqueItems: true, items: { enum: ['columns', 'steps'] }, description: 'What else the answer shows: "columns" — the full list of available columns (by default only what a step added and removed); "steps" — every step of the draft, as preview lists them (by default only the steps just added, or the one put in place, and steps_count).' },
   };
@@ -142,10 +142,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
       form({ title: 'start from a source', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over a catalog source (returns its context_id + the source columns).', required: ['name', 'source'], properties: pick(startFields, ['name', 'source', 'time_range', ...startOptional]) }),
       form({ title: 'start from a task', tag: ['action', 'start'], optionalTag: true, tagDescription: 'start (the default): a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(startFields, ['name', 'from_task', 'source', ...startOptional]) }),
       step('add_steps', 'add steps', 'add_steps: append steps — one or several, in order, all or none; returns what each did to the data.', ['steps'], ['materialize']),
-      step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a step before `index`.', ['index', 'step']),
-      step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
-      step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),
-      step('fork', 'fork the draft', 'fork: branch a new draft, under a name of its own, from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; description overrides the parent\'s.', ['name'], ['description', 'after']),
+      step('edit_step', 'edit a step', 'edit_step: replace step `index` with `step`; every step after it is checked again.', ['index', 'step']),
+      step('fork', 'fork the draft', 'fork: branch a new draft, under a name of its own, from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix, or go back to step N (after: N); description overrides the parent\'s.', ['name'], ['description', 'after']),
       step('preview', 'preview the draft', 'preview: the steps and the SQL that would run. With validate: true it starts a task instead (read with query_model) that runs the SQL with every input limited to zero rows (dbt run --empty): what the warehouse refuses is said in seconds, reading no data.', [], ['validate'], []),
       step(['materialize', 'discard'], 'materialize or discard', 'materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', [], [], []),
     ],
@@ -201,17 +199,32 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // THE CONTEXTS, READ — list them, or describe one. Nothing here changes anything, so the tool is
   // read-only as a whole; removing what a context holds is delete_context, a tool of its own, because
   // a client asks before a destructive call and should not have to ask before a listing.
-  const describeForm = form({ title: 'describe a context', tag: ['action', 'describe'], tagDescription: 'describe: one context in depth.', required: ['context_id'], properties: { context_id: contextId(`The context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`) } });
+  // describe: one context in depth — and, where it holds a semantic layer, that layer as dbt parsed it
+  // (one of the project's own semantic models, or a build's): its semantic models, each metric's
+  // definition and its group_by, the declaration's own mistakes; validate checks it on the warehouse
+  const describeFields = {
+    action: { const: 'describe' },
+    context_id: contextId(`The context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`),
+    // a build's semantic models are named after the catalog's models it loads (and its own table, after the build); the project's are its own
+    semantic_model: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$', description: 'Narrow the semantic layer shown to one semantic model of the context and the metrics that read it. With metric too, the metric\'s semantic models are narrowed to this one.' },
+    metric: { type: 'string', description: 'Narrow the semantic layer shown to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as the group_by of query_model\'s metrics step takes it.' },
+    validate: { type: 'boolean', description: VALIDATE('MetricFlow compiles each metric in view, naming one it cannot build (with a time_range the warehouse also runs each metric and each semantic model\'s dimensions over it)', 'query_model') },
+    time_range: timeRange('The metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it.'),
+  };
+  const describeForms = [
+    form({ title: 'describe a context', required: ['action', 'context_id'], properties: pick(describeFields, ['action', 'context_id', 'semantic_model', 'metric', 'validate']) }),
+    form({ title: 'validate a context over a window', required: ['action', 'context_id', 'validate', 'time_range'], properties: { ...pick(describeFields, ['action', 'context_id', 'semantic_model', 'metric', 'time_range']), validate: { const: true, description: describeFields.validate.description } } }),
+  ];
   const contextTool = {
     type: 'object',
-    description: 'Read the isolated execution contexts (the workspaces build_model produces). action: list (a page of contexts, most recently used first) | describe (one context\'s tasks/models/metrics/group-by paths). Removing one, or a model in one, is delete_context.',
+    description: 'Read the isolated execution contexts (the workspaces build_model produces). action: list (a page of contexts, most recently used first) | describe (one context in depth: its steps and tasks, and its semantic layer as dbt parsed it — semantic models, each metric\'s definition and what it can be grouped by; with metric or semantic_model, one of them; validate: true checks it on the warehouse, a task). Removing one, or a model in one, is delete_context.',
     anyOf: [
       form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: `list: the contexts, most recently used first, ${CONTEXT_PAGE} to a page — the server keeps every conversation's, so page through them (offset) or narrow them (search).`, properties: {
         limit: { type: 'integer', minimum: 1, maximum: 100, description: `How many contexts the page holds (default ${CONTEXT_PAGE}).` },
         offset: { type: 'integer', minimum: 0, description: 'Skip this many first — next_offset of the previous page.' },
         search: { type: 'string', minLength: 1, description: 'Keep the contexts whose id, task or metric names, notes or description contain this text (any case).' },
       } }),
-      describeForm,
+      ...describeForms,
     ],
   };
   // WHAT A CONTEXT HOLDS, REMOVED — the whole context, its pipeline model, or one model's task additions.
@@ -253,25 +266,6 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
         limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS },
       },
     },
-    // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
-    preview_semantic_model: (() => {
-      const fields = {
-        context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id a build returned.`),
-        // a task's context names its semantic models after the catalog's models it loads; the project's are its own
-        semantic_model: { type: 'string', enum: [...new Set([...semanticKeys, ...(project ? project.semantic_models.map((m) => m.name) : [])])].sort(), description: 'Narrow the answer to one semantic model of the context and the metrics that read it — mostly for a task\'s context, which can hold several. With metric too, the metric\'s semantic models are narrowed to this one.' },
-        metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as the group_by of query_model\'s metrics step takes it.' },
-        validate: { type: 'boolean', description: VALIDATE('MetricFlow compiles each metric in view, naming one it cannot build (with a time_range the warehouse also runs each metric and each semantic model\'s dimensions over it)', 'query_model') },
-        time_range: timeRange('The metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it.'),
-      };
-      return {
-        type: 'object',
-        description: 'context_id alone shows the context\'s whole semantic layer; with metric, one metric in full (its inputs and everything its group_by takes); with semantic_model, one semantic model and the metrics that read it. validate: true checks it by running it instead — a task; with a time_range the warehouse also runs each metric over that window and reads each semantic model\'s dimensions and entities.',
-        anyOf: [
-          form({ title: 'show the layer', required: ['context_id'], properties: pick(fields, ['context_id', 'semantic_model', 'metric', 'validate']) }),
-          form({ title: 'validate over a window', tag: ['validate', true], required: ['context_id', 'time_range'], properties: pick(fields, ['context_id', 'semantic_model', 'metric', 'time_range']) }),
-        ],
-      };
-    })(),
     semantic_index: semanticIndexSchema(catalog, { project, places: TOOL_PLACES.semantic_index.ref }),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
@@ -319,7 +313,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     'delete_context.context': untagged(deleteForms.context, 'what', 'Tear down an entire isolated context (delete its files + artifacts).'),
     'delete_context.pipeline_model': untagged(deleteForms.pipeline_model, 'what', 'Delete the pipeline model of a context (remove its view + semantic model) and re-parse.'),
     'delete_context.semantic_model': untagged(deleteForms.semantic_model, 'what', 'Remove a semantic model\'s task additions from a context.'),
-    'context.describe': untagged(describeForm, 'action', 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.'),
+    'context.describe': { type: 'object', anyOf: describeForms.map((f) => ({ title: f.title, ...untagged(f, 'action', f.title) })) },
     'experiment.analyze': analyzeContract(),
     'experiment.check_split': checkSplitContract(),
     'experiment.plan': planContract(),

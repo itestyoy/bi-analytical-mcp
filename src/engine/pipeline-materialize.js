@@ -145,7 +145,7 @@ export const pipelineMaterializeMethods = {
     const bounds = [m.time?.column, m.partition_column].filter(Boolean).map((c) => `'${c}'`).join(' or ');
     return new ToolError(
       `this catalog requires a bounded time window (require_time_range) for '${source}': start the draft with time_range { start, end } `
-      + `(build_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (insert_step at index 1). Unbounded scans over '${m.dbt_model}' are blocked.`,
+      + `(build_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (a fork after: 0 starts the steps again with it first). Unbounded scans over '${m.dbt_model}' are blocked.`,
       { stage: 'validate', field: 'time_range' },
     );
   },

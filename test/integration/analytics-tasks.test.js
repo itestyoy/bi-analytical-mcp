@@ -333,7 +333,7 @@ test('a task dimension over a time column is read at its grain (week), or at the
   assert.equal(num(byHand.yes), 8, '[computed dimension] the 8 completed purchases');
 
   // the labels went with what they were given on, into the layer dbt parsed
-  const p = await engine.preview_semantic_model({ context_id: built.coh_wk });
+  const p = await engine.context({ action: 'describe', context_id: built.coh_wk });
   const users = p.semantic_models.find((sm) => sm.name === 'users');
   assert.equal(users.dimensions.find((d) => d.name === 'coh_wk_install_date').label, 'Install week');
   // (a measure is listed by the legacy spec; the latest spec has none — a simple metric carries its own)

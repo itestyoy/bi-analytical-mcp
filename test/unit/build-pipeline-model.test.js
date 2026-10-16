@@ -321,8 +321,8 @@ test('data_freshness re-queries after each index scan (reflects new data, not a 
   e.close();
 });
 
-// ── P1: pointwise editing — edit/insert/delete/truncate mutate in place + revalidate ──
-test('build_model: edit_step / insert_step / delete_step / truncate mutate in place', async () => {
+// ── P1: pointwise editing — edit_step mutates in place + revalidates; a fork goes back to step N ──
+test('build_model: edit_step mutates in place, and a fork of steps 1..N goes back to step N', async () => {
   const e = engine();
   const s = await e.build_model({ action: 'start', name: 'edit', source: 'events' });
   const d = s.context_id;
@@ -333,20 +333,15 @@ test('build_model: edit_step / insert_step / delete_step / truncate mutate in pl
   assert.equal(ed.action, 'edit_step');
   assert.deepEqual(ed.step.conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
   assert.deepEqual([ed.step.index, ed.steps_count], [1, 2], 'edit does not change the step count');
-  // insert a new step BEFORE position 1.
-  const ins = await e.build_model({ action: 'insert_step', context_id: d, index: 1, step: { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'event_name' }, { value: 'tutorial' }, { value: 'first_launch' }] }] }, include: ['steps'] });
-  assert.equal(ins.steps.length, 3);
-  assert.equal(ins.steps[0].conditions[0].fn, 'in', 'inserted at the front');
-  assert.equal(ins.steps[1].conditions[0].args[1].value, 'tutorial', 'the step that was first is second now');
-  // delete step 2: nothing placed, the count
-  const del = await e.build_model({ action: 'delete_step', context_id: d, index: 2 });
-  assert.deepEqual([del.steps, del.step, del.steps_count], [undefined, undefined, 2]);
-  // truncate back to a single step (the cheap "go back to step N").
-  const tr = await e.build_model({ action: 'truncate', context_id: d, after: 1, include: ['steps'] });
-  assert.deepEqual(tr.steps.map((x) => [x.index, x.conditions[0].fn]), [[1, 'in']]);
+  // back to step 1: a fork of steps 1..1, the original untouched
+  const back = await e.build_model({ action: 'fork', context_id: d, name: 'edit_back', after: 1, include: ['steps'] });
+  assert.deepEqual(back.steps.map((x) => [x.index, x.stage]), [[1, 'where']]);
+  assert.equal(e.ctxs.get(d).state.draft.stages.length, 2, 'the original keeps its steps');
+  // the actions that moved steps around are no actions of the tool
+  for (const action of ['insert_step', 'delete_step', 'truncate']) await assert.rejects(() => e.build_model({ action, context_id: d, index: 1, after: 1 }), /invalid input/, action);
   // out-of-range index/after are rejected.
   await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: d, index: 9, step: mr }), /out of range/);
-  await assert.rejects(() => e.build_model({ action: 'truncate', context_id: d, after: 9 }), /out of range/);
+  await assert.rejects(() => e.build_model({ action: 'fork', context_id: d, name: 'edit_far', after: 9 }), /out of range/);
 });
 
 // An edit that breaks a LATER step is rejected with that step's index; the draft is intact.
@@ -406,8 +401,8 @@ test('build_model: include is refused on preview, materialize and discard', asyn
     }
   }
   for (const [flag, item] of [['include_columns', 'columns'], ['include_steps', 'steps']]) {
-    await assert.rejects(() => e.build_model({ action: 'truncate', context_id, after: 1, [flag]: true }),
-      (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'truncate', context_id, after: 1, include: [item] })}`), flag);
+    await assert.rejects(() => e.build_model({ action: 'fork', context_id, name: 'flag_fork', after: 1, [flag]: true }),
+      (err) => err.message.includes(`is written in an earlier spelling — write ${JSON.stringify({ action: 'fork', context_id, name: 'flag_fork', after: 1, include: [item] })}`), flag);
   }
   assert.equal(e.ctxs.get(context_id).state.draft.stages.length, 1, 'the refused calls changed nothing');
 });

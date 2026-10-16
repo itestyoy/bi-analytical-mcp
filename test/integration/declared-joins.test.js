@@ -12,8 +12,9 @@
 //   acquisition  one row per player and day: { user, time } — the record of the moment's day.
 //   experiments  one row per player × experiment: { user, experiment } — the experiment named.
 //   crashlytics  a crash report per player and ad funnel: { user, funnel, format } — the funnel
-//                matched on the tracking-id column of the format named. The authors' `unique` is not
-//                quite true here (four reports of u1 name one funnel): trusted, never checked.
+//                matched on the tracking-id column of the format named. The authors' `unique` is
+//                trusted, never checked — and true here: a report carries a funnel only when it is
+//                the first after it.
 //
 // Every assertion is a NUMBER (or a set of ids) from running against the warehouse — per the
 // project rule the generated SQL is never matched as text. Each case is built so a wrong ON
@@ -30,7 +31,7 @@
 //               part names a column of the rows as they are at its step;
 //   J   (44, 47, 49) `attrs` is the contract: exactly the listed attributes arrive — nothing implicit;
 //   K   (50-53) a FACT as the semantic join target: owning a key with `type: unique` gives its
-//               attributes a governed path; `unique` is a claim about the data nothing verifies;
+//               attributes a governed path, and a key unique on the data adds no row;
 //   L           the same day (31, 8).
 //
 // Where a scenario's numbers are asserted elsewhere, it lives there and is not repeated here:
@@ -325,9 +326,9 @@ test('15. crash reports join installs point-in-time: 13 rows, no duplicates', op
 // ═══════════ D. the ad funnel: which crash report followed the ad an event belongs to ═══════════
 //
 // The crash source's contract: the player and the funnel, on the tracking-id column of the FORMAT the
-// caller names. Its authors declare it unique — and in this warehouse it is not quite: four reports of
-// u1 name one rewarded funnel, so its two funnel events meet four reports each (16's 14 rows from 8
-// events). `unique` is the authors' word, trusted, never checked (section K shows the same of MetricFlow).
+// caller names. Its authors declare it unique — the authors' word, trusted, never checked — and the
+// data holds it: a report carries a funnel only when it is the first report after it, so every funnel
+// event meets at most one report (16's 8 rows from 8 events).
 
 // 18. The key is (funnel, PLAYER), not the funnel alone. u2 and u10 share the funnel id 'fnl_dup', so a
 //     player-blind join would hand u2's banner crashes to u10's ad events. It does not.
@@ -338,8 +339,8 @@ test('18. the player is part of the key: a shared funnel id does not leak across
     { stage: 'join', ...CRASH_OF('banner'), attrs: [{ column: 'crash_id' }] },
     { stage: 'project', keep: ['event_id', 'crash_id'] });
   const pairs = new Set(rows.map((r) => `${r.event_id}|${r.crash_id ?? '-'}`));
-  assert.deepEqual(pairs, new Set(['e133|k4', 'e133|k5', 'e134|k4', 'e134|k5', 'e149|-', 'e150|-']),
-    "u2's events meet u2's two banner reports; u10's e149 / e150, same funnel id, meet none");
+  assert.deepEqual(pairs, new Set(['e133|k4', 'e134|k4', 'e149|-', 'e150|-']),
+    "u2's events meet u2's banner report; u10's e149 / e150, same funnel id, meet none");
 });
 
 // ═══════════ E. GROUNDING: a declaration the warehouse does not back ═══════════
@@ -399,16 +400,16 @@ test('23. a phantom relationship is pruned', opts, async (t) => {
 
 // 24. Pruning is surgical: the crash source's join contract, built on real columns, still joins on
 //     every format with the same numbers as in the honest catalog.
-test('24. the join contract is untouched by the pruning: 14 / 12 / 8', opts, async (t) => {
+test('24. the join contract is untouched by the pruning: 8 / 4 / 4', opts, async (t) => {
   if (skip(t)) return;
   assert.ok(phantom.joinContract('crashlytics'), 'the contract names real columns only, so it survives');
   // the join the pruned catalog generates for each format, run on the warehouse (section F's
   // technique: 32 holds what preview shows to what materialize builds) — nothing materialized.
   const n = async (format) => (await runSql(await generatedSql(phantomEngine, 'events',
     { stage: 'join', ...CRASH_OF(format), kind: 'inner', attrs: [{ column: 'crash_id' }] }))).length;
-  assert.equal(await n('rewarded'), 14, 'rewarded');
-  assert.equal(await n('interstitial'), 12, 'interstitial');
-  assert.equal(await n('banner'), 8, 'banner');
+  assert.equal(await n('rewarded'), 8, 'rewarded');
+  assert.equal(await n('interstitial'), 4, 'interstitial');
+  assert.equal(await n('banner'), 4, 'banner');
 });
 
 // 25. When the pruned key was the OWNER of a relationship, the ownership index must be rebuilt —
@@ -539,24 +540,23 @@ test('28. each ad format generates the join on its own tracking column', opts, a
       JOIN {{ ref('fct_crashlytics_events') }} c
         ON c.${col} = e.tracking_id
        AND c.player_id_of_internal = e.player_id_of_internal`;
-  for (const [format, col, n] of [['rewarded', 'rewarded_tracking_id', 14], ['interstitial', 'interstitial_tracking_id', 12], ['banner', 'banner_tracking_id', 8]]) {
+  for (const [format, col, n] of [['rewarded', 'rewarded_tracking_id', 8], ['interstitial', 'interstitial_tracking_id', 4], ['banner', 'banner_tracking_id', 4]]) {
     const gen = await generatedSql('events', { stage: 'join', ...CRASH_OF(format), kind: 'inner', attrs: [{ column: 'crash_id' }] });
     const want = await ordered(refFor(col), ['event_id', 'crash_id']);
     assert.equal(want.length, n, `${format}: the reference itself`);
     const got = await ordered(gen, ['event_id', 'crash_id']);
     assert.deepEqual(got, want, format);
-    // '16. the events of a rewarded funnel meet its crash reports: 14 rows from 8 events, 7 reports' —
-    // u1's four reports name one funnel, so its two events meet four each: the contract's `unique` is
-    // the authors' word, and here it is not quite true
+    // '16. the events of a rewarded funnel meet its crash report: 8 rows from 8 events, 4 reports' —
+    // the contract's `unique` holds, so no event meets two reports
     if (format === 'rewarded') {
       assert.equal(new Set(got.map((r) => String(r.event_id))).size, 8, '[16] from 8 events');
-      assert.equal(new Set(got.map((r) => String(r.crash_id))).size, 7, '[16] 7 crash reports: k1..k3 and k10 (u1), k6, k9, k13');
+      assert.equal(new Set(got.map((r) => String(r.crash_id))).size, 4, '[16] 4 crash reports: k1, k6, k9, k13');
     }
   }
 });
 
 // 29. BOTH parts of the key must reach the generated code. Drop the player half by hand and the
-//     shared funnel id 'fnl_dup' hands u2's banner reports to u10's events — 12 rows instead of 8.
+//     shared funnel id 'fnl_dup' hands u2's banner report to u10's events — 6 rows instead of 4.
 test('29. the composite key generates BOTH equalities, not just the funnel id', opts, async (t) => {
   if (skip(t)) return;
   const gen = await generatedSql('events', { stage: 'join', ...CRASH_OF('banner'), kind: 'inner', attrs: [{ column: 'crash_id' }] });
@@ -565,16 +565,16 @@ test('29. the composite key generates BOTH equalities, not just the funnel id', 
     SELECT e.event_id, c.crash_id
       FROM {{ ref('fct_analytics_events') }} e
       JOIN {{ ref('fct_crashlytics_events') }} c ON c.banner_tracking_id = e.tracking_id`, ['event_id', 'crash_id']);
-  assert.equal(funnelOnly.length, 12, 'the funnel id ALONE pulls u10 into k4/k5');
-  assert.equal(got.length, 8);
+  assert.equal(funnelOnly.length, 6, 'the funnel id ALONE pulls u10 into k4');
+  assert.equal(got.length, 4);
   assert.notDeepEqual(got, funnelOnly);
   // '19. an empty format column matches nothing': only the reports that recorded a banner funnel
-  assert.equal(new Set(got.map((r) => String(r.crash_id))).size, 4, '[19] only k4, k5, k11, k12 recorded a banner funnel');
+  assert.equal(new Set(got.map((r) => String(r.crash_id))).size, 2, '[19] only k4 and k11 carry a banner funnel');
 });
 
 // 30. `kind` must generate the join type it names: left-joined, every event stays, a NULL where no
 //     report matched.
-test('30. kind:left generates a LEFT JOIN — 188 rows, 180 of them unmatched', opts, async (t) => {
+test('30. kind:left generates a LEFT JOIN — 184 rows, 180 of them unmatched', opts, async (t) => {
   if (skip(t)) return;
   const gen = await generatedSql('events', { stage: 'join', ...CRASH_OF('banner'), attrs: [{ column: 'crash_id' }] });
   const got = await ordered(gen, ['event_id', 'crash_id']);
@@ -584,7 +584,7 @@ test('30. kind:left generates a LEFT JOIN — 188 rows, 180 of them unmatched', 
       LEFT JOIN {{ ref('fct_crashlytics_events') }} c
         ON c.banner_tracking_id = e.tracking_id
        AND c.player_id_of_internal = e.player_id_of_internal`, ['event_id', 'crash_id']);
-  assert.equal(want.length, 188, '4 events x 2 reports + 180 events with none');
+  assert.equal(want.length, 184, '4 events with their one report + 180 events with none');
   assert.equal(want.filter((r) => r.crash_id == null).length, 180);
   assert.deepEqual(got, want);
   assert.equal(new Set(got.map((r) => String(r.event_id))).size, 184, '[19] a left join keeps every event');
@@ -687,24 +687,24 @@ const CHAIN = [
   { stage: 'project', keep: ['crash_id', 'event_id', 'acquisition_id', 'country', 'media_source'] },
 ];
 
-// 35. Three contracts in one pipeline over four sources: the 14 (event, report) pairs of the rewarded
-//     funnels all fall on a day their player has a spend row — 8 events, 7 reports, 4 spend rows.
-test('35. four sources in one pipeline: 14 rows, 8 events, 7 crashes, 4 spend rows', opts, async (t) => {
+// 35. Three contracts in one pipeline over four sources: the 8 (event, report) pairs of the rewarded
+//     funnels all fall on a day their player has a spend row — 8 events, 4 reports, 4 spend rows.
+test('35. four sources in one pipeline: 8 rows, 8 events, 4 crashes, 4 spend rows', opts, async (t) => {
   if (skip(t)) return;
   const rows = await chain('events', 'events', CHAIN);
-  assert.equal(rows.length, 14);
+  assert.equal(rows.length, 8);
   assert.equal(new Set(rows.map((r) => String(r.event_id))).size, 8);
-  assert.equal(new Set(rows.map((r) => String(r.crash_id))).size, 7, 'k1..k3, k10 (u1), k6, k9, k13');
+  assert.equal(new Set(rows.map((r) => String(r.crash_id))).size, 4, 'k1, k6, k9, k13');
   assert.equal(new Set(rows.map((r) => String(r.acquisition_id))).size, 4);
 });
 
 // 37. Each row is attributed at ITS event's instant and day: u1's rewarded funnel ran while it was US.
-test('37. the chain attributes each event at its own instant: US 8 / GB 4 / BR 2; meta 10 / applovin 2 / organic 2', opts, async (t) => {
+test('37. the chain attributes each event at its own instant: US 2 / GB 4 / BR 2; meta 4 / applovin 2 / organic 2', opts, async (t) => {
   if (skip(t)) return;
   const rows = await chain('events', 'events', CHAIN);
   const countBy = (col) => rows.reduce((m, r) => ({ ...m, [String(r[col])]: (m[String(r[col])] || 0) + 1 }), {});
-  assert.deepEqual(countBy('country'), { US: 8, GB: 4, BR: 2 });
-  assert.deepEqual(countBy('media_source'), { meta: 10, applovin: 2, organic: 2 });
+  assert.deepEqual(countBy('country'), { US: 2, GB: 4, BR: 2 });
+  assert.deepEqual(countBy('media_source'), { meta: 4, applovin: 2, organic: 2 });
 });
 
 // 38. And the CODE the four-way chain generates is the four-way join a human would write —
@@ -725,7 +725,7 @@ test('38. the generated four-way join matches a hand-written one', opts, async (
       JOIN {{ ref('fct_crashlytics_events') }} c
         ON c.rewarded_tracking_id = e.tracking_id
        AND c.player_id_of_internal = e.player_id_of_internal`, cols);
-  assert.equal(want.length, 14);
+  assert.equal(want.length, 8);
   assert.deepEqual(await ordered(gen, cols), want);
 });
 
@@ -843,7 +843,7 @@ const CHAIN_LISTED = [
 ];
 
 // 44. Fields from all three models in one aggregate — ids, event-scoped payload, a joined time.
-test('44. any attribute of a joined model can be listed: 14 rows, 7 reports, 5 issues, 8 events, 4 funnels, 4 spend rows', opts, async (t) => {
+test('44. any attribute of a joined model can be listed: 8 rows, 4 reports, 4 issues, 8 events, 4 funnels, 4 spend rows', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRows('events', ...CHAIN_LISTED, {
     stage: 'aggregate',
@@ -859,9 +859,9 @@ test('44. any attribute of a joined model can be listed: 14 rows, 7 reports, 5 i
     ],
   });
   const r = rows[0];
-  assert.equal(num(r.n), 14);
-  assert.equal(num(r.crashes), 7);
-  assert.equal(num(r.issues), 5);
+  assert.equal(num(r.n), 8);
+  assert.equal(num(r.crashes), 4);
+  assert.equal(num(r.issues), 4);
   assert.equal(num(r.events), 8);
   assert.equal(num(r.funnels), 4, 'fnl_01, fnl_04, fnl_06, fnl_08');
   assert.equal(num(r.spend_rows), 4);
@@ -869,8 +869,8 @@ test('44. any attribute of a joined model can be listed: 14 rows, 7 reports, 5 i
   assert.equal(num(r.after), num(want[0].n), 'the crash after the ad, compared as moments');
 });
 
-// (45. Grouping by a joined attribute with joined amounts as the measures — meta 18 / organic 2 /
-// applovin 2, spend 20 / 0 / 5, impressions 1420 / 0 / 360 — is mcp-end-to-end.test.js #9's slice.)
+// (45. Grouping by a joined attribute — meta 4 / organic 2 / applovin 2 — is mcp-end-to-end.test.js
+// #9's slice.)
 
 // 47. What was listed is what is there — and nothing else. The joined model has a dozen more
 //     columns; none of them leaked in, so naming one is a plain unknown-column failure.
@@ -879,7 +879,7 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   const narrow = { stage: 'join', ...CRASH_OF('rewarded'), kind: 'inner', attrs: [{ column: 'crash_id' }] };
   const rows = await pipeRows('events', narrow,
     { stage: 'aggregate', measures: [{ name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] });
-  assert.equal(num(rows[0].crashes), 7);
+  assert.equal(num(rows[0].crashes), 4);
   for (const unlisted of ['issue_title_of_event_data', 'rewarded_tracking_id', 'is_fatal_of_event_data']) {
     await assert.rejects(
       () => pipeRows('events', narrow, { stage: 'aggregate', measures: [{ name: 'x', expr: { fn: 'count_distinct', args: [{ column: unlisted }] } }] }),
@@ -890,12 +890,12 @@ test('47. only the listed columns arrive: an unlisted one is an unknown column',
   const wider = await pipeRows('events',
     { ...narrow, attrs: [{ column: 'crash_id' }, { column: 'issue_title_of_event_data' }] },
     { stage: 'aggregate', measures: [{ name: 'issues', expr: { fn: 'count_distinct', args: [{ column: 'issue_title_of_event_data' }] } }] });
-  assert.equal(num(wider[0].issues), 5);
+  assert.equal(num(wider[0].issues), 4);
 });
 
 // (48. Every way a name can end up used twice is refused at add_steps, with the reason and the
 // rename: test/unit/build-pipeline-model.test.js. The rename the error prints, built with both
-// sides present — fatal_crash 8 / non_fatal 4 / anr 2 beside ad_started 7 / ad_finished 7 — is
+// sides present — fatal_crash 4 / non_fatal 2 / anr 2 beside ad_started 4 / ad_finished 4 — is
 // mcp-end-to-end.test.js #5(c).)
 
 // 49. The all-at-once path is held to the same contract — a pipeline handed over whole, or
@@ -940,37 +940,34 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
 // `<relationship>__<attribute>` can only reach a dimension the manifest carries, so a fact used
 // as a join target has to emit its own declared attributes — it used to emit only its time axis,
 // and every ad_funnel__<attr> the catalog advertised was refused by MetricFlow as "no valid join
-// path exists". Second that `unique` is a CLAIM ABOUT THE DATA and nothing verifies it: in THIS
-// warehouse it is false (four reports of u1 name the same funnel), and the numbers below are the
-// honest consequence.
+// path exists". Second that `unique` is a CLAIM ABOUT THE DATA, and the fixture makes it true: a
+// report carries a funnel only when it is the first after it (SEED_DATA.md §12), so no (funnel,
+// player) pair repeats on the owning side and the join adds no row.
 
 // 50. The governed path reaches the owning fact's attributes: 176 events matched no report,
-//     14 matched one — split by the app version the crash was reported from.
-// 51. …and the total says what the claim cost: 190 against an honest 184. u1's two funnel
-//     events match FOUR of its crash reports, so they are counted four times. Where the owning
-//     side really does hold one row per key, the same query totals exactly.
+//     8 matched one — split by the app version the crash was reported from.
+// 51. …and the total stays 184: each of the four rewarded funnels meets one report.
 // Both attributes come through the SAME join (ad_funnel onto the crash row), so 50's app-version
-// split and 51's device-model total are the marginals of ONE query grouped by both — a count, and
-// the inflation is the join's, whichever attributes of the joined row are kept.
-test('50. a fact that owns a key exposes its attributes to a governed group-by; 51. `unique` is a claim nobody checks: a false one inflates 184 to 190', opts, async (t) => {
+// split and 51's device-model total are the marginals of ONE query grouped by both.
+test('50. a fact that owns a key exposes its attributes to a governed group-by; 51. a `unique` key that is unique adds no row: 184 stays 184', opts, async (t) => {
   if (skip(t)) return;
   assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', '[50] the crash source is the target');
   const r = await ownerEngine.query_model({
     context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['jown_evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(splitBy(r, 'app_version', 'jown_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, '[50] events per crash app_version, via ad_funnel');
+  assert.deepEqual(splitBy(r, 'app_version', 'jown_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '[50] events per crash app_version, via ad_funnel');
 
   const flat = await ownerEngine.query_model({ context_id: ownerCtx, steps: [{ stage: 'metrics', metrics: ['jown_evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
   assert.equal(num(flat.rows[0].jown_evts), 184, '[51] ungrouped, nothing is joined and the count is honest');
 
-  assert.equal(sumCol(r.rows, 'jown_evts'), 190, '[51] the join added 6 rows: 2 events x 4 reports of one funnel');
-  // the same key is genuinely NOT unique on the owning side — which is why.
+  assert.equal(sumCol(r.rows, 'jown_evts'), 184, '[51] grouped through the join, the count is the same: no event meets two reports');
+  // the key is unique on the owning side, as declared — which is why.
   const dup = await wh.query(`SELECT count(*) AS n FROM (
     SELECT rewarded_tracking_id, player_id_of_internal FROM main.fct_crashlytics_events
     WHERE rewarded_tracking_id IS NOT NULL GROUP BY 1, 2 HAVING count(*) > 1) d`);
-  assert.equal(num(dup.rows[0].n), 1, 'one duplicated (funnel, player) pair — u1 with fnl_01, four times');
+  assert.equal(num(dup.rows[0].n), 0, '[51] no (funnel, player) pair repeats on the crash side');
 });
 
 // 52. The KEY SHAPE comes from the declaration and nothing else. The same warehouse, the same
@@ -987,8 +984,8 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
     context_id: oneCtx, steps: [{ stage: 'metrics', metrics: ['jone_evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(splitBy(r, 'app_version', 'jone_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, 'same numbers as the two-column key');
-  assert.deepEqual(splitBy(r, 'device_model', 'jone_evts'), { none: 176, iphone: 14 }, 'by device_model, the same as the two-column key');
+  assert.deepEqual(splitBy(r, 'app_version', 'jone_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, 'same numbers as the two-column key');
+  assert.deepEqual(splitBy(r, 'device_model', 'jone_evts'), { none: 176, iphone: 8 }, 'by device_model, the same as the two-column key');
 });
 
 // 53. NOTHING IS ADVERTISED THAT CANNOT BE ANSWERED. Whatever the catalog lists under the owned
@@ -1029,8 +1026,8 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   for (const a of own) assert.equal(totals[a], 184, `${a} must not inflate`);
 
   // '54. a truthful `unique` never duplicates: 184 stays 184' — THE ANSWER TO "how can a
-  // many-to-one join fan out". It cannot. Section K's 190 came from a FALSE claim; here the owning
-  // column really does hold one row per value (checked against the warehouse), and the very same
+  // many-to-one join fan out". It cannot. Here the owning column holds one row per value
+  // (checked against the warehouse), and the very same
   // generated join keeps the count at exactly 184 — 24 events find their one crash report, 160
   // find none. The rows are the ones read above; every attribute's split totals 184 there.
   const dup = await wh.query(`SELECT count(*) AS n FROM (

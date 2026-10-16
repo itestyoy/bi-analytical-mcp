@@ -243,9 +243,9 @@ test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labell
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 7. an attribute of an owned FACT is reached through the relationship the source declares
   assert.equal(r.group_by_resolved['crashlytics.app_version'], 'crashlytics_app_version', '7: resolved through ad_funnel, not through the crash identity');
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.app_version'], 'aown_evts'), { none: 176, '1.0.0': 6, '1.1.0': 8 }, '7: events per crash app_version, without via');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.app_version'], 'aown_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '7: events per crash app_version, without via');
   // 8. via names the relationship explicitly and gives the same join's numbers
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aown_evts'), { none: 176, iphone: 14 }, '8: events per crash device_model, via ad_funnel');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aown_evts'), { none: 176, iphone: 8 }, '8: events per crash device_model, via ad_funnel');
   // 20. with an owner declared, both sides label the relationship consistently
   const crash = await ownerEngine.semantic_index({ source: 'crashlytics' });
   assert.match(crash.relationships.find((x) => x.entity === 'ad_funnel').use, /^owned here — other models point at it/, '20: the crash side owns ad_funnel');
@@ -255,7 +255,7 @@ test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labell
   assert.equal(rel.joins, 'crashlytics', '20: the events side points at the owner');
 });
 
-test('19. a relationship nobody owns has no governed path — the crash source\'s join contract joins it in a pipeline: 14 rows', opts, async (t) => {
+test('19. a relationship nobody owns has no governed path — the crash source\'s join contract joins it in a pipeline: 8 rows', opts, async (t) => {
   if (skip(t)) return;
   const v = await engine.semantic_index({ source: 'crashlytics' });
   assert.equal(v.relationships.find((r) => r.entity === 'ad_funnel_rewarded').use, 'no model owns it (no governed path)');
@@ -264,7 +264,7 @@ test('19. a relationship nobody owns has no governed path — the crash source\'
     { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'event_name', name: 'crash_event' }] },
     { stage: 'aggregate', group_by: ['crash_event'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
-  assert.deepEqual(mapCol(rows, 'crash_event', 'n'), { fatal_crash: 8, non_fatal: 4, anr: 2 });
+  assert.deepEqual(mapCol(rows, 'crash_event', 'n'), { fatal_crash: 4, non_fatal: 2, anr: 2 });
 });
 
 // ═══════════ S5. GROUNDING, AND NO ANCHOR ═══════════

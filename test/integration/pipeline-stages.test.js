@@ -1739,9 +1739,9 @@ test('11. unnest then a point-in-time join: 20 breadcrumbs as GB 10 / US 6 / DE 
 });
 
 // 12. …and across a join: the stack frames of the crash report that followed the rewarded ad an event
-//     belongs to. 6 reports have both a stack and a rewarded funnel; their 10 frames each pair with
+//     belongs to. 3 reports have both a stack and a rewarded funnel; their 5 frames each pair with
 //     the funnel's 2 events.
-test('12. the rewarded ad funnel x its crash report\'s stack frames: 20 rows, 6 reports, 5 files', opts, async (t) => {
+test('12. the rewarded ad funnel x its crash report\'s stack frames: 10 rows, 3 reports, 3 files', opts, async (t) => {
   if (skip(t)) return;
   const rows = await pipeRowsFrom('events',
     { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'crash_id' }, { column: 'stack_frames_of_event_data' }] },
@@ -1755,9 +1755,9 @@ test('12. the rewarded ad funnel x its crash report\'s stack frames: 20 rows, 6 
       { name: 'events', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } },
     ] },
   );
-  assert.equal(numOrNaN(rows[0].n), 20);
-  assert.equal(numOrNaN(rows[0].crashes), 6, 'k13 carries a funnel but no stack, so it drops out');
-  assert.equal(numOrNaN(rows[0].files), 5, 'Ads.cs is only in k4, which has no rewarded funnel');
+  assert.equal(numOrNaN(rows[0].n), 10);
+  assert.equal(numOrNaN(rows[0].crashes), 3, 'k1, k6, k9 — k13 carries a funnel but no stack, so it drops out');
+  assert.equal(numOrNaN(rows[0].files), 3, 'Game.cs, Engine.cs, Net.cs');
   assert.equal(numOrNaN(rows[0].events), 6, 'three funnels: fnl_01, fnl_04, fnl_06');
 });
 

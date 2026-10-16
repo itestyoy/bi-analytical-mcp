@@ -152,7 +152,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
 
 // ═══════════ 2. four sources in one pipeline, stage by stage ═══════════
 
-test('2. an event → its funnel\'s crash report → the install version then → the spend record of the day: 14 rows', opts, async (t) => {
+test('2. an event → its funnel\'s crash report → the install version then → the spend record of the day: 8 rows', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('events', [
     { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'crash_id' }] },
@@ -167,8 +167,8 @@ test('2. an event → its funnel\'s crash report → the install version then �
     ] },
   ]);
   const r = built.rows[0];
-  assert.equal(num(r.n), 14, '8 funnel events meet 7 reports (u1\'s two events four each), every one on a spend day');
-  assert.equal(num(r.crashes), 7);
+  assert.equal(num(r.n), 8, '8 funnel events meet one report each, every one on a spend day');
+  assert.equal(num(r.crashes), 4);
   assert.equal(num(r.events), 8);
   assert.equal(num(r.funnels), 4);
   assert.equal(num(r.spend_rows), 4);
@@ -197,7 +197,7 @@ test('3. the users contract joins the version valid then: 13 attributed rows —
 
 // ═══════════ 4. one relationship, three ad formats ═══════════
 
-test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funnels apart', opts, async (t) => {
+test('4. the caller picks the ad format: 8 / 4 / 4 rows, and k1 keeps its funnels apart', opts, async (t) => {
   if (skip(t)) return;
   // ONE build per format: the joined pairs (event, crash) — a table of a few rows, so its row count
   // is the join's size and k1's own pairs are read off the same rows
@@ -206,9 +206,9 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
     { stage: 'project', keep: ['crash_id', 'event_id'] },
   ]);
   const built = { rewarded: await pairsFor('rewarded'), interstitial: await pairsFor('interstitial'), banner: await pairsFor('banner') };
-  assert.equal(num(built.rewarded.row_count), 14, '[rows] rewarded');
-  assert.equal(num(built.interstitial.row_count), 12, '[rows] interstitial');
-  assert.equal(num(built.banner.row_count), 8, '[rows] banner');
+  assert.equal(num(built.rewarded.row_count), 8, '[rows] rewarded');
+  assert.equal(num(built.interstitial.row_count), 4, '[rows] interstitial');
+  assert.equal(num(built.banner.row_count), 4, '[rows] banner');
 
   // u1 crashed having seen a rewarded funnel AND an interstitial one; each format returns its
   // own pair, and the banner column is empty so it returns nothing.
@@ -250,8 +250,8 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
     adSide[String(r.event_name)] = (adSide[String(r.event_name)] || 0) + num(r.n);
     crashSide[String(r.crashlytics_event_name)] = (crashSide[String(r.crashlytics_event_name)] || 0) + num(r.n);
   }
-  assert.deepEqual(crashSide, { fatal_crash: 8, non_fatal: 4, anr: 2 });
-  assert.deepEqual(adSide, { ad_started: 7, ad_finished: 7 });
+  assert.deepEqual(crashSide, { fatal_crash: 4, non_fatal: 2, anr: 2 });
+  assert.deepEqual(adSide, { ad_started: 4, ad_finished: 4 });
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
@@ -362,13 +362,13 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
 // ═══════════ 9. a stored result, re-sliced without recomputing ═══════════
 
 // The slice groups by an attribute of the third model beside a count of the first.
-test('9. materialize once, then re-slice the stored result from its task: meta 10 / organic 2 / applovin 2', opts, async (t) => {
+test('9. materialize once, then re-slice the stored result from its task: meta 4 / organic 2 / applovin 2', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('events', [
     { stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, kind: 'inner', attrs: [{ column: 'crash_id' }] },
     { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' }, kind: 'inner', attrs: [{ column: 'media_source' }] },
   ], `e2e_store_${seq++}`);
-  assert.equal(num(built.row_count), 14, 'the row-level result is stored as a table');
+  assert.equal(num(built.row_count), 8, 'the row-level result is stored as a table');
 
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, steps) => {
@@ -379,17 +379,17 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   const sliced = await slice(`e2e_slice_${seq++}`, [
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
   ]);
-  assert.deepEqual(mapCol(sliced.rows, 'media_source', 'n'), { meta: 10, organic: 2, applovin: 2 });
+  assert.deepEqual(mapCol(sliced.rows, 'media_source', 'n'), { meta: 4, organic: 2, applovin: 2 });
 
   // a filter over the stored result is just as cheap.
   const meta = await slice(`e2e_slice_${seq++}`, [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'media_source' }, { value: 'meta' }] }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
-  assert.equal(num(meta.rows[0].n), 10);
+  assert.equal(num(meta.rows[0].n), 4);
   // the stored result itself pages without recomputing
-  const page = (await call('query_model', { task_ids: [built.task_id], limit: 5, offset: 10 })).results[0];
-  assert.equal(page.rows.length, 4, 'rows 11-14 of 14');
+  const page = (await call('query_model', { task_ids: [built.task_id], limit: 5, offset: 5 })).results[0];
+  assert.equal(page.rows.length, 3, 'rows 6-8 of 8');
 });
 
 // ═══════════ 10. an existing task, extended in place ═══════════

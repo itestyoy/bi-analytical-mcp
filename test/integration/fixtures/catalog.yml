@@ -408,7 +408,7 @@ models:
                 rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
                 interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
                 banner:       { key: [banner_tracking_id, player_id_of_internal] }
-          # THE JOIN CONTRACT: one crash report per player and ad funnel (the authors' guarantee), on
+          # THE JOIN CONTRACT: one crash report per player and ad funnel (the authors' guarantee, which the data holds), on
           # the tracking-id column of the format the caller names
           join:
             unique: true
@@ -437,17 +437,17 @@ models:
           meta: { mcp: { index: false } }
       - name: rewarded_tracking_id
         data_type: string
-        description: "Last REWARDED ad funnel seen before the crash; NULL if there was none."
+        description: "The REWARDED ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: interstitial_tracking_id
         data_type: string
-        description: "Last INTERSTITIAL ad funnel seen before the crash; NULL if there was none."
+        description: "The INTERSTITIAL ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: banner_tracking_id
         data_type: string
-        description: "Last BANNER ad funnel seen before the crash; NULL if there was none."
+        description: "The BANNER ad funnel this report follows — set on the first report after the funnel only, so a (player, funnel) pair names one report; NULL otherwise."
         config:
           meta: { mcp: { index: false } }
       - name: event_time

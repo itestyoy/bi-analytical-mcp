@@ -27,7 +27,7 @@
 // events, crashlytics, acquisition, users and experiments. Nothing here names a column the model
 // could not find through semantic_index.
 
-const ANSWERING = ['query_model', 'query_model', 'build_model'];
+const ANSWERING = ['query_model', 'build_model'];
 const PURCHASED = "event_name = 'iap_purchase_completed'";
 
 export const CASES = [

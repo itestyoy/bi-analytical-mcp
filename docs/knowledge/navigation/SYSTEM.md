@@ -34,7 +34,7 @@ Fast entrypoint for the system: what bi-analytical-mcp is and how a question flo
 
 ## Notes
 
-- A question flows: `semantic_index` (what exists) → `build_semantic_model` (reusable metrics) or `build_pipeline_model` (a one-off table) → `query_*` starts a task and returns its `task_id` at once → the same side's query tool reads it back with `{ task_ids }` → `display_model_result` draws a card, once.
+- A question flows: `semantic_index` (what exists) → `build_model` (a one-off table of steps, or a semantic layer of reusable metrics as its last step) → `query_model` starts a task and returns its `task_id` at once, and reads it back with `{ task_ids }` → `display_model_result` draws a card, once.
 - Two warehouses, two dialects: BigQuery (production) and DuckDB (local work and tests).
 - Every tool takes one field, `request`; its schema is the portable subset and is never cut.
 

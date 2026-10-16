@@ -40,7 +40,7 @@
   шаги после него читают колонку результата: `{ stage: 'order_by', keys: [{ key: 'users_country' }] }` (ключ сортировки — имя колонки результата). Связь сервер выводит из объявленных
   ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
   `user__country` **не принимается** — схема отказывает и перечисляет формы ссылки, которые берёт `group_by` (`{ source: "users", column }`, `{ source, property }` …). Полный перечень доступного —
-  `groupable_columns` в обзоре и `groupable` в ответе `build_semantic_model`. Колонки результата
+  `groupable_columns` в обзоре и `groupable` в описании контекста (`context({ action: "describe" })`). Колонки результата
   тоже без внутреннего разделителя: `users_country`, `crashlytics_app_version`, `metric_time_day` —
   ими же адресуются шаги после запроса (`steps`), карточка (`display_model_result`) и пайплайн от сохранённого результата (`from_task`); соответствие возвращается в
   `group_by_resolved`; внутреннего написания MetricFlow агент не видит ни на входе, ни на выходе.
@@ -457,7 +457,7 @@ models:
 работают — с числами из фикстуры, которыми это доказано (`pipeline-stages.test.js`, раздел
 COMPLEX PAYLOAD TYPES).
 
-Общее правило: **массив — не атрибут.** В управляемой метрике (`build_semantic_model`) по массиву
+Общее правило: **массив — не атрибут.** В управляемой метрике (шаг `semantic_model` в `build_model`) по массиву
 (как и по структуре, объявленной в `properties`) не сгруппировать и его не просуммировать как есть —
 `{ property }` в `dimensions` берёт только скалярное свойство (JSON-объект в плоской колонке, форма C,
 — обычное текстовое свойство). Но скаляр из сложного значения извлекается и там — вычисляемым
@@ -703,7 +703,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 `semantic_index({ recipe })` возвращает рецепт как есть (только джойн pipeline с медленно меняющейся моделью без `between` дополняется окном под этот каталог — что дополнено, сказано в `fitted_to_catalog`) плюс рамку: имена метрик хранятся
 как объявлены (в `example_queries` — те же имена), а
 рецепт — **строительный блок**: взять `hack`, адаптировать payload под точный вопрос, отдать
-`semantic_payload` в `build_semantic_model`, а pipeline — в `build_pipeline_model`.
+`semantic_payload` и pipeline — в `build_model` (у первого последний шаг — `semantic_model`).
 
 Поэтому самое ценное поле — не payload, а **`hack`**: обобщённый приём, из которого агент
 собирает решение задачи, для которой рецепта нет. Payload — доказательство, что приём работает.
@@ -721,8 +721,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
 | `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
 | `metric_types` | да | какого рода результат | из словаря ниже |
-| `semantic_payload` | одно из | payload `build_semantic_model` | управляемый путь: `name`, `semantic_models` (элемент `{ source }` без мер подключает модель ради её колонок), `metrics` |
-| `pipeline_payload` | одно из | запрос `build_pipeline_model` на старт: `{ action: 'start', name, source, time_range?, steps }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_pipeline_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
+| `semantic_payload` | одно из | запрос `build_model` на старт, последний шаг — `semantic_model` | управляемый путь: `name`, `source`, шаг с `dimensions`, `join` (модель, по атрибутам которой группируют), `measures` (`source` — мера другой модели), `metrics` |
+| `pipeline_payload` | одно из | запрос `build_model` на старт: `{ action: 'start', name, source, time_range?, steps }` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты. Отдаётся агенту как есть — `build_model({ request: <pipeline_payload> })`, с `materialize: true` собирается тем же вызовом. Файл развёртывания в прежней форме `{ name, pipeline: { source, stages } }` читается как такой запрос |
 | `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
 | `example_queries` | для `semantic_payload` | `[{ steps: [{ stage: "metrics", metrics, group_by? }, …] }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
 | `experiment` | для A/B | `{ action: 'analyze', metric, group_field, arm }` — сопоставление колонок результата → группа `experiment({ action: 'analyze' })`; `{ action: 'check_split', group_field, arm: { n }, expected_ratio? }` → `experiment({ action: 'check_split' })`. Файл развёртывания с прежними плоскими ключами `<поле>_field` (`n_field`, `sumY_field`, `sumNum_field` …) читается как такой `arm` | см. таблицу ниже |
@@ -797,7 +797,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 }
 ```
 
-**Pipeline** — `pipeline_payload`, запрос `build_pipeline_model` на старт со всеми стадиями, часто с `experiment`. Для того, чего
+**Pipeline** — `pipeline_payload`, запрос `build_model` на старт со всеми стадиями, часто с `experiment`. Для того, чего
 управляемая метрика не выражает. Результат — таблица; тест требует хотя бы одной строки, а с `experiment` — **не меньше двух** (контроль и вариант).
 
 ```json
@@ -921,8 +921,8 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 | форма | что проверяется |
 |---|---|
-| `semantic_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется без ошибки (`ok: true`, массив `rows`) |
-| `pipeline_payload` | запрос отправляется как есть, с `materialize: true` (`build_pipeline_model`), сборка выполняется, результат ≥ 1 строки (≥ 2, если есть `experiment`); если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
+| `semantic_payload` | `build_model` со слоем парсится (dbt parse), **первый** `example_queries` исполняется без ошибки (`ok: true`, массив `rows`) |
+| `pipeline_payload` | запрос отправляется как есть, с `materialize: true` (`build_model`), сборка выполняется, результат ≥ 1 строки (≥ 2, если есть `experiment`); если есть `experiment` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `experiment.action` — `check_split`, то же для него |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
 | `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: запрос на старт отправляется как есть, затем `preview` — стадии рендерятся, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после, цепочка моделей раскладывается; плюс наличие `read_first`, `hack`, `notes` |
 
@@ -987,7 +987,7 @@ payload и проверяет на точных числах, перечисле
 для любой модели — все части ключа `primary_entity`. Отсутствие самой таблицы считается тем же.
 Модель исключается из каталога с причиной: остальные источники работают как обычно, обзор
 перечисляет её в `unavailable_models`, `semantic_index({ source })` называет недостающие колонки,
-а из схем `build_semantic_model` / `build_pipeline_model` она пропадает: вызов с ней отвергается валидацией как неизвестный источник (причину называют обзор и `semantic_index({ source })`).
+а из схемы `build_model` она пропадает: вызов с ней отвергается валидацией как неизвестный источник (причину называют обзор и `semantic_index({ source })`).
 Если недоступными оказались **все** источники событий, сервер не стартует. Окно валидности сюда
 не входит: без колонок окна модель считается плоской размерностью, это штатная деградация.
 Обычные колонки — атрибут, свойство, величина, одна из связей, колонка приложения — вырезаются

@@ -201,7 +201,7 @@ export function slowlyChangingNoMeasures(catalog, models) {
   const fact = entity ? (catalog.facts || []).find((f) => keyOn(f)?.length === 1) : null;
   const key = fact ? keyOn(fact)[0].column : null;
   const instead = key
-    ? `count on an events source instead — e.g. a semantic_models item { source: '${fact}', measures: [{ name: '${entity}s', expr: { fn: 'count_distinct', args: [{ column: '${key}' }] } }] } — and group it by ${model}'s columns`
+    ? `count on an events source instead — a measure over '${fact}' (the build's source, or a measure with source: '${fact}'), e.g. { name: '${entity}s', expr: { fn: 'count_distinct', args: [{ column: '${key}' }] } } — and group it by ${model}'s columns`
     : 'count on an events source instead, and group it by its columns';
   return `${models.map((m) => `'${m}'`).join(', ')} ${models.length > 1 ? 'are' : 'is'} slowly-changing (several versions per key, each with a validity window), so ${models.length > 1 ? 'they take' : 'it takes'} no measures; ${instead}.`;
 }

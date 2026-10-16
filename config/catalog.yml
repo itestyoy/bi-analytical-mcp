@@ -7,8 +7,8 @@ version: 2
 # declared in sources.yml. Exactly one model per ROLE; several models may be events
 # SOURCES (each with its own known_events + event-scoped payload + primary_entity).
 # Events sources are INDEPENDENT AND EQUAL — none is a default: the source is always a
-# separate tool argument (semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }),
-# semantic_models[].from) and never part of a name, and each keeps its own space in the
+# separate tool argument (semantic_index({ request: { source, event } }), build_model({ request: { source } }),
+# a semantic_model measure's source) and never part of a name, and each keeps its own space in the
 # value index. Within a source, event and property names are used as-is.
 # The parsing/attribution already happened upstream — we DO NOT re-parse anything;
 # we take the ready, flattened columns as-is and only re-shape (rename role columns).
@@ -1664,7 +1664,7 @@ models:
   #   · a fact MUST declare is_event_name + is_time.
   #   · this source is EQUAL to the analytics one, not nested under it: address its events and
   #     properties with source: 'crashlytics' (semantic_index({ request: { source, event } }),
-  #     build_pipeline_model({ request: { source: 'crashlytics' } }), semantic_models[].from), and use the
+  #     build_model({ request: { source: 'crashlytics' } }), a semantic_model measure's source), and use the
   #     names as-is inside a pipeline or semantic model built from it.
   #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
   #   · a payload column is marked `property: true`; WHICH events populate it is measured by the index; it reads

@@ -172,7 +172,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   their whole paths; `events` keeps a share of the rows of the named events (for one that drowns the
   rest), whose counts and surrounding transitions are then approximate. For event logic these stages
   cannot say — a match_recognize, several sources joined, a cohort chosen by an aggregate, a python
-  step — the table is built with `build_pipeline_model` and the eventstream starts from its task
+  step — the table is built with `build_model` and the eventstream starts from its task
   (`from_task` + `path: [<column>]` + `columns: { event, time }`), reading that table's columns; its
   cards are the same transition graph, step matrix and sankey. A start kept in an earlier spelling
   (its list as `stages`, `events.include` / `split`, segment objects) is read in this one, and a new
@@ -344,8 +344,8 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   result arrives. A result that is gone — its table or context deleted, a result held in memory
   expired or lost to a restart, a task_id the server does not know — is `error.code: result_gone`
   (a card of it reads "This result is no longer available", not "Error").
-  BUILD, QUERY, SHOW: two builders — `build_semantic_model` and `build_pipeline_model` — and one
-  query tool, `query_model`. A call that starts warehouse work (a build, a
+  BUILD, QUERY, SHOW: one builder, `build_model` — its last step may be a `semantic_model` step,
+  the semantic layer — and one query tool, `query_model`. A call that starts warehouse work (a build, a
   query) returns only `{ task_id }` and never waits; `query_model`, given
   `{ task_ids }`, waits for it (up to 30 s per call) and returns a page of the rows (`offset` /
   `limit`) — and never draws;
@@ -354,7 +354,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
   carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
   tools whose answer has one shape and no card (`time`, `context`, `delete_context`, `memory`,
-  `explore_errors`, `build_semantic_model`) declare an `outputSchema` and carry every successful
+  `explore_errors`) declare an `outputSchema` and carry every successful
   answer as `structuredContent` too; every other answer is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may

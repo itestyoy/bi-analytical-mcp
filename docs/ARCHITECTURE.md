@@ -223,10 +223,10 @@ with the YAML config header. Two consumption modes, unchanged:
    how the `match_recognize` pipeline is consumed today.
 2. **Direct materialization.** `query_model(materialize:true)` stores a
    result (after its steps) as a table named after its task; a pipeline started from that task
-   (`build_pipeline_model({ action: 'start', name, from_task })`) re-slices it with the same
+   (`build_model({ action: 'start', name, from_task })`) re-slices it with the same
    stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
 
-`build_semantic_model` stays the declarative way to define measures/metrics over
+A `semantic_model` step — `build_model`'s last — stays the declarative way to define measures/metrics over
 the **scalar** two-source models. **A pipeline built in one call (`_buildPipeline`) is the pipeline
 creator**: it accepts a `pipeline` (`source` + ordered stages — where/compute/unnest/join/
 aggregate/pivot/unpivot/sample/order_by/limit/project and the `match_recognize` funnel stage;

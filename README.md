@@ -25,10 +25,9 @@ Design docs:
 | Tool | Purpose |
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
-| `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
-| `build_pipeline_model` | compose a pipeline incrementally (start → add_steps* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
+| `build_model` | compose a build incrementally (start → add_steps* → edit_step / fork → materialize) whose rows are the result — funnels (`match_recognize`), sessions, joins on a model's join contract, pivots, and a `python` stage (a dbt **Python model** of its own, run on the warehouse's Python runtime: BigFrames / Snowpark / PySpark); its LAST step may be a `semantic_model` step — reusable named metrics over the build's source or over the table its steps built, queried many ways with `query_model` |
 | `query_model` | a query as `steps`, reading every task back (`{ task_ids }`): with one `metrics` step (metrics + group_by) a metric query run by `mf query` against a context, `where` steps before it for the rows its metrics fold, and the pipeline's own read stages after it over its result (a where step on a metric is a having); without one, a read of the context's stored pipeline table in the same read stages (where, compute, aggregate, pivot, …) |
-| `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
+| `context` | read contexts: `{ action: list \| describe }` — describe adds a context's semantic layer as dbt parsed it (each metric's definition and group_by; `validate: true` runs it); `delete_context` removes one |
 
 Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
 The shapes above are that field's content. A tool's schema is a closed root with this one field,
@@ -72,7 +71,7 @@ the read steps after it work on its result:
 ## Architecture
 
 ```
-AI ──► build_semantic_model (enum-constrained)
+AI ──► build_model + semantic_model step (enum-constrained)
           └─ compile → render YAML → .mcp/ctx/<id>/models/generated/context.yml → dbt parse
 AI ──► query_model (enum-constrained)
           └─ mf query (dbt Core, MetricFlow kept warm) in the context overlay → rows
@@ -84,9 +83,10 @@ AI ──► query_model (enum-constrained)
 - **Compile** (`src/compile.js`): declaration → dbt measures/dimensions/metrics.
   A measure is `{ name, expr }`, its expression ONE aggregate in the expression grammar every
   tool shares (`{ fn: "sum", args: [{ column }] }`, the rows where a condition holds by a `case` it
-  folds); the model's `where` and the measure's case are baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
-  `{ metric }` leaves — a ratio is `div` of two metrics. Namespacing
-  uses a single underscore (dbt 1.11 forbids `__` in names).
+  folds) — the case is baked into its `expr` (`CASE WHEN …`). A derived metric's `expr` is arithmetic over
+  `{ metric }` leaves — a ratio is `div` of two metrics. Metrics, measures and computed dimensions
+  are stored under the names they are declared by (a context holds one semantic layer); a name
+  MetricFlow refuses is refused when the step is added.
 - **Render** (`src/yaml-render.js`): exactly one semantic model per dbt model per
   context (base template + task additions).
 - **Contexts** (`src/context-manager.js`): per-context overlay dbt project +
@@ -195,7 +195,7 @@ Snowflake, Databricks, DuckDB); on any other adapter it is absent and `semantic_
 
 The integration suite runs on **DuckDB**: each test file gets a database file of its own
 (`DUCKDB_PATH`, read by the fixture profiles), builds the base project, then runs
-`build_semantic_model` → `dbt parse` → `mf query` (and the pipelines, the python stage — dbt-duckdb
+`build_model` (a semantic_model step) → `dbt parse` → `mf query` (and the pipelines, the python stage — dbt-duckdb
 runs dbt Python models locally) and checks the returned rows. One process at a time can hold a DuckDB
 file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 

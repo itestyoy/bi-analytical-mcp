@@ -146,7 +146,7 @@ export const semanticIndexMethods = {
     if (rels.length) {
       out.relationships = rels;
       const viaable = rels.filter((r) => r.joins);
-      if (viaable.length) out.join_note = `In a metric query, group by { source: '${viaable[0].joins}', column: '<column>' }, with the model loaded by a semantic_models item { source: '${viaable[0].joins}' } — the relationship the schema declares is the join.`;
+      if (viaable.length) out.join_note = `In a metric query, group by { source: '${viaable[0].joins}', column: '<column>' }, the build's semantic_model step joining the model (join: [{ source: '${viaable[0].joins}', on }]) — the relationship the schema declares is the join.`;
     }
     // THE JOIN CONTRACT: what a pipeline names to join THIS model onto its rows (src/catalog/joins.js)
     const contract = c.joinContract(k);
@@ -361,7 +361,7 @@ export const semanticIndexMethods = {
       .filter(([, rels]) => rels.length > 1);
     const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
     recommendations.push(ent
-      ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (load the model with a semantic_models item { source: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
+      ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (the build's semantic_model step joins the model: join: [{ source: '${mk}', on }]${viaHint}), or reference '${col}' after a pipeline join stage { stage: 'join', source: '${mk}', on, attrs }.`
       : `Reference '${col}' after a pipeline join with:'${mk}' (build_model join stage).`);
     const out = {
       column: col, source: mk, type: dim.type,
@@ -667,7 +667,7 @@ export const semanticIndexMethods = {
     // Declared models the warehouse cannot back (a structural column or the table is missing):
     // excluded from every tool; the reason is here so the analyst can be told what to fix.
     ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ request: { source } }) on one shows what is missing.' } : {}),
-    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_model({ request: { source } }), semantic_models[].source; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
+    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_model({ request: { source } }), a semantic_model measure's source; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
     // Each events source lists its OWN event names — they are never merged into one list,
     // because two sources may legitimately carry the same event name.
     event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),

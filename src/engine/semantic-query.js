@@ -99,7 +99,7 @@ export const semanticQueryMethods = {
     const { now, afterLoading } = this._groupableSplit(ctx);
     const show = (rs) => rs.slice(0, 20).map(refShown).join(', ');
     const models = [...new Set(afterLoading.map((r) => r.source ?? r.semantic_model[0]))];
-    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once the context reads their model (a semantic_models item { source: <model> }): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
+    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once the build's semantic_model step joins their model (join: [{ source: <model>, on }]): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   },
 
   /**
@@ -197,7 +197,7 @@ export const semanticQueryMethods = {
     }
     if (candidates.size === 1) return out(`${[...candidates][0]}__${name}`);
     if (candidates.size > 1) throw new ToolError(`${at}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field });
-    throw new ToolError(`${at}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it (semantic_models: [{ source: '${model}' }]) and check semantic_index({ request: { source: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field });
+    throw new ToolError(`${at}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Join it in the build's semantic_model step (join: [{ source: '${model}', on }]) and check semantic_index({ request: { source: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field });
   },
 
   /**
@@ -228,7 +228,7 @@ export const semanticQueryMethods = {
       const as = declaredRef || (c.modelDimensionColumns(model).includes(ref.dimension) ? { source: model, column: ref.dimension } : null);
       if (as) throw new ToolError(`${at}: '${label}' is ${as.column !== undefined ? 'a column' : 'an event property'} of '${model}', named where it lives in the catalog — write ${refText(as)}`, { stage: 'validate', field });
       const computed = (ctx.state.additions?.[model]?.dimensions || []).map((d) => this._taskDimRef(model, d, c)).filter((r) => r.dimension !== undefined).map((r) => r.dimension);
-      throw new ToolError(`${at}: '${label}' is not a dimension this context computed on '${model}'. ${computed.length ? `It computed: ${computed.join(', ')}.` : 'It computed none there.'} A dimension computed from the row is declared { name, expr } in a semantic_models item.`, { stage: 'validate', field });
+      throw new ToolError(`${at}: '${label}' is not a dimension this context computed on '${model}'. ${computed.length ? `It computed: ${computed.join(', ')}.` : 'It computed none there.'} A dimension computed from the row is declared { name, expr } in the dimensions of the build's semantic_model step.`, { stage: 'validate', field });
     }
     if (ref.grain !== undefined) throw new ToolError(`${at}: '${label}' is a computed dimension, which is categorical — it takes no grain`, { stage: 'validate', field });
     return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${ref.dimension}`, label, type: 'unknown' };

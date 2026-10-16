@@ -32,7 +32,7 @@
 `known_events`, свои событийные свойства `*_of_event_data`, свой `primary_entity` и своё
 место в индексе значений по ключу `(source, property)`. Ни один не «главный». Поэтому
 источник всегда идёт **отдельным аргументом**:
-`semantic_index({ source, event })`, `build_pipeline_model({ source })`,
+`semantic_index({ source, event })`, `build_model({ source })`,
 `semantic_models[].source` — и никогда не приклеивается к имени.
 
 ---
@@ -417,7 +417,7 @@ semantic_index({ request: { source: 'acquisition' } }) describes them.
   "attrs": [{ "column": "app_version", "name": "users_app_version" }, { "column": "country" }] }
 ```
 
-Так же ведёт себя и путь «конвейер целиком» — `build_pipeline_model.pipeline` (`_buildPipeline`), в том числе
+Так же ведёт себя и путь «конвейер целиком» — `build_model.pipeline` (`_buildPipeline`), в том числе
 `dry_run`: тот же отказ, а не тихо собранная модель без поля.
 
 ### Несколько соединений подряд

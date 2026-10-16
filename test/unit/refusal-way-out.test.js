@@ -30,7 +30,7 @@ test('a declaration whose only metric reads a measure on the slowly-changing use
     assert.match(e.message, /no metric of this declaration can be queried/);
     assert.match(e.message, /'users' is slowly-changing/);
     // the count to write instead, on an events source that carries the users key
-    assert.match(e.message, /source: 'events', measures: \[\{ name: '\w+', expr: \{ fn: 'count_distinct', args: \[\{ column: 'player_id_of_internal' \}\] \} \}\]/);
+    assert.match(e.message, /a measure over 'events' \(the build's source, or a measure with source: 'events'\), e\.g\. \{ name: '\w+', expr: \{ fn: 'count_distinct', args: \[\{ column: 'player_id_of_internal' \}\] \} \}/);
     return true;
   });
   assert.equal(contexts(), before, 'no context is created for a refused declaration');

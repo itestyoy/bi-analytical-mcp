@@ -8,8 +8,9 @@
 import { stepOfDeclaration } from '../../src/pipeline/semantic-stage.js';
 import { taskResult } from './settle.js';
 
-/** The build_model start a declaration is. */
-export const declaration = (engine, decl) => stepOfDeclaration((engine.raw || engine).catalog, decl);
+/** The build_model start a declaration is — or a start as it stands (a recipe's semantic_payload is one),
+ *  built in the same call. */
+export const declaration = (engine, decl) => (Array.isArray(decl?.steps) ? { ...decl, materialize: true } : stepOfDeclaration((engine.raw || engine).catalog, decl));
 
 /** Declare `decl` on `engine` and return the task its materialize started — { task_id, context_id, … },
  *  as a call that starts warehouse work answers (a refusal is thrown as it is). */

@@ -19,7 +19,7 @@ import { pythonReferenceRecipes } from './python-guide.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { currentOf, currentMetrics, currentQueryInput } from './earlier-spelling.js';
 import { propertyTypes } from './pipeline/compute.js';
-import { stepOfDeclaration } from './pipeline/semantic-stage.js';
+import { stepOfDeclaration, isSemanticStep } from './pipeline/semantic-stage.js';
 
 /**
  * A pipeline recipe's payload, as the build_model start request it is. A file written for an
@@ -72,7 +72,7 @@ function currentSemanticModel(sm, catalog = null) {
 }
 
 /**
- * A semantic recipe's payload, as the declaration it is (read as a build_model start by its semantic_model step: src/pipeline/semantic-stage.js stepOfDeclaration). A file written for an
+ * A semantic recipe's payload written as an earlier declaration, in today's spelling (then read as a build_model start by its semantic_model step: semanticStartRequest). A file written for an
  * earlier version may load a model for its attributes with `use_base_models`, reference a measure as
  * `{ name }`, write a derived metric as text over its inputs or a ratio of two sides, type a dimension
  * with `as_type`, fold a measure with `sum_boolean`, or write its measures, conditions and dimensions
@@ -94,6 +94,21 @@ export function semanticRequest(payload, catalog = null) {
   const metrics = currentMetrics(out.metrics);
   if (metrics !== out.metrics) out = { ...out, metrics };
   return out;
+}
+
+/**
+ * A semantic recipe's payload as the build_model start it is: written so (`steps`, its semantic_model
+ * step the last), it is taken as it stands. A deployment's file may still hold the earlier declaration
+ * ({ name, semantic_models, metrics }); it is read as the start its semantic_model step makes
+ * (src/pipeline/semantic-stage.js stepOfDeclaration) over `catalog` — and handed over as written where
+ * that catalog cannot say it (no catalog, or a model it lacks): the recipe view still shows it, and the
+ * call it is made into is checked as any call is.
+ */
+export function semanticStartRequest(payload, catalog = null) {
+  if (!isObj(payload) || Array.isArray(payload.steps)) return payload;
+  const declaration = semanticRequest(payload, catalog);
+  if (!catalog) return declaration;
+  try { return stepOfDeclaration(catalog, declaration) || declaration; } catch { return declaration; }
 }
 
 // The earlier experiment block's flat `<field>_field` keys → where that column goes in `arm` (a path
@@ -136,11 +151,14 @@ export function experimentMap(e) {
   return { ...rest, arm };
 }
 
-/** What an earlier example query's `{ model, attribute }` named, read off the recipe's own declaration
+/** What an earlier example query's `{ model, attribute }` named, read off the recipe's own layer
  *  (src/earlier-spelling.js currentRef): an event property its semantic model declared a dimension, a
- *  dimension it computed there, else a column of that model. */
+ *  dimension it computed there, else a column of that model. A layer written as a build_model start
+ *  declares its dimensions on the build's source, in its semantic_model step. */
 function refSubject(semantic) {
-  const models = (isObj(semantic) && Array.isArray(semantic.semantic_models)) ? semantic.semantic_models : [];
+  const step = isObj(semantic) && Array.isArray(semantic.steps) ? semantic.steps.find(isSemanticStep) : null;
+  const models = step ? [{ source: semantic.source, dimensions: step.dimensions }]
+    : (isObj(semantic) && Array.isArray(semantic.semantic_models)) ? semantic.semantic_models : [];
   return (attribute, model) => {
     const d = (models.find((sm) => sm?.source === model)?.dimensions || []).find((x) => x?.property === attribute || x?.name === attribute);
     return d?.property !== undefined ? 'property' : d?.expr !== undefined ? 'dimension' : 'column';
@@ -156,11 +174,11 @@ function readFile(path, origin, catalog = null) {
   if (!path || !existsSync(path)) return [];
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   return (raw.recipes || []).map((r) => {
-    const semantic = r.semantic_payload ? semanticRequest(r.semantic_payload, catalog) : undefined;
+    const semantic = r.semantic_payload ? semanticStartRequest(r.semantic_payload, catalog) : undefined;
     return {
       ...r,
       ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload, catalog) } : {}),
-      ...(semantic ? { semantic_payload: (catalog && stepOfDeclaration(catalog, semantic)) || semantic } : {}),
+      ...(semantic ? { semantic_payload: semantic } : {}),
       ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic), propertyType: propertyTypes(catalog) })) } : {}),
       ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
       origin,

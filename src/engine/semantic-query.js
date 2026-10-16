@@ -122,6 +122,42 @@ export const semanticQueryMethods = {
     return this._taskColumn(ctx, kind, ref, at, field);
   },
 
+  /** The models a metric of this context folds the rows of: the owner of every measure it reads,
+   *  through the metrics a derived one is built from. */
+  _metricModels(ctx, name) {
+    const metrics = ctx.state.metrics || [];
+    const m = metrics.find((x) => x.name === name);
+    if (!m) return [];
+    const c = this._catalogOf(ctx);
+    const owner = new Map(Object.entries(ctx.state.additions || {}).flatMap(([k, a]) => (a.measures || []).map((me) => [me.name, k])));
+    return [...new Set([...measureRefs(m, metrics)].map((r) => owner.get(r) || c.modelOwningMeasure(r)).filter(Boolean))];
+  },
+
+  /** Whether the columns of `model` cut the rows of `source`: its own, or those of a model a
+   *  relationship of `source` points at (the one join MetricFlow makes from it). */
+  _cuts(ctx, source, model) {
+    if (source === model) return true;
+    const c = this._catalogOf(ctx);
+    const own = c.primaryEntityName(model);
+    return Object.keys(c.entitiesOf(source)).some((ent) => c.joinTargetFor(ent) === model || (own && ent === own));
+  },
+
+  /** The metrics of `metrics` a dimension of `model` does not cut — a metric whose measures fold rows
+   *  of a model that neither is `model` nor joins to it. */
+  _uncut(ctx, model, metrics) {
+    return metrics.filter((m) => this._metricModels(ctx, m).some((src) => !this._cuts(ctx, src, model)));
+  },
+
+  /** A dimension of `model` named in a query of metrics it does not cut is refused here, in the call —
+   *  MetricFlow would refuse it minutes later in its own words. */
+  _checkCuts(ctx, model, label, metrics, at) {
+    const not = this._uncut(ctx, model, metrics);
+    if (!not.length) return;
+    const reads = not.map((m) => `'${m}' (it folds ${this._metricModels(ctx, m).join(', ')})`).join(', ');
+    const cut = metrics.filter((m) => !not.includes(m));
+    throw new ToolError(`${at}: '${label}' does not cut ${reads} — a metric is grouped by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it cuts ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or group by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
+  },
+
   /** That the dbt project's own semantic layer is queried in its own contexts — the refusal of one of
    *  its names in a task's context. */
   _projectNameHere(said, at, field) {
@@ -776,6 +812,7 @@ export const semanticQueryMethods = {
     for (const [i, g] of q.groupBy.entries()) {
       const at = `${q.at} group_by[${i}]`;
       const r = this._taskRef(ctx, g, at, 'steps');
+      if (r.kind === 'dimension') this._checkCuts(ctx, g.source ?? g.semantic_model.at(-1), r.label, metrics, at);
       if (metrics.includes(r.column) || [...rename.values()].includes(r.column)) throw new ToolError(`${at}: '${r.label}' would produce a result column '${r.column}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'steps' });
       // a time dimension is asked for at its grain — the column MetricFlow names with it
       const tok = r.kind === 'time' ? `metric_time__${r.grain}` : r.grain ? `${r.path}__${r.grain}` : r.path;
@@ -790,6 +827,7 @@ export const semanticQueryMethods = {
     const where = q.wheres.flatMap((w) => this._whereClauses(w.conditions, (ref, at) => {
       const r = this._taskRef(ctx, ref, at, 'steps');
       if (r.kind === 'time') return { kind: 'metric_time', grain: ref.grain };
+      if (r.kind === 'dimension') this._checkCuts(ctx, ref.source ?? ref.semantic_model.at(-1), r.label, metrics, at);
       whereNames.set(r.path, r.column);
       return r.kind === 'entity' ? { kind: 'entity', name: r.path } : { kind: 'dimension', path: r.path };
     }, w.at));
@@ -843,14 +881,13 @@ export const semanticQueryMethods = {
       // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
       // report the freshness of each one it reads, and headline the STALEST — that is the date
       // the combined result is actually complete through.
-      // Freshness is a property of the sources whose MEASURES the query reads: every events source
-      // in the context, plus a non-events source (a spend table) only when the task aggregates it.
-      // A dimension joined for its attributes (installs) has a time axis too, but its latest install
-      // says nothing about how complete a spend or events result is.
+      // Freshness is a property of the sources whose MEASURES THIS query reads — the models its metrics
+      // fold (through the metrics a derived one is built from), not every source of the context: a
+      // spend table beside the events says nothing of how complete an events metric is, nor does a
+      // dimension joined for its attributes (installs).
       // (a build's own table is as fresh as its build: no freshness of the warehouse's is read for it)
       const cc = this._catalogOf(ctx);
-      const contributes = (k) => cc.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(cc.getModel(k).measures || {}).length > 0;
-      const factsRead = (ctx.state.usedModels || []).filter((k) => !cc.getModel(k).built && cc.getModel(k).time?.column && contributes(k));
+      const factsRead = [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))].filter((k) => cc.models[k] && !cc.getModel(k).built && cc.getModel(k).time?.column);
       const freshByFact = {};
       await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f); }));
       const knownFresh = Object.values(freshByFact).filter(Boolean);

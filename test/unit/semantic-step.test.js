@@ -65,6 +65,10 @@ test('preview shows the layer; edit_step replaces the step, a whole fork carries
   await assert.rejects(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: { stage: 'limit', limit: 1 } }), /is the build's semantic_model step/);
   const edited = await e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step({ metrics: [{ name: 'events', type: 'simple', measure: 'rows' }] }) });
   assert.deepEqual(edited.step_effects[0].metrics, ['events']);
+  // an edit answers under its own word, and takes materialize as add_steps does
+  assert.equal(edited.action, 'edit_step');
+  assert.ok(edited.step_edited && !edited.steps_added, JSON.stringify(Object.keys(edited)));
+  await assert.doesNotReject(() => e.build_model({ action: 'edit_step', context_id: s.context_id, index, step: step(), materialize: false }));
   // a whole fork carries it, a fork of the steps before it does not
   const whole = await e.build_model({ action: 'fork', context_id: s.context_id, name: 'lay_copy', include: ['steps'] });
   assert.deepEqual(whole.steps.map((x) => x.stage), ['semantic_model']);
@@ -101,7 +105,7 @@ test('names are stored as declared: a grain, a governed measure\'s name and anot
   const e = engine();
   const named = (name) => step({ measures: [{ name, expr: { fn: 'count' } }], metrics: [{ name: 'rows', type: 'simple', measure: name }] });
   // the schema holds MetricFlow's spelling: two characters at least, no `__`, no `_` at the end
-  for (const bad of ['n', 'a__b', 'rows_']) await assert.rejects(() => start(e, [named(bad)]), /must match pattern/, bad);
+  for (const bad of ['n', 'a__b', 'rows_']) await assert.rejects(() => start(e, [named(bad)]), /must be a name the semantic layer takes: .* no "__" and no "_" at the end/, bad);
   await assert.rejects(() => start(e, [named('week')]), /measure 'week': a time grain is no name/);
   await assert.rejects(() => start(e, [step({ metrics: [{ name: 'metric_time', type: 'simple', measure: 'rows' }] })]), /MetricFlow reserves the name 'metric_time'/);
   await assert.rejects(() => start(e, [named('total_spend')]), /the catalog governs a measure of that name on 'acquisition'/);

@@ -268,7 +268,7 @@ test('memory about: an entity is { source, property | column | event }, a phrase
   for (const bare of ['users.country', 'country']) {
     await assert.rejects(
       () => e.memory({ action: 'record', notes: [{ note: 'x', about: [bare] }] }),
-      /`notes\.0\.about\.0` must be exactly one of: .*\| \{ term \}; `notes\.0\.about\.0` must be object/,
+      /`notes\.0\.about\.0` must be exactly one of: .*\| \{ term \}; `notes\.0\.about\.0` must be an object \{ term \}/,
     );
   }
   // a model's column is `column` (an event's payload is `property`): the earlier spelling is told its name

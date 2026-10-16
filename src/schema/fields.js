@@ -12,14 +12,13 @@ import { form, pick, timeRange, measureForm } from '../schema-kit.js';
 import { exprDefs, EXPR_REF, EXPR_KINDS, PLACES } from '../pipeline/compute.js';
 import { CONTEXT_ID } from '../context-manager.js';
 import { contractOnSchema } from '../catalog/joins.js';
+import { SEMANTIC_NAME } from './names.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
 export const TASK = '^[a-z][a-z0-9_]{2,40}$';
 
-/** A name the semantic layer stores as it is written — a metric's, a measure's, a computed dimension's:
- *  MetricFlow's rule (a lowercase letter first, at least two characters, no `__`, no `_` at the end). */
-export const SEMANTIC_NAME = '^[a-z](_?[a-z0-9]){1,39}$';
+export { SEMANTIC_NAME } from './names.js';
 
 export const CTX = CONTEXT_ID;
 

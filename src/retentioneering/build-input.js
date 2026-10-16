@@ -81,7 +81,7 @@ export function validateStart(catalog, spec) {
   }
   const cols = namedColumns(catalog, spec);
   const path = spec.path || [cols.user];
-  if (new Set([...path, cols.event, cols.time]).size < path.length + 2) throw new ToolError('the path, the event column and the time column name different columns', { stage: 'validate', field: 'columns' });
+  if (new Set([...path, cols.event, cols.time]).size < path.length + 2) throw new ToolError('the path, the event column and the time column must each name a different column — one column cannot be two of them', { stage: 'validate', field: 'columns' });
   const reserved = Object.values(ES_COLUMNS);
   for (const seg of spec.segments || []) {
     if (reserved.includes(seg)) throw new ToolError(`segment '${seg}' takes a name the eventstream uses for its own column (${reserved.join(', ')}) — carry it under another: a compute stage copies it ({ stage: "compute", name: "${seg}_value", expr: { column: "${seg}" } })`, { stage: 'validate', field: 'segments' });

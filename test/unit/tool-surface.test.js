@@ -173,6 +173,18 @@ test('add_steps warns when an event-specific property is used without its event 
   assert.match(await warnFor(onEvent('in', 'ad_started', 'first_launch')), /also keeps first_launch/);
   // a condition that does not name the events kept is no scope
   assert.match(await warnFor(onEvent('neq', 'first_launch')), /add an earlier where on event_name/);
+  // a funnel step reads a property on the events it names itself: scoped by that step, no earlier where
+  // needed — flagged only where the step names an event the property is not on
+  const funnel = async (events) => {
+    const d = await e.build_model({ action: 'start', name: 'funnelscope', source: 'events' });
+    const r = await e.build_model({ action: 'add_steps', context_id: d.context_id, steps: [{ stage: 'match_recognize', steps: [
+      { name: 'launch', event_name: ['first_launch'] },
+      { name: 'ad', event_name: events, where: [{ fn: 'eq', args: [{ property: 'ad_type_of_event_data' }, { value: 'rewarded' }] }] },
+    ] }] });
+    return (stepNotes(r) || []).find((x) => x.includes('populated only on event'));
+  };
+  assert.equal(await funnel(['ad_started']), undefined);
+  assert.match(await funnel(['ad_started', 'first_launch']), /step 'ad' also names first_launch/);
 });
 
 // HLL is promoted as the preferred distinct-count method (mergeable, high-accuracy).

@@ -555,9 +555,9 @@ models:
     description: >
       Player-level acquisition spend: one row per (player, day) with the cost, impressions and
       clicks attributed to that player. Amounts are MEASURES (aggregate them), the channel
-      columns are attributes (group by them). Joins to an events source by the PLAYER key alone
-      (many-to-many by design — carry a channel attribute onto events, never sum money over it),
-      and to the install record by the player key AND the validity window, point-in-time.
+      columns are attributes (group by them). Joins onto event rows by its contract — the player
+      AND the day of spend_date — so each event meets one row: it carries a channel attribute onto
+      events, never its money (a measure, compared beside the events on metric_time).
     config:
       meta:
         mcp:

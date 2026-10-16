@@ -93,6 +93,23 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   assert.deepEqual(got, want);
 });
 
+test('a metric is cut by the columns its own rows reach: another model\'s column refused in the call, described per metric, its freshness its own source\'s', opts, async (t) => {
+  if (skip(t) || !ctx) return;
+  // spend folds acquisition's rows: an events column does not cut it (MetricFlow would refuse it minutes later)
+  const byEvent = { group_by: [{ source: 'events', column: 'event_name' }] };
+  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['evts', 'spend'], byEvent)], time_range: WINDOW }), /'events\.event_name' does not cut 'spend' \(it folds acquisition\)[^]*it cuts 'evts'/);
+  const evts = await engine.query_model({ context_id: ctx, steps: [metrics(['evts'], byEvent)], time_range: WINDOW });
+  assert.equal(evts.ok, true, JSON.stringify(evts.error));
+  // describe lists, for each metric, the dimensions that cut it
+  const dimsOf = async (metric) => (await engine.context({ action: 'describe', context_id: ctx, metric })).metrics[0].group_by.dimensions.map((d) => `${d.source ?? d.semantic_model.join('.')}.${d.column ?? d.property ?? d.dimension}`);
+  assert.ok((await dimsOf('evts')).includes('events.event_name'));
+  assert.ok(!(await dimsOf('spend')).includes('events.event_name'));
+  // the freshness read is the queried metric's own source's
+  const spend = await engine.query_model({ context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW });
+  assert.equal(spend.ok, true, JSON.stringify(spend.error));
+  assert.equal(spend.provenance.source, 'acquisition');
+});
+
 test('edit_step and materialize replace the layer: the new metric answers, the old one is gone', opts, async (t) => {
   if (skip(t) || !ctx) return;
   const { steps } = await engine.build_model({ action: 'preview', context_id: ctx });

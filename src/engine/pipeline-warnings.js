@@ -207,6 +207,20 @@ export class PipelineAdvisor {
     if (!c.isFact(draft?.source)) return []; // a measures/dimension pipeline reads no event payload
     const fact = draft.source; // the pipeline reads ONE fact — its own
     const applies = this.valueIndex.appliesMap(fact, c.eventProps(fact)); // key -> observed [event_name]
+    // a funnel's step reads a property on the events it names itself: a property its step names is
+    // scoped by that step (flagged only where the step names an event the property is not on), and only
+    // what the stage reads outside its steps is held to the where steps before it
+    if (stage?.stage === 'match_recognize' && Array.isArray(stage.steps)) {
+      for (const st of stage.steps) {
+        const inStep = c.eventProps(fact).filter((p) => JSON.stringify(st).includes(`"${p}"`));
+        for (const p of inStep) {
+          const evs = applies[p];
+          const off = evs?.length ? (st.event_name || []).filter((e) => !evs.includes(e)) : [];
+          if (off.length) return [`'${p}' is populated only on event(s) ${evs.join(', ')} — step '${st.name ?? '?'}' also names ${off.join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+        }
+      }
+      stage = { ...stage, steps: [] };
+    }
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];

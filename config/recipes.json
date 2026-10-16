@@ -137,7 +137,7 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd"
+        "price_in_usd_of_event_data"
       ],
       "required_user_attrs": [
         "country",
@@ -324,26 +324,10 @@
               ]
             }
           ]
-        },
-        {
-          "steps": [
-            {
-              "stage": "metrics",
-              "metrics": [
-                "revenue"
-              ],
-              "group_by": [
-                {
-                  "source": "users",
-                  "column": "media_source"
-                }
-              ]
-            }
-          ]
         }
       ],
       "notes": "The model whose column it is must OWN the relationship (primary/unique on it); a model with a validity window is joined point-in-time by the layer itself. Filtering works the same way: a where step before the metrics step, on { source, column }, filters through the same join.",
-      "hack": "Load the model with a semantic_models item { source: \"<model>\" } and group_by { source: \"<model>\", column }: the join runs on the relationship the SCHEMA declares — no key is named at the call site. Any metric x any column of any joined model, always this form."
+      "hack": "Join the model in the semantic_model step on its contract — join: [{ source: \"<model>\", on: { <key part>: <the main model's key column>, time: <its time axis> } }] — and group_by { source: \"<model>\", column }: semantic_index({ request: { source: \"<model>\" } }) shows the contract's parts. Any metric x any column of any joined model, always this form."
     },
     {
       "id": "funnel_from_event_property_steps",
@@ -769,7 +753,7 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd"
+        "price_in_usd_of_event_data"
       ],
       "required_user_attrs": [
         "install_date"
@@ -911,7 +895,7 @@
           ]
         }
       ],
-      "notes": "The cohort axis comes from the dimension model, so the task loads it (a semantic_models item { source: \"users\" }); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
+      "notes": "The cohort axis comes from the dimension model, so the semantic_model step joins it (join: [{ source: \"users\", on }]); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
       "hack": "Group by a TIME column of the joined model (the cohort, { source, column }) and by metric_time (the activity) at once — the grid is just two time dimensions in one group_by. Swap either axis (any cohort column, any grain) and the shape holds."
     },
     {
@@ -1056,9 +1040,9 @@
         "level_completed"
       ],
       "required_properties": [
-        "level_id",
-        "complete_time",
-        "attempt"
+        "level_id_of_event_data",
+        "complete_time_of_event_data",
+        "attempt_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -1255,8 +1239,8 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd",
-        "product_id"
+        "price_in_usd_of_event_data",
+        "product_id_of_event_data"
       ],
       "required_user_attrs": [
         "country"
@@ -1504,10 +1488,10 @@
         "ad_finished"
       ],
       "required_properties": [
-        "revenue",
-        "ad_type",
-        "placement",
-        "ad_network"
+        "revenue_of_event_data",
+        "ad_type_of_event_data",
+        "placement_of_event_data",
+        "network_of_additional_info_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -1690,8 +1674,8 @@
         "currency_outcome"
       ],
       "required_properties": [
-        "amount",
-        "source_type"
+        "amount_of_event_data",
+        "source_type_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -2129,7 +2113,7 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd"
+        "price_in_usd_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -2239,8 +2223,8 @@
         "ad_finished"
       ],
       "required_properties": [
-        "price_in_usd",
-        "revenue"
+        "price_in_usd_of_event_data",
+        "revenue_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -2398,7 +2382,7 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd"
+        "price_in_usd_of_event_data"
       ],
       "required_user_attrs": [],
       "required_roles": [
@@ -2585,7 +2569,7 @@
         "iap_purchase_completed"
       ],
       "required_properties": [
-        "price_in_usd"
+        "price_in_usd_of_event_data"
       ],
       "required_user_attrs": [],
       "required_roles": [
@@ -6335,7 +6319,7 @@
           ]
         }
       ],
-      "notes": "The measures above read the SAME column at sum, max, average and p90 — nothing in the schema decided that. Such a source has its own time axis, so metric_time means its dates, not an events fact's; joining it to per-event data is many-to-many by design (carry its attributes onto events, never sum its money over them).",
+      "notes": "The measures above read the SAME column at sum, max, average and p90 — nothing in the schema decided that. Such a source has its own time axis, so metric_time means its dates, not an events fact's; joined onto per-event rows by its contract (the player and the day) it carries its attributes onto events, never its amounts — those are measures, compared beside the events on metric_time.",
       "hack": "The schema marks a column aggregatable and fixes NO function: every measure's expr names the column and picks its own function, so one model answers \"total\", \"peak\", \"typical\" and \"tail\" at once. Extrapolate: any amount, any of sum | average | min | max | median | percentile | count | count_distinct, chosen per question."
     },
     {
@@ -6598,7 +6582,7 @@
         }
       ],
       "notes": "Each semantic model names its own `source` and is scoped with its own event vocabulary — an event or property of one source is not readable on the other, and there is no default source. What makes them comparable is metric_time: both are put on the same axis without being joined.",
-      "hack": "One context, several `semantic_models`, each with its own `source`: the layer answers both in one query and lines them up over metric_time. Extrapolate: any number of sources side by side; a RATIO across two of them belongs in a derived metric, not in a measure."
+      "hack": "One semantic_model step, a measure of another source named by its `source`: the layer answers both in one query and lines them up over metric_time. Extrapolate: any number of sources side by side; a RATIO across two of them belongs in a derived metric, not in a measure."
     },
     {
       "required_events": [],

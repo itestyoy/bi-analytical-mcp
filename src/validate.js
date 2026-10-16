@@ -8,6 +8,7 @@ import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { isPlainObject } from './engine/helpers.js';
 import { rankFuzzy } from './fuzzy.js';
+import { PATTERN_SAYS } from './schema/names.js';
 
 export function makeValidators(schemas) {
   // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
@@ -70,6 +71,14 @@ export const CROSS_PATH_SPELLING = {
   name_as: 'name_column',
   value_as: 'value_column',
   mode: 'between_steps',
+};
+
+/** A query's fields that are said in its steps — where each goes, for a request that wrote it beside them. */
+const STEP_FIELDS = {
+  metrics: 'a query names its metrics in a step: steps: [{ stage: "metrics", metrics: [...], group_by: [...] }]',
+  group_by: 'what the metrics are grouped by goes in the metrics step: steps: [{ stage: "metrics", metrics, group_by: [...] }]',
+  where: 'a filter is a where step: steps: [{ stage: "where", conditions: [...] }, { stage: "metrics", … }] — before the metrics step it filters the rows, after it the result',
+  order_by: 'an order is an order_by step after the metrics step: { stage: "order_by", keys: [{ key, direction }] }',
 };
 
 /**
@@ -194,7 +203,9 @@ function describe(e, ctx = {}) {
       // a form of a union names what it takes: the field is not one of them (src/schema-kit.js form)
       const fields = Object.keys(node?.properties || {});
       const takes = node?.title && node.properties ? ` — ${node.title} takes ${fields.length ? fields.join(', ') : 'no fields'}` : '';
-      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'` : takes}`;
+      // what a metric query said beside its steps is said IN them: a field of a step, not of the request
+      const inStep = !alt && node?.properties?.steps ? STEP_FIELDS[used] : null;
+      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'` : inStep ? ` — ${inStep}` : takes}`;
     }
     case 'enum': {
       // A long enum is the schema being exact; a long MESSAGE is just noise — name enough to act on.
@@ -207,7 +218,18 @@ function describe(e, ctx = {}) {
       return oneOf(at, vals, used, alt);
     }
     case 'const': return `${at} must be ${JSON.stringify(e.params.allowedValue)}`;
-    case 'type': return `${at} must be ${Array.isArray(e.params.type) ? e.params.type.join(' or ') : e.params.type}`;
+    case 'type': {
+      // an object the schema spells out is said with its fields — the ones it needs first — rather than
+      // only "object", which leaves the caller to dig for its shape
+      const node = deref(ctx.schema, e.parentSchema) || (ctx.schema ? atPointer(ctx.schema, e.schemaPath.replace(/\/type$/, '')) : null);
+      const want = Array.isArray(e.params.type) ? e.params.type.join(' or ') : e.params.type;
+      if (want === 'object' && node?.properties) {
+        const req = node.required || [];
+        const fields = [...req, ...Object.keys(node.properties).filter((k) => !req.includes(k)).map((k) => `${k}?`)];
+        return `${at} must be an object { ${fields.join(', ')} }`;
+      }
+      return `${at} must be ${want}`;
+    }
     case 'minimum': return `${at} must be >= ${e.params.limit}`;
     case 'maximum': return `${at} must be <= ${e.params.limit}`;
     case 'exclusiveMinimum': return `${at} must be > ${e.params.limit}`;
@@ -228,6 +250,7 @@ function describe(e, ctx = {}) {
     case 'oneOfNamed': return `${at} must be exactly one of: ${e.params.names.join(' | ')}`;
     case 'requiresOneOf': return `${at} needs at least one of: ${e.params.keys.join(', ')}`;
     case 'unionOfValues': return `${at} must be ${e.params.title || `one of: ${e.params.names.join(' | ')}`}`;
+    case 'pattern': return PATTERN_SAYS[e.params.pattern] ? `${at} must be ${PATTERN_SAYS[e.params.pattern]}` : `${at} ${e.message}`;
     default: return `${at} ${e.message}`;
   }
 }
@@ -559,7 +582,11 @@ function explainNode(root, n, value, memo) {
   // (a union of one form — a group of one, where a deployment offers one — names no choice; nor does a
   // union whose closest branch is a union of its own — a group of forms, the ref inside what a note is
   // about: the innermost union names the forms, and a group's title is no form to write)
-  const label = (named && candidates.length === 1) || defaults?.has(best.i) || branches.length === 1 || Array.isArray(branches[best.i].anyOf) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(meant.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
+  // (nor a value its form took at its own level — every error of it inside a field the form has: the
+  // form was right, and the modes listed beside a misspelt nested name are only noise)
+  const nestedOnly = (es) => es.length > 0 && es.every((e) => e.instancePath !== '');
+  const settled = nestedOnly(best.es) && meant.length <= LONG_UNION && meant.every((i) => i === best.i || scoreOf(i).es.some((e) => e.instancePath === ''));
+  const label = settled || (named && candidates.length === 1) || defaults?.has(best.i) || branches.length === 1 || Array.isArray(branches[best.i].anyOf) ? [] : [{ keyword: 'oneOfNamed', instancePath: '', params: { names: [...new Set(meant.map((i) => branchTitle(branches[i], i)).filter(Boolean))] } }];
   return dedupe([...own, ...label, ...best.es]);
 }
 

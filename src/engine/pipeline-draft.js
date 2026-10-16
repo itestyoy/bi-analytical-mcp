@@ -42,10 +42,11 @@ export const pipelineDraftMethods = {
       const toSemantic = isSemanticStep(input.step);
       if (input.index === semanticAt) {
         if (!toSemantic) throw new ToolError(`step ${semanticAt} is the build's semantic_model step: edit it with another semantic_model step, or fork the build before it (fork, after: ${semanticAt - 1}) and add the step there`, { stage: 'validate', field: 'step' });
-        return this._draftSemanticAnswer(ctx, draft, await this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
+        return this._draftThenBuild(ctx, draft, input, this._draftSemanticAnswer(ctx, draft, await this._draftSetSemantic(ctx, draft, input.step), input.action, inc));
       }
       if (toSemantic) throw new ToolError(`a semantic_model step is the build's last step${draft.semantic ? ` — this build's is step ${semanticAt}: edit that one` : ` — add it after step ${draft.stages.length}`}`, { stage: 'validate', field: 'step' });
-      return this._draftEditStep(ctx, draft, input.index, input.step, inc.columns, inc.steps);
+      // (materialize: true builds right after the edit, as it does after added steps)
+      return this._draftThenBuild(ctx, draft, input, await this._draftEditStep(ctx, draft, input.index, input.step, inc.columns, inc.steps));
     }
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { context_id: ctx.id, action: 'discard', discarded: true }; }
@@ -94,7 +95,8 @@ export const pipelineDraftMethods = {
     const all = this._draftSteps(draft);
     return {
       context_id: ctx.id, action,
-      ...(inc.steps ? { steps: all } : { steps_added: all.slice(-1), steps_count: all.length }),
+      // (an edit put the step in place, an add appended it: each answers under its own word)
+      ...(inc.steps ? { steps: all } : { [action === 'edit_step' ? 'step_edited' : 'steps_added']: all.slice(-1), steps_count: all.length }),
       step_effects: [effect],
       next: `Materialize — build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }), or materialize: true beside the step — writes the layer and parses it; then query its metrics (${effect.metrics.join(', ')}) with query_model({ request: { context_id: "${ctx.id}", steps: [{ stage: "metrics", metrics: [...] }] } }).`,
     };
@@ -115,7 +117,7 @@ export const pipelineDraftMethods = {
       return {
         ...added,
         materialize,
-        next: `The steps are added and their build is started (materialize.task_id): read it with ${this.tasks.readWith(materialize.task_id)} — it waits for the build and returns its rows.`,
+        next: `${input.action === 'edit_step' ? 'The step is replaced' : 'The steps are added'} and the build is started (materialize.task_id): read it with ${this.tasks.readWith(materialize.task_id)} — it waits for the build and returns its rows.`,
       };
     } catch (e) {
       const stage = e instanceof ToolError ? (e.stage || 'validate') : 'internal';
@@ -124,7 +126,7 @@ export const pipelineDraftMethods = {
       return {
         ...added,
         materialize: { ok: false, error: { stage, message: e.message, ...(e.code ? { code: e.code } : {}) } },
-        next: `The steps are added; the build did not start (materialize.error says why). Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
+        next: `${input.action === 'edit_step' ? 'The step is replaced' : 'The steps are added'}; the build did not start (materialize.error says why). Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
       };
     }
   },

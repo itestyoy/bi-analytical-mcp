@@ -35,6 +35,19 @@ test('experiment analyze, proportion: control vs two variants, per-variant verdi
   assert.equal(c.significant, false);
 });
 
+// the z-test's normal approximation needs both outcomes in every group: a group with fewer than ten
+// conversions or ten non-conversions is flagged, its interval kept within a difference of rates can take,
+// and the recommendation says first that the sample is too small to read
+test('experiment analyze, proportion: a group too small for the normal approximation is flagged first', () => {
+  const r = engine._analyzeExperiment({ metric: 'proportion', control: { label: 'control', n: 6, conversions: 6 }, variants: [{ label: 'B', n: 6, conversions: 1 }] });
+  const [b] = r.results;
+  assert.equal(b.small_sample, true);
+  assert.ok(b.confidence_interval[0] >= -1 && b.confidence_interval[1] <= 1, JSON.stringify(b.confidence_interval));
+  assert.match(r.recommendations[0], /^Too few users to read B/);
+  const big = engine._analyzeExperiment({ metric: 'proportion', control: { label: 'control', n: 1000, conversions: 200 }, variants: [{ label: 'B', n: 1000, conversions: 250 }] });
+  assert.equal(big.results[0].small_sample, undefined);
+});
+
 test('experiment analyze, mean: Welch t-test path', () => {
   const r = engine._analyzeExperiment({
     metric: 'mean',

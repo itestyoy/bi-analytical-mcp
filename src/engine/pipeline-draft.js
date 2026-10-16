@@ -7,6 +7,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { renderPipeline, columnList } from '../pipeline.js';
 import { comparisonOf, eachCondition } from '../pipeline/compute.js';
 import { currentSpelling } from '../pipeline/earlier.js';
+import { isSemanticStep, SEMANTIC_STAGE } from '../pipeline/semantic-stage.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 
 /** The comparisons of a column with constants that bound a scan of it (require_time_range). */
@@ -24,24 +25,97 @@ export const pipelineDraftMethods = {
    * The all-at-once _buildPipeline path is unchanged. Lifecycle:
    * start → add_steps* → (preview) → materialize | discard.
    */
-  async build_pipeline_model(input) {
-    this._validate('build_pipeline_model', input);
+  async build_model(input) {
+    this._validate('build_model', input);
     // start is the default action: a request without one is a start (its forms are the only ones that may omit it)
     if (input.action === undefined || input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
     const ctx = this._ctx(input.context_id);
     const draft = ctx.state.draft;
-    if (!draft) throw new ToolError(`no draft in context '${input.context_id}' — start one with build_pipeline_model({ request: { action: 'start', name, source } })`, { stage: 'validate', field: 'context_id' });
+    if (!draft) throw new ToolError(`no draft in context '${input.context_id}' — start one with build_model({ request: { action: 'start', name, source } })`, { stage: 'validate', field: 'context_id' });
     this.ctxs.touch(ctx.id);
     const inc = included(input);
-    if (input.action === 'add_steps') return this._draftThenBuild(ctx, draft, input, await this._draftAddSteps(ctx, draft, input.steps, inc.columns, inc.steps, { building: !!input.materialize }));
+    if (input.action === 'add_steps') return this._draftThenBuild(ctx, draft, input, await this._draftAddAll(ctx, draft, input.steps, inc, { building: !!input.materialize }));
+    // the semantic_model step is the build's last, one past its stages
+    const semanticAt = draft.semantic ? draft.stages.length + 1 : null;
+    if (input.action === 'edit_step' || input.action === 'insert_step') {
+      const toSemantic = isSemanticStep(input.step);
+      if (input.action === 'edit_step' && input.index === semanticAt) {
+        if (!toSemantic) throw new ToolError(`step ${semanticAt} is the build's semantic_model step: edit it with another semantic_model step, or delete it (delete_step) and add the step`, { stage: 'validate', field: 'step' });
+        return this._draftSemanticAnswer(ctx, draft, this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
+      }
+      if (toSemantic) {
+        if (input.action === 'insert_step' && !draft.semantic && input.index === draft.stages.length + 1) return this._draftSemanticAnswer(ctx, draft, this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
+        throw new ToolError(`a semantic_model step is the build's last step${draft.semantic ? ` — this build's is step ${semanticAt}: edit that one` : ` — add it after step ${draft.stages.length}`}`, { stage: 'validate', field: 'step' });
+      }
+    }
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.step, inc.columns, inc.steps);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.step, inc.columns, inc.steps);
+    if (input.action === 'delete_step' && input.index === semanticAt) {
+      delete draft.semantic; this.ctxs.touch(ctx.id);
+      return { context_id: ctx.id, action: 'delete_step', step_index: semanticAt - 1, steps_count: draft.stages.length, next: 'The semantic_model step is removed; the layer the context holds stays until the next materialize of one.' };
+    }
     if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, inc.columns, inc.steps);
-    if (input.action === 'truncate') return this._draftTruncate(ctx, draft, input.after, inc.columns, inc.steps);
+    if (input.action === 'truncate' && draft.semantic && Number.isInteger(input.after) && input.after >= draft.stages.length && input.after <= semanticAt) {
+      // the stages stay: only the semantic_model step goes, when the cut is before it
+      if (input.after < semanticAt) { delete draft.semantic; this.ctxs.touch(ctx.id); }
+      return { context_id: ctx.id, action: 'truncate', step_index: input.after, ...(inc.steps ? { steps: this._draftSteps(draft) } : { steps_count: this._draftSteps(draft).length }) };
+    }
+    if (input.action === 'truncate') {
+      if (draft.semantic && input.after < semanticAt) { delete draft.semantic; this.ctxs.touch(ctx.id); }
+      return this._draftTruncate(ctx, draft, input.after, inc.columns, inc.steps);
+    }
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { context_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
+  },
+
+  /**
+   * Add steps — with add_steps, or the first ones with start: the stages, and a semantic_model step after
+   * them, the build's last. All or none: a semantic_model step that is refused takes the stages added
+   * with it back.
+   */
+  async _draftAddAll(ctx, draft, steps, inc, { building = false } = {}) {
+    if (!Array.isArray(steps) || !steps.length) throw new ToolError('add_steps needs a non-empty `steps` array', { stage: 'validate', field: 'steps' });
+    const at = steps.findIndex(isSemanticStep);
+    const extra = steps.findIndex((st, i) => i > at && at !== -1 && isSemanticStep(st));
+    if (extra !== -1) throw new ToolError(`steps[${extra}]: a build has one semantic_model step`, { stage: 'validate', field: `steps[${extra}]` });
+    if (at !== -1 && at !== steps.length - 1) throw new ToolError(`steps[${at}]: a semantic_model step is the build's last — put it after the others`, { stage: 'validate', field: `steps[${at}]` });
+    if (draft.semantic) throw new ToolError(`this build ends in its semantic_model step (step ${draft.stages.length + 1}): nothing comes after it — insert a step before it (insert_step), or edit it (edit_step)`, { stage: 'validate', field: 'steps' });
+    const stages = at === -1 ? steps : steps.slice(0, -1);
+    if (at === -1) return this._draftAddSteps(ctx, draft, stages, inc.columns, inc.steps, { building });
+    const snapshot = draft.stages.slice();
+    const added = stages.length ? await this._draftAddSteps(ctx, draft, stages, inc.columns, inc.steps, { building }) : null;
+    let effect;
+    try { effect = this._draftSetSemantic(ctx, draft, steps[at]); } catch (e) {
+      draft.stages = snapshot; this.ctxs.touch(ctx.id);
+      throw new ToolError(`steps[${at}]: ${e.message}`, { stage: e.stage || 'validate', field: `steps[${at}]${e.field ? `.${e.field}` : ''}`, code: e.code });
+    }
+    const answer = this._draftSemanticAnswer(ctx, draft, effect, 'add_steps', inc);
+    return added ? { ...added, ...answer, step_effects: [...added.step_effects, effect] } : answer;
+  },
+
+  /** The semantic_model step, checked as it would be built (its layer compiled and rendered), put in place. */
+  _draftSetSemantic(ctx, draft, st) {
+    const { render } = this._semanticLayerOf(draft, st);
+    draft.semantic = st;
+    this.ctxs.touch(ctx.id);
+    return {
+      step_index: draft.stages.length + 1, stage: SEMANTIC_STAGE,
+      semantic_models: render.semanticModels, metrics: render.metricNames,
+      ...(render.warnings?.length ? { recommendations: render.warnings } : {}),
+    };
+  },
+
+  /** What a call that put the semantic_model step in place answers. */
+  _draftSemanticAnswer(ctx, draft, effect, action, inc) {
+    const all = this._draftSteps(draft);
+    return {
+      context_id: ctx.id, action,
+      ...(inc.steps ? { steps: all } : { steps_added: all.slice(-1), steps_count: all.length }),
+      step_effects: [effect],
+      next: `Materialize — build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }), or materialize: true beside the step — writes the layer and parses it; then query its metrics (${effect.metrics.join(', ')}) with query_model({ request: { context_id: "${ctx.id}", steps: [{ stage: "metrics", metrics: [...] }] } }).`,
+    };
   },
 
   /**
@@ -64,11 +138,11 @@ export const pipelineDraftMethods = {
     } catch (e) {
       const stage = e instanceof ToolError ? (e.stage || 'validate') : 'internal';
       // the call succeeds, its build did not: kept in the error log as a refused call is
-      this.errors?.record?.({ source: 'tool', tool: 'build_pipeline_model', stage, field: 'materialize', code: e.code, message: e.message, args: { request: input }, context_id: ctx.id });
+      this.errors?.record?.({ source: 'tool', tool: 'build_model', stage, field: 'materialize', code: e.code, message: e.message, args: { request: input }, context_id: ctx.id });
       return {
         ...added,
         materialize: { ok: false, error: { stage, message: e.message, ...(e.code ? { code: e.code } : {}) } },
-        next: `The steps are added; the build did not start (materialize.error says why). Materialize with build_pipeline_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
+        next: `The steps are added; the build did not start (materialize.error says why). Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
       };
     }
   },
@@ -305,9 +379,10 @@ export const pipelineDraftMethods = {
    *  copied into edit_step is the step that was built (one kept from an earlier version is shown in this
    *  version's spelling, src/pipeline/earlier.js). `physSet`: the grounding the build renders with. */
   _draftSteps(draft, physSet = null) {
-    if (!draft.stages.length) return [];
+    const semantic = draft.semantic ? [{ index: draft.stages.length + 1, ...draft.semantic }] : [];
+    if (!draft.stages.length) return semantic;
     const current = this._draftSpelling(draft, physSet);
-    return draft.stages.map((s, i) => ({ index: i + 1, ...(current.get(s) ?? s) }));
+    return [...draft.stages.map((s, i) => ({ index: i + 1, ...(current.get(s) ?? s) })), ...semantic];
   },
 
   /**
@@ -327,7 +402,7 @@ export const pipelineDraftMethods = {
 
   async _draftStart(input) {
     // materialize builds the steps the call adds: a start that adds none would build nothing
-    if (input.materialize && !input.steps?.length) throw new ToolError('materialize: true builds the steps this start adds — give them in `steps`, or materialize later with build_pipeline_model({ request: { action: "materialize", context_id } })', { stage: 'validate', field: 'materialize' });
+    if (input.materialize && !input.steps?.length) throw new ToolError('materialize: true builds the steps this start adds — give them in `steps`, or materialize later with build_model({ request: { action: "materialize", context_id } })', { stage: 'validate', field: 'materialize' });
     const found = input.from_task ? this._taskBase(input) : null;
     if (input.context_id) this._ctxToWrite(input.context_id); // refused before the warehouse is asked
     const base = found ? await this._baseWithPhysical(found.base) : null;
@@ -341,17 +416,17 @@ export const pipelineDraftMethods = {
     // guard) — never offered, never buildable, not called out. Only real columns exist.
     const physSet = await this.probe.grounding(source);
     const cols = base ? base.columns.map((c) => ({ name: c.name, type: c.type })) : this._groundedDeclared(source, physSet).cols;
-    const buildHint = `When the steps look right, materialize with build_pipeline_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`;
+    const buildHint = `When the steps look right, materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`;
     const resp = {
       context_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
-      next: `Append steps with build_pipeline_model({ request: { action: "add_steps", context_id: "${ctx.id}", steps: [...] } }) — a logical chunk at a time; each response shows what each step added or removed (include: ["columns"] or preview for the full list).`,
+      next: `Append steps with build_model({ request: { action: "add_steps", context_id: "${ctx.id}", steps: [...] } }) — a logical chunk at a time; each response shows what each step added or removed (include: ["columns"] or preview for the full list).`,
       recommendations: [
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first step can reference (include: ["columns"] lists them); nothing before it is recomputed.`
-          : `The source has ${cols.length} columns your first step can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include: ["columns"] } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
+          : `The source has ${cols.length} columns your first step can reference; get the full list with build_model({ request: { action: "start", ..., include: ["columns"] } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/compute then aggregate.`,
         buildHint,
       ],
@@ -363,7 +438,7 @@ export const pipelineDraftMethods = {
     // materialize: true the build after them too
     let added;
     try {
-      added = await this._draftAddSteps(ctx, ctx.state.draft, input.steps, inc.columns, inc.steps, { building: !!input.materialize });
+      added = await this._draftAddAll(ctx, ctx.state.draft, input.steps, inc, { building: !!input.materialize });
     } catch (e) {
       // a context this call made for the draft goes with the refused steps: a corrected retry starts
       // afresh, and no empty draft is left behind for every attempt
@@ -484,14 +559,15 @@ export const pipelineDraftMethods = {
     const src = this._ctx(input.context_id);
     const origin = src.state.draft || src.state.pipeline_origin; // live draft, or the snapshot a materialize left behind
     if (!origin) throw new ToolError(`context '${input.context_id}' has no draft or built pipeline to fork — start one, or fork a context whose pipeline was materialized`, { stage: 'validate', field: 'context_id' });
-    const total = origin.stages.length;
+    // the semantic_model step, the build's last, is one past its stages
+    const total = origin.stages.length + (origin.semantic ? 1 : 0);
     const after = input.after == null ? total : input.after;
     if (!Number.isInteger(after) || after < 0 || after > total) throw new ToolError(`fork after=${input.after} out of range — the source has ${total} step(s); use 0..${total}`, { stage: 'validate', field: 'after' });
     const ctx = this.ctxs.create();
     const name = input.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
     const description = input.description || origin.description;
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], ...(origin.base ? { base: JSON.parse(JSON.stringify(origin.base)) } : {}), ...(description ? { description } : {}) };
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), ...(origin.semantic && after === total ? { semantic: JSON.parse(JSON.stringify(origin.semantic)) } : {}), checkpoints: [], ...(origin.base ? { base: JSON.parse(JSON.stringify(origin.base)) } : {}), ...(description ? { description } : {}) };
     // a draft started from a task's table: the fork reads the same table as its step 0
     if (origin.base) {
       if (!this.ctxs.has(origin.base.owner) || !this.ctxs.hasPipelineModel(origin.base.owner, origin.base.model)) throw new ToolError(`the table this draft starts from (${origin.base.model}, task ${origin.base.task_id}) is gone — start a new draft from a task that still exists`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });
@@ -532,7 +608,7 @@ export const pipelineDraftMethods = {
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.context_id} is unchanged — branch variants freely.`,
         ...(broken ? [`The copied steps do not build as they are: ${broken}`] : []),
         ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — delete_context on it is refused unless forced.`] : []),
-        `Materialize with build_pipeline_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`,
+        `Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`,
       ],
     };
     if (included(input).columns) resp.available_columns = cols;
@@ -645,7 +721,7 @@ export const pipelineDraftMethods = {
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
-        ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include: ["steps"] or use build_pipeline_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
+        ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include: ["steps"] or use build_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after, { building })] : []),
       ],
     };
@@ -695,6 +771,11 @@ export const pipelineDraftMethods = {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
+    // the semantic_model step: the layer it declares, as it would be written (src/yaml-render.js)
+    if (draft.semantic && !draft.stages.length) {
+      const { render } = this._semanticLayerOf(draft, draft.semantic);
+      return { ...base, semantic_models: render.semanticModels, metrics: render.metricNames, yaml: render.yaml, warnings: render.warnings || [] };
+    }
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No steps yet — add_steps first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
     // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.

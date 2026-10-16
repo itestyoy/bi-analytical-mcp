@@ -39,12 +39,12 @@ for (const name of new Set([TEST_ENV, 'dbt-v2'])) {
     const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
     const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('tgt'), timeSpineDialect: 'duckdb' });
     const engine = settle(new Engine({ catalog, contextManager: ctxs, runner: createDbt({ environment, profilesDir: BASE }) }));
-    const s = await engine.build_pipeline_model({ action: 'start', name: 'per_event', source: 'events' });
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
+    const s = await engine.build_model({ action: 'start', name: 'per_event', source: 'events' });
+    await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
       { stage: 'order_by', keys: [{ key: 'event_name', direction: 'asc' }] },
     ] });
-    const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+    const built = await engine.build_model({ action: 'materialize', context_id: s.context_id });
     assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
     const target = join(ctxs.dir(built.context_id), 'target');
     const before = filesUnder(target);

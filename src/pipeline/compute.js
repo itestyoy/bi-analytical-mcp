@@ -472,11 +472,11 @@ export const PLACES = {
   },
   stored_rows: {
     what: 'a read of stored rows', leaves: ['column', 'value', 'now'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,
-    hint: 'Raw SQL and an event property are a build\'s: build from the task — build_pipeline_model({ request: { action: "start", name, from_task } }) (a pipeline build\'s task, or a query run with materialize: true)',
+    hint: 'Raw SQL and an event property are a build\'s: build from the task — build_model({ request: { action: "start", name, from_task } }) (a pipeline build\'s task, or a query run with materialize: true)',
   },
   semantic_model: {
     what: 'a semantic model\'s where, dimension or measure', leaves: ['column', 'property', 'value', 'now'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw'), ...TASK_MEASURE_AGGS], windows: false,
-    hint: 'A window or raw SQL is a pipeline\'s (build_pipeline_model)',
+    hint: 'A window or raw SQL is a pipeline\'s (build_model)',
   },
   metric_where: {
     what: 'a where before the metrics step', leaves: [...REF_PLACES.group_by.takes, 'value'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => !NOT_OVER_DIMENSIONS.has(fn))], windows: false,

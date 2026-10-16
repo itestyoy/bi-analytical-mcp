@@ -18,6 +18,7 @@ import { buildWarehouse, fixtureProject, startWarehouse } from './warehouse-harn
 import { settle, readTable } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
@@ -726,9 +727,9 @@ test('a table-wide statistic is ONE row, and its numbers scale the rows as liter
 
 /** A pipeline over the events source, materialized; its rows. */
 async function condPipe(steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps });
-  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps });
+  const built = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return { rows: built.rows, context_id: s.context_id };
 }
@@ -810,18 +811,18 @@ test('one ungrouped aggregate over events carrying every condition and expressio
   assert.equal(num(row.twice_sum), doubled, '[raw positional args] sum of {1} * 2 over `order`');
 
   // [text vs boolean] an order compares no flag: refused as the step is added
-  const flag = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: flag.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'bundle_id' }, { value: false }] }] }] }), /text column in the warehouse/);
+  const flag = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_model({ action: 'add_steps', context_id: flag.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'bundle_id' }, { value: false }] }] }] }), /text column in the warehouse/);
   // [raw positional args] a column named in its text is refused
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'order', expr: { column: 'session_number' } }] });
   // a column written by name in the text — bare, or in the warehouse's identifier quotes — is refused
   for (const sql of ['order * 2', '"order" * 2']) {
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
+    await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql, type: 'int' } }] }), /a column goes in `args`/, sql);
   }
   // a placeholder with no argument, and an argument no placeholder uses, are refused
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
+  await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '{2} * 2', args: [{ column: 'order' }] } }] }), /has no argument/);
+  await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'twice', expr: { fn: 'raw', sql: '2', args: [{ column: 'order' }] } }] }), /not used/);
 });
 
 test('a read of a built model filters and keeps groups with the same grammar: a where before its aggregate and one after it take or', opts, async (t) => {
@@ -848,7 +849,7 @@ test('a read of a built model filters and keeps groups with the same grammar: a 
 test('a semantic measure over a case and a where step before the metrics step take or and the text operators', opts, async (t) => {
   if (skip(t)) return;
   const level = { property: 'level_id_of_event_data' };
-  const built = await engine.build_semantic_model({
+  const built = await declare(engine, {
     name: 'cond_sem',
     semantic_models: [{ source: 'events', dimensions: [{ column: 'event_name' }], measures: [
       { name: 'picked', expr: rowsWhere({ fn: 'or', args: [{ fn: 'eq', args: [level, { value: 1 }] }, { fn: 'gte', args: [level, { value: 3 }] }] }) },
@@ -888,9 +889,9 @@ test('a time window whose bounds carry their own offset is those instants, whate
   // read as Anchorage wall-clock instead, the window would move nine hours later — and hold another count
   const local = await truth("select count(*) as n from fct_analytics_events where device_time >= '2026-01-02 09:00:00' and device_time <= '2026-01-04 08:59:59'");
   assert.ok(want > 0 && want < all && want !== local, 'the fixture tells the readings apart');
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events', time_range: { start: '2026-01-02T00:00:00Z', end: '2026-01-03T23:59:59.000Z', timezone: 'America/Anchorage' } });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const built = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.equal(num(built.rows[0].n), want);
 });
@@ -904,8 +905,8 @@ test('a project stage drops the columns it names and keeps the rest; the next st
   ]);
   assert.equal(rows.length, want);
   // once session_number is dropped the next stage cannot name it — refused as the step is added
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }] }] }), (e) => !(e instanceof assert.AssertionError));
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'project', drop: ['session_number'] }, { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'session_number' }] } }] }] }), (e) => !(e instanceof assert.AssertionError));
 });
 
 test('a query over a built model computes a sample stddev, variance, median and percentile, as the warehouse does', opts, async (t) => {
@@ -950,17 +951,17 @@ test('a text flag stays text after a checkpoint and from a build\'s task, with t
     ] },
   ];
   // the prefix is built first: the counts then read the checkpoint's table, not the source
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'bundle_id' }] }] }] });
-  const prefix = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'bundle_id' }] }] }] });
+  const prefix = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(prefix.build?.ok, true, JSON.stringify(prefix.error || prefix.build));
-  const added = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: counts });
+  const added = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: counts });
   assert.ok(added.from_checkpoint, 'the counts read the built prefix');
-  const after = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const after = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(after.build?.ok, true, JSON.stringify(after.error || after.build));
   assert.deepEqual([num(after.rows[0].yes), num(after.rows[0].no)], [truthy, all - truthy]);
   // a draft started from the prefix's task reads the same table, and the same column in it
-  const from = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, steps: counts });
-  const built = await engine.build_pipeline_model({ action: 'materialize', context_id: from.context_id });
+  const from = await engine.build_model({ action: 'start', name: `cond_${seq++}`, from_task: prefix.task_id, steps: counts });
+  const built = await engine.build_model({ action: 'materialize', context_id: from.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   assert.deepEqual([num(built.rows[0].yes), num(built.rows[0].no)], [truthy, all - truthy]);
 });
@@ -983,17 +984,17 @@ test('a joined text column, under the name the join gave it, is compared with a 
 
 test('preview with validate runs the draft\'s SQL against the warehouse with no data read: a refusal there is said, and nothing is left in the project', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] },
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ] });
-  const good = await engine.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
+  const good = await engine.build_model({ action: 'preview', context_id: s.context_id, validate: true });
   assert.equal(good.ok, true, JSON.stringify(good.error));
   assert.equal(good.validated, true);
   // a function the warehouse does not have: only the warehouse can say so
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
-  const bad = await engine.raw.build_pipeline_model({ action: 'preview', context_id: s.context_id, validate: true });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'bad', expr: { fn: 'raw', sql: 'no_such_function_xyz({1})', args: [{ column: 'n' }] } }] });
+  const bad = await engine.raw.build_model({ action: 'preview', context_id: s.context_id, validate: true });
   const read = await engine.raw.query_model({ task_ids: [bad.task_id] });
   assert.equal(read.results[0].ok, false, JSON.stringify(read.results[0]));
   assert.ok(!engine.ctxs.generatedFiles(s.context_id).some((f) => /_chk/.test(f)), 'the check left no model behind');
@@ -1009,8 +1010,8 @@ test('a time column compared with an expression that yields a moment keeps the r
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
   ]);
   assert.equal(num(rows[0].n), want);
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
-  await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { fn: 'length', args: [{ column: 'event_name' }] }] }] }] }), /is a moment/);
+  const s = await engine.build_model({ action: 'start', name: `cond_${seq++}`, source: 'events' });
+  await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'device_time' }, { fn: 'length', args: [{ column: 'event_name' }] }] }] }] }), /is a moment/);
 });
 
 // ════════════ FUNNELS: match_recognize (was match-recognize.test.js) ═══════════════════════════
@@ -1169,7 +1170,7 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
 });
 
-// (Feature C, the incremental build_pipeline_model — start with its columns, add the funnel stage,
+// (Feature C, the incremental build_model — start with its columns, add the funnel stage,
 // preview, materialize 12/8/5/3 — is end-to-end.test.js 3a; the columns add_steps lists for the
 // next stage, the partition key carried, are test/unit/build-pipeline-model.test.js's 'add_steps
 // propagates columns'. The materialized rows equal the all-at-once build above. A rejected stage
@@ -1372,17 +1373,17 @@ const byPlayer = (rows) => Object.fromEntries(rows.map((r) => [String(r.player_i
 
 /** Build a draft from `steps`, materializing after each index listed in `pointsAt` (1-based). */
 async function cpBuild(name, steps, pointsAt = []) {
-  const { context_id } = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
+  const { context_id } = await engine.build_model({ action: 'start', name, source: 'events' });
   let last = null;
   for (let i = 0; i < steps.length; i += 1) {
-    await engine.build_pipeline_model({ action: 'add_steps', context_id, steps: [steps[i]] });
+    await engine.build_model({ action: 'add_steps', context_id, steps: [steps[i]] });
     if (pointsAt.includes(i + 1)) {
-      last = await engine.build_pipeline_model({ action: 'materialize', context_id });
+      last = await engine.build_model({ action: 'materialize', context_id });
       assert.notEqual(last.ok, false, JSON.stringify(last.error));
     }
   }
   if (!pointsAt.includes(steps.length)) {
-    last = await engine.build_pipeline_model({ action: 'materialize', context_id });
+    last = await engine.build_model({ action: 'materialize', context_id });
     assert.notEqual(last.ok, false, JSON.stringify(last.error));
   }
   return { context_id, result: last };
@@ -1402,9 +1403,9 @@ test('editing a step AFTER the prefix keeps it: the numbers still match a full r
   assert.ok(whole.result.row_count > 0, '[continued = whole] the pipeline returns rows at all');
   assert.deepEqual(byPlayer(before.rows), byPlayer(whole.result.rows), '[continued = whole] the same rows as one built in one go');
   const edited = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 3 }] }] };
-  const ed = await engine.build_pipeline_model({ action: 'edit_step', context_id, index: 4, step: edited });
+  const ed = await engine.build_model({ action: 'edit_step', context_id, index: 4, step: edited });
   assert.equal(ed.from_checkpoint.at, 3, 'the prefix survived an edit below it');
-  const after = await engine.build_pipeline_model({ action: 'materialize', context_id });
+  const after = await engine.build_model({ action: 'materialize', context_id });
   assert.notEqual(after.ok, false, JSON.stringify(after.error));
   assert.equal(after.steps_recomputed, 1);
   const fresh = await cpBuild('cp_edit_ref', [...CP_STEPS.slice(0, 3), edited]);
@@ -1424,11 +1425,11 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
   assert.ok(players.length >= 2, 'several players in the prefix');
 
   // [fork] a fork inherits the prefix: same numbers as an independent recompute
-  const fork = await engine.build_pipeline_model({ action: 'fork', context_id, after: 3, name: 'cp_fork' });
+  const fork = await engine.build_model({ action: 'fork', context_id, after: 3, name: 'cp_fork' });
   assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] inherits the checkpoint');
   const tail = { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'total_score' }, { value: 1 }] }] };
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: fork.context_id, steps: [tail] });
-  const forked = await engine.build_pipeline_model({ action: 'materialize', context_id: fork.context_id });
+  await engine.build_model({ action: 'add_steps', context_id: fork.context_id, steps: [tail] });
+  const forked = await engine.build_model({ action: 'materialize', context_id: fork.context_id });
   assert.notEqual(forked.ok, false, JSON.stringify(forked.error));
   assert.equal(forked.from_checkpoint.model, built.model, "[fork] the fork read the parent's table");
   const independent = await cpBuild('cp_fork_ref', [...CP_STEPS.slice(0, 3), tail]);
@@ -1440,9 +1441,9 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
   await wh.query(`UPDATE main.${built.model} SET levels = 99, total_score = 4242 WHERE player_id_of_internal = '${victim}'`);
 
   // [prefix is read] the parent's continuation reads the changed row
-  const cont = await engine.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 2 }] }] }] });
+  const cont = await engine.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'levels' }, { value: 2 }] }] }] });
   assert.equal(cont.from_checkpoint.at, 3, '[prefix is read] the continuation stands on the checkpoint');
-  const out = await engine.build_pipeline_model({ action: 'materialize', context_id });
+  const out = await engine.build_model({ action: 'materialize', context_id });
   assert.notEqual(out.ok, false, JSON.stringify(out.error));
   const rows = byPlayer(out.rows);
   assert.deepEqual(rows[victim], [99, 4242], '[prefix is read] the continuation read the materialized prefix');
@@ -1457,10 +1458,10 @@ test('one materialized prefix: a fork of it equals an independent recompute; aft
 
   // [fork] the inherited model is NOT rebuilt in a fork: a second fork branched over the changed
   // table carries the change into its own result.
-  const fork2 = await engine.build_pipeline_model({ action: 'fork', context_id, after: 3, name: 'cp_fork2' });
+  const fork2 = await engine.build_model({ action: 'fork', context_id, after: 3, name: 'cp_fork2' });
   assert.deepEqual(fork2.inherited_checkpoints, [{ at: 3, model: built.model, owner: context_id }], '[fork] the second fork inherits the same checkpoint');
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: fork2.context_id, steps: [tail] });
-  const tampered = await engine.build_pipeline_model({ action: 'materialize', context_id: fork2.context_id });
+  await engine.build_model({ action: 'add_steps', context_id: fork2.context_id, steps: [tail] });
+  const tampered = await engine.build_model({ action: 'materialize', context_id: fork2.context_id });
   assert.notEqual(tampered.ok, false, JSON.stringify(tampered.error));
   assert.equal(byPlayer(tampered.rows)[victim][1], 4242, '[fork] the inherited table was read, never rebuilt');
 });
@@ -1521,12 +1522,12 @@ const pipeRows = (...steps) => pipeRowsFrom('crashlytics', ...steps);
 
 /** …over any source. */
 async function pipeRowsFrom(source, ...steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `cx_${seq++}`, source });
+  const s = await engine.build_model({ action: 'start', name: `cx_${seq++}`, source });
   for (const step of steps) {
-    const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+    const r = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -1827,13 +1828,13 @@ test('15. the complex properties are discoverable with their declared shape', op
 // it ran, and an unbalanced `{%` that would fail compilation — the build must succeed regardless.
 
 async function countWhere(name, condition, description) {
-  const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
+  const s = await engine.build_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
   assert.ok(s.context_id, JSON.stringify(s));
   // the event name under a column of its own: a constant compared with the event-name column itself is
   // checked against the catalog's events first, and the literal is to reach the warehouse
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'ev', expr: { column: 'event_name' } }, { stage: 'where', conditions: [condition] }] });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'ev', expr: { column: 'event_name' } }, { stage: 'where', conditions: [condition] }] });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return Number(c.rows[0].n);
 }
@@ -1860,7 +1861,7 @@ test('governed path: a Jinja filter value is literal, a Jinja label neither runs
   // the distinct players of the tutorial events at a step: count_distinct over a case that yields the
   // player there
   const playersAt = (step) => ({ fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }, { fn: 'eq', args: [{ property: 'element_of_event_data' }, { value: step }] }], then: { column: 'player_id_of_internal' } }] }] });
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'jtut',
     semantic_models: [{ source: 'events', measures: [{ name: 's1', expr: playersAt('step_1'), label: '{{ run_query(\'select 1/0\') }} {% if' }, { name: 'sj', expr: playersAt('{{ "step_1" }}') }] }],
     metrics: [{ name: 's1', type: 'simple', measure: 's1' }, { name: 'sj', type: 'simple', measure: 'sj' }],

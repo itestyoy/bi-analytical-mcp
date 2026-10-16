@@ -12,8 +12,9 @@
 
 import { ERROR_SOURCES } from './error-log.js';
 import { stageDefs } from './pipeline.js';
+import { exprDefs } from './pipeline/compute.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
-import { TASK, CTX, TASK_ID, D, semanticModelBranch, semanticDefs, metricSchema, METRIC_TIME_RANGE, METRIC_QUERY_FIELDS, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, removedDimensionForms, DRY_RUN, VALIDATE } from './schema/fields.js';
+import { TASK, CTX, TASK_ID, D, METRIC_TIME_RANGE, METRIC_QUERY_FIELDS, MAX_WAIT_SECONDS, READ_PAGE, KEPT_ROWS, CONTEXT_PAGE, TASK_READ, DRY_RUN, VALIDATE } from './schema/fields.js';
 import { refSchema } from './schema/refs.js';
 import { display } from './schema/display.js';
 import { transportSchema } from './schema/transport.js';
@@ -30,7 +31,7 @@ export { MAX_WAIT_SECONDS, transportSchema };
  * in one call. They are validated, never listed or called by a client: every tool is listed and called
  * by its one name.
  */
-export const METHOD_CONTRACTS = new Set(['build_pipeline_model.pipeline', 'delete_context.context', 'delete_context.pipeline_model', 'delete_context.semantic_model', 'context.describe', 'experiment.analyze', 'experiment.check_split', 'experiment.plan']);
+export const METHOD_CONTRACTS = new Set(['build_model.pipeline', 'delete_context.context', 'delete_context.pipeline_model', 'delete_context.semantic_model', 'context.describe', 'experiment.analyze', 'experiment.check_split', 'experiment.plan']);
 
 /**
  * WHAT EACH TOOL'S DEFINITIONS HOLD — the places of the tool, by kind: where its expressions stand
@@ -40,13 +41,13 @@ export const METHOD_CONTRACTS = new Set(['build_pipeline_model.pipeline', 'delet
  * where it names a thing (src/schema/refs.js REF_PLACES). Its `$defs` of each expression kind, `$defs.stage`
  * and `$defs.ref` are one definition each, built for these places: they hold what the places take together
  * and nothing else, and where two places of one kind take different parts, each is checked as its value is
- * built. A method's contract takes its tool's (build_pipeline_model.pipeline is a build's).
+ * built. A method's contract takes its tool's (build_model.pipeline is a build's).
  */
 export const TOOL_PLACES = {
-  build_pipeline_model: { expr: ['source_rows'], stage: ['build'] },
-  // a declaration: the row expression and a measure (ONE aggregate of it) of a semantic model, a derived
-  // metric's value — each a kind of its own (src/pipeline/compute.js EXPR_KINDS)
-  build_semantic_model: { expr: ['semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'] },
+  // a build: its steps over a source's rows, and its last step, the semantic layer over them — a semantic
+  // model's row expression and measure (ONE aggregate of it), a derived metric's value, each a kind of its
+  // own (src/pipeline/compute.js EXPR_KINDS)
+  build_model: { expr: ['source_rows', 'semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'], stage: ['build'] },
   // a query: a metric query (where steps, its metrics step, then a read of its result) or a read of a
   // stored table (its read steps)
   query_model: { expr: ['metric_where', 'stored_rows'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by'] },
@@ -72,55 +73,12 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     }
     : { type: 'string', pattern: CTX, description });
   const modelKeys = catalog.modelKeys();
-  // the models a semantic layer can load: an item of semantic_models, and the dimensions an update
-  // removes, are offered only over them (a model with no primary entity is a pipeline join's)
+  // the models a semantic layer can load (a model with no primary entity is a pipeline join's)
   const semanticKeys = catalog.semanticModelKeys();
-  const createFields = {
-    context_id: { type: 'string', pattern: CTX, description: D.context_id },
-    name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
-    description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
-    semantic_models: { type: 'array', items: { anyOf: semanticKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'One or more per source model: { source, where?, dimensions?, measures? }; each item\'s where scopes its own measures. An item with only `source` loads that model, so its columns can be grouped and filtered as { source, column } (e.g. { source: "users" } for { source: "users", column: "country" }; a slowly-changing model is joined point-in-time). What an item computes is written in the one expression over its model: { column } (a column, an entity key, a declared amount), { property } (an event property, on an events source), { value }, { now: true }. A measure is { name, expr, label? }, expr ONE aggregate — { fn: "count" } counts the rows, { fn: "sum", args: [{ fn: "case", cases: [{ when: [...], then: { column: "price" } }] }] } folds the rows its case holds for; a dimension is { column }, { property } — queried as { source, property } — or { name, expr } computed from the row — queried as { semantic_model: [<source>], dimension: <name> }.' },
-    metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to expose for querying (each references measures defined above, or other metrics).' },
-    dry_run: { type: 'boolean', description: DRY_RUN('the declaration — the YAML it renders, its semantic models and metrics', 'preview_semantic_model with validate, once it is built') },
-    include: { type: 'array', uniqueItems: true, items: { enum: ['yaml'] }, description: 'What else the answer shows: "yaml" — the full rendered context YAML (always written to the context files; left out of the answer to keep it small).' },
-  };
-  // action: 'update' — the incremental path, in the SAME vocabulary as a declaration: what it adds is
-  // written exactly as a declaration writes it (the same items, so a listing carries them once), and
-  // what it removes is named the way it was added.
-  const updateFields = {
-    context_id: { type: 'string', pattern: CTX, description: 'The context whose task to change.' },
-    name: { type: 'string', pattern: TASK, description: 'The task to change, by its name — one the context holds (default: its first). To add a task beside it, declare one: { name, context_id, … } without action.' },
-    semantic_models: { ...createFields.semantic_models, description: 'What to add, per source model: dimensions and measures (an item\'s where scopes the measures declared beside it, never those already there). An item with only `source` loads a model this context does not read yet, so its columns can be grouped and filtered as { source, column }.' },
-    metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'Metrics to add.' },
-    remove: {
-      type: 'object', additionalProperties: false,
-      description: 'What to remove, by the names it was added under. Removals come first, so one update replaces a measure or a metric by removing it and declaring it again.',
-      properties: {
-        dimensions: { type: 'array', minItems: 1, items: { anyOf: removedDimensionForms(catalog, semanticKeys) }, description: 'Dimensions to remove, named as they were declared: { source, column }, { source, property }, or { source, name } for a computed one.' },
-        measures: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a metric reads one, unless cascade.' },
-        metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Refused while a derived metric is built from one, unless cascade.' },
-      },
-    },
-    cascade: { type: 'boolean', description: 'Also remove what is built on a removed item: the metrics that read a removed measure, and the derived metrics built from a removed metric.' },
-    dry_run: createFields.dry_run,
-    include: createFields.include,
-  };
-  const create = {
-    type: 'object',
-    description: 'Two forms. The default declares a task — name, semantic_models, metrics — in a new context, or beside the task already in context_id. action:"update" changes the task in a context, named by its name, in the same words: semantic_models and metrics are added, `remove` takes them away by name, and the rest stays as declared.',
-    // the expression in the kinds a declaration writes it in: a semantic model's rows, its measures, a
-    // derived metric's value
-    $defs: semanticDefs(catalog, { project, kinds: TOOL_PLACES.build_semantic_model }),
-    anyOf: [
-      form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, required: ['name', 'metrics'], properties: createFields }),
-      form({ title: 'update the task in a context', tag: ['action', 'update'], required: ['context_id'], properties: updateFields }),
-    ],
-  };
-
   // the window a pipeline reads its source in — the built-in-one-call contract and the builder's start alike
   const pipelineWindow = timeRange('Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied before the steps — avoids hand-written time literals and keeps whole-session windows intact.');
 
-  // a pipeline built in one call (build_pipeline_model.pipeline): a derived dbt model from a declarative PIPELINE
+  // a pipeline built in one call (build_model.pipeline): a derived dbt model from a declarative PIPELINE
   // (a pipe-syntax transformation, optionally ending in a match_recognize funnel)
   // and materialize it. The pipeline's rows ARE the result. No caller writes this contract (a draft's
   // materialize hands its steps over in it), so its list keeps the engine's own name, `stages` — each
@@ -146,7 +104,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     },
   };
 
-  // build_pipeline_model: compose a pipeline INCREMENTALLY, one step at a time. A
+  // build_model: compose a build INCREMENTALLY, one step at a time. A
   // single stateful tool with an `action`; add_steps validates each step and
   // returns the columns now available for the NEXT one (schema only — nothing is
   // materialized until materialize). A step is a stage, tagged by its `stage`.
@@ -223,7 +181,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // (src/engine/semantic-query.js _metricSteps). Its fields are the one list METRIC_QUERY_FIELDS, which
   // also tells an earlier metric query apart (src/earlier-spelling.js).
   const queryFields = pick({
-      steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The query, in order. A METRIC QUERY has one metrics step — { stage: "metrics", metrics: [...], group_by: [...] }, what the semantic layer computes. Before it, where steps: they filter the rows its metrics fold, over what group_by names, named as it names them — { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] }; a column of the rows, a metric or an aggregate is refused there. After it, steps over its result — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — by the names its rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"); a where there filters the result (a having on a metric), { stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] } ranks it, so the rows a task keeps are the top ones. WITHOUT a metrics step the steps read the context\'s built pipeline table — the same read stages over its columns (a where after an aggregate is a having; a second aggregate folds the groups again); omitted, the table as it is. Nothing upstream is recomputed. A join, an unnest, a funnel or a python step makes a new table: build it with build_pipeline_model from the task (from_task).' },
+      steps: { type: 'array', minItems: 1, items: { $ref: '#/$defs/stage' }, description: 'The query, in order. A METRIC QUERY has one metrics step — { stage: "metrics", metrics: [...], group_by: [...] }, what the semantic layer computes. Before it, where steps: they filter the rows its metrics fold, over what group_by names, named as it names them — { stage: "where", conditions: [{ fn: "eq", args: [{ source: "users", column: "country" }, { value: "US" }] }] }; a column of the rows, a metric or an aggregate is refused there. After it, steps over its result — where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — by the names its rows come back with: the metrics and the group_by items\' result columns ("metric_time_day", "users_country"); a where there filters the result (a having on a metric), { stage: "order_by", keys: [{ key: "<metric>", direction: "desc" }] } ranks it, so the rows a task keeps are the top ones. WITHOUT a metrics step the steps read the context\'s built pipeline table — the same read stages over its columns (a where after an aggregate is a having; a second aggregate folds the groups again); omitted, the table as it is. Nothing upstream is recomputed. A join, an unnest, a funnel or a python step makes a new table: build it with build_model from the task (from_task).' },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them; a built table itself is in its build's task, paged to its last row. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
       materialize: { type: 'boolean', description: 'A metric query only: store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
@@ -246,7 +204,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   const describeForm = form({ title: 'describe a context', tag: ['action', 'describe'], tagDescription: 'describe: one context in depth.', required: ['context_id'], properties: { context_id: contextId(`The context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`) } });
   const contextTool = {
     type: 'object',
-    description: 'Read the isolated execution contexts (the workspaces build_semantic_model / build_pipeline_model produce). action: list (a page of contexts, most recently used first) | describe (one context\'s tasks/models/metrics/group-by paths). Removing one, or a model in one, is delete_context.',
+    description: 'Read the isolated execution contexts (the workspaces build_model produces). action: list (a page of contexts, most recently used first) | describe (one context\'s tasks/models/metrics/group-by paths). Removing one, or a model in one, is delete_context.',
     anyOf: [
       form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: `list: the contexts, most recently used first, ${CONTEXT_PAGE} to a page — the server keeps every conversation's, so page through them (offset) or narrow them (search).`, properties: {
         limit: { type: 'integer', minimum: 1, maximum: 100, description: `How many contexts the page holds (default ${CONTEXT_PAGE}).` },
@@ -272,8 +230,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   };
 
   const tools = {
-    build_semantic_model: create,
-    build_pipeline_model: withStageDefs(buildModel, catalog, project, TOOL_PLACES.build_pipeline_model),
+    build_model: withStageDefs(buildModel, catalog, project, TOOL_PLACES.build_model),
     context: contextTool,
     delete_context: deleteContext,
     query_model: query,
@@ -299,7 +256,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
     preview_semantic_model: (() => {
       const fields = {
-        context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
+        context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id a build returned.`),
         // a task's context names its semantic models after the catalog's models it loads; the project's are its own
         semantic_model: { type: 'string', enum: [...new Set([...semanticKeys, ...(project ? project.semantic_models.map((m) => m.name) : [])])].sort(), description: 'Narrow the answer to one semantic model of the context and the metrics that read it — mostly for a task\'s context, which can hold several. With metric too, the metric\'s semantic models are narrowed to this one.' },
         metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as the group_by of query_model\'s metrics step takes it.' },
@@ -356,7 +313,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   // the input contracts of the engine methods the tools hand to (METHOD_CONTRACTS): validated, never offered
   const contracts = {
     // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
-    'build_pipeline_model.pipeline': withStageDefs(registerModel, catalog, project, TOOL_PLACES.build_pipeline_model),
+    'build_model.pipeline': withStageDefs(registerModel, catalog, project, TOOL_PLACES.build_model),
     // what the tool's form takes, its tag left out — the method is handed the form's fields, so a field
     // added to the form reaches the method's contract with it
     'delete_context.context': untagged(deleteForms.context, 'what', 'Tear down an entire isolated context (delete its files + artifacts).'),
@@ -387,5 +344,9 @@ function untagged(f, key, description) {
  *  expression and the one stage definition, built for the tool's `places` (TOOL_PLACES), the expression's
  *  refs naming `project`'s layer too. */
 function withStageDefs(toolSchema, catalog, project, places) {
-  return { ...toolSchema, $defs: { ...(toolSchema.$defs || {}), ...stageDefs(catalog, { project, places: places.stage, exprPlaces: places.expr }) } };
+  // the closed kinds of the expression the tool's places take beside the row expression its stages
+  // build (a build's semantic_model step: a measure — ONE aggregate, its args the row expression — and a
+  // derived metric's value)
+  const kinds = Object.fromEntries(Object.entries(places).filter(([k]) => k === 'aggregate' || k === 'metric_expr'));
+  return { ...toolSchema, $defs: { ...(toolSchema.$defs || {}), ...stageDefs(catalog, { project, places: places.stage, exprPlaces: places.expr }), ...exprDefs(catalog, { project, kinds }) } };
 }

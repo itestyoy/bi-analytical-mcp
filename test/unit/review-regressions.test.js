@@ -14,6 +14,7 @@ import { Engine } from '../../src/engine.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 import { settle, isStartedTask, taskResult, stepEffect } from '../helpers/settle.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => settle(new Engine({
@@ -182,46 +183,13 @@ models:
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
 });
 
-// ── remove_dimensions matched a name nobody is ever shown ───────────────────────────────────
-// What is stored is the task-namespaced copy ('ret_country'); what the tools publish is the
-// attribute ('country'). Matching on the stored name made every removal a silent no-op that
-// still reported success.
-test('remove_dimensions takes the attribute it was offered, and refuses an unknown one', async () => {
-  const e = engine();
-  const first = await e.build_semantic_model({
-    name: 'ret',
-    semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'users', dimensions: [{ column: 'country' }] }],
-    metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
-  });
-  const ctx = e.ctxs.get(first.context_id);
-  assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
-  assert.ok(first.groupable.some((g) => g.source === 'users' && g.column === 'country'), 'offered as the column');
-
-  await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ source: 'users', column: 'platform' }] } }),
-    /cannot remove dimension 'platform'.*It has: country/s,
-  );
-  // a dimension is named the way it was declared: the earlier { from, field } is refused with that way
-  await assert.rejects(
-    () => e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ from: 'users', field: 'country' }] } }),
-    (err) => err.message.includes('is written in an earlier spelling — write {"source":"users","column":"country"}'),
-  );
-  const out = await e.build_semantic_model({ action: 'update', context_id: first.context_id, remove: { dimensions: [{ source: 'users', column: 'country' }] } });
-  assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
-  // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
-  // own surface), but the task no longer declares its own copy of it
-  const { yaml } = renderContext(e.catalog, e.ctxs.get(first.context_id).state);
-  assert.ok(!/ret_country/.test(yaml), 'the task-namespaced dimension is out of the manifest');
-  assert.ok(out.metrics.length >= 1, 'the rest of the task is intact');
-});
-
 // ── the suggested group_by example named a model the context had not loaded ─────────────────
 // `groupable` returned every attribute the CATALOG can reach, and the example deliberately picked
 // a model other than the task's source — so the suggested call failed with "needs model 'users',
 // which is not loaded in this context".
 test('groupable and the example only name models this context loaded', async () => {
   const e = engine();
-  const out = await e.build_semantic_model({
+  const out = await declare(e, {
     name: 'evonly',
     semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
@@ -230,7 +198,7 @@ test('groupable and the example only name models this context loaded', async () 
   assert.ok(!loaded.has('users'), 'this context loaded no users model');
   assert.ok((out.groupable || []).length > 0 && out.groupable.every((g) => loaded.has(g.source)), JSON.stringify(out.groupable));
   assert.ok((out.groupable_after_loading || []).some((g) => g.source === 'users'), 'and the rest is offered separately');
-  assert.match(out.groupable_after_loading_note || '', /semantic_models: \[\{ source: '\w+' \}\]/);
+  assert.match(out.groupable_after_loading_note || '', /join it in the build's semantic_model step — \{ source: '\w+', on: \{ … \} \}/);
   // whatever is published as groupable is accepted by the query path, as it is written there (the one ref)
   const ctx = e.ctxs.get(out.context_id);
   for (const [i, g] of (out.groupable || []).entries()) {
@@ -421,22 +389,18 @@ models:
 // It was guarded by `joinTargetFor(own) === model`, which is a tautology: `own` IS that model's
 // primary entity, so it always resolves back to it. Every unreachable attribute was therefore
 // accepted as `<own>__<attribute>` and died later inside MetricFlow, as an unknown entity.
-test('an attribute of a LOADED model no source can reach is refused here, not by MetricFlow', async () => {
+test('an attribute of a model no source of the context reaches is refused here, not by MetricFlow', async () => {
   const e = engine();
-  // measures on one events source; the OTHER events source is loaded, but nothing declares a
-  // relationship to it (two facts do not point at each other).
-  const out = await e.build_semantic_model({
+  // measures on one events source; the OTHER events source is no join of the step — nothing of the
+  // events points at a key it owns (two facts do not point at each other) — so the layer does not load it
+  const out = await declare(e, {
     name: 'evonly',
     semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
     metrics: [{ name: 'n', type: 'simple', measure: 'n' }],
   });
   await assert.rejects(
     () => e.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['evonly_n'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] }),
-    (err) => {
-      assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
-      assert.match(err.message, /relationships/, 'and says where to look');
-      return true;
-    },
+    /needs model 'crashlytics', which this context does not read/,
   );
   // …while the REACHABLE model of the same context still resolves under its relationship (the fix
   // closed no path; the warehouse-backed group-bys prove the rest).
@@ -479,15 +443,15 @@ models:
 // instead of a stage-time refusal at add_steps.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
-  const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
+  const s = await e.build_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] });
+  const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] });
   assert.equal(stepEffect(ok).step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
-  const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const agg = await e.build_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   await assert.rejects(
-    () => e.build_pipeline_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),
+    () => e.build_model({ action: 'add_steps', context_id: agg.context_id, steps: [{ stage: 'unnest', expr: { property: 'words_collected' }, name: 'word' }] }),
     /unknown column 'event_data' at this stage/,
   );
 });

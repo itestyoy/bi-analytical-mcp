@@ -14,6 +14,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, one } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -24,7 +25,7 @@ let wh; let engine;
 // TASK again (what they prove does not depend on a fresh context). A run that skips the first test
 // declares one for itself.
 let monCtx;
-const monContext = async () => monCtx ?? (monCtx = (await engine.build_semantic_model(TASK)).context_id);
+const monContext = async () => monCtx ?? (monCtx = (await declare(engine, TASK)).context_id);
 const TASK = {
   name: 'mon',
   semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
@@ -62,7 +63,7 @@ async function readAll(tool, taskIds) {
 test('a batch started right after the declaration waits for its parse, runs every query, and one read returns the warehouse\'s numbers in order', opts, async (t) => {
   if (skip(t)) return;
   // the declaration is still being parsed when the batch is started
-  const created = await engine.raw.build_semantic_model(TASK);
+  const created = await declare(engine.raw, TASK);
   monCtx = created.context_id;
   const started = await engine.raw.query_model({
     context_id: created.context_id,
@@ -134,10 +135,10 @@ test('a batch started right after the declaration waits for its parse, runs ever
 
 test('a batch of reads over a built pipeline model, each in steps of the pipeline\'s own stages: count, non-NULL count, sums, a where on a measure, a count and a sum over a case, and a share and an any over a case with an else, read back together', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'priced', source: 'events' });
+  const s = await engine.build_model({ action: 'start', name: 'priced', source: 'events' });
   // a numeric property, read as the catalog declares it (no cast)
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } }] });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } }] });
+  const mat = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const priced = { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'price' }] }] };
   const completed = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] };

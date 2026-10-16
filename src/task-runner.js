@@ -35,8 +35,9 @@ export class TaskRunner {
    * @param readers  { <side>: the query tool that reads that side's tasks back }
    * @param onFailure (id, tool, ctx, input, error) — a task that ended in an error (the error log)
    */
-  constructor({ jobs, ctxs, sideOf, readers, onFailure = () => {} }) {
+  constructor({ jobs, ctxs, sideOf, readers, kindTools = {}, onFailure = () => {} }) {
     this.jobs = jobs;
+    this.kindTools = kindTools; // a kind of task a tool starts on two sides → the tool it is said as
     this.ctxs = ctxs;
     this.sideOf = sideOf;
     this.readers = readers;
@@ -175,10 +176,11 @@ export class TaskRunner {
     return { task_id: id, ...extra, read_with: this.readers[side], next: `${this.readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
-  /** The tool a task's kind is said as: a query's kind (a metric query, a read of a stored table) by the
-   *  tool that started it, the query tool of its side; any other kind is a tool's own name. */
+  /** The tool a task's kind is said as: a kind a tool starts on two sides (a metric query or a read; a
+   *  semantic layer's parse or a pipeline's build) by the tool that starts it; any other kind is a tool's
+   *  own name. */
   toolOf(kind) {
-    return kind?.startsWith('query_') && this.readers[this.sideOf(kind)] ? this.readers[this.sideOf(kind)] : kind;
+    return this.kindTools[kind] || kind;
   }
 
   /** The call that reads a task back: its side's query tool, with the task_id. */

@@ -20,6 +20,7 @@ import { armFrom } from '../helpers/experiment-arm.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { DATA_TESTED } from '../helpers/recipe-coverage.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -34,7 +35,7 @@ const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(numOrNa
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), numOrNaN(r[valCol])]));
 
 async function create(decl) {
-  const out = await engine.build_semantic_model(decl);
+  const out = await declare(engine, decl);
   assert.equal(out.parse.ok, true, `parse failed for ${decl.name}: ${JSON.stringify(out.parse)}`);
   ctxOf[decl.name] = out.context_id;
   return out;
@@ -367,10 +368,10 @@ test('one materialized revenue-by-country task: started without waiting, read ba
 
   // 'a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)'
   const from = async (name, steps) => {
-    const d = await engine.build_pipeline_model({ action: 'start', name, from_task: m.task_id });
+    const d = await engine.build_model({ action: 'start', name, from_task: m.task_id });
     assert.equal(d.reads, m.table, '[from_task] the draft reads the task\'s table');
-    await engine.build_pipeline_model({ action: 'add_steps', context_id: d.context_id, steps });
-    const built = await engine.build_pipeline_model({ action: 'materialize', context_id: d.context_id });
+    await engine.build_model({ action: 'add_steps', context_id: d.context_id, steps });
+    const built = await engine.build_model({ action: 'materialize', context_id: d.context_id });
     assert.equal(built.status, 'done', JSON.stringify(built.error));
     return built.rows;
   };
@@ -432,9 +433,9 @@ test('a drawn card reads its views from its own task: a row opens into a level t
 // them equal. A value carrying SQL is bound as a literal.
 test('query_model over a built model: count(column) counts NON-NULL only, values are literals', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'nullcount', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } }] });
-  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: 'nullcount', source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } }] });
+  const mat = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const fold = (...measures) => ({ stage: 'aggregate', measures });
   const where = (...conditions) => ({ stage: 'where', conditions });
@@ -488,10 +489,10 @@ test('query_model: conditional aggregates and a second aggregate stage count the
   const src = (await wh.query('select player_id_of_internal as u, event_name as e from fct_analytics_events')).rows;
   const per = new Map();
   for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
-  const step = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, include: ['columns'], steps: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
+  const s = await engine.build_model({ action: 'start', name: 'two_levels', source: 'events' });
+  const step = await engine.build_model({ action: 'add_steps', context_id: s.context_id, include: ['columns'], steps: [{ stage: 'compute', name: 'prev_event', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } }] });
   assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
-  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const mat = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   const prev = await engine.query_model({ context_id: s.context_id, steps: [
     { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'prev_event' }] }] },
@@ -590,7 +591,7 @@ test('a pipeline build pages its stored table to the last row, and a read of it 
   if (skip(t)) return;
   const truth = (await wh.query('select event_id from fct_analytics_events order by event_id')).rows.map((r) => r.event_id);
   assert.ok(truth.length > 100, `expected more than two pages of events, got ${truth.length}`);
-  const started = await engine.raw.build_pipeline_model({ action: 'start', name: 'paged_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id', 'event_name'] }, { stage: 'order_by', keys: [{ key: 'event_id' }] }], materialize: true });
+  const started = await engine.raw.build_model({ action: 'start', name: 'paged_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id', 'event_name'] }, { stage: 'order_by', keys: [{ key: 'event_id' }] }], materialize: true });
   const built = { task_id: started.materialize?.task_id, context_id: started.context_id };
   assert.ok(built.task_id, JSON.stringify(started));
   const first = await taskResult(engine.raw, built.task_id);
@@ -615,7 +616,7 @@ test('a pipeline build pages its stored table to the last row, and a read of it 
   assert.deepEqual([across.provenance?.tier, across.model_sql], ['pipeline', undefined]);
   // a build that ends unsorted says so on every page — those read from its table past the rows held too —
   // and its pages still hold every row once
-  const loose = await engine.raw.build_pipeline_model({ action: 'start', name: 'loose_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id'] }], materialize: true });
+  const loose = await engine.raw.build_model({ action: 'start', name: 'loose_events', source: 'events', steps: [{ stage: 'project', keep: ['event_id'] }], materialize: true });
   assert.equal((await taskResult(engine.raw, loose.materialize?.task_id)).status, 'done');
   const pages = [];
   for (let off = 0; off != null && pages.length < 20;) {
@@ -788,7 +789,7 @@ test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 1
 
 // ════════════ EVERY RECIPE RUNS (was recipes-parse.test.js) ════════════════════════════════════
 // Every recipe must be RUNNABLE end-to-end: its semantic_payload parses (dbt parse)
-// and its first example query executes (mf query); its pipeline_payload — a build_pipeline_model
+// and its first example query executes (mf query); its pipeline_payload — a build_model
 // start request — is sent AS IT STANDS, with materialize: true, and its build returns rows. This
 // guarantees the recipes we hand to the agent are requests the tools take, and compute.
 //
@@ -835,7 +836,7 @@ for (const r of RUN_HERE) {
     }
 
     // Semantic-model recipe: create + run its first example query.
-    const out = await engine.build_semantic_model(r.semantic_payload);
+    const out = await declare(engine, r.semantic_payload);
     assert.equal(out.parse.ok, true, `parse failed for ${r.id}: ${JSON.stringify(out.parse.error || out.parse)}`);
     const example = (r.example_queries || [])[0];
     if (example) {

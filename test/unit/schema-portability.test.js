@@ -254,7 +254,7 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   }
   // …and the fold actually happened where it was worth it: the stage union is ONE definition that
   // both the one-step field and the list of steps point at.
-  const bnm = schemas.build_pipeline_model;
+  const bnm = schemas.build_model;
   assert.ok(bnm.$defs?.stage, 'the stage union is a definition');
   const stepField = forms(bnm, bnm).map((f) => f.properties?.step).find(Boolean);
   const stepsField = deref(bnm, forms(bnm, bnm).map((f) => f.properties?.steps).find(Boolean));
@@ -279,9 +279,8 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
 test('each tool schema holds one expr of each kind, its window, one stage and one ref where it takes them, and no definition per place', () => {
   const all = allSchemas(CATALOG);
   const takes = {
-    build_pipeline_model: ['expr', 'over', 'over_frame', 'stage'],
-    'build_pipeline_model.pipeline': ['expr', 'over', 'over_frame', 'stage'],
-    build_semantic_model: ['expr', 'aggregate', 'metric_expr'],
+    build_model: ['expr', 'aggregate', 'metric_expr', 'over', 'over_frame', 'stage'],
+    'build_model.pipeline': ['expr', 'aggregate', 'metric_expr', 'over', 'over_frame', 'stage'],
     query_model: ['expr', 'over', 'over_frame', 'stage', 'ref'],
     semantic_index: ['ref'],
     memory: ['ref'],
@@ -304,7 +303,7 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
   const SQL = 'SQL over rows — needs a table';
   const RUNTIME = 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows';
   const SEMANTIC = 'in the semantic layer — needs MetricFlow';
-  assert.deepEqual(groups(all.build_pipeline_model), [SQL, 'over a source\'s events — needs the rows still that source\'s events']);
+  assert.deepEqual(groups(all.build_model), [SQL, 'over a source\'s events — needs the rows still that source\'s events', SEMANTIC], 'a build\'s: its stages, and its last step, the semantic layer over them');
   assert.deepEqual(groups(all.query_model), [SQL, SEMANTIC], 'a metric query\'s: a read\'s, and its metrics step');
   const semanticGroup = deref(all.query_model, all.query_model.$defs.stage).anyOf.map((g) => deref(all.query_model, g)).find((g) => g.title === SEMANTIC);
   assert.deepEqual(forms(all.query_model, semanticGroup).flatMap((f) => pinned(all.query_model, f, 'stage')), ['metrics']);
@@ -329,7 +328,7 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
     const c = loadCatalog(path, {});
     const tools = [
       ...listed(path).map((t) => [t.name, t.inputSchema, TOOL_PLACES[t.name] || {}]),
-      ['build_pipeline_model.pipeline', transportSchema(buildSchemas(c)['build_pipeline_model.pipeline']), TOOL_PLACES.build_pipeline_model],
+      ['build_model.pipeline', transportSchema(buildSchemas(c)['build_model.pipeline']), TOOL_PLACES.build_model],
       ['build_retentioneering_model', transportSchema(eventstreamSchema(c)), { expr: ['source_rows', PLACES.stored_rows], stage: [startPlace(c)] }],
     ];
     const placesIn = (table, names = []) => names.map((p) => (typeof p === 'string' ? table[p] : p));
@@ -354,7 +353,8 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
           for (const fn of fns) assert.ok(ps.some((p) => p.fns.includes(fn)), `${name}: ${fn} (${f.title}) in $defs.${kind} — no place of that kind takes it`);
           // a measure is ONE aggregate, folding rows; where measures are their own kind, the rows take none
           if (kind === 'aggregate') assert.ok(fns.every((fn) => AGGREGATE_FNS.includes(fn)) && !f.properties?.over, `${name}: ${f.title} — a measure is an aggregate folding rows`);
-          if (kind === 'expr' && kinds.aggregate.length) assert.ok(!fns.some((fn) => AGGREGATE_FNS.includes(fn)), `${name}: ${f.title} — an aggregate in the row expression of a tool whose measures are their own kind`);
+          // (a tool whose rows also fold — a build's aggregate stage — keeps them in its row expression)
+          if (kind === 'expr' && kinds.aggregate.length && !expr.some((p) => p.fns.some((fn) => AGGREGATE_FNS.includes(fn)))) assert.ok(!fns.some((fn) => AGGREGATE_FNS.includes(fn)), `${name}: ${f.title} — an aggregate in the row expression of a tool whose measures are their own kind`);
           if (f.properties?.over) {
             assert.ok(ps.some((p) => p.windows), `${name}: a window (${f.title}) — no place of the tool takes one`);
             // a window function reads its partition whole; an aggregate over a window also a frame of it
@@ -376,7 +376,7 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
         }
         // (a place that lists no stages takes every stage of the registry; a step no stage of it is — the
         // metrics step — is there only where a place of the tool offers it)
-        assert.ok(stage.some((p) => (p.stages ? p.stages.includes(s) : stageDef(s) !== null)), `${name}: the ${s} stage — no place of the tool takes it`);
+        assert.ok(stage.some((p) => (p.stages ? p.stages.includes(s) : stageDef(s) !== null || (p.offers || []).some((o) => o.stage === s))), `${name}: the ${s} stage — no place of the tool takes it`);
         if (!stageDef(s)) assert.ok(stage.some((p) => (p.offers || []).some((o) => o.stage === s)), `${name}: the ${s} step — no place of the tool offers it`);
       }
       for (const f of defs.ref ? forms(doc, defs.ref) : []) {

@@ -19,7 +19,7 @@
 //           right number cannot tell a model that chose right from one that did not. Every indirect
 //           case has one: choosing the metric is what it tests.
 //   ref     a path through the tools that reaches the same answer — a pipeline over `source` in
-//           `steps` (build_pipeline_model's, each added as it is), read at `column` (number), or at `key`/`value` (label: the row with the largest
+//           `steps` (build_model's, each added as it is), read at `column` (number), or at `key`/`value` (label: the row with the largest
 //           value; map: every row). `npm run eval:check` runs it and holds it to `answer.sql`, so
 //           every positive case is known to be answerable with the tools as they are.
 //
@@ -27,7 +27,7 @@
 // events, crashlytics, acquisition, users and experiments. Nothing here names a column the model
 // could not find through semantic_index.
 
-const ANSWERING = ['query_model', 'query_model', 'build_pipeline_model'];
+const ANSWERING = ['query_model', 'query_model', 'build_model'];
 const PURCHASED = "event_name = 'iap_purchase_completed'";
 
 export const CASES = [
@@ -220,7 +220,7 @@ export const CASES = [
     prompt: 'How many orders did customers place in our online shop last month? Use the orders table.',
     // looking is right (the catalog says what exists); building or querying something that is not
     // there, or answering with a number, is not
-    expect: { forbid: ['build_semantic_model', 'build_pipeline_model', 'query_model', 'query_model', 'display_model_result'] },
+    expect: { forbid: ['build_model', 'query_model', 'display_model_result'] },
     answer: { kind: 'none' },
   },
   {

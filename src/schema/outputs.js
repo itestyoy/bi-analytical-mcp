@@ -21,14 +21,6 @@ const obj = { type: 'object' };
 const list = (items = {}) => ({ type: 'array', items });
 const shape = (description, required, properties) => ({ type: 'object', description, required, properties });
 
-/** A call that starts a task answers with its id and where to read it — nothing else. */
-const started = shape('The task the call started, and the query tool that reads it back.', ['task_id', 'read_with', 'next'], {
-  task_id: str,
-  context_id: str,
-  read_with: str,
-  next: { type: 'string', description: 'The call that reads the task back.' },
-});
-
 export const OUTPUTS = {
   time: shape('How long the timer waited.', ['ok', 'waited_seconds', 'cap_seconds', 'started_at', 'finished_at'], {
     ok: { const: true },
@@ -92,6 +84,4 @@ export const OUTPUTS = {
     note: str,
     error: obj,
   }),
-
-  build_semantic_model: started,
 };

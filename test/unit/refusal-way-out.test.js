@@ -11,6 +11,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'));
 const ctxs = new ContextManager({ workspaceRoot: tempDir('way-out') });
@@ -21,7 +22,7 @@ const contexts = () => ctxs.list().length;
 
 test('a declaration whose only metric reads a measure on the slowly-changing users model is refused, creating nothing', async () => {
   const before = contexts();
-  await assert.rejects(engine.build_semantic_model({
+  await assert.rejects(declare(engine, {
     name: 'installs_only',
     semantic_models: [{ source: 'users', measures: [{ name: 'installs', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }],
     metrics: [{ name: 'installs', type: 'simple', measure: 'installs' }],
@@ -48,7 +49,7 @@ test('an id that names no context says how to list those that exist', async () =
 test('a pipeline start whose steps are refused leaves no draft behind', async () => {
   const before = contexts();
   for (let i = 0; i < 2; i++) {
-    await assert.rejects(engine.build_pipeline_model({
+    await assert.rejects(engine.build_model({
       action: 'start', name: 'leak_probe', source: 'events',
       steps: [{ stage: 'aggregate', group_by: ['prise'], measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     }), /unknown column 'prise'.*nothing was started/);
@@ -57,10 +58,10 @@ test('a pipeline start whose steps are refused leaves no draft behind', async ()
 });
 
 test('a function given a parameter under another name is refused as that function, naming the parameter it takes', async () => {
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'misnamed_params', source: 'events' });
+  const s = await engine.build_model({ action: 'start', name: 'misnamed_params', source: 'events' });
   const refusal = async (expr) => {
     let msg = '';
-    await assert.rejects(engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'x', expr }] }), (e) => { msg = e.message; return true; });
+    await assert.rejects(engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'x', expr }] }), (e) => { msg = e.message; return true; });
     return msg;
   };
   const t = { column: 'device_time' };

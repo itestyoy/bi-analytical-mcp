@@ -20,7 +20,7 @@
 //   engine/semantic-build.js      build / update / delete a semantic model, a pipeline model
 //   engine/semantic-query.js      query_model: references, the metric-query shell
 //   engine/semantic-preview.js    preview_semantic_model
-//   engine/pipeline-draft.js      build_pipeline_model's draft: steps, checkpoints, preview
+//   engine/pipeline-draft.js      build_model's draft: steps, checkpoints, preview
 //   engine/pipeline-materialize.js  the draft run as a chain of dbt models
 //   engine/task-results.js        reading a task back, query_model, display_model_result
 
@@ -67,12 +67,18 @@ import { CONTEXT_PAGE } from './schema/fields.js';
 import { propertyTypes } from './pipeline/compute.js';
 
 /**
- * THE KINDS OF QUERY TASK and the side each belongs to. query_model starts both — a metric query (a
- * metrics step: the semantic layer computes it) and a read of a stored table (steps over a pipeline's
- * rows) — and a task records which it is, as it has since the two were tools of their own (a task kept
- * from then reads back alike).
+ * THE KINDS OF TASK a tool starts on two sides — each with the side it belongs to and the tool it is said
+ * as. query_model starts a metric query (a metrics step: the semantic layer computes it) and a read of a
+ * stored table (steps over a pipeline's rows); build_model a semantic layer's parse (its semantic_model
+ * step) and a pipeline's build. A task records which it is, as it has since each was a tool of its own (a
+ * task kept from then reads back alike).
  */
-export const QUERY_KINDS = { query_semantic_model: 'semantic', query_pipeline_model: 'pipeline' };
+export const TASK_KINDS = {
+  query_semantic_model: { side: 'semantic', tool: 'query_model' },
+  query_pipeline_model: { side: 'pipeline', tool: 'query_model' },
+  build_semantic_model: { side: 'semantic', tool: 'build_model' },
+  build_pipeline_model: { side: 'pipeline', tool: 'build_model' },
+};
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -154,9 +160,9 @@ export class Engine {
     }
     for (const name of Object.keys(this.schemas)) if (!this.tools.has(name)) throw new Error(`the schema '${name}' belongs to no tool definition`);
     // which side a task belongs to, and which tool reads that side back — both read off the definitions
-    // (a task records the KIND of work that started it: a tool's name, or one of QUERY_KINDS — query_model
+    // (a task records the KIND of work that started it: a tool's name, or one of TASK_KINDS — query_model
     // starts a metric query or a read of a stored table, each on its own side)
-    this._sides = { ...QUERY_KINDS, ...Object.fromEntries(this.tools.values().filter((d) => d.side).map((d) => [d.name, d.side])) };
+    this._sides = { ...Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.side])), ...Object.fromEntries(this.tools.values().filter((d) => d.side).map((d) => [d.name, d.side])) };
     this._readers = Object.fromEntries(this.tools.values().filter((d) => d.reads).flatMap((d) => [].concat(d.reads).map((side) => [side, d.name])));
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
@@ -194,7 +200,7 @@ export class Engine {
     this.validators = makeValidators({ ...this.schemas, ...this.contracts });
     this.ctxs = contextManager || new ContextManager({});
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
-    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, onFailure: (...a) => this._recordTaskError(...a) });
+    this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a) });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
     // the dbt project's contexts (engine.ctxs), the catalog and the job registry: the one surface it
     // is written against, so an engine method can change without reaching into a feature
@@ -633,7 +639,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_model({ request: { context_id: '${ctx.id}', steps } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_model({ request: { task_ids: ['${n.task_id}'] } }) for its rows, query_model({ request: { context_id: '${ctx.id}', steps } }) to filter or regroup them; build on them with build_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }

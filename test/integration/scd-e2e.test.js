@@ -21,6 +21,7 @@ import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('scd_project'); // a private copy: the test files run side by side
@@ -62,7 +63,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 // fan-out of the point-in-time join would inflate each of them.
 test('governed SCD join on a project with no time spine of its own: point-in-time revenue by country (50 / 20 / 30, total 100) and a metric_time month series (100)', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model({
+  const created = await declare(engine, {
     name: 'scd_rev',
     semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users', dimensions: [{ column: 'country' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
@@ -89,7 +90,7 @@ test('governed SCD join on a project with no time spine of its own: point-in-tim
 //    The renderer must drop it (with a warning) and keep the manifest valid & queryable.
 test('governed SCD join: a measure on the SCD users model is dropped with a warning; the task still parses & queries', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model({
+  const created = await declare(engine, {
     name: 'scd_drop',
     semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users', measures: [{ name: 'player_count', expr: { fn: 'count_distinct', args: [{ column: 'internal_player_id' }] } }] }],
     metrics: [
@@ -115,8 +116,8 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
 // 4) PIPELINE point-in-time join via the users contract's time: same point-in-time numbers as governed.
 test('pipeline join on the users contract: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
-  const r = await engine.build_pipeline_model({
+  const s = await engine.build_model({ action: 'start', name: 'scd_pipe', source: 'events' });
+  const r = await engine.build_model({
     action: 'add_steps', context_id: s.context_id, steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
       { stage: 'compute', name: 'price', expr: { property: 'price_in_usd_of_event_data' } },
@@ -125,7 +126,7 @@ test('pipeline join on the users contract: point-in-time revenue by country = US
     ],
   });
   assert.equal(r.action, 'add_steps');
-  const mat = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const mat = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
   // the build's rows are its table's (a country each, well under a page)
   const by = mapOf(mat.rows, 'country', 'revenue');
@@ -142,9 +143,9 @@ test('the key alone would inflate to 130 / 6 rows; a join without its time is re
   if (skip(t)) return;
   const { rows } = await wh.query(`SELECT sum(e.price_in_usd_of_event_data) AS revenue, count(*) AS n FROM main.fct_events e JOIN main.dim_users u ON e.internal_player_id = u.internal_player_id WHERE e.event_name = 'iap_purchase_completed'`);
   assert.deepEqual([num(rows[0].revenue), num(rows[0].n)], [130, 6], 'u1 (2 purchases) × 2 versions + u2 + u3');
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_notime', source: 'events' });
+  const s = await engine.build_model({ action: 'start', name: 'scd_notime', source: 'events' });
   await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'internal_player_id' }, attrs: [{ column: 'country' }] }] }),
+    () => engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'internal_player_id' }, attrs: [{ column: 'country' }] }] }),
     /missing required property 'time'/,
   );
 });

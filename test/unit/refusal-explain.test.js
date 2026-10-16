@@ -15,10 +15,10 @@ const refusal = (e, tool, input) => { try { e._validate(tool, input); return nul
 
 test('a mode left unnamed is refused as the mode the fields belong to, with the modes there are', () => {
   const e = engine();
-  const update = refusal(e, 'build_semantic_model', { context_id: 'abc123', remove: { metrics: ['x'] } });
-  assert.match(update, /update the task in a context/);
-  assert.match(update, /missing required property 'action'/);
-  assert.doesNotMatch(update, /unexpected property 'remove'/);
+  const edit = refusal(e, 'build_model', { context_id: 'abc123', index: 1, step: { stage: 'limit', limit: 1 } });
+  assert.match(edit, /edit or insert a step/);
+  assert.match(edit, /missing required property 'action'/);
+  assert.doesNotMatch(edit, /unexpected property 'step'/);
   const del = refusal(e, 'delete_context', { context_id: 'abc123', semantic_model: 'events' });
   assert.match(del, /one semantic model's additions/);
   assert.match(del, /missing required property 'what'/);
@@ -29,7 +29,7 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
   // one tree of each level's grammar: a metric query's where step over a dimension, a pipeline where over a column
   const levels = [
     ['query_model', { source: 'users', column: 'country' }, (conditions) => ({ context_id: 'abc123', steps: [{ stage: 'where', conditions }, { stage: 'metrics', metrics: ['x'] }] })],
-    ['build_pipeline_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
+    ['build_model', { column: 'event_name' }, (conditions) => ({ action: 'add_steps', context_id: 'abc123', steps: [{ stage: 'where', conditions }] })],
   ];
   for (const [tool, subject, call] of levels) {
     const leaf = (bogus) => ({ fn: 'eq', args: [subject, { value: 'US' }], ...(bogus ? { bogus: 1 } : {}) });
@@ -48,9 +48,9 @@ test('a deep and / or tree is checked, and refused, in time that grows with its 
 test('a join stage names its contract\'s parts in one field, on — the earlier with / via are refused', () => {
   const e = engine();
   const base = { action: 'add_steps', context_id: 'abc123' };
-  const earlier = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
+  const earlier = refusal(e, 'build_model', { ...base, steps: [{ stage: 'join', with: 'users', via: 'user', attrs: [{ column: 'country' }] }] });
   assert.match(earlier, /unexpected property 'with'|missing required property 'source'/);
-  const list = refusal(e, 'build_pipeline_model', { ...base, steps: [{ stage: 'join', source: 'users', on: ['player_id'], attrs: [{ column: 'country' }] }] });
+  const list = refusal(e, 'build_model', { ...base, steps: [{ stage: 'join', source: 'users', on: ['player_id'], attrs: [{ column: 'country' }] }] });
   assert.match(list, /`steps\.0\.on`/);
 });
 
@@ -73,7 +73,7 @@ test('a read\'s condition is the one grammar over the stored table\'s columns, a
 
 test('an aggregate takes no where — over a window as folding rows — and a function that is no window takes no over — the refusal names the form', () => {
   const e = engine();
-  const add = (stage) => refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', steps: [stage] });
+  const add = (stage) => refusal(e, 'build_model', { action: 'add_steps', context_id: 'abc123', steps: [stage] });
   const isOne = { fn: 'eq', args: [{ column: 'a' }, { value: 1 }] };
   assert.match(add({ stage: 'compute', name: 'x', expr: { fn: 'sum', args: [{ column: 'a' }], over: {}, where: [isOne] } }), /unexpected property 'where' — fn: sum \| average \| min \| max \(over a window\) takes fn, args, over/);
   // folding rows, a where is the earlier spelling of the case the aggregate folds: refused with it

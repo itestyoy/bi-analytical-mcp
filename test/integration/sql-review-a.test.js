@@ -60,10 +60,10 @@ const truth = async (sql) => (await wh.query(sql)).rows;
 
 /** A pipeline over `source`, its steps added and materialized: its rows. */
 async function pipe(source, steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `sqlrev_a_${seq++}`, source });
-  const a = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps });
+  const s = await engine.build_model({ action: 'start', name: `sqlrev_a_${seq++}`, source });
+  const a = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps });
   assert.ok(!a.error, `add_steps: ${JSON.stringify(a.error)}`);
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }

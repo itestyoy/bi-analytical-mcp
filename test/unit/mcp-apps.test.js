@@ -138,7 +138,7 @@ test('structured output only for a card that is DRAWN — display_model_result\'
   const drawn = { ...rows, display, drawn_from: { tool: 'query_model' }, drawn: true };
   assert.ok(toCallToolResult(drawn, 'display_model_result').structuredContent);
   // the same rows from any other tool — a query, a read — are text alone
-  for (const name of ['query_model', 'query_model', 'build_pipeline_model', 'experiment']) assert.equal(toCallToolResult({ ...rows, display }, name).structuredContent, undefined, name);
+  for (const name of ['query_model', 'query_model', 'build_model', 'experiment']) assert.equal(toCallToolResult({ ...rows, display }, name).structuredContent, undefined, name);
   // experiment: its own card when the call asks for it, and only then
   const ab = { metric: 'proportion', confidence: 0.95, results: [{ variant: 'b', control_rate: 0.1, variant_rate: 0.12, absolute_lift: 0.02, relative_lift: 0.2, confidence_interval: [0.01, 0.03], relative_lift_ci: [0.1, 0.3], p_value: 0.001, significant: true }] };
   assert.ok(toCallToolResult(ab, 'experiment', { action: 'analyze', card: true }).structuredContent);
@@ -198,7 +198,7 @@ test('view model: a time series by segment is one line per segment, with the row
 });
 
 test('view model: a category and an amount is a bar per category', () => {
-  const m = buildViewModel('build_pipeline_model', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'US', users: 100 }, { country: 'DE', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, null);
+  const m = buildViewModel('build_model', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'US', users: 100 }, { country: 'DE', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, null);
   assert.equal(m.kind, 'chart', 'a breakdown sorted by size is a chart, not a funnel');
   assert.deepEqual(m.chart.bars, [{ label: 'US', value: 100 }, { label: 'DE', value: 37 }]);
 });
@@ -264,7 +264,7 @@ test('view model: a mean with no relative interval plots the absolute one', asyn
 
 test('view model: a funnel from a row per step carries each step\'s share of the first and of the previous', () => {
   const rows = [{ step: '1_start', users: 10000 }, { step: '2_move', users: 7400 }, { step: '3_match', users: 5100 }, { step: '4_finish', users: 3900 }];
-  const m = buildViewModel('build_pipeline_model', { status: 'ready', table: 'pipe_tutorial', columns: [{ name: 'step' }, { name: 'users' }], rows });
+  const m = buildViewModel('build_model', { status: 'ready', table: 'pipe_tutorial', columns: [{ name: 'step' }, { name: 'users' }], rows });
   assert.equal(m.kind, 'funnel');
   assert.equal(m.measure, 'users');
   assert.deepEqual(m.funnels[0].steps.map((x) => [x.label, x.value]), rows.map((r) => [r.step, r.users]));
@@ -285,12 +285,12 @@ test('view model: counts that merely decrease, or steps that grow, are not a fun
   // two unrelated metrics in one row: no step-like names
   assert.equal(buildViewModel('query_model', { columns: [{ name: 'dau' }, { name: 'new_users' }], rows: [{ dau: 1000, new_users: 300 }] }).kind, 'none');
   // step-named rows whose counts grow: a bar chart, not a funnel
-  assert.equal(buildViewModel('build_pipeline_model', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: 5 }, { step: 'b', users: 9 }] }).kind, 'chart');
+  assert.equal(buildViewModel('build_model', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: 5 }, { step: 'b', users: 9 }] }).kind, 'chart');
 });
 
 test('view model: a DECLARED funnel draws the declared steps with their labels, whatever the columns are called', () => {
   const row = { installs: 1000, first_level: 640, day2: 380, spend: 12.5 };
-  const m = buildViewModel('build_pipeline_model', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'funnel', title: 'Onboarding', steps: [{ column: 'installs', label: 'Install' }, { column: 'first_level', label: 'Level 1' }, { column: 'day2' }] } });
+  const m = buildViewModel('build_model', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'funnel', title: 'Onboarding', steps: [{ column: 'installs', label: 'Install' }, { column: 'first_level', label: 'Level 1' }, { column: 'day2' }] } });
   assert.equal(m.kind, 'funnel');
   assert.equal(m.title, 'Onboarding');
   assert.deepEqual(m.funnels[0].steps.map((x) => [x.label, x.value]), [['Install', 1000], ['Level 1', 640], ['day2', 380]]);
@@ -299,7 +299,7 @@ test('view model: a DECLARED funnel draws the declared steps with their labels, 
 
 test('view model: a DECLARED line over a non-time axis keeps the row order; series_column splits one value into lines', () => {
   const rows = [{ level: 'L3', country: 'US', users: 90 }, { level: 'L1', country: 'US', users: 200 }, { level: 'L3', country: 'GB', users: 30 }, { level: 'L1', country: 'GB', users: 80 }];
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'level' }, { name: 'country' }, { name: 'users' }], rows, display: { kind: 'line', x: 'level', y: ['users'], series_column: 'country' } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'level' }, { name: 'country' }, { name: 'users' }], rows, display: { kind: 'line', x: 'level', y: ['users'], series_column: 'country' } });
   assert.equal(m.kind, 'chart');
   assert.equal(m.chart.ordered, true);
   assert.deepEqual(m.chart.series.map((x) => [x.name, x.points]), [['US', [['L3', 90], ['L1', 200]]], ['GB', [['L3', 30], ['L1', 80]]]]);
@@ -312,7 +312,7 @@ test('view model: a DECLARED line over a non-time axis keeps the row order; seri
 test('view model: a DECLARED bar split by a column groups (or stacks) a bar per value inside each category', () => {
   const rows = [{ c: 'US', p: 'ios', v: 420 }, { c: 'US', p: 'android', v: 310 }, { c: 'BR', p: 'android', v: 180 }, { c: 'BR', p: 'ios', v: 40 }, { c: 'BR', p: 'ios', v: 5 }];
   const cols = [{ name: 'c' }, { name: 'p' }, { name: 'v' }];
-  const m = buildViewModel('build_pipeline_model', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p', stacked: true, horizontal: true } });
+  const m = buildViewModel('build_model', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p', stacked: true, horizontal: true } });
   assert.equal(m.chart.type, 'bar');
   assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
   // the largest series first (android 490 > ios 465); a category × series seen twice is summed
@@ -320,24 +320,24 @@ test('view model: a DECLARED bar split by a column groups (or stacks) a bar per 
   assert.equal(m.chart.stacked, true);
   assert.equal(m.chart.horizontal, true);
   // several y columns: a bar each per category, grouped
-  const g = buildViewModel('build_pipeline_model', { columns: [{ name: 'c' }, { name: 'a' }, { name: 'b' }], rows: [{ c: 'x', a: 1, b: 2 }, { c: 'y', a: 3, b: 4 }], display: { kind: 'bar', x: 'c', y: ['a', 'b'] } });
+  const g = buildViewModel('build_model', { columns: [{ name: 'c' }, { name: 'a' }, { name: 'b' }], rows: [{ c: 'x', a: 1, b: 2 }, { c: 'y', a: 3, b: 4 }], display: { kind: 'bar', x: 'c', y: ['a', 'b'] } });
   assert.deepEqual(g.chart.series, [{ name: 'a', values: [1, 3] }, { name: 'b', values: [2, 4] }]);
   assert.equal(g.chart.stacked, false);
 });
 
 test('view model: a DECLARED area stacks its series; a single line stays a line', () => {
   const rows = [{ d: '2026-09-01', p: 'ios', n: 5 }, { d: '2026-09-01', p: 'web', n: 1 }, { d: '2026-09-02', p: 'ios', n: 6 }, { d: '2026-09-02', p: 'web', n: 2 }];
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'area', x: 'd', y: ['n'], series_column: 'p' } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'area', x: 'd', y: ['n'], series_column: 'p' } });
   assert.equal(m.chart.area, true);
   assert.equal(m.chart.stacked, true);
   assert.deepEqual(m.chart.series.map((x) => [x.name, x.points.map((p) => p[1])]), [['ios', [5, 6]], ['web', [1, 2]]]);
-  const l = buildViewModel('build_pipeline_model', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'line', x: 'd', y: ['n'], series_column: 'p' } });
+  const l = buildViewModel('build_model', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'line', x: 'd', y: ['n'], series_column: 'p' } });
   assert.equal(l.chart.area, undefined);
 });
 
 test('view model: a DECLARED pie is slices in size order with their shares; past six the smallest fold into Other', () => {
   const vals = [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['JP', 60], ['KR', 40], ['IN', 25]];
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'c' }, { name: 'v' }], rows: vals.map(([c, v]) => ({ c, v })).reverse(), display: { kind: 'pie', label_column: 'c', value_column: 'v' } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'c' }, { name: 'v' }], rows: vals.map(([c, v]) => ({ c, v })).reverse(), display: { kind: 'pie', label_column: 'c', value_column: 'v' } });
   assert.equal(m.chart.type, 'pie');
   assert.equal(m.chart.total, 1600);
   assert.deepEqual(m.chart.slices.map((x) => [x.label, x.value]), [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['Other', 125]]);
@@ -347,7 +347,7 @@ test('view model: a DECLARED pie is slices in size order with their shares; past
 
 test('view model: KPI tiles read one row, with the change against a previous column', () => {
   const row = { revenue: 184230.5, revenue_prev: 171020, crash_rate: 0.0041, crash_rate_prev: 0.0052 };
-  const m = buildViewModel('build_pipeline_model', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'kpi', values: [{ column: 'revenue', label: 'Revenue', format: 'currency', previous_column: 'revenue_prev', good: 'up' }, { column: 'crash_rate', format: 'percent', previous_column: 'crash_rate_prev', good: 'down' }] } });
+  const m = buildViewModel('build_model', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'kpi', values: [{ column: 'revenue', label: 'Revenue', format: 'currency', previous_column: 'revenue_prev', good: 'up' }, { column: 'crash_rate', format: 'percent', previous_column: 'crash_rate_prev', good: 'down' }] } });
   assert.equal(m.kind, 'kpi');
   assert.deepEqual(m.tiles.map((t) => [t.label, t.value, t.previous, t.good]), [['Revenue', 184230.5, 171020, 'up'], ['crash_rate', 0.0041, 0.0052, 'down']]);
   assert.equal(m.tiles[0].change, (184230.5 - 171020) / 171020);
@@ -366,7 +366,7 @@ test('view model: KPI tiles over a time axis show the LAST row, its change from 
 
 test('view model: a sankey sums a link seen twice, drops empty flows and sizes each node by what passes through', () => {
   const rows = [['organic', 'ios', 40], ['organic', 'ios', 2], ['organic', 'android', 60], ['ios', 'payer', 5], ['android', 'payer', 4], ['android', 'x', null]].map(([a, b, v]) => ({ a, b, v }));
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'v' }], rows, display: { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'v' }], rows, display: { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' } });
   assert.equal(m.chart.type, 'sankey');
   assert.deepEqual(m.chart.links, [{ from: 'organic', to: 'ios', flow: 42 }, { from: 'organic', to: 'android', flow: 60 }, { from: 'ios', to: 'payer', flow: 5 }, { from: 'android', to: 'payer', flow: 4 }]);
   assert.deepEqual(m.chart.nodes.map((n) => [n.name, n.size]), [['organic', 102], ['android', 60], ['ios', 42], ['payer', 9]]);
@@ -421,12 +421,12 @@ test('a pivot whose value is also one of its levels is refused when it is drawn:
 test('view model: what a chart leaves out is said in numbers — categories past the cap, series by size or by column order, amounts not drawn', () => {
   // a declared bar over 120 categories: 30 drawn, 120 counted
   const many = Array.from({ length: 120 }, (_, i) => ({ c: `c${i}`, v: i }));
-  const bar = buildViewModel('build_pipeline_model', { columns: [{ name: 'c' }, { name: 'v' }], rows: many, display: { kind: 'bar', x: 'c', y: ['v'] } });
+  const bar = buildViewModel('build_model', { columns: [{ name: 'c' }, { name: 'v' }], rows: many, display: { kind: 'bar', x: 'c', y: ['v'] } });
   assert.deepEqual([bar.chart.labels.length, bar.chart.categories_total], [30, 120]);
   assert.deepEqual(bar.chart.bars.at(-1), { label: 'c29', value: 29 });
   // split by a column: a series' total counts every row, also those past the drawn categories
   const split = Array.from({ length: 70 }, (_, i) => ({ c: `c${i}`, p: i < 60 ? 'ios' : 'web', v: i < 60 ? 1 : 100 }));
-  const byP = buildViewModel('build_pipeline_model', { columns: [{ name: 'c' }, { name: 'p' }, { name: 'v' }], rows: split, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p' } });
+  const byP = buildViewModel('build_model', { columns: [{ name: 'c' }, { name: 'p' }, { name: 'v' }], rows: split, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p' } });
   assert.equal(byP.chart.series[0].name, 'web', 'web (10 rows × 100) outweighs ios (60 × 1), though its rows come last');
   assert.equal(byP.chart.categories_total, 70);
   // eight value columns over time: the first six in column order, and the card is told so
@@ -439,7 +439,7 @@ test('view model: what a chart leaves out is said in numbers — categories past
   const bySeg = buildViewModel('query_model', { columns: [{ name: 'day' }, { name: 'country' }, { name: 'dau' }], rows: seg });
   assert.deepEqual([bySeg.chart.folded, bySeg.chart.folded_by, bySeg.chart.series[0].name], [3, 'size', 'k8']);
   // an inferred breakdown draws its first amount and names the others
-  const brk = buildViewModel('build_pipeline_model', { columns: [{ name: 'platform' }, { name: 'users' }, { name: 'revenue' }, { name: 'arpu' }], rows: [{ platform: 'ios', users: 10, revenue: 50, arpu: 5 }, { platform: 'web', users: 4, revenue: 8, arpu: 2 }] });
+  const brk = buildViewModel('build_model', { columns: [{ name: 'platform' }, { name: 'users' }, { name: 'revenue' }, { name: 'arpu' }], rows: [{ platform: 'ios', users: 10, revenue: 50, arpu: 5 }, { platform: 'web', users: 4, revenue: 8, arpu: 2 }] });
   assert.deepEqual([brk.chart.y, brk.chart.omitted], ['users', ['revenue', 'arpu']]);
 });
 
@@ -477,18 +477,18 @@ test('drill: a view is the stored rows under the path, grouped by what it draws;
 
 test('view model: a drillable chart carries each mark\'s own value to filter by, and where to read the next view', () => {
   const display = { kind: 'bar', x: 'country', y: ['v'], series_column: 'p', drill: { levels: [{ column: 'channel' }] } };
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'country' }, { name: 'p' }, { name: 'v' }], rows: [{ country: null, p: 'ios', v: 3 }, { country: 'US', p: 7, v: 5 }], display, drill_source: { task_id: 'aabbccddeeff' } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'country' }, { name: 'p' }, { name: 'v' }], rows: [{ country: null, p: 'ios', v: 3 }, { country: 'US', p: 7, v: 5 }], display, drill_source: { task_id: 'aabbccddeeff' } });
   assert.deepEqual(m.chart.labels, ['∅', 'US']);
   assert.deepEqual(m.chart.drill.keys, [null, 'US'], 'the empty category filters by null, not by its label');
   assert.deepEqual(m.chart.series.map((x) => x.key).sort(), [7, 'ios'], 'a numeric split value stays a number');
   assert.deepEqual(m.chart.drill.source, { task_id: 'aabbccddeeff' });
   // without a source to read from there is nothing to drill
-  assert.equal(buildViewModel('build_pipeline_model', { columns: [{ name: 'country' }, { name: 'v' }], rows: [{ country: 'US', v: 1 }], display: { kind: 'bar', x: 'country', y: ['v'], drill: { levels: [{ column: 'p' }] } } }).chart.drill, undefined);
+  assert.equal(buildViewModel('build_model', { columns: [{ name: 'country' }, { name: 'v' }], rows: [{ country: 'US', v: 1 }], display: { kind: 'bar', x: 'country', y: ['v'], drill: { levels: [{ column: 'p' }] } } }).chart.drill, undefined);
 });
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
   // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } } });
+  const m = buildViewModel('build_model', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } } });
   assert.equal(m.kind, 'chart');
   assert.equal(m.chart.type, 'bar');
 });
@@ -525,7 +525,7 @@ test('a funnel with outcomes, one per ad format: shares of the parent, the main 
   const counts = { interstitial: [918, 441, 477, 65, 52, 13], rewarded: [68, 42, 26, 20, 11, 9] };
   const rows = Object.entries(counts).flatMap(([format, ns]) => steps.map(([step, parent], i) => ({ format, step, parent, n: ns[i] })));
   const display = { kind: 'funnel', series_column: 'format', steps: { label_column: 'step', value_column: 'n', parent_column: 'parent' } };
-  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'format' }, { name: 'step' }, { name: 'parent' }, { name: 'n' }], rows, display });
+  const m = buildViewModel('build_model', { columns: [{ name: 'format' }, { name: 'step' }, { name: 'parent' }, { name: 'n' }], rows, display });
   assert.equal(m.kind, 'funnel');
   assert.deepEqual(m.funnels.map((f) => f.series), ['interstitial', 'rewarded']);
   const [inter] = m.funnels;

@@ -69,11 +69,11 @@ function engine(runner, { workspaceRoot, registryPath } = {}) {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const add = (e, context_id, stage) => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [stage] });
-const materialize = (e, context_id) => e.build_pipeline_model({ action: 'materialize', context_id });
+const add = (e, context_id, stage) => e.build_model({ action: 'add_steps', context_id, steps: [stage] });
+const materialize = (e, context_id) => e.build_model({ action: 'materialize', context_id });
 
 async function startedDraft(e, name = 'seg') {
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name, source: 'events' });
+  const { context_id } = await e.build_model({ action: 'start', name, source: 'events' });
   await add(e, context_id, AGG);
   await add(e, context_id, PY_STAGE);
   return context_id;
@@ -104,7 +104,7 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, context_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
-  assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
+  assert.ok(e._listTasks().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_model'));
   const peek = await one(e.query_model({ task_ids: [bg.task_id], wait_seconds: 0 }));
   assert.equal(peek.status, 'running');
 
@@ -198,7 +198,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  const { context_id } = await e.build_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
   await add(e, context_id, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] });
   const r = await finishTask(e, await materialize(e, context_id), runner);
   assert.equal(r.materialized, 'view');
@@ -209,7 +209,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   assert.deepEqual(d.draft.checkpoints.map((c) => [c.at, c.model, c.carries_source]), [[1, r.model, 'events']]);
   assert.equal(d.draft.steps.length, 1);
   // preview says what materialize would actually build now (nothing — everything is the table).
-  const pv = await e.build_pipeline_model({ action: 'preview', context_id });
+  const pv = await e.build_model({ action: 'preview', context_id });
   assert.equal(pv.steps_recomputed, 0);
   assert.match(pv.checkpoint_note, /Every step is already materialized/);
   await assert.rejects(() => materialize(e, context_id), /nothing to build/);
@@ -227,7 +227,7 @@ test('an edit during a build does not remove the files that build is producing',
   await untilHeld(runner);
 
   // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
-  const ed = await e.build_pipeline_model({ action: 'edit_step', context_id, index: 1, step: AGG });
+  const ed = await e.build_model({ action: 'edit_step', context_id, index: 1, step: AGG });
   assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
   assert.deepEqual(draftOf(e, context_id).checkpoints, []);
   // …but the model it is building stays on disk, so the task's own result is still readable
@@ -256,7 +256,7 @@ test('no build holds its call — a python build and an SQL build both answer wi
   runner.finish(true);
   await taskResult(e, out.task_id);
 
-  const { context_id: sql } = await e.build_pipeline_model({ action: 'start', name: 'grace_sql', source: 'events' });
+  const { context_id: sql } = await e.build_model({ action: 'start', name: 'grace_sql', source: 'events' });
   await add(e, sql, AGG);
   const sqlStarted = await materialize(e, sql);
   assert.ok(isStartedTask(sqlStarted), 'an SQL build is a task too');

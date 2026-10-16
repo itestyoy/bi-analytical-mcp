@@ -14,6 +14,7 @@ import { buildViewModel, drillView, DRILL_ROWS, pivotRows, PIVOT_LEVEL_ROWS } fr
 import { settle, isStartedTask, one, readTable } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -26,7 +27,7 @@ before(async () => {
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('detq'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'mon',
     semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],

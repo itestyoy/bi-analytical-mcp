@@ -19,6 +19,7 @@ import { settle, taskResult, isStartedTask, one } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { deref, field } from '../helpers/schema-nav.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project');
@@ -239,13 +240,10 @@ test('what the project does not define is refused in the call, naming what it do
   // an entity only the acquisition model carries is not one the events metric reaches
   await refused({ steps: [{ stage: 'metrics', metrics: ['project_events_total'], group_by: [{ entity: 'media_source' }] }] }, /not one project_events_total can be grouped by.*player/);
   // the project's contexts are read as they are: not built on, not dropped
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, name: 'xyz', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', context_id: ACQ, name: 'xyz', source: 'events', steps: [{ stage: 'semantic_model', measures: [{ name: 'n', expr: { fn: 'count' } }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] }] })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw.delete_context({ context_id: ACQ })), /nothing to drop/);
-  // …not even as a dry run of a declaration over it
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, dry_run: true, name: 'xyz', semantic_models: [{ source: 'events', measures: [{ name: 'n', expr: { fn: 'count' } }] }], metrics: [{ name: 'n', type: 'simple', measure: 'n' }] })), /own semantic layer/);
   // …by any tool that would write into it
-  await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ action: 'update', context_id: ACQ, remove: { metrics: ['project_cost'] } })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw.build_pipeline_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
+  await assert.rejects(Promise.resolve().then(() => raw.build_model({ action: 'start', name: 'xyz', source: 'events', context_id: ACQ })), /own semantic layer/);
   await assert.rejects(Promise.resolve().then(() => raw._buildPipeline({ context_id: EV, name: 'xyz', pipeline: { source: 'events', stages: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, kind: 'inner', attrs: [{ column: 'country' }] }] } })), /own semantic layer/);
   // (that it still serves its layer after them is asserted by the side-by-side queries below:
   // '[still serves after the refused writes]')
@@ -315,7 +313,7 @@ test('a stored result of the project\'s layer outlives a restart — even one wh
   // a result a pipeline was started from is held through the retention (as gc holds any owner a draft
   // reads), while one nothing reads ages out
   const base = await q(ACQ, { steps: clicksBySource, materialize: true });
-  const draft = await raw.build_pipeline_model({ action: 'start', name: 'from_clicks', source: 'events', from_task: base.task_id });
+  const draft = await raw.build_model({ action: 'start', name: 'from_clicks', source: 'events', from_task: base.task_id });
   assert.ok(draft.context_id, JSON.stringify(draft));
   await new Promise((r) => { setTimeout(r, 20); });
   engine.gc(10); // the store's results are swept first (the draft still reads `base`), then idle contexts — the draft among them
@@ -578,7 +576,7 @@ test('validate names the metric and the dimension whose column the warehouse doe
 test('a task\'s own context next to the project\'s layer: built once (events tutorials/players/per_player + users), queried, previewed, validated, and refused the project\'s names', opts, async (t) => {
   if (skip(t)) return;
   const raw = engine.raw || engine;
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'pvw',
     semantic_models: [{ source: 'events', measures: [{ name: 'tutorials', expr: { fn: 'count' } }, { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }, { source: 'users' }],
     metrics: [{ name: 'tutorials', type: 'simple', measure: 'tutorials' }, { name: 'players', type: 'simple', measure: 'players' }, { name: 'per_player', type: 'derived', expr: { fn: 'div', args: [{ metric: 'tutorials' }, { metric: 'players' }] } }],
@@ -631,7 +629,10 @@ test('a task\'s own context next to the project\'s layer: built once (events tut
     assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), `[every cut gives back the whole count] ${JSON.stringify(cut)}`);
   }
   // a build that is running is
-  const rebuilding = await (engine.raw || engine).build_semantic_model({ action: 'update', context_id: out.context_id, semantic_models: [{ source: 'events', measures: [{ name: 'more', expr: { fn: 'count' } }] }], metrics: [{ name: 'more', type: 'simple', measure: 'more' }] });
+  const { steps: built } = await raw.build_model({ action: 'preview', context_id: out.context_id });
+  const { index, ...layer } = built.find((st) => st.stage === 'semantic_model');
+  await raw.build_model({ action: 'edit_step', context_id: out.context_id, index, step: { ...layer, measures: [...layer.measures, { name: 'more', expr: { fn: 'count' } }], metrics: [...layer.metrics, { name: 'more', type: 'simple', measure: 'more' }] } });
+  const rebuilding = await raw.build_model({ action: 'materialize', context_id: out.context_id });
   assert.equal((await preview({ context_id: out.context_id })).status.building, true);
   await taskResult(engine.raw || engine, rebuilding.task_id);
   const started = await preview({ context_id: out.context_id, validate: true, time_range: WINDOW });

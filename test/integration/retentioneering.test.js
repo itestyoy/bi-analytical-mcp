@@ -721,13 +721,13 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
     });
   }
   assert.ok(expected.get('level_restarted') > 0, 'T41: the fixture has restarts to find');
-  const p = await engine.build_pipeline_model({ action: 'start', name: 'restarts', source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, steps: [
+  const p = await engine.build_model({ action: 'start', name: 'restarts', source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: p.context_id, steps: [
     { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ column: 'event_name' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } } },
     { stage: 'compute', name: 'ev', expr: { fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_started' }] }, { fn: 'eq', args: [{ column: 'prev' }, { value: 'level_started' }] }], then: { value: 'level_restarted' } }], else: { column: 'event_name' }, type: 'string' } },
     { stage: 'project', keep: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
   ] });
-  const m = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
+  const m = await engine.build_model({ action: 'materialize', context_id: p.context_id });
   const firstBuild = await one(engine.query_model({ task_ids: [m.task_id] }));
   assert.equal(firstBuild.status, 'done', `T41 the draft's first build: ${JSON.stringify(firstBuild.error)}`);
   // the start's steps run over the task's table as over a source: here a compute copying a column under the segment's name
@@ -748,17 +748,17 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
 
   // T43 — the draft's second build (every event but the first launch; the case renames only level_started)
   const n = Number((await wh.query("select count(*) as n from fct_analytics_events where event_name <> 'first_launch'")).rows[0].n);
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: p.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
-  const second = await engine.build_pipeline_model({ action: 'materialize', context_id: p.context_id });
+  await engine.build_model({ action: 'add_steps', context_id: p.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'neq', args: [{ column: 'ev' }, { value: 'first_launch' }] }] }] });
+  const second = await engine.build_model({ action: 'materialize', context_id: p.context_id });
   const rebuilt = await one(engine.query_model({ task_ids: [second.task_id] }));
   assert.equal(rebuilt.status, 'done', `T43 the draft's rebuild: ${JSON.stringify(rebuilt.error)}`);
   const rb = await engine.build_retentioneering_model({ name: 'from_rebuild', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } });
   const rr = await readDone(rb.task_id);
   assert.equal(rr.status, 'done', `T43 from_rebuild: ${JSON.stringify(rr.error)}`);
   assert.equal(rr.events, n, 'T43: the eventstream over the rebuild finds the table it builds on');
-  const pq = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: pq.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-  const pm = await engine.build_pipeline_model({ action: 'materialize', context_id: pq.context_id });
+  const pq = await engine.build_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: pq.context_id, steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const pm = await engine.build_model({ action: 'materialize', context_id: pq.context_id });
   const counted = await one(engine.query_model({ task_ids: [pm.task_id] }));
   assert.equal(counted.status, 'done', `T43 on_rebuild: ${JSON.stringify(counted.error)}`);
   assert.equal(Number(counted.rows[0].n), n, 'T43: a pipeline started from the rebuild finds its table');

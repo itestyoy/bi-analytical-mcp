@@ -128,7 +128,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const root = e.contracts['build_pipeline_model.pipeline'];
+  const root = e.contracts['build_model.pipeline'];
   const items = stageBranch(root, 'python', 'stages');
   assert.deepEqual(packageEnum(root, items), [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(packageEnum(root, items).includes('sklearn'));
@@ -202,7 +202,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: tempDir('pystage') });
   const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
-  const pkgEnum = () => packageEnum(e.contracts['build_pipeline_model.pipeline'], stageUnion(e.contracts['build_pipeline_model.pipeline'], 'stages')
+  const pkgEnum = () => packageEnum(e.contracts['build_model.pipeline'], stageUnion(e.contracts['build_model.pipeline'], 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python'));
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
@@ -213,18 +213,18 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
 test('incremental builder: add_steps python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const s = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
-  const p = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [PY_STAGE] });
+  const s = await e.build_model({ action: 'start', name: 'seg', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
+  const p = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [PY_STAGE] });
   assert.deepEqual(stepEffect(p).columns_added.map((c) => c.name), ['revenue_z']);
-  const pv = await e.build_pipeline_model({ action: 'preview', context_id: s.context_id });
+  const pv = await e.build_model({ action: 'preview', context_id: s.context_id });
   assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.context_id}_s1`, 'sql'], [`pipe_seg_${s.context_id}`, 'python']]);
   assert.equal(pv.models[1].input, `pipe_seg_${s.context_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 5 }] });
+  const after = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'limit', limit: 5 }] });
   assert.equal(stepEffect(after).step_index, 3);
-  const m = await e.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const m = await e.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(m.model, `pipe_seg_${s.context_id}`);
   assert.deepEqual(pipeFiles(e, s.context_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
 });
@@ -251,10 +251,10 @@ test('python stage: the body is text — a margin it shares is taken off, a synt
 test('python stage: the body schema is a string', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  for (const tool of ['build_pipeline_model', 'build_pipeline_model.pipeline']) {
+  for (const tool of ['build_model', 'build_model.pipeline']) {
     const root = e.schemas[tool] || e.contracts[tool];
     // the builder's one step, and the one-call contract's list (which keeps the engine's name, `stages`)
-    const py = tool === 'build_pipeline_model' ? stageBranch(root, 'python') : stageBranch(root, 'python', 'stages');
+    const py = tool === 'build_model' ? stageBranch(root, 'python') : stageBranch(root, 'python', 'stages');
     assert.equal(py.properties.functions.items.properties.body.type, 'string');
   }
   // twelve levels deep validates and renders (integration: such a body runs, by rows)
@@ -309,7 +309,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
     const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
-    const stagesPg = stageNames(ePg.schemas.build_pipeline_model);
+    const stagesPg = stageNames(ePg.schemas.build_model);
     assert.ok(!stagesPg.includes('python'), `no python stage on redshift: ${stagesPg.join(', ')}`);
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
     await assert.rejects(() => ePg._buildPipeline({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*redshift.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
@@ -320,7 +320,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
-    assert.ok(stageNames(eDuck.schemas.build_pipeline_model).includes('python'));
+    assert.ok(stageNames(eDuck.schemas.build_model).includes('python'));
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -356,11 +356,11 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
   try {
     const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
-    const py = stageBranch(e.schemas.build_pipeline_model, 'python');
+    const py = stageBranch(e.schemas.build_model, 'python');
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice/);
-    assert.ok(packageEnum(e.schemas.build_pipeline_model, py).includes('duckdb'));
+    assert.ok(packageEnum(e.schemas.build_model, py).includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
 
@@ -393,12 +393,12 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   try {
     const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
     const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY }));
-    const py = stageBranch(e.schemas.build_pipeline_model, 'python');
+    const py = stageBranch(e.schemas.build_model, 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
     assert.match(py.description, /Rules for bigframes/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
     assert.match(py.properties.functions.items.properties.body.description, /converts itself with df\.to_pandas\(\)/);
-    assert.match(packageField(e.schemas.build_pipeline_model, py).description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
+    assert.match(packageField(e.schemas.build_model, py).description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
     assert.ok(!py.description.includes('PYSPARK') && !py.description.includes('SNOWPARK'), 'only this platform\'s rules');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -548,7 +548,7 @@ test('the stage description itself carries the runtime rules and the right form 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pydesc') }), pythonBin: PY }));
-  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
+  const py = stageBranch(e.schemas.build_model, 'python');
 
   // every rule of the guide is represented in the description…
   const guide = await e.semantic_index({ guide: 'python' });
@@ -588,7 +588,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pyrec') }), recipes, pythonBin: PY }));
 
-  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
+  const py = stageBranch(e.schemas.build_model, 'python');
   const entries = recipes.entriesRequiring('python_models');
   // The description INSISTS on reading them and says how many there are and how to fetch one — but
   // it no longer LISTS them: every caller is handed this string on every request, and the ids with
@@ -640,7 +640,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   const bare = loadCatalog(CATALOG, {});
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e2 = settle(new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: tempDir('pyrec2') }), pythonBin: PY }));
-  const py2 = stageBranch(e2.schemas.build_pipeline_model, 'python');
+  const py2 = stageBranch(e2.schemas.build_model, 'python');
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
   // …and with nothing to point at, the description carries the forms itself instead of dropping them
@@ -690,15 +690,15 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
 
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
-  const s = await e.build_pipeline_model({ action: 'start', name: 'bigpy', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [big] });
+  const s = await e.build_model({ action: 'start', name: 'bigpy', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
+  const added = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [big] });
   assert.equal(added.steps_added[added.steps_added.length - 1]?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
-  const s2 = await e2.build_pipeline_model({ action: 'start', name: 'bigpy2', source: 'events' });
-  const many = await e2.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [AGG, big] });
+  const s2 = await e2.build_model({ action: 'start', name: 'bigpy2', source: 'events' });
+  const many = await e2.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [AGG, big] });
   assert.equal(many.steps_added?.length, 2, JSON.stringify(many.error || many).slice(0, 300));
 
   // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
@@ -718,8 +718,8 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
-  const raw = await e.build_pipeline_model({ action: 'start', name: 'raw_py', source: 'events' });
-  const added = await e.build_pipeline_model({ action: 'add_steps', context_id: raw.context_id, steps: [PY_STAGE] });
+  const raw = await e.build_model({ action: 'start', name: 'raw_py', source: 'events' });
+  const added = await e.build_model({ action: 'add_steps', context_id: raw.context_id, steps: [PY_STAGE] });
   const [said] = nudge(added);
   assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(stepNotes(added))}`);
   assert.match(said, /'events'/, 'it names the source being read raw');
@@ -728,16 +728,16 @@ test('a python stage with no preparation before it is told so; one after an SQL 
   assert.match(said, /nothing to change/, 'and it stays a recommendation, not a verdict');
 
   // 2. the same stage after an aggregate → nothing to say
-  const prepared = await e.build_pipeline_model({ action: 'start', name: 'prep_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, steps: [AGG] });
-  const after = await e.build_pipeline_model({ action: 'add_steps', context_id: prepared.context_id, steps: [PY_STAGE] });
+  const prepared = await e.build_model({ action: 'start', name: 'prep_py', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: prepared.context_id, steps: [AGG] });
+  const after = await e.build_model({ action: 'add_steps', context_id: prepared.context_id, steps: [PY_STAGE] });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
-  const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, steps: [AGG] });
-  const scopedPy = await e.build_pipeline_model({ action: 'add_steps', context_id: scoped.context_id, steps: [PY_STAGE] });
+  const scoped = await e.build_model({ action: 'start', name: 'scoped_py', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
+  await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [AGG] });
+  const scopedPy = await e.build_model({ action: 'add_steps', context_id: scoped.context_id, steps: [PY_STAGE] });
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)
@@ -758,7 +758,7 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('sqlfirst') }), pythonBin: PY }));
-  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
+  const py = stageBranch(e.schemas.build_model, 'python');
   assert.match(py.description, /What belongs here/);
   assert.match(py.description, /table it reads is prepared in SQL stages/);
   assert.match(py.description, /rather than the raw source/);
@@ -811,9 +811,9 @@ for (const r of PY_RECIPES) {
     const pyEngine = settle(new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: tempDir('rp-py') }), pythonBin: PY }));
     // the start request as it is served: every stage checked (the bodies through the static gate),
     // then the preview lays out the chain of models a build would run
-    const started = await pyEngine.build_pipeline_model(r.pipeline_payload);
+    const started = await pyEngine.build_model(r.pipeline_payload);
     assert.equal(started.steps_count, r.pipeline_payload.steps.length, `${r.id}: every step is on the draft`);
-    const out = await pyEngine.build_pipeline_model({ action: 'preview', context_id: started.context_id });
+    const out = await pyEngine.build_model({ action: 'preview', context_id: started.context_id });
     assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
     const declared = r.pipeline_payload.steps.flatMap((st) => st.output?.columns || []);
     for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);

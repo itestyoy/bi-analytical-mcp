@@ -91,6 +91,25 @@ pre-assignment events CUPED reads as its covariate; the assignment window stays 
 assigned_at / ended_at, as the experiment recipes write it. Adding `time: { within: [assigned_at,
 ended_at] }` to the catalog later is a one-line change.
 
+Amended while implementing (step 3, agreed with the owner on 2026-10-16):
+- `measures[].source` names any model of the semantic layer, not only a joined one. MetricFlow folds such a
+  measure over that model's own rows and compares it beside the main model's on metric_time and the
+  group-by; it joins no rows for it. So spend, events and crashes stay side by side, and `acquisition` is
+  no `join`.
+- `join` lists the models whose attributes the metrics are grouped and filtered by. Each is a model that
+  owns a key another model carries, which is what MetricFlow joins onto (today: `users`). Its `on` is
+  checked against that key when the step is added: each key part is the main model's column of the key, and
+  the time part is the main model's time axis, because MetricFlow matches a slowly-changing model at the
+  metric's time. A select part that filters the joined model is refused there; that join belongs to a step
+  before the semantic_model step.
+- A context holds one semantic layer: its build's semantic_model step. The step is changed by `edit_step`
+  and `materialize` again, which replaces the layer the context held. `build_semantic_model`'s
+  `action: "update"`, its `remove` and `cascade`, and a second task in one context are gone.
+- The step is compiled when it is added and written and parsed by `materialize` (a task). Before that,
+  `preview` shows its YAML.
+- 3a (the step alone, over a catalog source) lands first. 3b (the step over a table the steps before it
+  built) follows in its own commit; until then a step after other steps is refused, saying so.
+
 ### Removed
 Input-side earlier-spelling converters (a stored draft still reads), the `<task>_<metric>` prefix, the five
 old tools, the pipeline join's `via` / `between` / `on: [...]`.

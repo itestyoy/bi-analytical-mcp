@@ -82,11 +82,11 @@ test('a recipe is offered only where this deployment can run it', () => {
   assert.equal(local.get('anywhere').unavailable_here, undefined);
 });
 
-// A pipeline recipe's payload is the build_pipeline_model start request itself, handed over as it
-// stands: build_pipeline_model({ request: <pipeline_payload> }). Every shipped one is held to the
+// A pipeline recipe's payload is the build_model start request itself, handed over as it
+// stands: build_model({ request: <pipeline_payload> }). Every shipped one is held to the
 // tool's own schema here (input validation — what they compute is model-results.test.js's), on a
 // deployment that runs python models, so the python ones are offered their stage.
-test('every shipped pipeline_payload is a build_pipeline_model start request the tool accepts as it stands', async () => {
+test('every shipped pipeline_payload is a build_model start request the tool accepts as it stands', async () => {
   await import('../../src/engine.js'); // the engine registers the funnel and python stages, as a server does
   const { loadCatalog } = await import('../../src/catalog.js');
   const { buildSchemas } = await import('../../src/schema.js');
@@ -97,7 +97,7 @@ test('every shipped pipeline_payload is a build_pipeline_model start request the
   const pipelines = loadRecipes(SYSTEM).list.filter((r) => r.pipeline_payload);
   assert.ok(pipelines.length > 10, 'the shipped set has pipeline recipes');
   for (const r of pipelines) {
-    const res = validateInput(validators.build_pipeline_model, r.pipeline_payload);
+    const res = validateInput(validators.build_model, r.pipeline_payload);
     assert.equal(res.ok, true, `${r.id}: ${(res.errors || []).join(' | ')}`);
     assert.equal(r.pipeline_payload.action, 'start', `${r.id}: a start request`);
   }
@@ -164,7 +164,7 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   const firstLaunch = { fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] };
   assert.deepEqual(p.steps, [{ stage: 'where', conditions: [firstLaunch] }, { stage: 'project', keep: ['event_name'] }, { stage: 'sample', share: 0.1 }, { stage: 'limit', limit: 5 }]);
   assert.equal(p.stages, undefined, 'the list is served under its one name');
-  const pr = validateInput(validators.build_pipeline_model, p);
+  const pr = validateInput(validators.build_model, p);
   assert.equal(pr.ok, true, (pr.errors || []).join(' | '));
   const s = recipes.get('old_sem').semantic_payload;
   // an item's model, written `from` then, is its `source`; a model loaded for its columns is a { source } item
@@ -177,7 +177,11 @@ test('a deployment recipe in earlier stage and semantic spellings is served as r
   // a ratio is the derived metric dividing its sides; a derived metric's text over aliases the expression over the metrics
   assert.deepEqual(s.metrics.find((m) => m.name === 'share'), { name: 'share', type: 'derived', expr: { fn: 'div', args: [{ metric: 'launches' }, { metric: 'rows' }] } });
   assert.deepEqual(s.metrics.find((m) => m.name === 'rest'), { name: 'rest', type: 'derived', expr: { fn: 'sub', args: [{ metric: 'rows' }, { metric: 'launches' }] } });
-  const sr = validateInput(validators.build_semantic_model, s);
+  // …and served with the catalog, it is the build_model start it is read as: its semantic_model step
+  const start = loadRecipes(SYSTEM, mine, null, catalog).get('old_sem').semantic_payload;
+  assert.deepEqual(start.steps.map((st) => st.stage), ['semantic_model']);
+  assert.deepEqual(start.steps[0].join.map((j) => j.source), ['users'], 'the model loaded for its columns is joined on its contract');
+  const sr = validateInput(validators.build_model, start);
   assert.equal(sr.ok, true, (sr.errors || []).join(' | '));
   // a recipe written today is served as it is
   const today = { name: 'today', semantic_models: s.semantic_models, metrics: s.metrics };
@@ -234,7 +238,7 @@ test('a deployment recipe\'s typed unnest is served as the two steps a new call 
     { stage: 'compute', name: 'qty', expr: { fn: 'cast', args: [{ column: 'qty_element' }], type: 'int' } },
     group,
   ]);
-  const r = validateInput(validators.build_pipeline_model, p, { propertyType: propertyTypes(catalog) });
+  const r = validateInput(validators.build_model, p, { propertyType: propertyTypes(catalog) });
   assert.equal(r.ok, true, (r.errors || []).join(' | '));
 });
 

@@ -117,13 +117,13 @@ test('a task that ends in an error is kept once, with its input — its reads ar
 test('an error carries what reproduces it: the draft a refused step was added to, the code of the model a task failed on, the runtime', async () => {
   const engine = makeEngine({ recipes: false });
   const source = engine.catalog.facts[0];
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'repro', source });
+  const s = await engine.build_model({ action: 'start', name: 'repro', source });
   const col = engine.catalog.modelColumns(source)[0].name;
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: col }] }] }] });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: col }] }] }] });
   // a step naming a column that is not there is refused — and the draft it was added to is kept with it
-  const refused = await runTool(engine, 'build_pipeline_model', { request: { action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_null', args: [{ column: 'no_such_col' }] }] }] } });
+  const refused = await runTool(engine, 'build_model', { request: { action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'is_null', args: [{ column: 'no_such_col' }] }] }] } });
   assert.equal(refused.result.isError, true);
-  const [row] = engine.explore_errors({ tool: 'build_pipeline_model' }).errors;
+  const [row] = engine.explore_errors({ tool: 'build_model' }).errors;
   const full = engine.explore_errors({ id: row.id }).error;
   assert.equal(full.context_id, s.context_id);
   assert.deepEqual(full.context.state.draft.stages.map((st) => st.stage), ['where']);
@@ -134,7 +134,7 @@ test('an error carries what reproduces it: the draft a refused step was added to
   // a task that failed on a generated model keeps that model's code, as the message names it
   const ctx = engine.ctxs.get(s.context_id);
   engine.ctxs.writeModel(ctx.id, 'pipe_repro_x', 'select 1 as a\n');
-  const id = engine._startTask(ctx, 'build_pipeline_model', async () => ({ ok: false, error: { stage: 'run', message: 'Database Error in model pipe_repro_x (models/generated/pipe_repro_x.sql)' } }), { input: { action: 'materialize', context_id: ctx.id } });
+  const id = engine._startTask(ctx, 'build_model', async () => ({ ok: false, error: { stage: 'run', message: 'Database Error in model pipe_repro_x (models/generated/pipe_repro_x.sql)' } }), { input: { action: 'materialize', context_id: ctx.id } });
   await engine._awaitTasks([id], 5);
   const task = engine.explore_errors({ id: engine.explore_errors({ task_id: id }).errors[0].id }).error;
   assert.equal(task.files['generated/pipe_repro_x.sql'], 'select 1 as a\n');

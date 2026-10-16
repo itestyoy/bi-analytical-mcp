@@ -82,7 +82,7 @@ test('a number met by a text is written as its text, and a text is not ordered a
 
 test('cast takes a type word — int, numeric, float, string — and refuses another', () => {
   const validators = makeValidators(buildSchemas(catalog));
-  const step = (type) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [compute('p', { fn: 'cast', args: [col('x')], type })] });
+  const step = (type) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [compute('p', { fn: 'cast', args: [col('x')], type })] });
   for (const type of ['int', 'numeric', 'float', 'string']) assert.equal(step(type).ok, true, type);
   for (const type of ['integer', 'bigint', 'double', 'boolean']) {
     const r = step(type);

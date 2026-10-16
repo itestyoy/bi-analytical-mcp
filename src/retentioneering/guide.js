@@ -12,7 +12,7 @@ export const GUIDE_NAME = 'retentioneering';
 export const ROUTING_TRIGGERS = [
   {
     if: 'a question about paths and sequences — what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are — or about transitions between states or outcomes a pipeline computed (one attempt, cycle or load → the next)',
-    do: `path analysis: build_retentioneering_model (the eventstream: source, window, the steps that prepare its rows, segments — or from_task, a pipeline build's table, for states and outcomes computed there), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card: its transition graph, step matrix and sankey are the standard pictures of paths, so there is no need to draw a diagram of your own. semantic_index({ request: { guide: "${GUIDE_NAME}" } }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_pipeline_model funnel.`,
+    do: `path analysis: build_retentioneering_model (the eventstream: source, window, the steps that prepare its rows, segments — or from_task, a pipeline build's table, for states and outcomes computed there), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card: its transition graph, step matrix and sankey are the standard pictures of paths, so there is no need to draw a diagram of your own. semantic_index({ request: { guide: "${GUIDE_NAME}" } }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_model funnel.`,
   },
 ];
 

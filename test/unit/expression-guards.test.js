@@ -237,8 +237,8 @@ test('a measure is typed by its aggregate: the earliest or latest of a column is
 
 test('a condition is a function: an earlier spelling is refused with the value written today; a field a function does not read is refused', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'cond', source: 'events' });
-  const add = (c) => e.build_pipeline_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
+  const { context_id } = await e.build_model({ action: 'start', name: 'cond', source: 'events' });
+  const add = (c) => e.build_model({ action: 'add_steps', context_id, steps: [{ stage: 'where', conditions: [c] }] });
   const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
   for (const [earlier, today] of [
     [{ column: 'session_number', op: 'gt', value: 1 }, { fn: 'gt', args: [col('session_number'), val(1)] }],
@@ -269,8 +269,8 @@ test('a condition is a function: an earlier spelling is refused with the value w
 // its element named `name` or, before that, `as`).
 test('a typed read, an aggregate\'s where and a typed unnest are refused with the value written today', async () => {
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('guards') }) });
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'typed', source: 'events' });
-  const add = (...steps) => e.build_pipeline_model({ action: 'add_steps', context_id, steps });
+  const { context_id } = await e.build_model({ action: 'start', name: 'typed', source: 'events' });
+  const add = (...steps) => e.build_model({ action: 'add_steps', context_id, steps });
   const shown = (today) => (err) => err.message.includes('is written in an earlier spelling') && err.message.includes(`write ${JSON.stringify(today)}`);
   const isTut = { fn: 'eq', args: [col('event_name'), val('tutorial')] };
   for (const [earlier, today] of [
@@ -290,7 +290,7 @@ test('a typed read, an aggregate\'s where and a typed unnest are refused with th
     { ...unnest, type: 'int' }, { stage: 'unnest', property: 'words_collected', name: 'w', type: 'int' },
     { stage: 'unnest', expr: { property: 'words_collected' }, as: 'w', type: 'int' }, { stage: 'unnest', property: 'words_collected', as: 'w', type: 'int' },
   ]) {
-    await assert.rejects(() => e.build_pipeline_model({ action: 'insert_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
+    await assert.rejects(() => e.build_model({ action: 'insert_step', context_id, index: 1, step }), (err) => err.message.startsWith('invalid input: `step`: an unnest takes no type')
       && err.message.endsWith(two) && !/unexpected property|earlier spelling/.test(err.message) && !err.message.includes('"name":"w","type":"int"'), JSON.stringify(step));
   }
   // a long name: its element's name is cut to a name a step may make

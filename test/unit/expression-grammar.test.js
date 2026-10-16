@@ -72,14 +72,15 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   assert.deepEqual([...one.fns].sort(), Object.keys(FNS).sort(), 'every function, windows and raw included');
   // a tool's is the one builder's for ITS places (TOOL_PLACES): what they take together and nothing else,
   // under the one name, never a level of its own beside it — less the aggregates where its measures are a
-  // kind of their own (build_semantic_model's $defs.aggregate)
-  for (const tool of ['build_pipeline_model', 'query_model', 'build_semantic_model', 'build_pipeline_model.pipeline']) {
+  // kind of their own ($defs.aggregate) and no row of it folds (a build's aggregate stage does)
+  for (const tool of ['build_model', 'query_model', 'build_model.pipeline']) {
     const doc = schemas[tool];
     const kinds = TOOL_PLACES[tool.split('.')[0]];
     const places = kinds.expr;
     const l = exprDef(doc);
     assert.deepEqual(l.leaves, exprDef({}, exprSchema(catalog, { places })).leaves, `${tool}: the leaves its places take`);
-    assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn)) && !(kinds.aggregate && AGGREGATE_FNS.includes(fn))).sort(), `${tool}: the functions its places take`);
+    const rowsFold = places.some((p) => AGGREGATE_FNS.some((a) => PLACES[p].fns.includes(a)));
+    assert.deepEqual([...l.fns].sort(), Object.keys(FNS).filter((fn) => places.some((p) => PLACES[p].fns.includes(fn)) && !(kinds.aggregate && !rowsFold && AGGREGATE_FNS.includes(fn))).sort(), `${tool}: the functions its places take`);
     const windows = places.some((p) => PLACES[p].windows);
     assert.equal(forms(doc, doc.$defs.expr).some((f) => f.properties?.over), windows, `${tool}: a window's form only where a place takes one`);
     // …a window function's `over` $defs.over, an aggregate over a window's $defs.over_frame, there and only there
@@ -95,18 +96,16 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   }
   const of = (tool) => exprDef(schemas[tool]);
   // a pipeline build: the rows' leaves, every function — no ref (a metric, another model's column)
-  assert.deepEqual(of('build_pipeline_model').leaves, one.leaves.slice(0, 4));
-  assert.deepEqual([...of('build_pipeline_model').fns].sort(), Object.keys(FNS).sort());
+  assert.deepEqual(of('build_model').leaves, one.leaves.slice(0, 4));
+  assert.deepEqual([...of('build_model').fns].sort(), Object.keys(FNS).sort());
   // a query — a read of stored rows, a metric query's where: no event property and no raw — a build's
   assert.deepEqual(of('query_model').leaves.slice(0, 3), ['a column — { column }', 'a constant — { value }', 'the current time — { now: true }']);
   assert.ok(!of('query_model').leaves.includes('an event property — { property }'));
   assert.ok(!of('query_model').fns.has('raw'));
-  // a semantic declaration: its rows' leaves and no aggregate — a measure is a kind of its own, ONE
-  // aggregate of the task's whose arguments are the rows' expression; a derived metric's value is another,
-  // { metric } and { value } in arithmetic, its arguments of its own kind. No raw, no window, no sketch
-  const sem = schemas.build_semantic_model;
-  assert.deepEqual(of('build_semantic_model').leaves, one.leaves.slice(0, 4));
-  for (const fn of AGGREGATE_FNS) assert.ok(!of('build_semantic_model').fns.has(fn), `a semantic row expression takes no ${fn}`);
+  // a build's semantic_model step: a measure is a kind of its own, ONE aggregate of the task's whose
+  // arguments are the rows' expression; a derived metric's value is another, { metric } and { value } in
+  // arithmetic, its arguments of its own kind. No raw, no window, no sketch in either
+  const sem = schemas.build_model;
   const measure = exprDef(sem, sem.$defs.aggregate);
   assert.deepEqual(measure.leaves, [], 'a measure is a function: no leaf');
   assert.deepEqual([...measure.fns].sort(), AGGREGATE_FNS.filter((fn) => PLACES.semantic_model.fns.includes(fn)).sort(), 'the aggregates a semantic model takes');
@@ -117,7 +116,7 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   assert.deepEqual([...derived.fns].sort(), [...PLACES.derived_metric.fns].sort());
   assert.equal(derived.argsRef, '#/$defs/metric_expr', 'its arguments are of its own kind');
   for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) {
-    for (const kind of ['expr', 'aggregate', 'metric_expr']) assert.ok(!exprDef(sem, sem.$defs[kind]).fns.has(fn), `a semantic declaration's ${kind} takes no ${fn}`);
+    for (const kind of ['aggregate', 'metric_expr']) assert.ok(!exprDef(sem, sem.$defs[kind]).fns.has(fn), `a semantic_model step's ${kind} takes no ${fn}`);
   }
   // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — no metric, no event property, no raw
   const sq = of('query_model').leaves;
@@ -132,7 +131,7 @@ test('every tool that takes an expression carries the row expression, $defs.expr
 // it says names one: cast, case, raw. An aggregate folds the rows its argument has a value on, and takes no
 // where of its own.
 test('a read names no type — cast converts; only cast, case and raw say a type; an aggregate takes no where', () => {
-  for (const tool of ['build_pipeline_model', 'build_semantic_model']) {
+  for (const tool of ['build_model']) {
     const doc = schemas[tool];
     const leaf = forms(doc, doc.$defs.expr).find((f) => f.title === 'an event property — { property }');
     assert.deepEqual(Object.keys(leaf.properties).sort(), ['field', 'property'], `${tool}: { property, field? }`);
@@ -140,7 +139,7 @@ test('a read names no type — cast converts; only cast, case and raw say a type
     // (a semantic measure is a kind of its own: its aggregates are there)
     for (const fn of ['sum', 'count', 'percentile']) assert.equal(formOf(doc, fn, doc.$defs.aggregate || doc.$defs.expr).properties.where, undefined, `${tool}: ${fn} takes no where`);
   }
-  const build = schemas.build_pipeline_model;
+  const build = schemas.build_model;
   assert.ok(formOf(build, 'raw').properties.type, 'raw says what its SQL yields');
   for (const fn of ['json_field', 'element_at', 'array_last']) assert.equal(formOf(build, fn).properties.type, undefined, `${fn} names no type`);
   assert.equal(forms(build, stageBranch(build, 'unnest')).some((f) => f.properties?.type), false, 'an unnest reads its element as it is');
@@ -162,7 +161,7 @@ test('a read names no type — cast converts; only cast, case and raw say a type
   assert.deepEqual(['price', 'result', 'result_n'].map((c) => built.columns.get(c).type), ['numeric', 'string', 'int']);
   // a call that names the type is refused with the read as it is now: the property alone where the catalog
   // reads it as that type (the converter asked, opts.propertyType), cast where it is another or not known
-  const step = (expr, opts) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr }] }, opts);
+  const step = (expr, opts) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr }] }, opts);
   const shown = (r, now) => assert.ok(r.errors.join(' ').includes(`\`steps.0.expr\` is written in an earlier spelling — write ${JSON.stringify(now)}`), r.errors.join(' | '));
   const price = { property: 'price_in_usd_of_event_data' };
   shown(step({ ...price, type: 'numeric' }, { propertyType: propertyTypes(catalog) }), price);
@@ -195,7 +194,7 @@ test('each place takes what its row in PLACES says, and a refusal names the plac
   assert.ok(sql('stored_rows', { now: true }).sql);
   refused('stored_rows', raw, 'raw');
   refused('stored_rows', { property: 'result_of_event_data' }, '{ property }');
-  assert.throws(() => sql('stored_rows', raw), /build from the task — build_pipeline_model\(\{ request: \{ action: "start", name, from_task \} \}\)/);
+  assert.throws(() => sql('stored_rows', raw), /build from the task — build_model\(\{ request: \{ action: "start", name, from_task \} \}\)/);
   // a semantic model: no raw SQL, no window
   assert.ok(sql('semantic_model', { now: true }).sql);
   refused('semantic_model', { fn: 'raw', sql: '1' }, 'raw');
@@ -220,7 +219,7 @@ test('each place takes what its row in PLACES says, and a refusal names the plac
 });
 
 test('a function takes its own arguments and parameters, and nothing else', () => {
-  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [stage] });
+  const step = (stage) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [stage] });
   const refused = (stage, re) => { const r = step(stage); assert.equal(r.ok, false, JSON.stringify(stage)); assert.match(r.errors.join(' | '), re, JSON.stringify(stage)); };
   // arity
   refused(where({ fn: 'between', args: [col('a'), val(1)] }), /at least 3 items/);
@@ -266,7 +265,7 @@ test('an aggregate folds rows only where a measure is written; a window stands o
 // folds). So a frame on a rank or a neighbour is refused by the schema, and — for a caller past it — where
 // the value is built, saying to leave it out.
 test('a window function\'s window is $defs.over, an aggregate over a window\'s $defs.over_frame: a frame on a rank or a neighbour is refused', () => {
-  for (const tool of ['build_pipeline_model', 'query_model', 'query_model']) {
+  for (const tool of ['build_model', 'query_model', 'query_model']) {
     const doc = schemas[tool];
     const windowed = forms(doc, doc.$defs.expr).filter((f) => f.properties?.over);
     assert.ok(windowed.length >= 4, `${tool}: its window forms`);
@@ -274,9 +273,8 @@ test('a window function\'s window is $defs.over, an aggregate over a window\'s $
     assert.deepEqual(Object.keys(doc.$defs.over.properties), ['partition_by', 'order_by']);
     assert.deepEqual(Object.keys(doc.$defs.over_frame.properties), ['partition_by', 'order_by', 'frame']);
   }
-  for (const def of ['over', 'over_frame']) assert.equal(schemas.build_semantic_model.$defs[def], undefined, 'a semantic model takes no window');
   const FRAMED = { ...OVER, frame: { mode: 'rows', preceding: 6 } };
-  const step = (expr) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr }] });
+  const step = (expr) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr }] });
   for (const expr of [{ fn: 'sum', args: [col('session_number')], over: FRAMED }, { fn: 'count', over: FRAMED }, { fn: 'row_number', over: OVER }]) {
     assert.equal(step(expr).ok, true, `${JSON.stringify(expr)}: ${step(expr).errors?.join(' | ')}`);
   }
@@ -363,7 +361,7 @@ test('a missing value is tested with is_null / is_not_null: a comparison with a 
   // a constant is a scalar, never a list (an in whose members are one list is an earlier spelling: a
   // kept step is carried over, a call refused with its members as arguments)
   assert.throws(() => render([where({ fn: 'eq', args: [col('event_name'), val(['a', 'b'])] })]), /a list is written as arguments of their own/);
-  const listed = validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] });
+  const listed = validateInput(validators.build_model, { action: 'add_steps', context_id: 'abcdef123456', steps: [where({ fn: 'in', args: [col('event_name'), val(['a', 'b'])] })] });
   assert.ok(listed.errors.join(' ').includes(`is written in an earlier spelling — write ${JSON.stringify({ fn: 'in', args: [col('event_name'), val('a'), val('b')] })}`), listed.errors.join(' | '));
 });
 

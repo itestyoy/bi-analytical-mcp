@@ -31,6 +31,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, startAndBuild } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 600000 };
@@ -69,7 +70,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 // Build a recipe's model once via the published _recipe payload.
 async function buildRecipe(t, id) {
-  const out = await engine.build_semantic_model(engine._recipe({ id }).semantic_payload);
+  const out = await declare(engine, engine._recipe({ id }).semantic_payload);
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }
@@ -79,7 +80,7 @@ const q = (ctx, input) => engine.query_model({ context_id: ctx, ...input });
 // #6: a numeric value that arrives as STRING is aggregable once it is read as a number (cast).
 test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'castq',
     semantic_models: [{ source: 'events', measures: [{ name: 'sum_ct', expr: { fn: 'sum', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }, { name: 'avg_ct', expr: { fn: 'average', args: [{ fn: 'cast', args: [{ property: 'complete_time_of_event_data' }], type: 'numeric' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
     metrics: [
@@ -93,7 +94,7 @@ test('TASK cast: sum/avg a STRING-numeric property read as numeric (cast)', opts
   assert.equal(num(r.rows[0].castq_sum_ct), 1263);            // exact Σ complete_time
   assert.ok(Math.abs(num(r.rows[0].castq_avg_ct) - 50.52) < 1e-6);
   // the same aggregation WITHOUT a cast is rejected (string is not numeric)
-  await assert.rejects(engine.build_semantic_model({
+  await assert.rejects(declare(engine, {
     name: 'castbad',
     semantic_models: [{ source: 'events', measures: [{ name: 'bad', expr: { fn: 'average', args: [{ property: 'complete_time_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] }],
     metrics: [{ name: 'bad', type: 'simple', measure: 'bad' }],
@@ -270,20 +271,24 @@ test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers g
 // users.install_date is a time column in the catalog. Declared on a task, it is a TIME dimension:
 // at `grain` when one is given (week), at the catalog's own granularity (day) when not — the same
 // rows as the users model's own install_date. The day cohorts summed by ISO week (Monday) are the
-// week cohorts. The labels given go with the dimension, the measure and the metric. A dimension
-// COMPUTED from the row ({ name, expr }) is grouped by where it lives: { semantic_model: [<its source>],
-// dimension: <its name> }.
+// week cohorts. The step's dimensions are its main model's: the cohorts' build is over the users, and
+// counts the events with a measure of their own (`source`). The labels given go with the dimension, the
+// measure and the metric. A dimension COMPUTED from the row ({ name, expr }) is grouped by where it lives:
+// { semantic_model: [<its source>], dimension: <its name> }.
 test('a task dimension over a time column is read at its grain (week), or at the catalog\'s (day); a computed one by its name', opts, async (t) => {
   if (skip(t)) return;
-  const task = (name, dims, eventDims) => engine.build_semantic_model({
+  const events = { source: 'events', measures: [{ name: 'n', expr: { fn: 'count' }, label: 'Events counted' }] };
+  const task = (name, dims, eventDims) => declare(engine, {
     name,
-    semantic_models: [{ source: 'events', ...(eventDims ? { dimensions: eventDims } : {}), measures: [{ name: 'n', expr: { fn: 'count' }, label: 'Events counted' }] }, { source: 'users', ...(dims ? { dimensions: dims } : {}) }],
+    semantic_models: eventDims
+      ? [{ ...events, dimensions: eventDims }, { source: 'users' }]
+      : [{ source: 'users', ...(dims ? { dimensions: dims } : {}) }, events],
     metrics: [{ name: 'n', type: 'simple', measure: 'n', label: 'Events' }],
   });
-  // (the week task also computes a dimension of its own on the events: whether the event is a completed purchase)
+  // (a build over the events computes a dimension of its own on them: whether the event is a completed purchase)
   const purchased = [{ name: 'purchased', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }];
   const built = {};
-  for (const [name, dims, eventDims] of [['coh_wk', [{ column: 'install_date', grain: 'week', label: 'Install week' }], purchased], ['coh_dy', [{ column: 'install_date' }]], ['coh_base', null]]) {
+  for (const [name, dims, eventDims] of [['coh_wk', [{ column: 'install_date', grain: 'week', label: 'Install week' }]], ['coh_dy', [{ column: 'install_date' }]], ['coh_base', null], ['coh_buy', null, purchased]]) {
     const out = await task(name, dims, eventDims);
     assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
     built[name] = out.context_id;
@@ -319,10 +324,10 @@ test('a task dimension over a time column is read at its grain (week), or at the
 
   // the computed dimension splits the events into the completed purchases and the rest, as the
   // warehouse counts them by hand
-  const split = await q(built.coh_wk, { steps: [{ stage: 'metrics', metrics: ['coh_wk_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] }] });
+  const split = await q(built.coh_buy, { steps: [{ stage: 'metrics', metrics: ['coh_buy_n'], group_by: [{ semantic_model: ['events'], dimension: 'purchased' }] }] });
   assert.equal(split.ok, true, JSON.stringify(split.error || split));
   const flag = split.group_by_resolved['events.purchased'];
-  const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.coh_wk_n)]));
+  const bySplit = Object.fromEntries(split.rows.map((r) => [String(r[flag]).toLowerCase(), num(r.coh_buy_n)]));
   const { rows: [byHand] } = await wh.query("select count(*) filter (where event_name = 'iap_purchase_completed') as yes, count(*) filter (where event_name <> 'iap_purchase_completed') as no from fct_analytics_events");
   assert.deepEqual(bySplit, { true: num(byHand.yes), false: num(byHand.no) }, `[computed dimension] ${JSON.stringify(split.rows)}`);
   assert.equal(num(byHand.yes), 8, '[computed dimension] the 8 completed purchases');
@@ -468,7 +473,7 @@ test('a cumulative metric over a time_range sums the days before the range that 
   if (skip(t)) return;
   const day = await eventsPerDay();
   const at = (d) => day.get(d) || 0;
-  const created = await engine.build_semantic_model(CUMULATIVE_TASK);
+  const created = await declare(engine, CUMULATIVE_TASK);
   const query = { context_id: created.context_id, time_range: { start: '2026-01-03', end: '2026-01-05' } };
   const cumulative = { stage: 'metrics', metrics: ['cum_daily', 'cum_two_day', 'cum_to_date'], group_by: [{ time: 'metric_time', grain: 'day' }] };
   const byDay = [{ stage: 'order_by', keys: [{ key: 'metric_time_day' }] }];

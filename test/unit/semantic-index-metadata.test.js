@@ -85,7 +85,7 @@ test('overview carries join_note + value_index_status; payload-less event is not
   const e = engine();
   const out = await e.semantic_index({});
   assert.ok(/\{ source: 'users', column: '\w+' \}/.test(out.join_note), 'join_note shows the one ref of a model column');
-  assert.ok(out.join_note.includes("{ source: 'users' }"), 'join_note names the declaration that loads the model');
+  assert.ok(out.join_note.includes("{ source: 'users', on: { … } }"), 'join_note names the join that loads the model');
   // what a metric query can group by, spelled as it groups: { source, column, via? } — the one ref
   assert.ok(out.groupable_columns.some((g) => g.source === 'users' && g.column === 'country'), JSON.stringify(out.groupable_columns));
   assert.equal(out.groupable_attributes, undefined, 'one name for the list');

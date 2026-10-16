@@ -16,8 +16,8 @@ import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol 
 import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
-import { METRICS_STEP } from '../schema/fields.js';
-import { TIME_PART, contractParts, describeContract } from '../catalog/joins.js';
+import { METRICS_STEP, SEMANTIC_MODEL_STEP } from '../schema/fields.js';
+import { TIME_PART, describeContract, onPartsError, contractOnSchema } from '../catalog/joins.js';
 import { isNumericType } from '../dialects/base.js';
 
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -202,16 +202,11 @@ export const STAGES = {
         const amounts = new Set(catalog.aggregatableFields(model).map((f) => f.column).filter(Boolean));
         const attributes = catalog.modelColumns(model).map((c) => c.name).filter((c) => !amounts.has(c));
         if (!attributes.length) continue;
-        const rowsColumn = (what) => ({ type: 'string', pattern: NAME, description: `A column of the rows: ${what}.` });
-        const on = {};
-        for (const k of contract.key) on[k.part] = rowsColumn(k.by ? `its value equals ${model}'s column the ${k.by} picks` : `its value equals ${model}.${k.column}`);
-        if (contract.time) on[TIME_PART] = rowsColumn(contract.time.within ? `the moment the version of ${model} valid then is joined (${contract.time.within.join(' … ')})` : `the moment whose day is ${model}.${contract.time.same_day}'s`);
-        for (const s of contract.select) on[s.part] = s.values ? { enum: s.values, description: `Which ${s.part}.` } : { type: 'string', minLength: 1, description: `The ${s.column} of ${model} the join keeps — a value it holds.` };
         forms.push(form({
           title: `join ${model}`, tag: ['stage', 'join'], required: ['stage', 'source', 'on', 'attrs'],
           properties: {
             source: { const: model },
-            on: { type: 'object', additionalProperties: false, required: Object.keys(on), properties: on, description: `The join contract ${model} declares: ${describeContract(model, contract)}.` },
+            on: contractOnSchema(model, contract),
             attrs: {
               type: 'array', minItems: 1, uniqueItems: true,
               description: 'The columns of the joined model that arrive — exactly these.',
@@ -244,10 +239,8 @@ export const STAGES = {
       if (model === source) throw new Error(`join: '${model}' is the pipeline's own source — join a DIFFERENT model`);
       const m = catalog.getModel(model);
       const on = p.on || {};
-      const parts = contractParts(contract);
-      const missing = parts.filter((k) => on[k] === undefined);
-      const stray = Object.keys(on).filter((k) => !parts.includes(k));
-      if (missing.length || stray.length) throw new Error(`join '${model}': on names its contract's parts — ${parts.join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}${stray.length ? `; ${stray.join(', ')} is no part of it` : ''} (${describeContract(model, contract)})`);
+      const wrong = onPartsError(model, contract, on);
+      if (wrong) throw new Error(`join '${model}': ${wrong}`);
       // the key: each part a column of the rows, equal to the joined model's column (a part chosen by a
       // select part's word, the column that word picks)
       const left = []; const right = [];
@@ -512,21 +505,21 @@ export function availableStages(catalog) {
  */
 const READ_STAGES = ['where', 'compute', 'aggregate', 'pivot', 'unpivot', 'order_by', 'limit', 'sample', 'project'];
 export const STAGE_PLACES = {
-  build: { what: 'a pipeline build', stages: null },
+  build: { what: 'a build', stages: null, offers: [SEMANTIC_MODEL_STEP] },
   read: {
     what: 'a read', stages: READ_STAGES,
-    elsewhere: 'makes a new table: build it from the task, build_pipeline_model({ request: { action: "start", name, from_task } })',
+    elsewhere: 'makes a new table: build it from the task, build_model({ request: { action: "start", name, from_task } })',
   },
   metric_scope: { what: 'a step up to the metrics step', stages: ['where', METRICS_STEP.stage], offers: [METRICS_STEP] },
   metric_result: {
     what: 'a step after the metrics step', stages: READ_STAGES,
-    elsewhere: 'makes a new table: store the result (materialize: true) and build from its task, build_pipeline_model({ request: { action: "start", name, from_task } })',
+    elsewhere: 'makes a new table: store the result (materialize: true) and build from its task, build_model({ request: { action: "start", name, from_task } })',
   },
 };
 
 /** Whether a place takes a step: one its list names — or, where it lists none, every stage of the registry. */
 function takes(p, name) {
-  return p.stages ? p.stages.includes(name) : stageDef(name) !== null;
+  return p.stages ? p.stages.includes(name) : stageDef(name) !== null || (p.offers || []).some((s) => s.stage === name);
 }
 
 /** The step a place of the table offers of its own under this name — no stage of the registry (a metric

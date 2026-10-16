@@ -1,5 +1,4 @@
-// A call that STARTS work (build_semantic_model, query_model, build_pipeline_model
-// materialize, query_model, a pipeline built in one call) returns only { task_id, … }; what it
+// A call that STARTS work (a build_model materialize, query_model, a pipeline built in one call) returns only { task_id, … }; what it
 // produced is read back with the query tool of its side ({ task_ids }). Most tests are about what the work produced, so they run their engine through
 // `settle(engine)`: the same engine, where a call that started a task returns that task's result
 // (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
@@ -43,7 +42,7 @@ function refusal(r) {
   return Object.assign(new Error(r.error.message), { stage: r.error.stage, field: r.error.field, code: r.error.code });
 }
 
-const TASK_TOOLS = new Set(['build_semantic_model', 'query_model', '_buildPipeline', 'build_pipeline_model', 'query_model']);
+const TASK_TOOLS = new Set(['query_model', '_buildPipeline', 'build_model']);
 
 /** The engine, with every started task settled into its result. */
 export function settle(engine) {
@@ -105,13 +104,13 @@ export const stepNotes = (r) => (r.step_effects || []).flatMap((e) => e.recommen
 export const stepEffect = (r) => r.step_effects[r.step_effects.length - 1];
 
 /**
- * A pipeline started with its steps and built in the same call — build_pipeline_model({ request:
+ * A pipeline started with its steps and built in the same call — build_model({ request:
  * { …start, materialize: true } }), what a recipe's pipeline_payload is handed over for — and its build
  * read back: the build's result, as query_model returns it.
  */
 export async function startAndBuild(engine, request) {
   const raw = engine.raw || engine;
-  const out = await raw.build_pipeline_model({ ...request, materialize: true });
+  const out = await raw.build_model({ ...request, materialize: true });
   if (!out.materialize?.task_id) throw new Error(`the build did not start: ${JSON.stringify(out.materialize?.error || out)}`);
   return taskResult(raw, out.materialize.task_id);
 }

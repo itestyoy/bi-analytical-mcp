@@ -17,6 +17,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -46,7 +47,7 @@ before(async () => {
   // The schema only MARKS which fields are amounts (cost / impressions / clicks, and the
   // cost_per_click expression). It fixes no aggregation, so the task picks one per question —
   // the same `cost` field is summed here, maxed there, and read at a percentile below.
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'uacq',
     semantic_models: [{
       source: 'acquisition',
@@ -147,13 +148,13 @@ test('grouped by an attribute of the same source: cost by media_source; and the 
 // the moment named, so they stay exactly 12.
 test('the same-day contract prevents fan-out: 12 first launches stay 12 rows', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_join_day', source: 'events' });
+  const s = await engine.build_model({ action: 'start', name: 'acq_join_day', source: 'events' });
   for (const step of [
     { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] },
     { stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'media_source' }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'matched', expr: { fn: 'count', args: [{ column: 'media_source' }] } }] },
-  ]) await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  ]) await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(num(c.rows[0].n), 12, 'one row per first launch: the day keeps u1 from meeting both spend days');
   const { rows } = await wh.query(`SELECT count(*) AS n FROM main.fct_analytics_events e JOIN main.fct_player_acquisition a ON e.player_id_of_internal = a.player_id_of_internal AND CAST(e.device_time AS DATE) = CAST(a.spend_date AS DATE) WHERE e.event_name = 'first_launch'`);
@@ -186,9 +187,9 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');
   assert.equal(sumCol(c.rows, 'n'), 13);
@@ -204,7 +205,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // it wants to slice by. It is the shipped recipe's own payload (governed_measure_by_name), and its
   // first query is the recipe's first example — this test is that recipe's data proof
   // (test/helpers/recipe-coverage.js).
-  const out = await engine.build_semantic_model(recipes.get('governed_measure_by_name').semantic_payload);
+  const out = await declare(engine, recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
   const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));

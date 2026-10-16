@@ -101,7 +101,7 @@ export function startStages(catalog) {
 
 /** When events need logic a start's steps cannot say — the one sentence every description that offers
  *  from_task carries. */
-export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s steps cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
+export const COMPLEX_EVENT_LOGIC = 'For event logic a start\'s steps cannot say — a match_recognize sequence, the events of several sources together, a cohort chosen by what its users did (an aggregate joined back), a python step — build that table with build_model first and start the eventstream from its task (from_task).';
 
 /**
  * WHAT EACH PLACE OF THE BUILD TAKES OF THE ONE STAGE DEFINITION — checked as the build is called
@@ -146,7 +146,7 @@ export function buildSchema(catalog, { project = null } = {}) {
     // both of the one stage definition (each place takes its part of it: startPlace, LIBRARY_STEPS)
     startSteps: {
       type: 'array', minItems: 1, items: { $ref: STAGE_REF },
-      description: `The steps the rows are prepared by, in SQL — the pipeline's own stages that keep the rows events (${kinds.join(', ')}), each { stage: … } as build_pipeline_model takes it, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns. The library's own steps come after the build (add_steps).`,
+      description: `The steps the rows are prepared by, in SQL — the pipeline's own stages that keep the rows events (${kinds.join(', ')}), each { stage: … } as build_model takes it, run in order after the time window. A where keeps the events the paths are about (a list of them, a slice of the source, a condition on an event property or a joined attribute). A compute makes a column: events renamed, merged or split by a parameter (a case over the event and its properties: ad_finished by is_error → ad_finished_failed / ad_finished_success), an event property read to carry, a window over a user's events (the previous one, the n-th occurrence). A join brings a related model's attribute (a slowly-changing model at the event's time: between). Then name what they made: the event column in columns, the path and the segments by their columns. The library's own steps come after the build (add_steps).`,
     },
     properties: {
       action: { enum: BUILD_ACTIONS, description: BUILD_ACTIONS.map((a) => `${a}: ${ACTION_SAYS()[a]}`).join('; ') },
@@ -159,7 +159,7 @@ export function buildSchema(catalog, { project = null } = {}) {
       source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it — what its steps read event properties and relationships of.' },
       from_task: {
         type: 'string', pattern: TASK_ID_PATTERN,
-        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its steps run over that table's columns, and the time window is the pipeline's.`,
+        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its path column(s) in path and its event and time columns in columns. Its steps run over that table's columns, and the time window is the pipeline's.`,
       },
       columns: columns(true),
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },

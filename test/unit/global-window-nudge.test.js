@@ -39,10 +39,10 @@ const DERIVE = { stage: 'compute', name: 'price', expr: { property: 'price_in_us
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'win', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [DERIVE] });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [AGG] });
-  const out = await e.build_pipeline_model({
+  const { context_id } = await e.build_model({ action: 'start', name: 'win', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
+  await e.build_model({ action: 'add_steps', context_id, steps: [AGG] });
+  const out = await e.build_model({
     action: 'add_steps', context_id,
     steps: [{ stage: 'compute', name: 'revenue_avg', expr: { fn: 'average', args: [{ column: 'revenue' }], over: {} } }] });
   const said = [...(stepNotes(out) || []), ...(out.warnings || [])].join(' ');
@@ -54,9 +54,9 @@ test('a window with no partition_by is named as a global window, with the aggreg
 
 test('the same window PER GROUP says nothing — a partition is what a window is for', async () => {
   const e = engine();
-  const { context_id } = await e.build_pipeline_model({ action: 'start', name: 'win2', source: 'events' });
-  await e.build_pipeline_model({ action: 'add_steps', context_id, steps: [DERIVE] });
-  const out = await e.build_pipeline_model({
+  const { context_id } = await e.build_model({ action: 'start', name: 'win2', source: 'events' });
+  await e.build_model({ action: 'add_steps', context_id, steps: [DERIVE] });
+  const out = await e.build_model({
     action: 'add_steps', context_id,
     steps: [{ stage: 'compute', name: 'running', expr: { fn: 'sum', args: [{ column: 'price' }], over: { partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] } } }] });
   const said = [...(stepNotes(out) || []), ...(out.warnings || [])];
@@ -82,7 +82,7 @@ test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.
 test('least/greatest take their arguments as expressions — columns and literals alike — and say how many they need', () => {
   const validators = makeValidators(buildSchemas(loadCatalog(CATALOG, {})));
-  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_steps', context_id: 'ctxabc123456', steps: [stage] });
+  const step = (stage) => validateInput(validators.build_model, { action: 'add_steps', context_id: 'ctxabc123456', steps: [stage] });
 
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { value: 100 }] } }).ok, true);
   assert.equal(step({ stage: 'compute', name: 'capped', expr: { fn: 'least', args: [{ column: 'revenue' }, { column: 'budget' }] } }).ok, true);

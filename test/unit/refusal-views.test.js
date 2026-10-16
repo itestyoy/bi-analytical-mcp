@@ -101,7 +101,7 @@ test('a field in another path\'s spelling is told its name only where that field
   // where `source` names a catalog model, the same spelling is told its name — a view, a note's about, a pipeline
   assert.match(refusal(e, 'semantic_index', { model: 'events' }), /request has an unexpected property 'model' — here that field is called 'source'/);
   assert.match(refusal(e, 'memory', { action: 'record', notes: [{ note: 'x', about: [{ model: 'users', column: 'country' }] }] }), /`notes\.0\.about\.0` has an unexpected property 'model' — here that field is called 'source'/);
-  assert.match(refusal(e, 'build_pipeline_model', { name: 'm', model: 'events', steps: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
+  assert.match(refusal(e, 'build_model', { name: 'm', model: 'events', steps: [{ stage: 'limit', limit: 1 }] }), /request has an unexpected property 'model' — here that field is called 'source'/);
 });
 
 // A list a tool runs in order is `steps` (one of them `step`), in every builder and query tool: the
@@ -111,10 +111,10 @@ test('stages and stage are told their name, steps and step, where the form takes
   const e = engine();
   const limit = { stage: 'limit', limit: 1 };
   for (const [tool, input, field] of [
-    ['build_pipeline_model', { action: 'add_steps', context_id: 'abc123', stages: [limit] }, 'stages'],
-    ['build_pipeline_model', { name: 'started', source: 'events', stages: [limit] }, 'stages'],
-    ['build_pipeline_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
-    ['build_pipeline_model', { action: 'insert_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
+    ['build_model', { action: 'add_steps', context_id: 'abc123', stages: [limit] }, 'stages'],
+    ['build_model', { name: 'started', source: 'events', stages: [limit] }, 'stages'],
+    ['build_model', { action: 'edit_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
+    ['build_model', { action: 'insert_step', context_id: 'abc123', index: 1, stage: limit }, 'stage'],
     ['query_model', { context_id: 'abc123', stages: [limit] }, 'stages'],
     ['query_model', { context_id: 'abc123', stages: [{ stage: 'metrics', metrics: ['x'] }, limit] }, 'stages'],
   ]) {
@@ -124,7 +124,7 @@ test('stages and stage are told their name, steps and step, where the form takes
   // in a batch, at the query that wrote it
   assert.match(refusal(e, 'query_model', { context_id: 'abc123', queries: [{ stages: [limit] }] }), /`queries\.0` has an unexpected property 'stages' — here that field is called 'steps'/);
   // a step's own tag is its kind, never the field's earlier name
-  assert.equal(refusal(e, 'build_pipeline_model', { action: 'add_steps', context_id: 'abc123', steps: [limit] }), null);
+  assert.equal(refusal(e, 'build_model', { action: 'add_steps', context_id: 'abc123', steps: [limit] }), null);
   // where no list of steps is taken, `stages` is a field the form does not take — no name to tell
   const drill = refusal(e, 'drill_result', { task_id: 'abcdef123456', stages: [limit] });
   assert.match(drill, /unexpected property 'stages'/);

@@ -8,9 +8,10 @@
 
 import { GRAINS } from '../catalog.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
-import { form, pick, timeRange, conditionSlot, measureForm } from '../schema-kit.js';
+import { form, pick, timeRange, measureForm } from '../schema-kit.js';
 import { exprDefs, EXPR_REF, EXPR_KINDS, PLACES } from '../pipeline/compute.js';
 import { CONTEXT_ID } from '../context-manager.js';
+import { contractOnSchema } from '../catalog/joins.js';
 
 export const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -30,7 +31,7 @@ export const D = {
 };
 
 /**
- * The `$defs` of build_semantic_model: the expression in the KINDS a declaration writes it in
+ * The `$defs` of a semantic declaration: the expression in the KINDS a declaration writes it in
  * (src/pipeline/compute.js EXPR_KINDS), each built by the one builder every tool's is and checked again as
  * it is compiled (src/compile.js): the row expression (`expr`) of a semantic model's where, computed
  * dimensions and a measure's arguments, and a measure itself (`aggregate`: ONE aggregate over row
@@ -55,82 +56,8 @@ export function semanticDefs(catalog, { project = null, kinds = {} } = {}) {
 export const DRY_RUN = (what, validateAt = null) => `Compile and show ${what}, reading nothing and building nothing${validateAt ? ` — the check that runs on the warehouse is ${validateAt}` : ''}.`;
 export const VALIDATE = (how, readWith) => `Check on the warehouse: ${how} — a task, read with ${readWith}.`;
 
-/** The model's columns the catalog types as time: a dimension of one is a time dimension, read at a grain. */
-function timeDimensionFields(catalog, modelKey) {
-  const dims = catalog.getModel(modelKey).dimensions || {};
-  return catalog.modelDimensionColumns(modelKey).filter((c) => dims[c]?.type === 'time').sort();
-}
-
 /** A computed dimension's name — what it is grouped and filtered by. */
 const DIMENSION_NAME = { type: 'string', pattern: NAME, description: 'The dimension\'s name — grouped and filtered as { semantic_model: [<its source>], dimension: <this name> }.' };
-
-/** The scalar event properties a dimension of `modelKey` may be (none off an events source). */
-const dimensionProps = (catalog, modelKey) => (catalog.isFact(modelKey) ? [...catalog.scalarEventProps(modelKey)].sort() : []);
-
-/**
- * A dimension a declaration adds to a semantic model, in closed forms by what it is: a column the
- * catalog types as time, at `grain` (default: the catalog's granularity for it); any other groupable
- * column; a scalar event property; or one computed from the row ({ name, expr }: a row expression,
- * categorical). The column forms are told apart by the columns each takes.
- */
-function dimensionItemSchema(catalog, modelKey) {
-  const label = { type: 'string', description: D.label };
-  const time = timeDimensionFields(catalog, modelKey);
-  const other = catalog.modelDimensionColumns(modelKey).filter((c) => !time.includes(c)).sort();
-  const props = dimensionProps(catalog, modelKey);
-  const forms = [
-    ...(time.length ? [form({ title: 'a time column', tag: ['column', time], properties: { grain: { enum: catalog.timeGranularities(), description: 'The bucket its values are read at (default: the column\'s own granularity in the catalog).' }, label } })] : []),
-    ...(other.length ? [form({ title: 'a column', tag: ['column', other], properties: { label } })] : []),
-    ...(props.length ? [form({ title: 'an event property', tag: ['property', props], properties: { label } })] : []),
-    form({
-      title: 'a computed dimension', required: ['name', 'expr'],
-      properties: {
-        name: DIMENSION_NAME,
-        expr: { $ref: EXPR_REF, description: 'Its value, computed from the row: a row expression over the model\'s columns and properties (no aggregate) — e.g. { fn: "case", cases: [{ when: [{ fn: "gt", args: [{ column: "price" }, { value: 10 }] }], then: { value: "high" } }], else: { value: "low" } }. A condition is false where it does not hold.' },
-        label,
-      },
-    }),
-  ];
-  return forms.length === 1 ? forms[0] : { type: 'object', anyOf: forms };
-}
-
-/**
- * A dimension an update removes, named the way it was declared — { source, column }, { source, property }
- * or { source, name } — over the models `keys` (those a semantic layer loads). → the item's forms.
- */
-export function removedDimensionForms(catalog, keys) {
-  return keys.flatMap((k) => {
-    const source = { source: { const: k } };
-    const columns = [...catalog.modelDimensionColumns(k)].sort();
-    const props = dimensionProps(catalog, k);
-    return [
-      ...(columns.length ? [form({ title: `${k}: a column`, tag: ['column', columns], required: ['source'], properties: source })] : []),
-      ...(props.length ? [form({ title: `${k}: an event property`, tag: ['property', props], required: ['source'], properties: source })] : []),
-      form({ title: `${k}: a computed dimension`, required: ['source', 'name'], properties: { ...source, name: DIMENSION_NAME } }),
-    ];
-  });
-}
-
-export function semanticModelBranch(catalog, modelKey) {
-  const label = { type: 'string', description: D.label };
-  return {
-    type: 'object', additionalProperties: false, required: ['source'], title: modelKey,
-    properties: {
-      source: { const: modelKey },
-      where: conditionSlot(EXPR_REF, 'Rows every measure of this item folds: conditions that all hold (e.g. { fn: "in", args: [{ column: "event_name" }, { value: "purchase" }, { value: "refund" }] } when the task concerns some events). It scopes the measures declared beside it, so an item with a where declares measures.'),
-      dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey) },
-      measures: {
-        type: 'array',
-        items: measureForm({
-          ref: EXPR_KINDS.aggregate.ref, pattern: NAME,
-          nameDescription: 'The measure\'s name; metrics read it by this name (stored as <task>_<name>).',
-          exprDescription: 'ONE aggregate of the model\'s rows — sum, average, min, max, median, percentile (with `percentile`), count_distinct, or count (with no args it counts the rows) — over a row expression, a case where it folds only the rows a condition holds for (within the item\'s own where): { fn: "count", args: [{ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }], then: { value: 1 } }] }] }, { fn: "percentile", args: [{ property: "load_ms" }], percentile: 0.9 }. A formula over several aggregates is several measures and a derived metric.',
-          extra: { label },
-        }),
-      },
-    },
-  };
-}
 
 export function metricSchema(catalog) {
   // what a metric reads is named as a string — a measure of this call or already in the context, as it
@@ -188,13 +115,68 @@ export const METRICS_STEP = {
     description: 'What the semantic layer computes: the metrics, one column each, broken down by group_by — one row per combination of its items. MetricFlow writes the SQL and makes every join. A query has one; the where steps before it filter the rows its metrics fold, the steps after it work on its result.',
     properties: {
       stage: { enum: [METRICS_STEP.stage] },
-      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
+      metrics: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as the build's semantic_model step returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array', uniqueItems: true, items: { $ref: '#/$defs/ref' },
         description: `How to break the metrics down, one result column per item, in order — each a ref, of those a group_by takes. { time: "metric_time", grain } works in every context (column metric_time_<grain>). In a task's context: a column of a model, { source, column } — the join comes from the schema, and the context has to read the model (a semantic_models item of the build, { source } alone to load it; column <source>_<column>); an event property the task declared a dimension, { source, property } (column <source>_<property>); a dimension it computed, { semantic_model: [<its source>], dimension } (column <source>_<dimension>); an entity, { entity } (column: its name).${project ? ' In a context of one of the dbt project\'s own semantic models: { semantic_model: [...], dimension, grain? } — semantic_model is the chain of models the dimension is reached through (the context\'s own model alone for its own; column <semantic_model>_<dimension>) — and { entity }; preview_semantic_model({ request: { context_id, metric } }) lists exactly the items a metric takes.' : ''}`,
       },
     },
   }),
+};
+
+/**
+ * THE LAST STEP OF A BUILD — the semantic layer over the build's rows (src/pipeline/semantic-stage.js):
+ * its dimensions, the models it joins for their attributes, its measures and its metrics. No stage of the
+ * registry (MetricFlow computes what it declares); offered by the place of a build
+ * (src/pipeline/stages.js STAGE_PLACES.build), and said where it is taken by every other place.
+ */
+export const SEMANTIC_MODEL_STEP = {
+  stage: 'semantic_model',
+  group: 'semantic',
+  elsewhere: 'a semantic_model step is a build\'s last step, the semantic layer over its rows (build_model)',
+  schema: (catalog) => {
+    const label = { type: 'string', description: D.label };
+    const loadable = catalog.semanticModelKeys();
+    // a model whose attributes a metric is grouped by: one that declares a join contract, that the
+    // semantic layer loads and that owns a key another model carries — what MetricFlow joins onto —
+    // joined on its contract's parts (checked against that key when the step is built)
+    const owns = (k) => Object.keys(catalog.entitiesOf(k)).some((r) => catalog.joinTargetFor(r) === k && catalog.modelKeys().some((m) => m !== k && catalog.entityKey(m, r)?.length));
+    const joinable = catalog.joinableModels().filter((k) => loadable.includes(k) && owns(k));
+    const dimension = {
+      type: 'object', title: 'a dimension of the main model',
+      anyOf: [
+        form({ title: 'a column', required: ['column'], properties: { column: { type: 'string', pattern: NAME, description: 'A groupable column of the main model.' }, grain: { enum: catalog.timeGranularities(), description: 'A time column\'s bucket (default: its own granularity).' }, label } }),
+        form({ title: 'an event property', required: ['property'], properties: { property: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: 'A scalar event property of an events source — queried as { source, property }.' }, label } }),
+        form({ title: 'a computed dimension', required: ['name', 'expr'], properties: { name: DIMENSION_NAME, expr: { $ref: EXPR_REF, description: 'Its value from the row: a row expression, no aggregate.' }, label } }),
+      ],
+    };
+    return {
+      type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
+      description: 'The semantic layer over this build: reusable named metrics, queried many ways with query_model (group_by, grain, filters). It is the build\'s last step; its main model is the build\'s source (the only step) or the table the steps before it built. MetricFlow writes the SQL and makes every join.',
+      properties: {
+        stage: { enum: ['semantic_model'] },
+        time: { type: 'string', pattern: NAME, description: 'The main model\'s time axis (metric_time) — for a table the steps before this one built; a catalog source is read on its own.' },
+        dimensions: { type: 'array', items: dimension, description: 'The main model\'s own dimensions beyond its catalog columns — a time column at a grain, an event property, one computed from the row.' },
+        ...(joinable.length ? {
+          join: {
+            type: 'array', uniqueItems: true,
+            description: 'Models whose attributes the metrics are grouped and filtered by ({ source, column } in a query), each on the join contract it declares: { source, on: { <part>: <a column of the main model | a value> } }. A slowly-changing model is matched at the metric\'s time: its time part is the main model\'s time axis.',
+            items: { anyOf: joinable.map((k) => form({ title: `join ${k}`, required: ['source', 'on'], properties: { source: { const: k }, on: contractOnSchema(k, catalog.joinContract(k)) } })) },
+          },
+        } : {}),
+        measures: {
+          type: 'array',
+          items: measureForm({
+            ref: EXPR_KINDS.aggregate.ref, pattern: NAME,
+            nameDescription: 'The measure\'s name; metrics read it by this name.',
+            exprDescription: 'ONE aggregate of the rows — sum, average, min, max, median, percentile (with `percentile`), count_distinct, or count (with no args it counts the rows) — over a row expression; the rows a condition holds for are folded by an aggregate over a case: { fn: "count", args: [{ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "event_name" }, { value: "purchase" }] }], then: { value: 1 } }] }] }. A formula over several aggregates is several measures and a derived metric.',
+            extra: { label, source: { enum: loadable, description: 'Fold the rows of this model of the semantic layer instead of the main model\'s — computed on its own rows and compared beside the main model\'s on metric_time and the group_by (its spend beside the events\' revenue). Omitted: the main model.' } },
+          }),
+        },
+        metrics: { type: 'array', minItems: 1, items: metricSchema(catalog), description: 'The metrics to query (each reads a measure above, or other metrics).' },
+      },
+    };
+  },
 };
 
 // The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by

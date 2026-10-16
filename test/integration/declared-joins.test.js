@@ -55,6 +55,7 @@ import { mcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare, editLayer } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -95,7 +96,7 @@ before(async () => {
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
-  const acq = await engine.build_semantic_model({
+  const acq = await declare(engine, {
     name: 'jacq',
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
@@ -103,7 +104,7 @@ before(async () => {
   assert.equal(acq.parse.ok, true, JSON.stringify(acq.parse));
   acqCtx = acq.context_id;
 
-  const ev = await engine.build_semantic_model({
+  const ev = await declare(engine, {
     name: 'jev',
     semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
@@ -145,7 +146,7 @@ before(async () => {
   ({ pruned: phantomPruned } = await groundCatalogToPhysical(phantom, backend, BASE));
 
   phantomEngine = settle(new Engine({ catalog: phantom, contextManager: ctxs, runner: backend }));
-  const pc = await phantomEngine.build_semantic_model({
+  const pc = await declare(phantomEngine, {
     name: 'jph',
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
@@ -164,7 +165,7 @@ before(async () => {
   writeFileSync(ownerPath, yaml.dump(od));
   ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
   ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
-  const oc = await ownerEngine.build_semantic_model({
+  const oc = await declare(ownerEngine, {
     name: 'jown',
     semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'crashlytics' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
@@ -174,9 +175,10 @@ before(async () => {
 
   // Two MORE catalogs over the same warehouse, each making the crash source the owner of the
   // funnel with a DIFFERENT key, so that what gets generated can only come from what was
-  // declared. `one` uses a ONE-column key on a column that repeats (the claim is false, as
-  // above); `true` uses funnel_tracking_id, which really is one row per value.
-  const owned = (crashKey, eventKey, declareColumn) => {
+  // declared. `one` uses a ONE-column key, the rewarded funnel alone (unique on this data too: each
+  // funnel is carried by one report); `true` uses funnel_tracking_id, one row per report by construction.
+  // Each declares the join contract its key is — the semantic layer joins a model on its contract.
+  const owned = (crashKey, eventKey, declareColumn, contract) => {
     const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
     const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
     if (declareColumn) {
@@ -186,6 +188,7 @@ before(async () => {
       });
     }
     mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: crashKey } };
+    mcp(M.fct_crashlytics_events).join = contract;
     mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: eventKey };
     const at = join(tempDir('owned'), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
@@ -195,7 +198,7 @@ before(async () => {
   // relationship (ad_funnel__user__*), and a path can only be served when the model that owns
   // its last leg is in the context.
   const evtsOn = async (engine, name) => {
-    const r = await engine.build_semantic_model({
+    const r = await declare(engine, {
       name,
       semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
       metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
@@ -204,11 +207,12 @@ before(async () => {
     return r;
   };
 
-  oneCatalog = owned(['rewarded_tracking_id'], ['tracking_id']);
+  const byFormat = mcp(yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8')).models.find((x) => x.name === 'fct_crashlytics_events')).join;
+  oneCatalog = owned(['rewarded_tracking_id'], ['tracking_id'], null, { unique: true, key: { funnel: byFormat.key.funnel }, select: byFormat.select });
   oneEngine = settle(new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend }));
   oneCtx = (await evtsOn(oneEngine, 'jone')).context_id;
 
-  trueCatalog = owned(['funnel_tracking_id'], ['tracking_id'], 'funnel_tracking_id');
+  trueCatalog = owned(['funnel_tracking_id'], ['tracking_id'], 'funnel_tracking_id', { unique: true, key: { funnel: 'funnel_tracking_id' } });
   trueEngine = settle(new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend }));
   trueCtx = (await evtsOn(trueEngine, 'jtrue')).context_id;
 }, opts);
@@ -218,12 +222,12 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /** Run a pipeline of steps and return its materialized rows. */
 async function pipeRows(source, ...steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `jn_${seq++}`, source });
+  const s = await engine.build_model({ action: 'start', name: `jn_${seq++}`, source });
   for (const step of steps) {
-    const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+    const r = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -376,18 +380,19 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   // …and its join contract, which names the missing bound, is no longer offered: nothing joins on it
   assert.equal(phantom.joinContract('users'), null);
   assert.ok(!phantom.joinableModels().includes('users'));
-  // …and the degradation is not just a flag on an object: the manifest PARSES (dbt rejects a
-  // `natural` entity that has no window) and the join now behaves as a plain dimension —
-  // u1's 36 events reach BOTH of its install rows, so the grouped total is 220, not 184.
-  const sm = await phantomEngine.build_semantic_model({
+  // …and with no contract it is joined by nothing: a semantic layer's join of it is refused (it would
+  // match every version of u1), and a layer over the events alone still parses and answers
+  await assert.rejects(() => phantomEngine.build_model({ action: 'start', name: 'jphev', source: 'events', steps: [{ stage: 'semantic_model', join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }], measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] }] }),
+    /'users' declares no join contract, so it is not joinable|unexpected property 'join'|`steps\.0\.join\.0/);
+  const sm = await declare(phantomEngine, {
     name: 'jphev',
-    semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'users' }],
+    semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
-  const res = await phantomEngine.query_model({ context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['jphev_evts'], group_by: [{ source: 'users', column: 'country' }] }] });
+  const res = await phantomEngine.query_model({ context_id: sm.context_id, steps: [{ stage: 'metrics', metrics: ['jphev_evts'] }] });
   assert.equal(res.ok, true, JSON.stringify(res.error));
-  assert.equal(sumCol(res.rows, 'jphev_evts'), 220, 'with no window left every event meets both of u1\'s versions');
+  assert.equal(sumCol(res.rows, 'jphev_evts'), 184);
 });
 
 // 23. A relationship whose key column is missing stops being offered to the semantic layer.
@@ -425,15 +430,15 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   // warehouse: one assignment per player in the experiment, so every one of the 184 events pairs once.
   assert.deepEqual(phantom.entityKey('experiments', 'user'), [{ column: 'player_id_of_internal' }]);
   assert.equal(phantom.joinTargetFor('user'), 'users');
-  const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
+  const st = await phantomEngine.build_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
   for (const stage of [
     { stage: 'join', source: 'experiments', on: { user: 'player_id_of_internal', experiment: 'checkout_flow' }, kind: 'inner', attrs: [{ column: 'variant_group' }] },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'distinct_base', expr: { fn: 'count_distinct', args: [{ column: 'event_id' }] } }] },
   ]) {
-    const r = await phantomEngine.build_pipeline_model({ action: 'add_steps', context_id: st.context_id, steps: [stage] });
+    const r = await phantomEngine.build_model({ action: 'add_steps', context_id: st.context_id, steps: [stage] });
     assert.ok(!r.error, JSON.stringify(r.error));
   }
-  const c = await phantomEngine.build_pipeline_model({ action: 'materialize', context_id: st.context_id });
+  const c = await phantomEngine.build_model({ action: 'materialize', context_id: st.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(num(c.rows[0].n), 184);
   assert.equal(num(c.rows[0].distinct_base), 184, 'and it did not fan out');
@@ -498,12 +503,12 @@ function ordered(sql, cols) {
 async function generatedSql(...args) {
   const eng = typeof args[0] === 'string' ? engine : args.shift();
   const [source, ...steps] = args;
-  const s = await eng.build_pipeline_model({ action: 'start', name: `gen_${seq++}`, source });
+  const s = await eng.build_model({ action: 'start', name: `gen_${seq++}`, source });
   for (const step of steps) {
-    const r = await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+    const r = await eng.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps ${step.stage}: ${JSON.stringify(r.error)}`);
   }
-  const p = await eng.build_pipeline_model({ action: 'preview', context_id: s.context_id });
+  const p = await eng.build_model({ action: 'preview', context_id: s.context_id });
   assert.ok(p.model_sql, 'preview returns the generated model SQL');
   return p.model_sql;
 }
@@ -735,7 +740,7 @@ test('38. the generated four-way join matches a hand-written one', opts, async (
 //     source's point-in-time join itself.
 test('40. governed: spend and events from two sources, sliced by the same install attribute', opts, async (t) => {
   if (skip(t)) return;
-  const task = await engine.build_semantic_model({
+  const task = await declare(engine, {
     name: 'jmix',
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [
@@ -774,7 +779,7 @@ test('40. governed: spend and events from two sources, sliced by the same instal
 //     same task WITH the model answers.
 test('41. a join path without its owning model is refused, and works once loaded — and (14) governed = pipeline for events too', opts, async (t) => {
   if (skip(t)) return;
-  const bare = await engine.build_semantic_model({
+  const bare = await declare(engine, {
     name: 'jbare',
     semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
@@ -782,15 +787,15 @@ test('41. a join path without its owning model is refused, and works once loaded
   assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
   await assert.rejects(
     () => engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'], group_by: [{ source: 'users', column: 'country' }] }] }),
-    /needs model 'users', which this context does not read.*semantic_models: \[\{ source: 'users' \}\]/s,
+    /needs model 'users', which this context does not read.*join it in the build's semantic_model step — \{ source: 'users', on: \{ … \} \}/s,
   );
   // the metric itself answers fine — it is the PATH that needed the model, not the measure.
   const flat = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'] }] });
   assert.equal(flat.ok, true, JSON.stringify(flat.error));
   assert.equal(num(flat.rows[0].jbare_evts), 184);
-  // the fix the refusal names — an update whose item only names the model — loads it into this context,
-  // and the same group_by now answers, every event counted once
-  const loadedNow = await engine.build_semantic_model({ action: 'update', context_id: bare.context_id, semantic_models: [{ source: 'users' }] });
+  // the fix the refusal names — the model joined in the semantic_model step on its contract — loads it
+  // into this context, and the same group_by now answers, every event counted once
+  const loadedNow = await editLayer(engine, bare.context_id, (st) => ({ ...st, join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' } }] }));
   assert.equal(loadedNow.parse.ok, true, JSON.stringify(loadedNow.parse));
   const viaUpdate = await engine.query_model({ context_id: bare.context_id, steps: [{ stage: 'metrics', metrics: ['jbare_evts'], group_by: [{ source: 'users', column: 'country' }] }] });
   assert.equal(viaUpdate.ok, true, JSON.stringify(viaUpdate.error));
@@ -817,9 +822,9 @@ test('42. a joined column keys the next join: the spend record of the install da
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', expr: { fn: 'count' } }] });
   assert.deepEqual(mapCol(rows, 'media_source', 'n'), { applovin: 3, google: 2, meta: 5, organic: 3 });
   // …and a part naming a column the rows do not have (yet) is refused at the step
-  const s2 = await engine.build_pipeline_model({ action: 'start', name: `ch_${seq++}`, source: 'crashlytics' });
+  const s2 = await engine.build_model({ action: 'start', name: `ch_${seq++}`, source: 'crashlytics' });
   await assert.rejects(
-    () => engine.build_pipeline_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', ...SPEND_ON('install_date'), attrs: [{ column: 'media_source' }] }] }),
+    () => engine.build_model({ action: 'add_steps', context_id: s2.context_id, steps: [{ stage: 'join', ...SPEND_ON('install_date'), attrs: [{ column: 'media_source' }] }] }),
     /install_date/,
   );
 });

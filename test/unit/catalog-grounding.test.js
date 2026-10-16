@@ -50,8 +50,8 @@ test('groundToPhysical prunes a phantom event property from the catalog accessor
 
 test('grounded catalog: phantom field is absent from the tool SCHEMAS (enums)', () => {
   const e = groundedEngine();
-  // build_semantic_model dimension/measure enums are projected from scalarEventProps.
-  const schemaStr = JSON.stringify(e.schemas.build_semantic_model);
+  // the property enums of a build (its steps' and its semantic_model step's expressions) are projected from scalarEventProps.
+  const schemaStr = JSON.stringify(e.schemas.build_model);
   assert.ok(!schemaStr.includes('complete_time_of_event_data'), 'pruned property not selectable in any enum');
   assert.ok(schemaStr.includes('ad_type_of_event_data'), 'a real property is still selectable');
 });
@@ -314,9 +314,8 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   // the values a schema offers: its enums, and its pinned constants (a semantic_models item's `source`)
   const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); if (typeof node.const === 'string') out.push([node.const]); for (const v of Object.values(node)) enums(v, out); } return out; };
   const offers = (schema, key) => enums(schema).some((e) => e.includes(key));
-  assert.ok(!offers(schemas.build_semantic_model, 'crashlytics'), 'build_semantic_model must not offer the unavailable source');
-  assert.ok(!offers(schemas.build_pipeline_model, 'crashlytics'), 'build_pipeline_model must not offer the unavailable source');
-  assert.ok(offers(schemas.build_semantic_model, 'events'));
+  assert.ok(!offers(schemas.build_model, 'crashlytics'), 'build_model must not offer the unavailable source');
+  assert.ok(offers(schemas.build_model, 'events'));
   const si = schemas.semantic_index;
   const modelView = si.anyOf.map((b) => (b.$ref ? si.$defs[b.$ref.split('/').pop()] : b)).find((b) => b.title === '{ source }');
   const sourceField = modelView.properties.source.$ref ? si.$defs[modelView.properties.source.$ref.split('/').pop()] : modelView.properties.source;

@@ -70,14 +70,14 @@ test('a contract is loaded as declared, and every mistake in it is refused at lo
 
 test('a join names exactly its contract\'s parts — a model without one is not joinable', async () => {
   const e = engineOf(catalogOf(EVENTS + USERS()));
-  const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
-  const add = (stage) => e.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [stage] });
+  const s = await e.build_model({ action: 'start', name: 'jtest', source: 'events' });
+  const add = (stage) => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [stage] });
   await assert.rejects(() => add({ stage: 'join', source: 'users', on: { user: 'player_id' }, attrs: [{ column: 'country' }] }), /missing required property 'time'/);
   await assert.rejects(() => add({ stage: 'join', source: 'users', on: { user: 'player_id', time: 'device_time', extra: 'x' }, attrs: [{ column: 'country' }] }), /unexpected property 'extra'/);
   const ok = await add({ stage: 'join', source: 'users', on: { user: 'player_id', time: 'device_time' }, attrs: [{ column: 'country' }] });
   assert.ok(ok.context_id);
   // without a contract nothing is joinable: the stage has no form at all
   const bare = engineOf(catalogOf(EVENTS + USERS(null)));
-  const b = await bare.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
-  await assert.rejects(() => bare.build_pipeline_model({ action: 'add_steps', context_id: b.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), /invalid input/);
+  const b = await bare.build_model({ action: 'start', name: 'jtest', source: 'events' });
+  await assert.rejects(() => bare.build_model({ action: 'add_steps', context_id: b.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), /invalid input/);
 });

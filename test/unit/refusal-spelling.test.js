@@ -25,30 +25,31 @@ const check = (tool, input) => validateInput(validators[tool], input);
 const text = (res) => (res.errors || []).join(' | ');
 
 const stage = (st) => ({ action: 'add_steps', context_id: 'ctxabc123456', steps: [st] });
+/** A build whose only step is its semantic layer, over `source`. */
+const layer = (source, step) => check('build_model', { action: 'start', name: 'spell_task', source, steps: [{ stage: 'semantic_model', ...step }] });
 const measure = (name, expr) => stage({ stage: 'aggregate', measures: [{ name, expr }] });
 
 test("a pipeline measure refuses `avg` (and `mean`, `quantile`) and says how it is spelled here", () => {
-  const res = check('build_pipeline_model', measure('x', { fn: 'avg', args: [{ column: 'price' }] }));
+  const res = check('build_model', measure('x', { fn: 'avg', args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /'avg' is spelled 'average'/);
   // the allowed list is still there — the hint adds to it, it does not replace it
   assert.match(text(res), /must be one of: add, sub/);
-  assert.match(text(check('build_pipeline_model', measure('x', { fn: 'mean', args: [{ column: 'price' }] }))), /'mean' is spelled 'average'/);
-  assert.match(text(check('build_pipeline_model', measure('x', { fn: 'quantile', args: [{ column: 'price' }], percentile: 0.5 }))), /'quantile' is spelled 'percentile'/);
+  assert.match(text(check('build_model', measure('x', { fn: 'mean', args: [{ column: 'price' }] }))), /'mean' is spelled 'average'/);
+  assert.match(text(check('build_model', measure('x', { fn: 'quantile', args: [{ column: 'price' }], percentile: 0.5 }))), /'quantile' is spelled 'percentile'/);
   // …and the correct spelling is accepted
-  assert.equal(check('build_pipeline_model', measure('x', { fn: 'average', args: [{ column: 'price' }] })).ok, true);
+  assert.equal(check('build_model', measure('x', { fn: 'average', args: [{ column: 'price' }] })).ok, true);
 });
 
 test("a governed measure refuses `avg` and says it is spelled `average` here", () => {
-  const payload = (fn) => ({
-    name: 'spell_task',
-    semantic_models: [{ source: 'events', measures: [{ name: 'm', expr: { fn, args: [{ column: 'price_in_usd_of_event_data' }] } }] }],
+  const payload = (fn) => layer('events', {
+    measures: [{ name: 'm', expr: { fn, args: [{ column: 'price_in_usd_of_event_data' }] } }],
     metrics: [{ name: 'm', type: 'simple', measure: 'm' }],
   });
-  const res = check('build_semantic_model', payload('avg'));
+  const res = payload('avg');
   assert.equal(res.ok, false);
   assert.match(text(res), /'avg' is spelled 'average'/);
-  assert.equal(check('build_semantic_model', payload('average')).ok, true);
+  assert.equal(payload('average').ok, true);
 });
 
 test("a card's fold refuses `avg` and the earlier `agg`, naming `average` and `fn`", () => {
@@ -62,30 +63,29 @@ test("a card's fold refuses `avg` and the earlier `agg`, naming `average` and `f
 });
 
 test('the quantile is `percentile` on every path, and SQL\'s `q` / `as` and the earlier `agg` are named for what they are here', () => {
-  const res = check('build_pipeline_model', measure('p90', { fn: 'percentile', q: 0.9, args: [{ column: 'price' }] }));
+  const res = check('build_model', measure('p90', { fn: 'percentile', q: 0.9, args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /here that field is called 'percentile'/);
-  assert.equal(check('build_pipeline_model', measure('p90', { fn: 'percentile', percentile: 0.9, args: [{ column: 'price' }] })).ok, true);
+  assert.equal(check('build_model', measure('p90', { fn: 'percentile', percentile: 0.9, args: [{ column: 'price' }] })).ok, true);
 
-  const gov = check('build_semantic_model', {
-    name: 'spell_pct',
-    semantic_models: [{ source: 'acquisition', measures: [{ name: 'p90', expr: { fn: 'percentile', args: [{ column: 'cost' }], q: 0.9 } }] }],
+  const gov = layer('acquisition', {
+    measures: [{ name: 'p90', expr: { fn: 'percentile', args: [{ column: 'cost' }], q: 0.9 } }],
     metrics: [{ name: 'p90', type: 'simple', measure: 'p90' }],
   });
   assert.equal(gov.ok, false);
   assert.match(text(gov), /here that field is called 'percentile'/);
 
   // a measure written as the earlier { name, agg } is shown as the expression it is now
-  const agg = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }));
+  const agg = check('build_model', stage({ stage: 'aggregate', measures: [{ name: 'n', agg: 'count' }] }));
   assert.equal(agg.ok, false);
   assert.ok(text(agg).includes('is written in an earlier spelling — write {"name":"n","expr":{"fn":"count","args":[]}}'), text(agg));
-  const as = check('build_pipeline_model', stage({ stage: 'unnest', expr: { column: 'items' }, as: 'item' }));
+  const as = check('build_model', stage({ stage: 'unnest', expr: { column: 'items' }, as: 'item' }));
   assert.equal(as.ok, false);
   assert.match(text(as), /here that field is called 'name'/);
 });
 
 test('a name with no counterpart in this path gets the plain list, with no invented advice', () => {
-  const res = check('build_pipeline_model', measure('x', { fn: 'geomean', args: [{ column: 'price' }] }));
+  const res = check('build_model', measure('x', { fn: 'geomean', args: [{ column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /must be one of/);
   assert.ok(!/is spelled/.test(text(res)), 'nothing is suggested for a function this server does not have');
@@ -96,8 +96,8 @@ test('a name with no counterpart in this path gets the plain list, with no inven
 // refusal lists the functions; the aggregate's description (and recipe boolean_condition_as_measure)
 // teach a count over a case.
 test('sum_boolean is refused with the list of functions, and no word-for-word advice, on both paths', () => {
-  const pipe = check('build_pipeline_model', measure('payers', { fn: 'sum_boolean', args: [{ column: 'is_payer' }] }));
-  const semantic = check('build_semantic_model', { name: 'spell_task', semantic_models: [{ source: 'events', measures: [{ name: 'm', expr: { fn: 'sum_boolean' } }] }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
+  const pipe = check('build_model', measure('payers', { fn: 'sum_boolean', args: [{ column: 'is_payer' }] }));
+  const semantic = layer('events', { measures: [{ name: 'm', expr: { fn: 'sum_boolean' } }], metrics: [{ name: 'm', type: 'simple', measure: 'm' }] });
   for (const res of [pipe, semantic]) {
     assert.equal(res.ok, false);
     assert.match(text(res), /must be one of/);
@@ -148,8 +148,6 @@ test("a read's transform and a metric query's metrics, group_by, where and order
     [{ stage: 'compute', name: 'recent', expr: { fn: 'gte', args: [{ column: 'metric_time_day' }, { now: true }] } }],
   ]) assert.equal(check('query_model', { context_id: 'ctxabc123456', steps: [revenue, ...steps] }).ok, true, JSON.stringify(steps));
   assert.equal(check('query_model', { context_id: 'ctxabc123456', queries: [{ steps: [revenue, { stage: 'order_by', keys }] }] }).ok, true);
-  // a list of names that is no query — the metrics an update removes — is not read as one
-  assert.equal(check('build_semantic_model', { action: 'update', context_id: 'ctxabc123456', remove: { metrics: ['revenue'] } }).ok, true);
 });
 
 // What a metric query groups and filters by is the one ref — a model's column { source, column }, an
@@ -189,49 +187,28 @@ test("a metric query's { model, attribute } is shown as the ref it is now, in it
   assert.equal(q([]).ok, false);
 });
 
-// A semantic model item names its model `source` (it was `from`), and an update names the task it
-// changes `name` (it was `task`); what a call asks to see more of is the one list `include` (it was a
-// flag per thing). Each earlier spelling is refused with the request it is now — never served.
-test('build_semantic_model: from, task and include_yaml are shown as source, name and include', () => {
-  const COUNT = { name: 'm', expr: { fn: 'count' } };
-  const metrics = [{ name: 'm', type: 'simple', measure: 'm' }];
-  const earlier = (input, at, now) => {
-    const res = check('build_semantic_model', input);
-    assert.equal(res.ok, false, JSON.stringify(input));
-    assert.ok(text(res).includes(`${at} is written in an earlier spelling — write ${JSON.stringify(now)}`), text(res));
-  };
-  earlier({ name: 'spell_task', semantic_models: [{ from: 'events', measures: [COUNT] }], metrics }, '`semantic_models.0`', { source: 'events', measures: [COUNT] });
-  earlier({ action: 'update', context_id: 'ctxabc123456', semantic_models: [{ from: 'users' }] }, '`semantic_models.0`', { source: 'users' });
-  earlier({ action: 'update', context_id: 'ctxabc123456', remove: { dimensions: [{ from: 'users', column: 'country' }] } }, '`remove.dimensions.0`', { source: 'users', column: 'country' });
-  earlier({ action: 'update', context_id: 'ctxabc123456', task: 'spell_task', semantic_models: [{ source: 'users' }] }, 'request', { action: 'update', context_id: 'ctxabc123456', semantic_models: [{ source: 'users' }], name: 'spell_task' });
-  earlier({ name: 'spell_task', include_yaml: true, semantic_models: [{ source: 'events', measures: [COUNT] }], metrics }, 'request', { name: 'spell_task', semantic_models: [{ source: 'events', measures: [COUNT] }], metrics, include: ['yaml'] });
-  // …and what they are now is taken
-  assert.equal(check('build_semantic_model', { name: 'spell_task', include: ['yaml'], semantic_models: [{ source: 'events', measures: [COUNT] }], metrics }).ok, true);
-  assert.equal(check('build_semantic_model', { action: 'update', context_id: 'ctxabc123456', name: 'spell_task', semantic_models: [{ source: 'users' }] }).ok, true);
-});
-
 // The builders' "show me more" is the one list `include` too: include_columns / include_steps are shown
 // as it, and an action that answers with no shape (preview) takes none.
-test('build_pipeline_model: include_columns and include_steps are shown as the one list include', () => {
+test('build_model: include_columns and include_steps are shown as the one list include', () => {
   const add = { action: 'add_steps', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }] };
-  const res = check('build_pipeline_model', { ...add, include_columns: true, include_steps: true });
+  const res = check('build_model', { ...add, include_columns: true, include_steps: true });
   assert.equal(res.ok, false);
   assert.ok(text(res).includes(`request is written in an earlier spelling — write ${JSON.stringify({ ...add, include: ['columns', 'steps'] })}`), text(res));
   // a flag set to false asked for nothing: the request is shown without it
-  assert.ok(text(check('build_pipeline_model', { ...add, include_columns: false })).includes(`write ${JSON.stringify(add)}`));
-  assert.equal(check('build_pipeline_model', { ...add, include: ['columns', 'steps'] }).ok, true);
-  assert.equal(check('build_pipeline_model', { ...add, include: ['columns', 'columns'] }).ok, false, 'each item once');
-  assert.equal(check('build_pipeline_model', { ...add, include: ['yaml'] }).ok, false, 'the builder\'s own enum');
-  assert.match(text(check('build_pipeline_model', { action: 'preview', context_id: 'ctxabc123456', include: ['steps'] })), /unexpected property 'include'/);
+  assert.ok(text(check('build_model', { ...add, include_columns: false })).includes(`write ${JSON.stringify(add)}`));
+  assert.equal(check('build_model', { ...add, include: ['columns', 'steps'] }).ok, true);
+  assert.equal(check('build_model', { ...add, include: ['columns', 'columns'] }).ok, false, 'each item once');
+  assert.equal(check('build_model', { ...add, include: ['yaml'] }).ok, false, 'the builder\'s own enum');
+  assert.match(text(check('build_model', { action: 'preview', context_id: 'ctxabc123456', include: ['steps'] })), /unexpected property 'include'/);
 });
 
 test('a pipeline step names its context with context_id; `draft_id` is refused with that name', () => {
-  const res = check('build_pipeline_model', { action: 'materialize', draft_id: 'ctxabc123456' });
+  const res = check('build_model', { action: 'materialize', draft_id: 'ctxabc123456' });
   assert.equal(res.ok, false);
   assert.match(text(res), /'draft_id' — here that field is called 'context_id'/);
-  assert.equal(check('build_pipeline_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
+  assert.equal(check('build_model', { action: 'materialize', context_id: 'ctxabc123456' }).ok, true);
   // a start may omit its action (the default) and name a context to start the draft in
-  assert.equal(check('build_pipeline_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
+  assert.equal(check('build_model', { name: 'started', source: 'events', context_id: 'ctxabc123456', steps: [{ stage: 'limit', limit: 1 }], materialize: true }).ok, true);
 });
 
 // `count(*)` is a SQL habit; here the rows are counted by a count with no argument. The refusal for

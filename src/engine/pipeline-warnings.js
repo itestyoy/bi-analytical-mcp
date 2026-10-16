@@ -303,7 +303,7 @@ export class PipelineAdvisor {
     return [
       ...this.dateBoundWarnings(stage, available),
       ...(own ? own(available) : [`Reference any column available now in the next stage (${listSome(available)}; include: ["columns"] lists them all).`]),
-      ...(building ? [] : ['Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", context_id } }); materialize when done.']),
+      ...(building ? [] : ['Preview the SQL anytime with build_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }
 }

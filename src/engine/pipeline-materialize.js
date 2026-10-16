@@ -139,18 +139,20 @@ export const pipelineMaterializeMethods = {
     return this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages);
   },
 
-  /** The refusal of an unbounded pipeline — named in the fields build_pipeline_model takes. */
+  /** The refusal of an unbounded pipeline — named in the fields build_model takes. */
   _unboundedPipelineError(source) {
     const m = this.catalog.getModel(source);
     const bounds = [m.time?.column, m.partition_column].filter(Boolean).map((c) => `'${c}'`).join(' or ');
     return new ToolError(
       `this catalog requires a bounded time window (require_time_range) for '${source}': start the draft with time_range { start, end } `
-      + `(build_pipeline_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (insert_step at index 1). Unbounded scans over '${m.dbt_model}' are blocked.`,
+      + `(build_model start, beside source), or add a where step on ${bounds || 'the time/partition column'} before the others (insert_step at index 1). Unbounded scans over '${m.dbt_model}' are blocked.`,
       { stage: 'validate', field: 'time_range' },
     );
   },
 
   async _draftMaterialize(ctx, draft) {
+    // a build that ends in its semantic_model step materializes the layer it declares
+    if (draft.semantic) return this._materializeLayer(ctx, draft);
     if (!draft.stages.length) throw new ToolError('draft has no steps to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
       throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });
@@ -263,7 +265,7 @@ export const pipelineMaterializeMethods = {
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
    * It runs INSIDE a task (_buildPipeline, or a draft's materialize): the build is waited
    * for here, and the caller reads the response with query_model({ request: { task_ids } }). A later pipeline re-slices
-   * the table without recomputing it: build_pipeline_model({ request: { action: 'start', from_task } }).
+   * the table without recomputing it: build_model({ request: { action: 'start', from_task } }).
    */
   async _registerPipeline(input, { ctxId: presetCtxId = null, taskId = null } = {}) {
     const dialect = this.catalog.dialect;
@@ -409,7 +411,7 @@ export const pipelineMaterializeMethods = {
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
           : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
-        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_model({ request: { task_ids, offset, limit } }), or filter / regroup them with query_model({ request: { context_id, steps } }) — the pipeline's own stages, run over the stored table.`,
+        `To re-slice it without recomputing, start a pipeline FROM this build: build_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_model({ request: { task_ids, offset, limit } }), or filter / regroup them with query_model({ request: { context_id, steps } }) — the pipeline's own stages, run over the stored table.`,
       ],
       warnings: [
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at

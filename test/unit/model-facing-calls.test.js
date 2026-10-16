@@ -120,7 +120,7 @@ test('the full deployment serves what the defaults leave out — the feature\'s 
   for (const { deployment, names, engine } of await surfaces()) {
     const full = deployment !== 'default';
     assert.equal(names.includes('build_retentioneering_model'), full, deployment);
-    assert.equal(stageNames(engine.schemas.build_pipeline_model).includes('python'), full, deployment);
+    assert.equal(stageNames(engine.schemas.build_model).includes('python'), full, deployment);
   }
 });
 
@@ -156,7 +156,7 @@ test('every call a model reads names only fields its tool takes', async () => {
 test('a stage\'s fields, where a text lists them, are the fields the stage takes', async () => {
   const wrong = [];
   for (const { deployment, engine, texts } of await surfaces()) {
-    const schema = engine.schemas.build_pipeline_model;
+    const schema = engine.schemas.build_model;
     const stages = new Set(stageNames(schema));
     // `pivot` does the reverse (group_by + on + measure + values): the words of the list that are field names
     const list = /`([a-z_]+)`[^`()]{0,40}\(([^()]*\+[^()]*)\)/g;

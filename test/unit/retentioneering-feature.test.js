@@ -178,8 +178,8 @@ test('the schemas offer exactly what the library does — every choice from the 
   assert.equal(deref(b0, field(b0, addSteps, 'steps').items), stage, 'and so are add_steps\'');
   assert.equal(deref(b0, field(b0, b0, 'step')), stage, 'and an edit\'s step');
   assert.deepEqual(startPlace(e.catalog).stages, ['where', 'compute', 'join']);
-  // the core's join forms, one per model, as build_pipeline_model offers them
-  const bp = e.schemas.build_pipeline_model;
+  // the core's join forms, one per model, as build_model offers them
+  const bp = e.schemas.build_model;
   assert.deepEqual(forms(b0, stage).filter((x) => pinned(b0, x, 'stage')[0] === 'join').map((x) => x.title), forms(bp, bp.$defs.stage).filter((x) => pinned(bp, x, 'stage')[0] === 'join').map((x) => x.title));
   assert.deepEqual(Object.keys(field(b0, start, 'columns').properties).sort(), ['event', 'time']);
   for (const k of ['path', 'segments']) assert.equal(deref(b0, field(b0, start, k).items).type, 'string', `${k}: column names`);
@@ -354,7 +354,7 @@ test('input the schema refuses is refused before anything starts', async () => {
   // the path an earlier version named in columns, or as [{ column }], is refused with the start written today
   await refused('build_retentioneering_model', { ...noPath, columns: { path: 'u', event: 'e', time: 't' } }, earlier('columns', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
   await refused('build_retentioneering_model', { ...fromTask, path: [{ column: 'u' }] }, earlier('path', { name: 'x', from_task: 'a0a0a0a0a0a0', columns: { event: 'e', time: 't' }, path: ['u'] }));
-  await refused('build_pipeline_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
+  await refused('build_model', { name: 'x', from_task: 'a0a0a0a0a0a0', time_range: { start: '2026-01-01' } }, /invalid input/);
   // the eventstream's own name goes into its models' file names: bounded as the core's names are
   await refused('build_retentioneering_model', { name: `e${'x'.repeat(41)}`, source: 'events' }, /invalid input/);
   await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc', name: `e${'x'.repeat(41)}` }, /invalid input/);
@@ -668,7 +668,7 @@ test('delete_context removes one eventstream in the feature\'s own form, which e
   assert.ok(e.ctxs.get(ctx.id), 'and so is the context');
   await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: ctx.id, eventstream: 'nope' })), (err) => err.field === 'eventstream' && /no eventstream 'nope'.*it holds other/.test(err.message));
   await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: ctx.id })), /invalid input: .*missing required property 'eventstream'/);
-  const plain = (await e.build_pipeline_model({ action: 'start', name: 'plain', source: 'events' })).context_id;
+  const plain = (await e.build_model({ action: 'start', name: 'plain', source: 'events' })).context_id;
   await assert.rejects(Promise.resolve().then(() => e.delete_context({ what: 'eventstream', context_id: plain, eventstream: 'es' })), (err) => err.field === 'context_id' && /is not a path-analysis context/.test(err.message));
   assert.equal(e.schemas.delete_context.anyOf.map((b) => deref(e.schemas.delete_context, b)).filter((f) => pinned(e.schemas.delete_context, f, 'what').includes('eventstream')).length, 1);
   // off: no such form, and `what` is one of the core's

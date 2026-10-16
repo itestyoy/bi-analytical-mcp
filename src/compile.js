@@ -325,7 +325,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
     const modelKey = sm.source;
     if (!catalog.models[modelKey]) fail(`semantic_models.source: unknown model '${modelKey}'. Known models: ${catalog.semanticModelKeys().join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.source');
     // a model with no primary entity has nothing MetricFlow could address its dimensions through
-    if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.source: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows reach a pipeline instead${catalog.joinContract(modelKey) ? `: build_pipeline_model with a join stage { stage: 'join', source: '${modelKey}', on: { … }, attrs }` : ' as its source'}. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.source');
+    if (!catalog.semanticModelKeys().includes(modelKey)) fail(`semantic_models.source: '${modelKey}' has no primary entity, so a semantic layer cannot load it — its rows reach a pipeline instead${catalog.joinContract(modelKey) ? `: build_model with a join stage { stage: 'join', source: '${modelKey}', on: { … }, attrs }` : ' as its source'}. A semantic layer loads ${catalog.semanticModelKeys().join(', ')}`, 'semantic_models.source');
     // an item's where scopes the measures declared beside it — with none, it would scope nothing
     if (sm.where?.length && !sm.measures?.length) fail(`semantic_models: the '${modelKey}' item has a where but no measures — a where scopes the measures declared in the same item. Put it beside the measures it is for, or fold each measure over a case of its own condition ({ fn: "count", args: [{ fn: "case", cases: [{ when: [...], then: { value: 1 } }] }] }); { source: '${modelKey}' } alone loads the model for its columns`, 'semantic_models.where');
     usedModels.add(modelKey);
@@ -337,7 +337,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
       // two measures of one name would both be written, and dbt refuses the duplicate at parse
       if (declaredMeasures.has(cm.name)) fail(`measure '${m.name}' is declared twice in this call (stored as '${cm.name}')`, 'measures.name');
       if (existingMeasures.has(cm.name)) {
-        fail(`measure '${m.name}' is already in this context, as '${cm.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { measures: ['${cm.name}'] }, semantic_models: [...] } }) — with cascade: true when metrics read it`, 'measures.name');
+        fail(`measure '${m.name}' is already in this context, as '${cm.name}'. Each name is declared once in the semantic_model step`, 'measures.name');
       }
       declaredMeasures.add(cm.name);
       ensure(modelKey).measures.push(cm);
@@ -367,7 +367,7 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
   // the context would keep one and drop the other without a word.
   const declareMetric = (m, md) => {
     if (existingMetrics.has(m.name)) {
-      fail(`metric '${md.name}' is already in this context, as '${m.name}'. To replace it, remove it and declare it again in one update: build_semantic_model({ request: { action: 'update', context_id, remove: { metrics: ['${m.name}'] }, metrics: [...] } }) — with cascade: true when other metrics are built from it`, 'metrics.name');
+      fail(`metric '${md.name}' is already in this context, as '${m.name}'. Each name is declared once in the semantic_model step`, 'metrics.name');
     }
     if (metricNames.has(m.name)) fail(`metric '${md.name}' is declared twice in this call (stored as '${m.name}')`, 'metrics.name');
     if (!m.label) m.label = m.name; // dbt 1.11+ requires a label on every metric (the caller's, or its name)

@@ -16,6 +16,7 @@ import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, stepEffect } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -49,7 +50,7 @@ before(async () => {
 
   // Metrics built FROM the crashlytics source. A semantic model is built from ONE source, so
   // inside it the source's own events and properties are named as-is.
-  const crash = await engine.build_semantic_model({
+  const crash = await declare(engine, {
     name: 'stab',
     semantic_models: [{ source: 'crashlytics', dimensions: [{ property: 'issue_title_of_event_data' }], measures: [{ name: 'fatal', expr: { fn: 'count' } }, { name: 'crashed_users', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'fatal_crash' }] }] }, { source: 'users' }],
     metrics: [
@@ -64,7 +65,7 @@ before(async () => {
   // fact, each scoped to its own vocabulary — the shipped recipe's own declaration, so the test
   // below is that recipe's data proof (test/helpers/recipe-coverage.js).
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
-  const both = await engine.build_semantic_model(recipes.get('metrics_from_two_sources').semantic_payload);
+  const both = await declare(engine, recipes.get('metrics_from_two_sources').semantic_payload);
   assert.equal(both.parse.ok, true, `parse failed: ${JSON.stringify(both.parse)}`);
   bothCtx = both.context_id;
 }, opts);
@@ -97,13 +98,11 @@ test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 
 
 // SEED_DATA §10: anr_duration_of_event_data exists ONLY on `anr` (3 rows, 5.5+8.0+12.5 = 26).
 // Scoping to anr yields the real total; the same measure without a scope still sees only
-// those 3 rows, because the column is NULL on every other crash event. Once the anr model is in
-// the crash context, one ungrouped query also carries the context's governed crash metrics:
-// 6 fatal_crash rows from 3 distinct players (u1×3, u2×2, u3×1) — a test of their own before.
+// those 3 rows, because the column is NULL on every other crash event. The crash context's governed
+// metrics, beside it: 6 fatal_crash rows from 3 distinct players (u1×3, u2×2, u3×1).
 test('governed metrics on the crash fact, and a payload property scoped to ONE event: fatal 6 from 3 players; anr rows 3, seconds 26, avg 26/3', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_semantic_model({
-    context_id: crashCtx,
+  const out = await declare(engine, {
     name: 'anr',
     semantic_models: [{ source: 'crashlytics', measures: [{ name: 'events', expr: { fn: 'count' } }, { name: 'secs', expr: { fn: 'sum', args: [{ property: 'anr_duration_of_event_data' }] } }, { name: 'avg_secs', expr: { fn: 'average', args: [{ property: 'anr_duration_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'anr' }] }] }],
     metrics: [
@@ -113,11 +112,13 @@ test('governed metrics on the crash fact, and a payload property scoped to ONE e
     ],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal', 'stab_crashed_users', 'anr_events', 'anr_secs', 'anr_avg_secs'] }] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const governed = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['stab_fatal', 'stab_crashed_users'] }] });
+  assert.equal(governed.ok, true, JSON.stringify(governed.error));
   // 'governed metrics on the crash fact: fatal = 6 from 3 distinct players'
-  assert.equal(num(r.rows[0].stab_fatal), 6, '[governed crash metrics] fatal');
-  assert.equal(num(r.rows[0].stab_crashed_users), 3, '[governed crash metrics] distinct players');
+  assert.equal(num(governed.rows[0].stab_fatal), 6, '[governed crash metrics] fatal');
+  assert.equal(num(governed.rows[0].stab_crashed_users), 3, '[governed crash metrics] distinct players');
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['anr_events', 'anr_secs', 'anr_avg_secs'] }] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
   // the payload property scoped to anr
   assert.equal(num(r.rows[0].anr_events), 3, '[anr scope] rows');
   assert.equal(num(r.rows[0].anr_secs), 26, '[anr scope] seconds');
@@ -128,14 +129,13 @@ test('governed metrics on the crash fact, and a payload property scoped to ONE e
 // A physical column of the crash fact, grouped without any join.
 test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1 -> 6', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_semantic_model({
-    context_id: crashCtx,
+  const out = await declare(engine, {
     name: 'ver',
     semantic_models: [{ source: 'crashlytics', dimensions: [{ column: 'app_version' }], measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'reports', type: 'simple', measure: 'reports' }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { steps: [{ stage: 'metrics', metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
+  const r = await q(out.context_id, { steps: [{ stage: 'metrics', metrics: ['ver_reports'], group_by: [{ source: 'crashlytics', column: 'app_version' }] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'ver_reports'), 'ver_reports');
   assert.equal(by['1.0.0'], 7);
@@ -157,9 +157,9 @@ test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (
 // u1 (3 crashes) and u2 (2) reached a second one, u3 (1) did not.
 test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
+  const s = await engine.build_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
   assert.ok(s.context_id, 'start returns a context_id');
-  const a = await engine.build_pipeline_model({
+  const a = await engine.build_model({
     action: 'add_steps',
     context_id: s.context_id,
     steps: [{
@@ -171,7 +171,7 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
       ],
     }] });
   assert.equal(stepEffect(a).step_index, 1);
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 3, 'one row per player who crashed');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, 2);
@@ -194,14 +194,14 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
   // the rows where `cond` holds: a count over a case that yields 1 there and nothing elsewhere
   const rowsWhere = (cond) => ({ fn: 'count', args: [{ fn: 'case', cases: [{ when: [cond], then: { value: 1 } }] }] });
-  const s0 = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s0.context_id, steps: [{ stage: 'aggregate', measures: [
+  const s0 = await engine.build_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
+  await engine.build_model({ action: 'add_steps', context_id: s0.context_id, steps: [{ stage: 'aggregate', measures: [
     { name: 'true_text', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }) },
     { name: 'false_upper', expr: rowsWhere({ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'FALSE' }] }) },
     { name: 'either', expr: rowsWhere({ fn: 'in', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }, { value: false }] }) },
     { name: 'flipped', expr: rowsWhere({ fn: 'eq', args: [{ value: 'true' }, { column: 'is_fatal_of_event_data' }] }) },
   ] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s0.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s0.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   const got = c.rows[0];
   assert.equal(num(got.true_text), num(want.yes), "[eq 'true'] the fatal rows");
@@ -209,8 +209,8 @@ test('a boolean column takes true / false however it is written, and its rows ar
   assert.equal(num(got.either), num(want.yes) + num(want.no), "[in ['true', false]] both");
   assert.equal(num(got.flipped), num(want.yes), "['true' = the column] the constant on the left");
   // a constant that is no boolean is refused in the call, naming the column
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
+  const s = await engine.build_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
 });
 
 // A funnel step's condition follows the same rule: a flag spelled "true" is compared as TRUE.
@@ -219,17 +219,17 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   const names = (await wh.query('select distinct event_name as e from fct_crashlytics_events order by 1')).rows.map((r) => r.e);
   const perPlayer = (await wh.query('select player_id_of_internal as u, count(*) as n from fct_crashlytics_events where is_fatal_of_event_data group by 1')).rows;
   const fatal = { event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'true' }] }] };
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
-  await engine.build_pipeline_model({
+  const s = await engine.build_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
+  await engine.build_model({
     action: 'add_steps', context_id: s.context_id,
     steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] }] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, perPlayer.filter((r) => num(r.n) >= 2).length, 'and a second one');
   // a constant that is no flag is refused as the step is added, naming the property
-  const bad = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({
+  const bad = await engine.build_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({
     action: 'add_steps', context_id: bad.context_id,
     steps: [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ fn: 'eq', args: [{ column: 'is_fatal_of_event_data' }, { value: 'yes' }] }] }, { name: 'again', event_name: names }] }] })), /'is_fatal_of_event_data' is a boolean: compare it with true or false/);
 });
@@ -238,13 +238,13 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
 test('columns named like keywords (group, order) flow through the stages as columns, counted from the rows', opts, async (t) => {
   if (skip(t)) return;
   const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
+  const s = await engine.build_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'group', expr: { fn: 'coalesce', args: [{ column: 'app_version' }, { value: 'none' }] } },
     { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', expr: { fn: 'count' } }] },
     { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
   ] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.reduce((n, r) => n + num(r.order), 0), num(want.n));
   assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
@@ -256,14 +256,14 @@ test('columns named like keywords (group, order) flow through the stages as colu
 test('a raw expression takes its columns in args, with functions, keywords and strings around them in its text; named in the text it is refused', opts, async (t) => {
   if (skip(t)) return;
   const want = (await wh.query("select count(*) as n from fct_crashlytics_events where is_fatal_of_event_data")).rows[0];
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
+  const s = await engine.build_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
   // the same column written by name in the text is refused when the step is added
-  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when is_fatal_of_event_data then 'x' end" } }] })), /names 'is_fatal_of_event_data' in its SQL text — a column goes in `args`/);
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [
     { stage: 'compute', name: 'fatal_flag', expr: { fn: 'raw', sql: "case when {1} then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end", args: [{ column: 'is_fatal_of_event_data' }] } },
     { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'fatal_flag' }, { value: 'fatal_x' }] }], then: { value: 1 } }] }] } }] },
   ] });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.ok(num(want.n) > 0, 'the fixture has fatal crashes');
   assert.equal(num(c.rows[0].n), num(want.n));
@@ -276,7 +276,7 @@ test('a raw expression takes its columns in args, with functions, keywords and s
 // contain. Same 3 ANR rows, same 26 seconds — but the function is fixed for every caller.
 test('a governed measure declared on an events source: anr_seconds = 26', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.build_semantic_model({
+  const out = await declare(engine, {
     name: 'gov',
     semantic_models: [{ source: 'crashlytics', dimensions: [{ column: 'app_version' }] }],
     metrics: [{ name: 'anr_seconds', type: 'simple', measure: 'anr_seconds' }],

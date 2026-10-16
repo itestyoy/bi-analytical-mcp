@@ -160,7 +160,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
      properties, its `meta.mcp.primary_entity` and its own space in the value
      index (keyed by `(source, property)`), and they are never mixed. No source is
      privileged: the SOURCE is always a separate argument — `semantic_index({
-     source, event })`, `build_pipeline_model({ source })`, `semantic_models[].source`
+     source, event })`, `build_model({ source })`, a semantic_model measure's `source`
      — never glued into a name. Within a source, names are used as-is. A source is
      named ALWAYS, in every catalog, including one that declares a single source:
      one address for one thing, so no name ever has a second, owner-less spelling
@@ -297,7 +297,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   the same schema it published, so what the model sees and what is checked are one schema. There are no
   old names: every tool is listed and called by its one name (no alias, no unlisted tool). What a tool
   hands its input to is a private engine METHOD (`_analyzeExperiment`, `_buildPipeline`, `_dropContext` …)
-  with an input contract named `<tool>.<mode>` (`experiment.analyze`, `build_pipeline_model.pipeline`,
+  with an input contract named `<tool>.<mode>` (`experiment.analyze`, `build_model.pipeline`,
   `delete_context.context` …; `METHOD_CONTRACTS`, src/schema.js), validated and never offered. A tool's
   modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
   distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
@@ -434,8 +434,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   written the same way (MetricFlow is handed the case as its expr). What a semantic metric
   reads is named by a string — a simple or cumulative metric's `measure` — or by `{ metric }` leaves:
   a derived metric's `expr` (its inputs read off the leaves; a ratio is `div` of two metrics) — and a
-  model is loaded into a task by an item of `semantic_models` (`{ source }` alone loads it for its
-  columns), in a declaration and an update alike (an update names its task by `name`). A SORT KEY over a table's rows (the
+  model is loaded into a semantic layer by its semantic_model step: a measure of it (`source`), or a join
+  of it for its columns (`join: [{ source, on }]`). A SORT KEY over a table's rows (the
   order_by stage — a build's, a read's, the steps after a metrics step — and a window's order) is ONE
   item `{ key, direction?, nulls? }` (`SORT_KEY`),
   NULLs last unless it says first, written explicitly on every warehouse; a partition (a window's, a
@@ -509,9 +509,18 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   only the views of what it drew (no other tools/call, resource, model message, link or network) — a
   test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
-- BUILD, QUERY, SHOW (HARD RULE). Two builders — `build_semantic_model` (the semantic side) and
-  `build_pipeline_model` (the pipeline side) — and ONE query tool, `query_model`, for both. A call that
-  STARTS warehouse work — a build (incl. action:update, a pipeline materialize) or a query
+- BUILD, QUERY, SHOW (HARD RULE). ONE builder, `build_model` — a build of steps: the pipeline's stages,
+  and as its LAST step a `semantic_model` step, the semantic layer over the build's source (or, once 3b
+  lands, over the table the steps before it built: src/pipeline/semantic-stage.js; its form
+  `SEMANTIC_MODEL_STEP`, src/schema/fields.js, offered by `STAGE_PLACES.build`) — and ONE query tool,
+  `query_model`, for both sides; the sides stay inside the engine (`TASK_KINDS`, src/engine.js: a
+  semantic layer's parse and a pipeline's build are build_model's tasks, a metric query and a read
+  query_model's). A context holds ONE semantic layer, its build's step: it is changed by edit_step and
+  materialized again, which replaces what the context held. Its measures fold the main model's rows, or —
+  with `source` — another model's own, compared beside them on metric_time; its `join` names the models
+  whose attributes the metrics are grouped by, each on its join contract, checked against the key
+  MetricFlow joins it on. A call that
+  STARTS warehouse work — a build (a materialize, a semantic layer's included) or a query
   (`query_model({ context_id, steps })` — a QUERY IS ITS STEPS: with a metrics step it is a METRIC
   QUERY (a semantic task), without one a READ of the context's stored pipeline table (a pipeline task;
   `time_range`, `materialize` and `include` belong to a metric query and are refused there). A metric
@@ -574,7 +583,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, only when `buildViewModel(...).kind !== 'none'` — and by every
   successful answer of a tool that declares an `outputSchema` (`output` on its definition,
-  src/schema/outputs.js: time, context, delete_context, memory, explore_errors, build_semantic_model —
+  src/schema/outputs.js: time, context, delete_context, memory, explore_errors —
   an answer of one shape, from a tool with no view, since a host draws a card for every answer that
   carries structuredContent). A tool that answers with a result's rows (the query tool, a pipeline
   build) declares none: the rows would be carried twice. Every other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
@@ -584,7 +593,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
   only when asked with `card: true` on analyze (a card offered to an Apps client alone: `card: true`
   from any other is refused, `false` — no card — is what it gets anyway). A stored result is
-  built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', name,
+  built on by a pipeline started from its task (`build_model({ action: 'start', name,
   from_task })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
   through tasks or display_model_result. The one sanctioned exception is a FEATURE's side (below):

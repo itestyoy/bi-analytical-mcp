@@ -21,9 +21,9 @@ const eventIs = (value) => ({ fn: 'eq', args: [{ column: 'event_name' }, { value
 
 /** The refusal of a pipeline whose where compares the event name with `value`. */
 async function pipelineRefusal(value, op = eventIs(value)) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `ev_${Math.abs(hash(JSON.stringify(op)))}`, source: 'events' });
+  const s = await engine.build_model({ action: 'start', name: `ev_${Math.abs(hash(JSON.stringify(op)))}`, source: 'events' });
   await assert.rejects(
-    engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [op] }] }),
+    engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [op] }] }),
     (e) => { pipelineRefusal.last = e.message; return true; },
   );
   return pipelineRefusal.last;
@@ -53,8 +53,8 @@ test('every member of an in / not_in and a neq is checked too', async () => {
 });
 
 test('a pipeline where on a real event is accepted', async () => {
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'ev_ok', source: 'events' });
-  const r = await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [eventIs('tutorial')] }] });
+  const s = await engine.build_model({ action: 'start', name: 'ev_ok', source: 'events' });
+  const r = await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [eventIs('tutorial')] }] });
   assert.notEqual(r.ok, false, JSON.stringify(r));
 });
 

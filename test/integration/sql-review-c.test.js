@@ -42,9 +42,9 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /** The rows a pipeline over the events source leaves after `steps`, materialized. */
 async function rows(steps) {
-  const s = await engine.build_pipeline_model({ action: 'start', name: `review_c_${seq++}`, source: 'events' });
-  await engine.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps });
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const s = await engine.build_model({ action: 'start', name: `review_c_${seq++}`, source: 'events' });
+  await engine.build_model({ action: 'add_steps', context_id: s.context_id, steps });
+  const c = await engine.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }

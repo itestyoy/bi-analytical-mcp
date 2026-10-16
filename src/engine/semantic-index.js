@@ -26,7 +26,7 @@ export const semanticIndexMethods = {
     return {
       ...r,
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload is a build_semantic_model request: build_semantic_model({ request: <semantic_payload> }). A pipeline_payload is a build_pipeline_model start request: build_pipeline_model({ request: <pipeline_payload> }) starts the draft with its steps — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question. A semantic_payload or a pipeline_payload is a build_model start request: build_model({ request: <payload> }) starts the build with its steps (a semantic_payload\'s last, its semantic_model step) — add materialize: true to build it in the same call, or materialize later with { action: \'materialize\', context_id }. An example query is query_model({ request: { context_id, ...<query> } }).',
     };
   },
 
@@ -170,7 +170,7 @@ export const semanticIndexMethods = {
         ...(a.label ? { label: a.label } : {}),
         ...(a.description ? { description: a.description } : {}),
       }));
-      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ request: { semantic_models: [{ source: '${k}', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }] }] } }) (percentile also takes percentile: 0.9 beside its args).`;
+      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).`;
     }
     // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way. Listed
     // with the catalog's own keys — `agg` is dbt's aggregation as the declaration fixes it (sum_boolean
@@ -363,7 +363,7 @@ export const semanticIndexMethods = {
     const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
     recommendations.push(ent
       ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (load the model with a semantic_models item { source: '${mk}' }${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
-      : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
+      : `Reference '${col}' after a pipeline join with:'${mk}' (build_model join stage).`);
     const out = {
       column: col, source: mk, type: dim.type,
       description: dDescs[col],
@@ -646,7 +646,7 @@ export const semanticIndexMethods = {
         ...(c.pythonRuntime.method && !c.pythonRuntime.method_declared
           ? { submission_note: `Nothing declares the submission: '${c.pythonRuntime.method}' is inferred from the profile's settings, and this server writes it into every python model it generates so the frame API and the runtime agree. Declare it where dbt itself looks — dbt_project.yml, models: +submission_method — and direct \`dbt run\` outside this server matches too.` }
           : {}),
-        note: 'A pipeline may end in a `python` stage (build_pipeline_model add_steps { steps: [{ stage: "python", … }] }): dbt runs it as a Python model on the warehouse runtime.',
+        note: 'A pipeline may end in a `python` stage (build_model add_steps { steps: [{ stage: "python", … }] }): dbt runs it as a Python model on the warehouse runtime.',
       }
       : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
     // The dbt project's own semantic layer: its metrics, queried in their context without a build —
@@ -668,7 +668,7 @@ export const semanticIndexMethods = {
     // Declared models the warehouse cannot back (a structural column or the table is missing):
     // excluded from every tool; the reason is here so the analyst can be told what to fix.
     ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ request: { source } }) on one shows what is missing.' } : {}),
-    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_pipeline_model({ request: { source } }), semantic_models[].source; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
+    ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ request: { source, event } }), build_model({ request: { source } }), semantic_models[].source; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
     // Each events source lists its OWN event names — they are never merged into one list,
     // because two sources may legitimately carry the same event name.
     event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
@@ -683,7 +683,7 @@ export const semanticIndexMethods = {
     // pipelines. The fact holds only per-event columns — user/experiment attributes
     // always come via their model.
     join_note: userModel
-      ? `Group or filter by { source: '${userModel}', column: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (load it with a semantic_models item { source: '${userModel}' } in build_semantic_model) — never spell a join path. In pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
+      ? `Group or filter by { source: '${userModel}', column: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (join it in the semantic_model step of build_model: { source: '${userModel}', on: { … } }) — never spell a join path. In pipelines, reach the same attributes with a join stage on its contract ({ stage: 'join', source: '${userModel}', on: { … }, attrs }).`
       : null,
     value_index_status: sync ? {
       ready: (sync.indexed_properties || 0) > 0,

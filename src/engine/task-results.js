@@ -248,7 +248,7 @@ export const taskResultMethods = {
       const metrics = ctx.state.engine === 'project' || (ctx.state.metrics || []).length;
       throw new ToolError(metrics
         ? `context ${ctx.id} holds metrics and no stored table: a query of it has a metrics step — query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: "metrics", metrics: [...], group_by: [...] }] } })`
-        : `context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize), then read it here`, { stage: 'validate', field: 'context_id' });
+        : `context ${ctx.id} holds no built pipeline model — build one with build_model (… materialize), then read it here`, { stage: 'validate', field: 'context_id' });
     }
     // the steps are built HERE, over the model's columns, by the compiler the read runs through: a
     // mistake is refused in the call (the columns are unknown only while a first build whose plan was

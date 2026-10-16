@@ -90,18 +90,21 @@ async function callErr(name, args) {
 
 /** A whole pipeline over MCP: start → add_steps → materialize. */
 async function mcpPipeline(source, steps, name) {
-  const s = await call('build_pipeline_model', { action: 'start', name: name || `e2e_${seq++}`, source });
-  for (const step of steps) await call('build_pipeline_model', { action: 'add_steps', context_id: s.context_id, steps: [step] });
-  const built = await call('build_pipeline_model', { action: 'materialize', context_id: s.context_id });
+  const s = await call('build_model', { action: 'start', name: name || `e2e_${seq++}`, source });
+  for (const step of steps) await call('build_model', { action: 'add_steps', context_id: s.context_id, steps: [step] });
+  const built = await call('build_model', { action: 'materialize', context_id: s.context_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return built;
 }
 
-/** A governed task over MCP: create it, then query it. */
-async function mcpTask(payload) {
-  const created = await call('build_semantic_model', payload);
-  assert.equal(created.parse?.ok, true, JSON.stringify(created.parse));
-  return created.context_id;
+/** A semantic layer over MCP: a build whose only step is its semantic_model step, materialized in the
+ *  same call, its parse read back with the tool the answer names. */
+async function mcpTask({ name, source, ...step }) {
+  const started = await call('build_model', { action: 'start', name, source, steps: [{ stage: 'semantic_model', ...step }], materialize: true });
+  assert.ok(started.materialize?.task_id, JSON.stringify(started.materialize));
+  const parsed = (await call(started.materialize.read_with, { task_ids: [started.materialize.task_id] })).results[0];
+  assert.equal(parsed.parse?.ok, true, JSON.stringify(parsed.parse || parsed.error));
+  return started.context_id;
 }
 
 // ═══════════ 1. discover → declare → query, the whole governed loop ═══════════
@@ -110,15 +113,15 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   if (skip(t)) return;
   // the protocol advertises the tools an assistant needs…
   const tools = (await client.listTools()).tools.map((x) => x.name);
-  for (const needed of ['semantic_index', 'build_semantic_model', 'query_model', 'build_pipeline_model', 'query_model', 'experiment']) {
+  for (const needed of ['semantic_index', 'build_model', 'query_model', 'experiment']) {
     assert.ok(tools.includes(needed), `${needed} is advertised`);
   }
-  // …and only those: editing a task is a MODE of build_semantic_model, not a tool of its own —
-  // two tools meant the deployment's whole vocabulary twice in every listing.
-  assert.ok(!tools.includes('update_semantic_model'), 'the update tool is folded into build_semantic_model');
-  const createTool = (await client.listTools()).tools.find((x) => x.name === 'build_semantic_model');
-  const request = createTool.inputSchema.properties.request;
-  assert.deepEqual(forms(createTool.inputSchema, request).flatMap((f) => pinned(createTool.inputSchema, f, 'action')), ['create', 'update']);
+  // …and only those: a semantic layer is a build's last step, not a tool of its own — two builders
+  // meant the deployment's whole vocabulary twice in every listing.
+  for (const gone of ['build_semantic_model', 'build_pipeline_model', 'update_semantic_model']) assert.ok(!tools.includes(gone), `${gone} is no tool`);
+  const builder = (await client.listTools()).tools.find((x) => x.name === 'build_model');
+  const request = builder.inputSchema.properties.request;
+  assert.ok(forms(builder.inputSchema, request).flatMap((f) => pinned(builder.inputSchema, f, 'action')).includes('start'));
   // …the overview names the four sources…
   const overview = await call('semantic_index', {});
   const models = JSON.stringify(overview.models || overview);
@@ -136,8 +139,9 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // MetricFlow applies the validity window itself: each spend row is attributed to the install
   // version valid on the spend day.
   const ctx = await mcpTask({
-    name: 'e2e_ua',
-    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'users' }],
+    name: 'e2e_ua', source: 'acquisition',
+    join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'spend_date' } }],
+    measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const r = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_ua_cost'], group_by: [{ source: 'users', column: 'country' }] }] });
@@ -173,7 +177,7 @@ test('2. an event → its funnel\'s crash report → the install version then �
   assert.equal(num(r.funnels), 4);
   assert.equal(num(r.spend_rows), 4);
   // the rows are a task's result — readable again by its id — and the pipeline tier is named.
-  assert.equal(built.tool, 'build_pipeline_model');
+  assert.equal(built.tool, 'build_model');
   assert.equal(built.table, built.model);
   assert.equal(built.provenance?.tier, 'pipeline');
 });
@@ -188,8 +192,8 @@ test('3. the users contract joins the version valid then: 13 attributed rows —
   ]);
   assert.deepEqual({ n: num(built.rows[0].n), distinct: num(built.rows[0].rows) }, { n: 13, distinct: 13 }, 'one install version per spend row');
   // a join that names no moment is refused at the protocol boundary — the key alone would match every version
-  const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
-  const refused = await callErr('build_pipeline_model', {
+  const s = await call('build_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
+  const refused = await callErr('build_model', {
     action: 'add_steps', context_id: s.context_id,
     steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] });
   assert.match(refused.error.message, /missing required property 'time'/);
@@ -225,18 +229,18 @@ test('4. the caller picks the ad format: 8 / 4 / 4 rows, and k1 keeps its funnel
 
 test('5. the attrs contract, enforced at the protocol boundary', opts, async (t) => {
   if (skip(t)) return;
-  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'events' })).context_id;
+  const start = async () => (await call('build_model', { action: 'start', name: `e2e_${seq++}`, source: 'events' })).context_id;
   const crash = (attrs) => ({ stage: 'join', source: 'crashlytics', on: { user: 'player_id_of_internal', funnel: 'tracking_id', format: 'rewarded' }, ...(attrs ? { attrs } : {}) });
 
   // (a) no attrs → refused, and the error lists the joined model's attributes — never an amount.
-  const missing = await callErr('build_pipeline_model', {
+  const missing = await callErr('build_model', {
     action: 'add_steps', context_id: await start(),
     steps: [{ stage: 'join', source: 'acquisition', on: { user: 'player_id_of_internal', time: 'device_time' } }] });
   assert.match(missing.error.message, /missing required property 'attrs' — a list of \{ column, … \}, column one of: .*media_source/s);
   assert.doesNotMatch(missing.error.message, /column one of: [^.]*\bcost\b/);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
-  const dup = await callErr('build_pipeline_model', { action: 'add_steps', context_id: await start(), steps: [crash([{ column: 'event_name' }])] });
+  const dup = await callErr('build_model', { action: 'add_steps', context_id: await start(), steps: [crash([{ column: 'event_name' }])] });
   assert.match(dup.error.message, /already has a column named 'event_name'/);
   assert.match(dup.error.message, /name: 'crashlytics_event_name'/);
 
@@ -255,8 +259,8 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_pipeline_model', { action: 'add_steps', context_id: s, steps: [{ ...crash([{ column: 'crash_id' }]), kind: 'inner' }] });
-  const unlisted = await callErr('build_pipeline_model', {
+  await call('build_model', { action: 'add_steps', context_id: s, steps: [{ ...crash([{ column: 'crash_id' }]), kind: 'inner' }] });
+  const unlisted = await callErr('build_model', {
     action: 'add_steps', context_id: s,
     steps: [{ stage: 'aggregate', measures: [{ name: 'x', expr: { fn: 'count_distinct', args: [{ column: 'issue_title_of_event_data' }] } }] }] });
   assert.match(unlisted.error.message, /unknown column 'issue_title_of_event_data'/);
@@ -294,9 +298,10 @@ test('6. funnel conversion by install country: 12 enter (US 4 / GB 3 / DE 3 / BR
 
 test('7. spend, events and crashes side by side on metric_time: 17.50 / 184 / 13', opts, async (t) => {
   if (skip(t)) return;
+  // each measure folds its own source's rows; MetricFlow compares them on metric_time
   const ctx = await mcpTask({
-    name: 'e2e_mix',
-    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'crashlytics', measures: [{ name: 'crashes', expr: { fn: 'count' } }] }],
+    name: 'e2e_mix', source: 'acquisition',
+    measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'evts', source: 'events', expr: { fn: 'count' } }, { name: 'crashes', source: 'crashlytics', expr: { fn: 'count' } }],
     metrics: [
       { name: 'cost', type: 'simple', measure: 'cost' },
       { name: 'evts', type: 'simple', measure: 'evts' },
@@ -372,9 +377,9 @@ test('9. materialize once, then re-slice the stored result from its task: meta 4
 
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, steps) => {
-    const d = await call('build_pipeline_model', { action: 'start', name, from_task: built.task_id });
-    await call('build_pipeline_model', { action: 'add_steps', context_id: d.context_id, steps });
-    return call('build_pipeline_model', { action: 'materialize', context_id: d.context_id });
+    const d = await call('build_model', { action: 'start', name, from_task: built.task_id });
+    await call('build_model', { action: 'add_steps', context_id: d.context_id, steps });
+    return call('build_model', { action: 'materialize', context_id: d.context_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'crashes', expr: { fn: 'count_distinct', args: [{ column: 'crash_id' }] } }] },
@@ -394,11 +399,11 @@ test('9. materialize once, then re-slice the stored result from its task: meta 4
 
 // ═══════════ 10. an existing task, extended in place ═══════════
 
-test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', opts, async (t) => {
+test('10. extend a semantic layer over MCP and re-query: cost 17.50 alongside 64 clicks', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await mcpTask({
-    name: 'e2e_grow',
-    semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }],
+    name: 'e2e_grow', source: 'acquisition',
+    measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }],
   });
   const before = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost'] }] });
@@ -413,13 +418,13 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   const tooEarly = await callErr('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_clicks'] }] });
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
-  // add a second amount from the SAME source, choosing its aggregation here and now — to the task
-  // named as a declaration names it (`name`; `task`, and an item's `from`, are an earlier spelling,
-  // refused at the boundary with the value converted)
-  const addClicks = { semantic_models: [{ source: 'acquisition', measures: [{ name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }], metrics: [{ name: 'clicks', type: 'simple', measure: 'clicks' }] };
-  const earlier = await callErr('build_semantic_model', { action: 'update', context_id: ctx, task: 'e2e_grow', ...addClicks });
-  assert.match(earlier.error.message, /earlier spelling — write .*"name":"e2e_grow"/s, JSON.stringify(earlier));
-  const grown = await call('build_semantic_model', { action: 'update', context_id: ctx, name: 'e2e_grow', ...addClicks });
+  // add a second amount from the SAME source, choosing its aggregation here and now: the build's
+  // semantic_model step edited — the step as preview shows it, with the measure and its metric beside
+  // the others — and materialized again
+  const { steps } = await call('build_model', { action: 'preview', context_id: ctx });
+  const { index, ...layer } = steps.find((st) => st.stage === 'semantic_model');
+  await call('build_model', { action: 'edit_step', context_id: ctx, index, step: { ...layer, measures: [...layer.measures, { name: 'clicks', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }], metrics: [...layer.metrics, { name: 'clicks', type: 'simple', measure: 'clicks' }] } });
+  const grown = await call('build_model', { action: 'materialize', context_id: ctx });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
 
   const after = await call('query_model', { context_id: ctx, steps: [{ stage: 'metrics', metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] }] });

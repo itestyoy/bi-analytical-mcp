@@ -4,14 +4,14 @@
 //   (Discovery and the value index's sync state — semantic_index overview → event →
 //    property → value search, and { status } after a refresh — are value-index.test.js's,
 //    which builds the index over the same fixture.)
-//   3. PIPELINE — build_pipeline_model (start/add_steps/preview/commit) builds the
+//   3. PIPELINE — build_model (start/add_steps/preview/commit) builds the
 //                    activation funnel; rows read back via query_model (12/8/5/3,
 //                    the same counts the funnels of pipeline-stages.test.js prove on the
 //                    all-at-once build).
 //   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_model by
-//                    country → build_semantic_model action update adds a payers metric → re-query;
+//                    country → an edit of the semantic_model step adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
-//   5. A/B         — build_pipeline_model fed the conversion recipe's steps one-at-a-
+//   5. A/B         — build_model fed the conversion recipe's steps one-at-a-
 //                    time → materialize → per-variant aggregates → experiment analyze + check_split +
 //                    plan: the conversion recipe's data proof (model-results.test.js runs the
 //                    others).
@@ -35,6 +35,7 @@ import { settle, readTable, one, stepEffect } from '../helpers/settle.js';
 import { armFrom } from '../helpers/experiment-arm.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare, editLayer } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
@@ -72,24 +73,24 @@ before(async () => {
 after(async () => { backend?.close?.(); engine?.close(); if (wh) await wh.stop(); });
 
 // ───────────────────────── 3. PIPELINE (incremental) ─────────────────────────
-test('3a. build_pipeline_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
+test('3a. build_model: start → add_steps (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include: ['columns'] });
+  const s = await engine.build_model({ action: 'start', name: 'e2e_funnel', source: 'events', include: ['columns'] });
   assert.ok(s.context_id, 'start returns a context_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.context_id;
 
   // default add_steps returns a DIFF; the funnel columns show up as added.
-  const a1 = await engine.build_pipeline_model({ action: 'add_steps', context_id: S.draftId, steps: [matchActivation()] });
+  const a1 = await engine.build_model({ action: 'add_steps', context_id: S.draftId, steps: [matchActivation()] });
   assert.equal(stepEffect(a1).step_index, 1);
   const cols = stepEffect(a1).columns_added.map((c) => c.name);
   assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
 
-  const pv = await engine.build_pipeline_model({ action: 'preview', context_id: S.draftId });
+  const pv = await engine.build_model({ action: 'preview', context_id: S.draftId });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (existence only)');
   assert.equal(pv.steps.length, 1);
 
-  const c = await engine.build_pipeline_model({ action: 'materialize', context_id: S.draftId });
+  const c = await engine.build_model({ action: 'materialize', context_id: S.draftId });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -98,7 +99,7 @@ test('3a. build_pipeline_model: start → add_steps (funnel) → preview → com
   S.pipeCtx = c.context_id;
   S.pipeTable = c.model;
   S.pipeTask = c.task_id;
-  assert.equal(c.tool, 'build_pipeline_model', 'the rows are the build task\'s result');
+  assert.equal(c.tool, 'build_model', 'the rows are the build task\'s result');
   // Provenance: a pipeline result is tagged tier=pipeline with the source + real data freshness.
   assert.equal(c.provenance?.tier, 'pipeline');
   assert.equal(c.provenance?.source, 'events');
@@ -125,7 +126,7 @@ test('3b. the build task\'s stored table is re-read (paged) with query_model (sa
 // ───────────────────────── 4. SEMANTIC MODEL ─────────────────────────
 test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR25, total 85', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.build_semantic_model({
+  const created = await declare(engine, {
     name: 'e2e_mon',
     semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],
     metrics: [{ name: 'revenue', type: 'simple', measure: 'revenue' }],
@@ -146,29 +147,30 @@ test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR
   assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
-// The two updates are made one after the other — a payers metric, then three derived metrics, each an
-// expression of { metric } leaves read as stored — and ONE ungrouped query reads the payers and the derived
-// metrics side by side (one mf call); the by-day query is the distinct-by-time recommendation's.
-test('4b. build_semantic_model action update adds a payers metric (re-query = 7 distinct payers), and derived metrics added by an update read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
+// Two edits of the semantic_model step, one after the other — a payers measure and metric, then three
+// derived metrics, each an expression of { metric } leaves read as stored or as declared — and ONE
+// ungrouped query reads the payers and the derived metrics side by side (one mf call); the by-day query
+// is the distinct-by-time recommendation's.
+test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 distinct payers), and derived metrics read the task\'s metrics by stored name, by declared name and by both in one expr alike: 85 / 7', opts, async (t) => {
   if (skip(t)) return;
-  const upd = await engine.build_semantic_model({ action: 'update',
-    context_id: S.semCtx,
+  const upd = await editLayer(engine, S.semCtx, (st) => ({
+    ...st,
     // the distinct players of the purchases: count_distinct over a case that yields the player on a
     // purchase and nothing on any other row
-    semantic_models: [{ source: 'events', measures: [{ name: 'payers', expr: { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }], then: { column: 'player_id_of_internal' } }] }] } }] }],
-    metrics: [{ name: 'payers', type: 'simple', measure: 'payers' }],
-  });
+    measures: [...st.measures, { name: 'payers', expr: { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }], then: { column: 'player_id_of_internal' } }] }] } }],
+    metrics: [...st.metrics, { name: 'payers', type: 'simple', measure: 'payers' }],
+  }));
   assert.equal(upd.parse.ok, true, JSON.stringify(upd.parse));
   assert.ok(upd.metrics.includes('e2e_mon_payers'), '[payers] new metric registered');
 
-  const derived = await engine.build_semantic_model({ action: 'update',
-    context_id: S.semCtx,
-    metrics: [
+  const derived = await editLayer(engine, S.semCtx, (st) => ({
+    ...st,
+    metrics: [...st.metrics,
       { name: 'per_payer_stored', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'e2e_mon_payers' }] } },
       { name: 'per_payer_declared', type: 'derived', expr: { fn: 'div', args: [{ metric: 'revenue' }, { metric: 'payers' }] } },
       { name: 'per_payer_mixed', type: 'derived', expr: { fn: 'div', args: [{ metric: 'e2e_mon_revenue' }, { metric: 'payers' }] } },
     ],
-  });
+  }));
   assert.equal(derived.parse.ok, true, JSON.stringify(derived.parse));
 
   const names = ['e2e_mon_per_payer_stored', 'e2e_mon_per_payer_declared', 'e2e_mon_per_payer_mixed'];
@@ -206,19 +208,19 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
 });
 
 // ───────────────────────── 5. A/B over the experiments role ─────────────────────────
-test('5a. build_pipeline_model fed the conversion recipe steps → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
+test('5a. build_model fed the conversion recipe steps → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
   if (skip(t)) return;
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
   // steps one at a time, then commit. (_buildPipeline with the same payload
   // is the documented fallback; here we prove the add_steps path also works.)
   const r = recipes.list.find((x) => x.id === 'experiment_conversion');
   const steps = r.pipeline_payload.steps;
-  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
+  const start = await engine.build_model({ action: 'start', name: 'e2e_ab_conv', source: r.pipeline_payload.source });
   for (const step of steps) {
-    const a = await engine.build_pipeline_model({ action: 'add_steps', context_id: start.context_id, steps: [step] });
+    const a = await engine.build_model({ action: 'add_steps', context_id: start.context_id, steps: [step] });
     assert.ok(Number.isInteger(stepEffect(a).step_index), 'each add_steps advances the draft');
   }
-  const commit = await engine.build_pipeline_model({ action: 'materialize', context_id: start.context_id });
+  const commit = await engine.build_model({ action: 'materialize', context_id: start.context_id });
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));
   S.abCtx = commit.context_id;
 

@@ -48,6 +48,7 @@ import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
+import { declare } from '../helpers/declare.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
@@ -84,18 +85,18 @@ function variant(mutate, extra = {}) {
   const cat = loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
   return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
-const evtsTask = (eng, name, load = []) => eng.build_semantic_model({
+const evtsTask = (eng, name, load = []) => declare(eng, {
   name, semantic_models: [{ source: 'events', measures: [{ name: 'evts', expr: { fn: 'count' } }] }, ...load.map((source) => ({ source }))],
   metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
 });
 /** Run a pipeline of steps and return its rows. */
 async function pipeRows(source, steps, eng = engine) {
-  const s = await eng.build_pipeline_model({ action: 'start', name: `au_${seq++}`, source });
+  const s = await eng.build_model({ action: 'start', name: `au_${seq++}`, source });
   for (const step of steps) {
-    const r = await eng.build_pipeline_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
+    const r = await eng.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step] });
     assert.ok(!r.error, `add_steps failed: ${JSON.stringify(r.error || r)}`);
   }
-  const c = await eng.build_pipeline_model({ action: 'materialize', context_id: s.context_id });
+  const c = await eng.build_model({ action: 'materialize', context_id: s.context_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -124,14 +125,14 @@ before(async () => {
   await indexer.refresh();
 
   // events x users, ad_type declared as a task dimension: S1 reads every split of one query
-  const eu = await engine.build_semantic_model({
+  const eu = await declare(engine, {
     name: 'aeu',
     semantic_models: [{ source: 'events', dimensions: [{ property: 'ad_type_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }] }, { source: 'users' }],
     metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }],
   });
   assert.equal(eu.parse.ok, true, `40: a task declaring ad_type as a dimension parses: ${JSON.stringify(eu.parse)}`);
   evUsersCtx = eu.context_id;
-  const both = await engine.build_semantic_model({
+  const both = await declare(engine, {
     name: 'aboth',
     semantic_models: [{ source: 'events', measures: [{ name: 'launches', expr: { fn: 'count' } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'first_launch' }] }] }, { source: 'crashlytics', measures: [{ name: 'reports', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'launches', type: 'simple', measure: 'launches' }, { name: 'reports', type: 'simple', measure: 'reports' }],
@@ -149,7 +150,7 @@ before(async () => {
     const clicks = M.fct_player_acquisition.columns.find((c) => c.name === 'clicks');
     setMcp(clicks, { measure: true, dimension: {} });
   }));
-  const bt = await bothEngine.build_semantic_model({
+  const bt = await declare(bothEngine, {
     name: 'aclk',
     semantic_models: [{ source: 'acquisition', dimensions: [{ column: 'clicks' }], measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }, { name: 'click_total', expr: { fn: 'sum', args: [{ column: 'clicks' }] } }] }, { source: 'users' }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'click_total', type: 'simple', measure: 'click_total' }],
@@ -291,10 +292,10 @@ test("S5 (E/H). one ungrounded variant: an amount, a governed measure and a time
   assert.ok(pruned.experiments.includes('(time axis)'), `27: the time axis over a missing column is pruned: ${JSON.stringify(pruned)}`);
   assert.equal(cat.getModel('experiments').time, undefined, '27: the model has no time axis left');
   // 25. a measure over the pruned amount is refused at validation, not in the warehouse
-  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ source: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
+  await assert.rejects(() => declare(eng, { name: 'agr2', semantic_models: [{ source: 'acquisition', measures: [{ name: 'b', expr: { fn: 'sum', args: [{ column: 'bonus_spend' }] } }] }], metrics: [{ name: 'b', type: 'simple', measure: 'b' }] }),
     /bonus_spend|invalid input/, '25: a measure over the pruned amount is refused at validation');
   // what survives builds and answers: the real amount, the surviving governed measure, the renamed source's count
-  const c = await eng.build_semantic_model({
+  const c = await declare(eng, {
     name: 'agr',
     semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }, { source: 'analytics', measures: [{ name: 'n', expr: { fn: 'count' } }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }, { name: 'total_spend', type: 'simple', measure: 'total_spend' }, { name: 'n', type: 'simple', measure: 'n' }],

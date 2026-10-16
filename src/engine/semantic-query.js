@@ -147,7 +147,7 @@ export const semanticQueryMethods = {
       // an event property is grouped by once the task declares it a dimension of its source
       if (declaredRef?.dimension !== undefined) throw new ToolError(`${at}: '${label}' is a dimension this task computed, not an event property — write ${refText(declaredRef)}`, { stage: 'validate', field });
       if (declaredRef?.property === undefined) {
-        throw new ToolError(`${at}: the event property '${label}' is not a dimension of this context — declare it one: build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_models: [{ source: '${model}', dimensions: [{ property: '${name}' }] }] } }), then name it { source: '${model}', property: '${name}' }.`, { stage: 'validate', field });
+        throw new ToolError(`${at}: the event property '${label}' is not a dimension of this context — declare it one — { property: '${name}' } in the dimensions of the build's semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } }), then materialize) — and name it { source: '${model}', property: '${name}' }.`, { stage: 'validate', field });
       }
       return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${name}`, label, type: 'unknown' };
     }
@@ -264,7 +264,8 @@ export const semanticQueryMethods = {
     const ctx = this._ctx(input.context_id);
     // a metric query has a metrics step; a context that holds no pipeline table has nothing else to read,
     // so a query of it without one is a metric query too — refused there, naming the metrics it offers
-    const pipelineContext = ctx.state.engine === 'pipeline' || !!ctx.state.draft || !!ctx.state.pipeline_model;
+    // (a draft that is only its semantic_model step is a semantic layer, with no table to read)
+    const pipelineContext = ctx.state.engine === 'pipeline' || !!ctx.state.pipeline_model || (!!ctx.state.draft && !(ctx.state.draft.semantic && !ctx.state.draft.stages.length && !ctx.state.draft.base));
     const metricQuery = (q) => !pipelineContext || (q.steps || []).some((st) => st?.stage === METRICS_STEP.stage);
     // A BATCH (queries): every query is validated before any starts, and they run side by side — one
     // task each, of the kind its steps say, read together with { task_ids }.
@@ -290,7 +291,7 @@ export const semanticQueryMethods = {
     // steps of the pipeline's own read stages (no metrics step), or build on them from the build's task.
     if (ctx.state.engine === 'pipeline' && !(ctx.state.metrics || []).length) {
       const built = ctx.state.pipeline_model?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline table (${ctx.state.model}), no metrics: read its rows with query_model({ request: { context_id: '${ctx.id}', steps } }) — steps without a metrics step${built ? `, or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : ''}`, { stage: 'validate', field: 'steps' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline table (${ctx.state.model}), no metrics: read its rows with query_model({ request: { context_id: '${ctx.id}', steps } }) — steps without a metrics step${built ? `, or build on them with build_model({ request: { action: 'start', name, from_task: '${built}' } })` : ''}`, { stage: 'validate', field: 'steps' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     return ctx.state.engine === 'project' ? this._projectQueryWork(ctx, input) : this._semanticQueryWork(ctx, input);
@@ -856,10 +857,10 @@ export const semanticQueryMethods = {
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
       const usesDistinct = distinctMeasures.size && metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...measureRefs(metric, ctx.state.metrics)].some((dm) => distinctMeasures.has(dm)); });
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
-        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       if (page.has_more) recs.push(this._keptRowsNote(page));
-      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ request: { action: \'start\', name, from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
+      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_model({ request: { action: \'start\', name, from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
         columns: res.columns,

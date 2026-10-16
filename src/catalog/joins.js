@@ -15,6 +15,8 @@
 //
 // A call names every part, and nothing else: `on: { <part>: <a column of the rows | a value> }`.
 
+import { NAME } from '../pipeline/sql.js';
+
 const PART = /^[a-z][a-z0-9_]*$/;
 const FIELDS = ['unique', 'key', 'time', 'select'];
 
@@ -94,4 +96,27 @@ export function describeContract(model, contract) {
   const time = contract.time?.within ? [`time within ${contract.time.within.join('–')}`] : contract.time?.same_day ? [`time on the day of ${contract.time.same_day}`] : [];
   const select = contract.select.map((s) => (s.values ? `${s.part}: one of ${s.values.join(' | ')}` : `${s.part}: a value of ${s.column}`));
   return `${model} — ${[...key, ...time, ...select].join('; ')}`;
+}
+
+/** What is wrong with the parts an `on` names for `contract` — every part named, nothing else — or null. */
+export function onPartsError(model, contract, on) {
+  const parts = contractParts(contract);
+  const missing = parts.filter((k) => on?.[k] === undefined);
+  const stray = Object.keys(on || {}).filter((k) => !parts.includes(k));
+  if (!missing.length && !stray.length) return null;
+  return `on names its contract's parts — ${parts.join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}${stray.length ? `; ${stray.join(', ')} is no part of it` : ''} (${describeContract(model, contract)})`;
+}
+
+/**
+ * `on` of a join onto `model` — the parts of the contract it declares, each named: a key part and the
+ * time a column of the rows, a select part its value. The pipeline's join step and the semantic_model
+ * stage's join take this one object.
+ */
+export function contractOnSchema(model, contract) {
+  const rowsColumn = (what) => ({ type: 'string', pattern: NAME, description: `A column of the rows: ${what}.` });
+  const on = {};
+  for (const k of contract.key) on[k.part] = rowsColumn(k.by ? `its value equals ${model}'s column the ${k.by} picks` : `its value equals ${model}.${k.column}`);
+  if (contract.time) on[TIME_PART] = rowsColumn(contract.time.within ? `the moment the version of ${model} valid then is joined (${contract.time.within.join(' … ')})` : `the moment whose day is ${model}.${contract.time.same_day}'s`);
+  for (const s of contract.select) on[s.part] = s.values ? { enum: s.values, description: `Which ${s.part}.` } : { type: 'string', minLength: 1, description: `The ${s.column} of ${model} the join keeps — a value it holds.` };
+  return { type: 'object', additionalProperties: false, required: Object.keys(on), properties: on, description: `The join contract ${model} declares: ${describeContract(model, contract)}.` };
 }

@@ -80,31 +80,31 @@ ${USER_KEY}      - { name: ts, data_type: timestamp, config: { meta: { mcp: { is
 
 test('every tool schema compiles for a catalog whose sources declare no relationship', () => {
   const { engine } = engineFor(NO_RELATIONSHIPS); // constructing the Engine IS the compile
-  assert.ok(engine.schemas.build_pipeline_model, 'the pipeline tool is still offered');
+  assert.ok(engine.schemas.build_model, 'the pipeline tool is still offered');
 });
+
+/** The semantic_model step of a build's schema — its last step, the semantic layer over its rows. */
+const semanticStep = (bm) => forms(bm, bm.$defs.stage).find((f) => pinned(bm, f, 'stage').includes('semantic_model'));
 
 test('every tool schema compiles for a model with no groupable dimension', () => {
   const { catalog, engine } = engineFor(NO_DIMENSIONS);
   assert.deepEqual(catalog.modelDimensionColumns('users'), []);
-  // the branch exists, minus the field there is nothing to fill in
-  const bsm = engine.schemas.build_semantic_model;
-  const branch = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'source').includes('users'));
-  assert.ok(branch, 'the users model can still carry a semantic model');
-  // no column to group by → the one dimension it can take is one computed from the row, { name, expr }
-  const dims = forms(bsm, field(bsm, branch, 'dimensions').items);
-  assert.deepEqual(dims.map((d) => Object.keys(d.properties).sort()), [['expr', 'label', 'name']]);
-  assert.ok(field(bsm, branch, 'measures'), 'measures are unaffected');
+  // the step is offered: its dimensions are its main model's, named in closed forms and checked against
+  // the model when it is compiled
+  const bm = engine.schemas.build_model;
+  const step = semanticStep(bm);
+  assert.ok(step, 'a build can end in its semantic layer');
+  assert.deepEqual(forms(bm, field(bm, step, 'dimensions').items).map((d) => d.required.sort()), [['column'], ['property'], ['expr', 'name']]);
+  assert.ok(field(bm, step, 'measures'), 'measures are unaffected');
 });
 
 test('every tool schema compiles for an events source with no declared event vocabulary', () => {
   const { catalog, engine } = engineFor(NO_EVENT_NAMES); // constructing the Engine IS the compile
   assert.deepEqual(catalog.eventNames('events'), [], 'nothing is declared yet');
-  // the semantic model of that source is still offered: its event is named by a condition's value
-  const bsm = engine.schemas.build_semantic_model;
-  const events = forms(bsm, field(bsm, bsm, 'semantic_models').items).find((b) => pinned(bsm, b, 'source').includes('events'));
-  assert.ok(events, 'the events source can be declared');
+  // the semantic layer over that source is still offered: its event is named by a condition's value
+  assert.ok(semanticStep(engine.schemas.build_model), 'the events source can carry a semantic layer');
   // and the funnel stage, which builds its own step vocabulary, is offered too
-  assert.ok(field(engine.schemas.build_pipeline_model, engine.schemas.build_pipeline_model, 'step'), 'the pipeline tool is still offered');
+  assert.ok(field(engine.schemas.build_model, engine.schemas.build_model, 'step'), 'the pipeline tool is still offered');
 });
 
 // The backstop: whatever the catalog, no built schema may carry an empty enum/oneOf/anyOf/allOf.

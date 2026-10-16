@@ -19,9 +19,10 @@ import { pythonReferenceRecipes } from './python-guide.js';
 import { currentSpelling } from './pipeline/earlier.js';
 import { currentOf, currentMetrics, currentQueryInput } from './earlier-spelling.js';
 import { propertyTypes } from './pipeline/compute.js';
+import { stepOfDeclaration } from './pipeline/semantic-stage.js';
 
 /**
- * A pipeline recipe's payload, as the build_pipeline_model start request it is. A file written for an
+ * A pipeline recipe's payload, as the build_model start request it is. A file written for an
  * earlier version carries `{ name, pipeline: { source, time_range?, stages } }` — the one-call contract
  * no tool takes — or its first steps as `stages`, and stages in an earlier spelling; a deployment's file
  * is not ours to rewrite, so it is read as that request here: its list as `steps`, each stage's own
@@ -71,7 +72,7 @@ function currentSemanticModel(sm, catalog = null) {
 }
 
 /**
- * A semantic recipe's payload, as the build_semantic_model request it is. A file written for an
+ * A semantic recipe's payload, as the declaration it is (read as a build_model start by its semantic_model step: src/pipeline/semantic-stage.js stepOfDeclaration). A file written for an
  * earlier version may load a model for its attributes with `use_base_models`, reference a measure as
  * `{ name }`, write a derived metric as text over its inputs or a ratio of two sides, type a dimension
  * with `as_type`, fold a measure with `sum_boolean`, or write its measures, conditions and dimensions
@@ -159,7 +160,7 @@ function readFile(path, origin, catalog = null) {
     return {
       ...r,
       ...(r.pipeline_payload ? { pipeline_payload: pipelineStartRequest(r.pipeline_payload, catalog) } : {}),
-      ...(semantic ? { semantic_payload: semantic } : {}),
+      ...(semantic ? { semantic_payload: (catalog && stepOfDeclaration(catalog, semantic)) || semantic } : {}),
       ...(Array.isArray(r.example_queries) ? { example_queries: r.example_queries.map((q) => currentQueryInput(q, { subject: refSubject(semantic), propertyType: propertyTypes(catalog) })) } : {}),
       ...(r.experiment ? { experiment: experimentMap(r.experiment) } : {}),
       origin,

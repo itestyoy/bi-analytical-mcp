@@ -49,8 +49,9 @@ test('derived metric expr is restricted to a safe arithmetic grammar', () => {
   // the schema refuses the text before anything compiles (the constant is the one expression's { value },
   // refused by the place as it compiles, above) — and raw SQL, which no place of the tool takes: the
   // tool's one expression holds no raw
-  assert.equal(v('build_semantic_model', decl({ expr: "r) as x, (select 1 from creds--" })).ok, false);
-  assert.match(v('build_semantic_model', decl({ expr: { fn: 'raw', sql: 'select 1 from creds' } })).errors.join(' | '), /`metrics\.1\.expr\.fn` must be one of/);
+  const step = (bad) => ({ action: 'start', name: 'evil', source: 'events', steps: [{ stage: 'semantic_model', measures: decl(bad).semantic_models[0].measures, metrics: decl(bad).metrics }] });
+  assert.equal(v('build_model', step({ expr: "r) as x, (select 1 from creds--" })).ok, false);
+  assert.match(v('build_model', step({ expr: { fn: 'raw', sql: 'select 1 from creds' } })).errors.join(' | '), /`steps\.0\.metrics\.1\.expr\.fn` must be one of/);
 });
 
 // A read runs under a tool that only reads, which a client calls without asking first: it takes no SQL
@@ -72,7 +73,7 @@ test('a read takes no raw SQL, and no raw SQL carries a Jinja opener', () => {
     assert.match(v('query_model', { context_id: 'abcdef123456', steps: [metrics, ...steps] }).errors.join(' | '), fn(1), at);
   }
   assert.match(v('query_model', { context_id: 'abcdef123456', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'raw', sql: '1' }, { value: 1 }] }] }, metrics] }).errors.join(' | '), /`steps\.0\.conditions\.0\.args\.0\.fn` must be one of/);
-  assert.equal(v('build_pipeline_model', { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } }] }).ok, true, 'raw is a build\'s');
+  assert.equal(v('build_model', { action: 'add_steps', context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } }] }).ok, true, 'raw is a build\'s');
   const build = (sql) => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql, args: [{ column: 'event_name' }] } }], { physicalCols: new Set(['event_name']) });
   for (const sql of ["upper({1}) || '{{ env_var(\"X\") }}'", '{% if true %}{1}{% endif %}', '{1} {# a note #}']) assert.throws(() => build(sql), /may not hold \{\{, \{% or \{#/, sql);
   assert.ok(build('upper({1})').columns.has('x'));

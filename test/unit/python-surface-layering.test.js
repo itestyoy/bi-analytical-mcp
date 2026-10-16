@@ -39,7 +39,7 @@ const engine = () => {
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
   return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('layer') }) }));
 };
-const stageDescription = (e) => stageBranch(e.schemas.build_pipeline_model, 'python').description;
+const stageDescription = (e) => stageBranch(e.schemas.build_model, 'python').description;
 
 const occurrences = (text, probe) => text.split(probe).length - 1;
 

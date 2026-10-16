@@ -986,11 +986,11 @@ test('52. a one-column `unique` key answers exactly as the two-column one', opts
 
   // both attributes through the one join, in one query (as 50's): each split is a marginal of it
   const r = await oneEngine.query_model({
-    context_id: oneCtx, steps: [{ stage: 'metrics', metrics: ['jone_evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
+    context_id: oneCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'crashlytics', column: 'app_version', via: 'ad_funnel' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.deepEqual(splitBy(r, 'app_version', 'jone_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, 'same numbers as the two-column key');
-  assert.deepEqual(splitBy(r, 'device_model', 'jone_evts'), { none: 176, iphone: 8 }, 'by device_model, the same as the two-column key');
+  assert.deepEqual(splitBy(r, 'app_version', 'evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, 'same numbers as the two-column key');
+  assert.deepEqual(splitBy(r, 'device_model', 'evts'), { none: 176, iphone: 8 }, 'by device_model, the same as the two-column key');
 });
 
 // 53. NOTHING IS ADVERTISED THAT CANNOT BE ANSWERED. Whatever the catalog lists under the owned
@@ -1012,7 +1012,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   const refused = []; const totals = {}; const answered = {};
   const ask = async (group_by) => {
     try {
-      const r = await trueEngine.query_model({ context_id: trueCtx, steps: [{ stage: 'metrics', metrics: ['jtrue_evts'], group_by }] });
+      const r = await trueEngine.query_model({ context_id: trueCtx, steps: [{ stage: 'metrics', metrics: ['evts'], group_by }] });
       if (!r.ok) return { why: JSON.stringify(r.error) };
       if (!r.rows.length) return { why: 'answered with no rows' };
       return { r };
@@ -1026,7 +1026,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
       if (alone.r) answered[ref.column] = alone.r; else refused.push(`${ref.source}.${ref.column}: ${alone.why}`);
     }
   }
-  for (const [a, r] of Object.entries(answered)) totals[a] = Object.values(splitBy(r, a, 'jtrue_evts')).reduce((s, n) => s + n, 0);
+  for (const [a, r] of Object.entries(answered)) totals[a] = Object.values(splitBy(r, a, 'evts')).reduce((s, n) => s + n, 0);
   assert.deepEqual(refused, [], 'the catalog must not offer an attribute the engine refuses');
   for (const a of own) assert.equal(totals[a], 184, `${a} must not inflate`);
 
@@ -1042,7 +1042,7 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   const split = (attribute) => {
     const r = answered[attribute];
     assert.ok(r, `[54] ${attribute} is advertised through ad_funnel and answered`);
-    return splitBy(r, attribute, 'jtrue_evts');
+    return splitBy(r, attribute, 'evts');
   };
   assert.deepEqual(split('app_version'), { none: 160, '1.0.0': 16, '1.1.0': 8 }, '[54] by app_version: 24 matched, none twice');
   assert.deepEqual(split('device_model'), { none: 160, iphone: 12, pixel: 8, galaxy: 4 }, '[54] by device_model');

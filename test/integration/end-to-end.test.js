@@ -196,7 +196,9 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
   if (skip(t)) return;
   const dc = await engine.context({ action: 'describe', context_id: S.semCtx });
   assert.equal(dc.engine, 'core');
-  assert.ok(dc.metrics.includes('revenue') && dc.metrics.includes('payers'), 'both metrics in context');
+  // the layer as dbt parsed it: each metric with its definition
+  const metrics = dc.metrics.map((m) => m.name);
+  assert.ok(metrics.includes('revenue') && metrics.includes('payers'), 'both metrics in context');
   assert.ok(dc.measures.includes('revenue') && dc.measures.includes('payers'), 'both measures in context');
 
   const status = await engine.semantic_index({ status: true });

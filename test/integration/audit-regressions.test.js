@@ -239,14 +239,14 @@ test('S2 (B). the value guard over the real index: five refusals, and the correc
 test('S3 (A/C). a fact that owns ad_funnel: reached without and with via, labelled on both sides', opts, async (t) => {
   if (skip(t)) return;
   const r = await q(ownerCtx, {
-    steps: [{ stage: 'metrics', metrics: ['aown_evts'], group_by: [{ source: 'crashlytics', column: 'app_version' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
+    steps: [{ stage: 'metrics', metrics: ['evts'], group_by: [{ source: 'crashlytics', column: 'app_version' }, { source: 'crashlytics', column: 'device_model', via: 'ad_funnel' }] }],
   }, ownerEngine);
   assert.equal(r.ok, true, JSON.stringify(r.error));
   // 7. an attribute of an owned FACT is reached through the relationship the source declares
   assert.equal(r.group_by_resolved['crashlytics.app_version'], 'crashlytics_app_version', '7: resolved through ad_funnel, not through the crash identity');
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.app_version'], 'aown_evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '7: events per crash app_version, without via');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.app_version'], 'evts'), { none: 176, '1.0.0': 2, '1.1.0': 6 }, '7: events per crash app_version, without via');
   // 8. via names the relationship explicitly and gives the same join's numbers
-  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'aown_evts'), { none: 176, iphone: 8 }, '8: events per crash device_model, via ad_funnel');
+  assert.deepEqual(marginal(r.rows, r.group_by_resolved['crashlytics.device_model'], 'evts'), { none: 176, iphone: 8 }, '8: events per crash device_model, via ad_funnel');
   // 20. with an owner declared, both sides label the relationship consistently
   const crash = await ownerEngine.semantic_index({ source: 'crashlytics' });
   assert.match(crash.relationships.find((x) => x.entity === 'ad_funnel').use, /^owned here — other models point at it/, '20: the crash side owns ad_funnel');

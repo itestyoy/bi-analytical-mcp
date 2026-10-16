@@ -207,24 +207,24 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   // (test/helpers/recipe-coverage.js).
   const out = await declare(engine, recipes.get('governed_measure_by_name').semantic_payload);
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'] }] });
+  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
+  assert.ok(near(num(r.rows[0].total_spend), 17.5), `total_spend=${r.rows[0].total_spend}`);
 
   // it groups like any other measure — by the source's own attribute, and through a declared
   // relationship exactly as a task measure does: a sum, so both are the marginals of ONE query
-  const g = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['gov_total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
+  const g = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['total_spend'], group_by: [{ source: 'acquisition', column: 'media_source' }, { source: 'users', column: 'country' }] }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
-  const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'gov_total_spend');
+  const by = marginal(g.rows, (row) => String(row[g.group_by_resolved['acquisition.media_source']]), 'total_spend');
   assert.ok(near(by.applovin, 8.25), `[by media_source] applovin=${by.applovin}`);
   assert.ok(near(by.meta, 5.75), `[by media_source] meta=${by.meta}`);
   assert.ok(near(by.google, 3.5), `[by media_source] google=${by.google}`);
-  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5), '[by media_source] the channels sum to 17.50');
+  assert.ok(near(sumCol(g.rows, 'total_spend'), 17.5), '[by media_source] the channels sum to 17.50');
   // the country is the install version valid on the spend day (SEED_DATA §13): u1's two spend rows fall
   // in two versions (01-01 US 1.50, 01-03 GB 0.50), so the split is US 6.75 / GB 5.00 / DE 4.00 / BR 1.75
   // — u1's first version for both days would make it US 7.25 / GB 4.50, its last US 5.25 / GB 6.50, and
   // the key alone would count u1's rows twice (the countries would sum to 19.50, not 17.50)
-  const byCountry = marginal(g.rows, (row) => String(row[g.group_by_resolved['users.country']]), 'gov_total_spend');
+  const byCountry = marginal(g.rows, (row) => String(row[g.group_by_resolved['users.country']]), 'total_spend');
   assert.deepEqual(Object.keys(byCountry).sort(), ['BR', 'DE', 'GB', 'US'], `[by users.country] every spend row has the country valid on its day: ${JSON.stringify(byCountry)}`);
   assert.ok(near(byCountry.US, 6.75), `[by users.country] US=${byCountry.US}`);
   assert.ok(near(byCountry.GB, 5.0), `[by users.country] GB=${byCountry.GB}`);

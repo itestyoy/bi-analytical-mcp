@@ -147,10 +147,10 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
 // analytics fact (SEED_DATA §2) and 6 fatal crashes on the crash fact (§5).
 test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['mix_launches', 'mix_fatal'] }] });
+  const r = await q(bothCtx, { steps: [{ stage: 'metrics', metrics: ['launches', 'fatal'] }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].mix_launches), 12);
-  assert.equal(num(r.rows[0].mix_fatal), 6);
+  assert.equal(num(r.rows[0].launches), 12);
+  assert.equal(num(r.rows[0].fatal), 6);
 });
 
 // SEED_DATA §10: players with a REPEATED fatal crash. 3 players crashed at all (u1,u2,u3);

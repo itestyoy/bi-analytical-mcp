@@ -71,6 +71,37 @@ function checkJoin(catalog, main, timeColumn, j, i) {
 }
 
 /**
+ * The foreign keys a table the steps before the step built carries, read off the step's joins — each the
+ * relationship the joined model owns whose key is the contract's, keyed by the table's columns `on` names,
+ * in the order the owner's key is written: { <relationship>: [<column>, …] }. `columns`: the table's.
+ */
+export function joinKeysOf(catalog, joins, columns) {
+  const keys = {};
+  for (const [i, j] of joins.entries()) {
+    const at = `join[${i}] '${j.source}'`;
+    const contract = catalog.joinContract(j.source);
+    if (!contract) fail(`${at}: '${j.source}' declares no join contract, so it is not joinable`, 'join');
+    const wrong = onPartsError(j.source, contract, j.on);
+    if (wrong) fail(`${at}: ${wrong}`, 'join');
+    for (const sel of contract.select.filter((x) => x.values)) {
+      if (!sel.values.includes(j.on[sel.part])) fail(`${at}: on.${sel.part} is one of ${sel.values.join(', ')}`, 'join');
+    }
+    const parts = contract.key.map((k) => ({ part: k.part, column: k.by ? k.columns[j.on[k.by]] : k.column }));
+    for (const p of parts) {
+      if (!columns.includes(j.on[p.part])) fail(`${at}: on.${p.part} names '${j.on[p.part]}', which is no column of the table the steps before this one built — its columns: ${columns.join(', ')}`, 'join');
+    }
+    const theirs = parts.map((p) => p.column);
+    const rel = Object.keys(catalog.entitiesOf(j.source)).find((r) => {
+      const key = catalog.entityKey(j.source, r)?.map((k) => k.column) || [];
+      return catalog.joinTargetFor(r) === j.source && key.length === theirs.length && key.every((c) => theirs.includes(c));
+    });
+    if (!rel) fail(`${at}: no key '${j.source}' owns is the contract's (${describeContract(j.source, contract)}) — the semantic layer joins onto a key a model owns`, 'join');
+    keys[rel] = catalog.entityKey(j.source, rel).map((k) => j.on[parts.find((p) => p.column === k.column).part]);
+  }
+  return keys;
+}
+
+/**
  * The declaration a semantic_model step makes over a catalog source — the build's `source`, with no
  * step before it: { name, description?, semantic_models, metrics }, the shape src/compile.js compiles.
  * The main model's item holds its dimensions and the measures without `source`; each other model a

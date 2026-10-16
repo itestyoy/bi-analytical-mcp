@@ -8,7 +8,8 @@ import { renderContext, slowlyChangingNoMeasures } from '../yaml-render.js';
 import { mergeCompiled } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { refText, wants } from './semantic-query.js';
-import { declarationOf } from '../pipeline/semantic-stage.js';
+import { declarationOf, joinKeysOf } from '../pipeline/semantic-stage.js';
+import { builtModel, catalogWith } from '../catalog/built-model.js';
 
 /** What a semantic declaration keeps in a context's state — all a new semantic_model step replaces. */
 const SEMANTIC_STATE = ['additions', 'metrics', 'usedModels', 'tasks', 'task_notes'];
@@ -40,9 +41,9 @@ function refuseIfNoMetricLeft(catalog, compiled, render) {
 
 export const semanticBuildMethods = {
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
-  _compile(input, options) {
+  _compile(input, options, catalog = this.catalog) {
     try {
-      return compileDeclaration(this.catalog, input, options);
+      return compileDeclaration(catalog, input, options);
     } catch (e) {
       if (e instanceof ToolError) throw e;
       // compile.js attaches the offending INPUT FIELD to the error — surface it so the
@@ -58,11 +59,11 @@ export const semanticBuildMethods = {
    * is how the reference is shown (users.country), `at` where it stands (steps[1] group_by[0]).
    */
   _checkModelLoaded(ctx, model, said, field = 'group_by', at = null) {
-    if (!model || !this.catalog.models[model]) return; // already refused
+    if (!model || !this._catalogOf(ctx).models[model]) return; // already refused
     if (ctx.state.usedModels?.includes(model)) return;
     throw new ToolError(
       `${at ? `${at}: ` : ''}'${said}' needs model '${model}', which this context does not read. `
-        + `Load it: ${loadModelCall(ctx.id, model, this.catalog)}.`,
+        + `Load it: ${loadModelCall(ctx.id, model, this._catalogOf(ctx))}.`,
       { stage: 'validate', field },
     );
   },
@@ -108,39 +109,85 @@ export const semanticBuildMethods = {
 
   /**
    * THE SEMANTIC LAYER A BUILD'S LAST STEP DECLARES (src/pipeline/semantic-stage.js) — compiled and
-   * rendered on a copy, nothing written: { decl, compiled, render }. Over the build's source, with no
-   * step before it; every mistake refused, naming the part of the step it is in.
+   * rendered on a copy, nothing written: { decl, compiled, render, catalog, layerModel? }. Over the build's
+   * source when the step is its only one; over the table the steps before it built otherwise — that table a
+   * model of the context's catalog (src/catalog/built-model.js: its time axis the step's `time`, its foreign
+   * keys its joins'), `table` the dbt model that holds it (the next build's name where none is known yet).
+   * Every mistake refused, naming the part of the step it is in.
    */
-  _semanticLayerOf(draft, st) {
+  async _semanticLayerOf(ctx, draft, st, { table = null } = {}) {
+    const say = (e) => new ToolError(`semantic_model: ${e.message}`, { stage: 'validate', field: e.field ? `semantic_model.${e.field}` : 'semantic_model' });
+    let catalog = this.catalog;
+    let layerModel = null;
+    let source = draft.source;
     if (draft.stages.length || draft.base) {
-      throw new ToolError('a semantic_model step over the rows of steps before it is not built yet: build the table (materialize), then start a build from its task with the semantic_model step alone — or make the semantic_model step the only one, over the source', { stage: 'validate', field: 'steps' });
+      const key = draft.name;
+      const c = this.catalog;
+      if (c.models[key] || c.primaryByEntity[key] || c.joinEntityNames().includes(key)) throw say(Object.assign(new Error(`the build's name '${key}' is a model or a key of the catalog, and its table is a model of the context under that name — name the build apart from them`), { field: 'name' }));
+      if (st.time === undefined) throw say(Object.assign(new Error('time: name the column of the table the steps before this one built that is its time axis (metric_time) — a column of the time type'), { field: 'time' }));
+      const columns = this._draftColumns(draft, await this.probe.grounding(draft.source, draft.stages));
+      const axis = columns.find((x) => x.name === st.time);
+      if (!axis) throw say(Object.assign(new Error(`time: '${st.time}' is no column of the table the steps before this one built — its columns: ${columns.map((x) => x.name).join(', ')}`), { field: 'time' }));
+      if (!['time', 'unknown'].includes(axis.type)) throw say(Object.assign(new Error(`time: '${st.time}' is ${axis.type}, not a moment — the time axis is a moment the steps before this one carry: a time column, or one made of it (min / max of it in an aggregate, date_trunc of it)`), { field: 'time' }));
+      let keys;
+      try { keys = joinKeysOf(c, st.join || [], columns.map((x) => x.name)); } catch (e) { throw say(e); }
+      const model = builtModel({ key, dbtModel: table || this._nextPipelineModel(ctx, draft.name), columns, time: st.time, keys, description: draft.description });
+      catalog = catalogWith(c, key, model);
+      layerModel = { key, model };
+      source = key;
     }
     let decl;
-    try { decl = declarationOf(this.catalog, { name: draft.name, description: draft.description, source: draft.source }, st); }
-    catch (e) { throw new ToolError(`semantic_model: ${e.message}`, { stage: 'validate', field: e.field ? `semantic_model.${e.field}` : 'semantic_model' }); }
-    const compiled = this._compile(decl);
+    try { decl = declarationOf(catalog, { name: draft.name, description: draft.description, source }, st); } catch (e) { throw say(e); }
+    const compiled = this._compile(decl, undefined, catalog);
     const layer = { tasks: [], additions: {}, metrics: [], usedModels: [] };
     mergeCompiled(layer, compiled);
-    const render = renderContext(this.catalog, layer, { spec: this._semanticSpec() });
-    refuseIfNoMetricLeft(this.catalog, compiled, render);
-    return { decl, compiled, render };
+    const render = renderContext(catalog, layer, { spec: this._semanticSpec() });
+    refuseIfNoMetricLeft(catalog, compiled, render);
+    return { decl, compiled, render, catalog, layerModel };
   },
 
   /**
    * The semantic layer of a build, made the context's: its declaration replaces the one the context held,
-   * written in the call — so a query issued right after it validates against these metrics — and parsed
-   * by dbt in a task (a query on the context waits for it: tasks on one context run in order).
+   * taken in the call — so a query issued right after it validates against these metrics — and parsed by
+   * dbt in a task (a query on the context waits for it: tasks on one context run in order). Over the table
+   * its steps build, that build goes first — or the table that already stands for them, a checkpoint or a
+   * task's — and the layer is written once it stands.
    */
-  _materializeLayer(ctx, draft) {
-    const { decl, compiled, render } = this._semanticLayerOf(draft, draft.semantic);
+  async _materializeLayer(ctx, draft) {
+    let table = null;
+    let built = null; // the build of the steps before the step, when they are no table yet
+    if (draft.stages.length || draft.base) {
+      const plan = draft.stages.length ? this._renderPlan(draft, draft.stages, { forBuild: true }) : null;
+      if (!draft.stages.length) table = draft.base.model;
+      else if (plan.checkpoint && !plan.stages.length) table = plan.checkpoint.model;
+      else {
+        built = await this._draftMaterialize(ctx, draft, { stagesOnly: true });
+        table = built.model;
+      }
+    }
+    const { decl, compiled, render, layerModel } = await this._semanticLayerOf(ctx, draft, draft.semantic, { table });
     for (const k of SEMANTIC_STATE) delete ctx.state[k];
     Object.assign(ctx.state, { tasks: [], additions: {}, metrics: [], usedModels: [] });
+    if (layerModel) ctx.state.layer_model = layerModel; else delete ctx.state.layer_model;
     mergeCompiled(ctx.state, compiled);
-    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
-    const input = { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, steps: [draft.semantic] };
-    const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, decl, compiled, render, file), { input });
-    return this._taskStarted(taskId, { context_id: ctx.id });
+    const write = () => this.ctxs.writeSemanticYaml(ctx.id, render);
+    const input = { action: 'materialize', context_id: ctx.id, name: draft.name, source: draft.source, steps: [...draft.stages, draft.semantic] };
+    if (!built) {
+      const file = write();
+      const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, decl, compiled, render, file), { input });
+      return this._taskStarted(taskId, { context_id: ctx.id });
+    }
+    // the layer is written once its table stands: the build runs first on the context
+    const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
+      const job = this.jobs.get(built.task_id);
+      if (job?.status !== 'ready') {
+        const why = job?.error || `its build ended ${job?.status || 'unknown'}`;
+        return { ok: false, status: 'error', context_id: ctx.id, error: { stage: 'build', message: `the table the semantic layer stands on (${table}, task ${built.task_id}) did not build: ${why}` } };
+      }
+      return this._declared(ctx, decl, compiled, render, write());
+    }, { input });
+    return this._taskStarted(taskId, { context_id: ctx.id, model: table });
   },
 
   /** The finished answer of a declared task: parsed, with what it can be grouped by and the next call. */
@@ -190,7 +237,7 @@ export const semanticBuildMethods = {
     }
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
-    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    const render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() });
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);

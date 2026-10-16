@@ -65,6 +65,7 @@ import { mixin, isPlainObject } from './engine/helpers.js';
 import { RESEARCH_GUIDES } from './research-guides.js';
 import { CONTEXT_PAGE } from './schema/fields.js';
 import { propertyTypes } from './pipeline/compute.js';
+import { catalogWith } from './catalog/built-model.js';
 
 /**
  * THE KINDS OF TASK a tool starts on two sides — each with the side it belongs to and the tool it is said
@@ -199,6 +200,7 @@ export class Engine {
     }
     this.validators = makeValidators({ ...this.schemas, ...this.contracts });
     this.ctxs = contextManager || new ContextManager({});
+    this._contextCatalogs = new Map(); // context id → the catalog its layer is read over (_catalogOf)
     // the task runtime (src/task-runner.js): the engine's tools and a feature's start and read tasks through it
     this.tasks = new TaskRunner({ jobs: this.jobs, ctxs: this.ctxs, sideOf: (tool) => this._sides[tool] || null, readers: this._readers, kindTools: Object.fromEntries(Object.entries(TASK_KINDS).map(([k, v]) => [k, v.tool])), onFailure: (...a) => this._recordTaskError(...a) });
     // WHAT A FEATURE MAY USE OF THE ENGINE (src/features.js), besides its task runtime (engine.tasks),
@@ -257,7 +259,7 @@ export class Engine {
     const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
     try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${wayOut}${hint}`, { stage: 'validate', field: 'context_id' }); }
     if (ctx.state?.internal) throw new ToolError(`unknown context_id: ${id}${this.project ? ` — the dbt project's own semantic models are contexts of their own, named after them: ${this.project.contexts.join(', ')}` : ''}`, { stage: 'validate', field: 'context_id' });
-    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
+    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this._catalogOf(ctx).models[k]);
     if (gone.length) {
       throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index({ request: {} }) lists them).`, { stage: 'validate', field: 'context_id' });
     }
@@ -280,7 +282,7 @@ export class Engine {
   /** The sources whose MEASURES a semantic context reads (a model loaded only to be joined to is
    *  not one of them). */
   _measureSources(ctx) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
     const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
     return [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
@@ -296,8 +298,8 @@ export class Engine {
     if (!bounds || !(bounds.start || bounds.end || bounds.endExclusive)) return [];
     const sources = this._measureSources(ctx);
     if (sources.length !== 1) return [];
-    const m = this.catalog.getModel(sources[0]);
-    const pe = this.catalog.primaryEntityName(sources[0]);
+    const m = this._catalogOf(ctx).getModel(sources[0]);
+    const pe = this._catalogOf(ctx).primaryEntityName(sources[0]);
     if (!pe || (m.dimensions || {})[PARTITION_DIM]) return [];
     // a cumulative metric's value on the window's first day sums the days before it: MetricFlow widens
     // its own time constraint for that, and a filter here — applied to the rows before they accumulate
@@ -727,6 +729,21 @@ export class Engine {
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) return dbtFailure('parse', r);
     return { ok: true, manifest: r.manifest };
+  }
+
+  /**
+   * THE CATALOG A CONTEXT READS — the server's, and, in a context whose semantic layer stands on a table
+   * its build made, that table as a model beside the others (src/catalog/built-model.js), so the layer is
+   * compiled, rendered and queried over it as over any model. Made once per layer the context holds.
+   */
+  _catalogOf(ctx) {
+    const layer = ctx?.state?.layer_model;
+    if (!layer) return this.catalog;
+    const held = this._contextCatalogs.get(ctx.id);
+    if (held?.layer === layer && held.base === this.catalog) return held.catalog;
+    const catalog = catalogWith(this.catalog, layer.key, layer.model);
+    this._contextCatalogs.set(ctx.id, { layer, base: this.catalog, catalog });
+    return catalog;
   }
 
   _assumptions(ctx) {

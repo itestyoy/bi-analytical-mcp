@@ -107,8 +107,12 @@ Amended while implementing (step 3, agreed with the owner on 2026-10-16):
   `action: "update"`, its `remove` and `cascade`, and a second task in one context are gone.
 - The step is compiled when it is added and written and parsed by `materialize` (a task). Before that,
   `preview` shows its YAML.
-- 3a (the step alone, over a catalog source) lands first. 3b (the step over a table the steps before it
-  built) follows in its own commit; until then a step after other steps is refused, saying so.
+- 3a (the step alone, over a catalog source) landed first; 3b (the step over a table the steps before it
+  built) in its own commit. That table is a model of the context's own catalog (src/catalog/built-model.js):
+  its time axis is the step's `time` (required there), its foreign keys are its joins' `on` columns, and it
+  owns no key, so nothing joins onto it. A query names its columns `{ semantic_model: [<the build's name>],
+  dimension }`. `materialize` builds the steps first, or reads the table that already stands for them,
+  and then writes and parses the layer. The build is named apart from the catalog's models and keys.
 
 ### Removed
 Input-side earlier-spelling converters (a stored draft still reads), the `<task>_<metric>` prefix, the five

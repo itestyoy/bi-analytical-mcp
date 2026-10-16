@@ -42,10 +42,10 @@ export const pipelineDraftMethods = {
       const toSemantic = isSemanticStep(input.step);
       if (input.action === 'edit_step' && input.index === semanticAt) {
         if (!toSemantic) throw new ToolError(`step ${semanticAt} is the build's semantic_model step: edit it with another semantic_model step, or delete it (delete_step) and add the step`, { stage: 'validate', field: 'step' });
-        return this._draftSemanticAnswer(ctx, draft, this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
+        return this._draftSemanticAnswer(ctx, draft, await this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
       }
       if (toSemantic) {
-        if (input.action === 'insert_step' && !draft.semantic && input.index === draft.stages.length + 1) return this._draftSemanticAnswer(ctx, draft, this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
+        if (input.action === 'insert_step' && !draft.semantic && input.index === draft.stages.length + 1) return this._draftSemanticAnswer(ctx, draft, await this._draftSetSemantic(ctx, draft, input.step), input.action, inc);
         throw new ToolError(`a semantic_model step is the build's last step${draft.semantic ? ` — this build's is step ${semanticAt}: edit that one` : ` — add it after step ${draft.stages.length}`}`, { stage: 'validate', field: 'step' });
       }
     }
@@ -87,7 +87,7 @@ export const pipelineDraftMethods = {
     const snapshot = draft.stages.slice();
     const added = stages.length ? await this._draftAddSteps(ctx, draft, stages, inc.columns, inc.steps, { building }) : null;
     let effect;
-    try { effect = this._draftSetSemantic(ctx, draft, steps[at]); } catch (e) {
+    try { effect = await this._draftSetSemantic(ctx, draft, steps[at]); } catch (e) {
       draft.stages = snapshot; this.ctxs.touch(ctx.id);
       throw new ToolError(`steps[${at}]: ${e.message}`, { stage: e.stage || 'validate', field: `steps[${at}]${e.field ? `.${e.field}` : ''}`, code: e.code });
     }
@@ -96,8 +96,8 @@ export const pipelineDraftMethods = {
   },
 
   /** The semantic_model step, checked as it would be built (its layer compiled and rendered), put in place. */
-  _draftSetSemantic(ctx, draft, st) {
-    const { render } = this._semanticLayerOf(draft, st);
+  async _draftSetSemantic(ctx, draft, st) {
+    const { render } = await this._semanticLayerOf(ctx, draft, st);
     draft.semantic = st;
     this.ctxs.touch(ctx.id);
     return {
@@ -771,11 +771,11 @@ export const pipelineDraftMethods = {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
-    // the semantic_model step: the layer it declares, as it would be written (src/yaml-render.js)
-    if (draft.semantic && !draft.stages.length) {
-      const { render } = this._semanticLayerOf(draft, draft.semantic);
-      return { ...base, semantic_models: render.semanticModels, metrics: render.metricNames, yaml: render.yaml, warnings: render.warnings || [] };
-    }
+    // the semantic_model step: the layer it declares, as it would be written (src/yaml-render.js) — over the
+    // source, or beside the SQL of the table it stands on
+    const layer = draft.semantic ? await this._semanticLayerOf(ctx, draft, draft.semantic) : null;
+    const semantic = layer ? { semantic_models: layer.render.semanticModels, metrics: layer.render.metricNames, yaml: layer.render.yaml, warnings: layer.render.warnings || [] } : {};
+    if (draft.semantic && !draft.stages.length) return { ...base, ...semantic };
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No steps yet — add_steps first.' };
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
     // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.
@@ -788,7 +788,7 @@ export const pipelineDraftMethods = {
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     const hasPython = models.some((m) => m.kind === 'python');
     return {
-      ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      ...base, ...semantic, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       // A chain that ends in a python model has no SQL of its own — its code is under `python`
       // below. Reporting `model_sql: null` as THE preview said nothing about what would be built.
       ...(rendered.sql ? { model_sql: rendered.sql } : {}),

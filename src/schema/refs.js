@@ -120,7 +120,8 @@ export function refForms(catalog, { project = null, via: offerVia = true } = {})
       title: '{ semantic_model, dimension }', required: ['semantic_model', 'dimension'],
       description: 'A dimension of a semantic model, named by where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context\'s own>"] for its own, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. A dimension a task computed ({ name, expr }) is named so too.',
       properties: {
-        semantic_model: { type: 'array', minItems: 1, items: strEnum(semanticModelNames(catalog, project)), description: 'The chain of semantic models the dimension is reached through, in order, ending with the one that carries it.' },
+        // (a build's own table is a semantic model of its context under the build's name — no name of the catalog)
+        semantic_model: { type: 'array', minItems: 1, items: { anyOf: [strEnum(semanticModelNames(catalog, project)), { type: 'string', pattern: '^[a-z][a-z0-9_]{2,40}$', description: 'A build\'s own table, named as the build: the semantic model its semantic_model step stands on.' }] }, description: 'The chain of semantic models the dimension is reached through, in order, ending with the one that carries it.' },
         dimension: { type: 'string', minLength: 1, description: 'The dimension\'s name, as its semantic model declares it.' },
         grain,
       },

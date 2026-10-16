@@ -28,7 +28,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, startAndBuild } from '../helpers/settle.js';
+import { settle, startAndBuild, taskResult } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
 import { declare } from '../helpers/declare.js';
@@ -340,6 +340,61 @@ test('a task dimension over a time column is read at its grain (week), or at the
   const measure = (p.semantic_models.find((sm) => sm.name === 'events').measures || []).find((m) => m.name === 'coh_wk_n');
   if (measure) assert.equal(measure.label, 'Events counted');
   assert.equal(p.metrics.find((m) => m.name === 'coh_wk_n').label, 'Events');
+});
+
+// ── 5c. a semantic layer over a table the build made ──
+// The build's steps fold the events to one row per session (its start and its event count), and its last
+// step is the semantic layer over THAT table: its time axis the session's start, joined to the install
+// record valid then. Sessions and events per session, by the install country — the numbers a hand-written
+// query over the same rows gives.
+test('a semantic layer over a built table: sessions and events per session, by the country at the session\'s start', opts, async (t) => {
+  if (skip(t)) return;
+  const raw = engine.raw || engine;
+  const started = await raw.build_model({
+    action: 'start', name: 'sess', source: 'events', materialize: true,
+    steps: [
+      { stage: 'aggregate', group_by: ['player_id_of_internal', 'session_number'], measures: [{ name: 'session_start', expr: { fn: 'min', args: [{ column: 'device_time' }] } }, { name: 'n_events', expr: { fn: 'count' } }] },
+      {
+        stage: 'semantic_model', time: 'session_start',
+        join: [{ source: 'users', on: { user: 'player_id_of_internal', time: 'session_start' } }],
+        measures: [{ name: 'sessions', expr: { fn: 'count' } }, { name: 'events', expr: { fn: 'sum', args: [{ column: 'n_events' }] } }],
+        metrics: [{ name: 'sessions', type: 'simple', measure: 'sessions' }, { name: 'events', type: 'simple', measure: 'events' }, { name: 'per_session', type: 'derived', expr: { fn: 'div', args: [{ metric: 'events' }, { metric: 'sessions' }] } }],
+      },
+    ],
+  });
+  assert.ok(started.materialize?.task_id, JSON.stringify(started.materialize));
+  const parsed = await taskResult(raw, started.materialize.task_id);
+  assert.equal(parsed.parse?.ok, true, JSON.stringify(parsed.parse || parsed.error));
+  const ctx = started.context_id;
+  const { rows: [all] } = await wh.query(`select count(*) as sessions, sum(n) as events from (select player_id_of_internal, session_number, count(*) as n from fct_analytics_events group by 1, 2) s`);
+  const total = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions', 'sess_events', 'sess_per_session'] }] });
+  assert.equal(total.ok, true, JSON.stringify(total.error));
+  assert.equal(num(total.rows[0].sess_sessions), num(all.sessions), 'one row per session');
+  assert.equal(num(total.rows[0].sess_events), 184, 'every event in its session');
+  assert.ok(Math.abs(num(total.rows[0].sess_per_session) - 184 / num(all.sessions)) < 1e-9);
+  // by the install country valid at the session's start
+  const byHand = (await wh.query(`select u.country, count(*) as n from (select player_id_of_internal, session_number, min(device_time) as start from fct_analytics_events group by 1, 2) s join dim_users u on u.player_id_of_internal = s.player_id_of_internal and s.start between u.install_time_valid_from and u.install_time_valid_until group by 1`)).rows;
+  const r = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions'], group_by: [{ source: 'users', column: 'country' }] }] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const got = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.sess_sessions)]));
+  assert.deepEqual(got, Object.fromEntries(byHand.map((x) => [String(x.country), num(x.n)])));
+  // a column of the built table is named by its semantic model; the built rows stay readable as a table
+  const byCount = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_sessions'], group_by: [{ semantic_model: ['sess'], dimension: 'n_events' }] }] });
+  assert.equal(byCount.ok, true, JSON.stringify(byCount.error));
+  assert.equal(byCount.rows.reduce((a, x) => a + num(x.sess_sessions), 0), num(all.sessions));
+  const read = await q(ctx, { steps: [{ stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
+  assert.equal(num(read.rows[0].n), num(all.sessions), 'the table itself, read as a pipeline\'s');
+  // the step edited alone: the next materialize stands the layer on the table already built
+  const { steps } = await raw.build_model({ action: 'preview', context_id: ctx });
+  const { index, ...layer } = steps.find((st) => st.stage === 'semantic_model');
+  await raw.build_model({ action: 'edit_step', context_id: ctx, index, step: { ...layer, measures: [...layer.measures, { name: 'longest', expr: { fn: 'max', args: [{ column: 'n_events' }] } }], metrics: [...layer.metrics, { name: 'longest', type: 'simple', measure: 'longest' }] } });
+  const again = await raw.build_model({ action: 'materialize', context_id: ctx });
+  assert.equal((await taskResult(raw, again.task_id)).parse?.ok, true);
+  const { rows: [most] } = await wh.query('select max(n) as n from (select count(*) as n from fct_analytics_events group by player_id_of_internal, session_number) s');
+  const longest = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['sess_longest', 'sess_sessions'] }] });
+  assert.equal(longest.ok, true, JSON.stringify(longest.error));
+  assert.equal(num(longest.rows[0].sess_longest), num(most.n));
+  assert.equal(num(longest.rows[0].sess_sessions), num(all.sessions));
 });
 
 // ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────

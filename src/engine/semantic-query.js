@@ -46,7 +46,7 @@ export const semanticQueryMethods = {
   _taskDimMap(ctx) {
     const map = new Map();
     for (const [modelKey, add] of Object.entries(ctx.state.additions || {})) {
-      const pe = this.catalog.primaryEntityName(modelKey);
+      const pe = this._catalogOf(ctx).primaryEntityName(modelKey);
       for (const d of add.dimensions || []) map.set(d.name, pe ? `${pe}__${d.name}` : d.name);
     }
     return map;
@@ -59,9 +59,10 @@ export const semanticQueryMethods = {
    * computed dimension takes a name no column or scalar property has — the set compileDimension refuses
    * it, src/compile.js, a declared property being scalar: a complex property's name stays free for one).
    */
-  _taskDimRef(model, d) {
-    const c = this.catalog;
+  _taskDimRef(model, d, c = this.catalog) {
     const name = d._attribute;
+    // a build's own table is no model of the catalog: what it carries is named by its semantic model
+    if (c.models[model]?.built) return { semantic_model: [model], dimension: name };
     if (c.modelDimensionColumns(model).includes(name)) return { source: model, column: name };
     if (c.isFact(model) && c.scalarEventProps(model).includes(name)) return { source: model, property: name };
     return { semantic_model: [model], dimension: name };
@@ -78,10 +79,12 @@ export const semanticQueryMethods = {
    * the query path then refused — "needs model 'users', which is not loaded in this context".
    */
   _groupableSplit(ctx) {
-    const all = [...this.catalog.reachableAttributes()];
+    const c = this._catalogOf(ctx);
+    // (a column of a build's own table is named by its semantic model: it is no model of the catalog)
+    const all = [...c.reachableAttributes()].map((r) => (r.source !== undefined && c.models[r.source]?.built ? { semantic_model: [r.source], dimension: r.column } : r));
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
-        const ref = this._taskDimRef(model, d);
+        const ref = this._taskDimRef(model, d, c);
         if (!all.some((r) => JSON.stringify(r) === JSON.stringify(ref))) all.push(ref);
       }
     }
@@ -133,7 +136,7 @@ export const semanticQueryMethods = {
    * declared on it (a copy at another grain) is the one it names first.
    */
   _taskColumn(ctx, kind, ref, at, field) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     const { source: model, via } = ref;
     const name = kind === 'source_column' ? ref.column : ref.property;
     const label = `${model}.${name}`;
@@ -142,7 +145,7 @@ export const semanticQueryMethods = {
     // not with the relationship refusal below: "not loaded" is the actual problem, and it is actionable.
     this._checkModelLoaded(ctx, model, label, field, at);
     const declared = this._taskDimOf(ctx, model, name);
-    const declaredRef = declared ? this._taskDimRef(model, declared) : null;
+    const declaredRef = declared ? this._taskDimRef(model, declared, c) : null;
     if (kind === 'source_property') {
       // an event property is grouped by once the task declares it a dimension of its source
       if (declaredRef?.dimension !== undefined) throw new ToolError(`${at}: '${label}' is a dimension this task computed, not an event property — write ${refText(declaredRef)}`, { stage: 'validate', field });
@@ -204,7 +207,7 @@ export const semanticQueryMethods = {
    * ({ source, column } / { source, property }), so naming one here is refused with that spelling.
    */
   _taskComputed(ctx, ref, at, field) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     const chain = ref.semantic_model;
     const model = chain[chain.length - 1];
     const label = `${chain.join(' → ')}.${ref.dimension}`;
@@ -212,11 +215,19 @@ export const semanticQueryMethods = {
     if (chain.length > 1) throw new ToolError(`${at}: in a task's context the join comes from the schema — name the model that carries the dimension alone: { semantic_model: ['${model}'], dimension: '${ref.dimension}' }`, { stage: 'validate', field });
     this._checkModelLoaded(ctx, model, label, field, at);
     const declared = this._taskDimOf(ctx, model, ref.dimension);
-    const declaredRef = declared ? this._taskDimRef(model, declared) : null;
+    const declaredRef = declared ? this._taskDimRef(model, declared, c) : null;
+    // a column of a build's own table, which only its semantic model names: under its identity, a time
+    // column at its day
+    const target = c.getModel(model);
+    if (target.built && !declared && c.modelDimensionColumns(model).includes(ref.dimension)) {
+      const grain = target.dimensions?.[ref.dimension]?.type === 'time' ? ref.grain || 'day' : null;
+      if (ref.grain !== undefined && !grain) throw new ToolError(`${at}: '${label}' is no time column — it takes no grain`, { stage: 'validate', field });
+      return { kind: 'dimension', path: `${c.primaryEntityName(model)}__${ref.dimension}`, grain, column: `${model}_${ref.dimension}`, label, type: grain ? 'time' : c.modelColumns(model).find((x) => x.name === ref.dimension)?.type || 'unknown' };
+    }
     if (declaredRef?.dimension === undefined) {
       const as = declaredRef || (c.modelDimensionColumns(model).includes(ref.dimension) ? { source: model, column: ref.dimension } : null);
       if (as) throw new ToolError(`${at}: '${label}' is ${as.column !== undefined ? 'a column' : 'an event property'} of '${model}', named where it lives in the catalog — write ${refText(as)}`, { stage: 'validate', field });
-      const computed = (ctx.state.additions?.[model]?.dimensions || []).map((d) => this._taskDimRef(model, d)).filter((r) => r.dimension !== undefined).map((r) => r.dimension);
+      const computed = (ctx.state.additions?.[model]?.dimensions || []).map((d) => this._taskDimRef(model, d, c)).filter((r) => r.dimension !== undefined).map((r) => r.dimension);
       throw new ToolError(`${at}: '${label}' is not a dimension this context computed on '${model}'. ${computed.length ? `It computed: ${computed.join(', ')}.` : 'It computed none there.'} A dimension computed from the row is declared { name, expr } in a semantic_models item.`, { stage: 'validate', field });
     }
     if (ref.grain !== undefined) throw new ToolError(`${at}: '${label}' is a computed dimension, which is categorical — it takes no grain`, { stage: 'validate', field });
@@ -230,14 +241,14 @@ export const semanticQueryMethods = {
    * nothing.
    */
   _taskEntities(ctx) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     return [...new Set(this._measureSources(ctx).flatMap((s) => Object.keys(c.isFact(s) ? c.getModel(s).entities || {} : c.entitiesOf(s))))];
   },
 
   /** An entity — a key a source whose measures the task reads carries (_taskEntities) — grouped by as
    *  it is: one row per key value, its result column the entity's name. */
   _taskEntity(ctx, entity, at, field) {
-    const c = this.catalog;
+    const c = this._catalogOf(ctx);
     const sources = this._measureSources(ctx);
     const declared = new Set(this._taskEntities(ctx));
     if (declared.has(entity)) return { kind: 'entity', path: entity, grain: null, column: entity, label: entity, type: 'unknown' };
@@ -748,7 +759,7 @@ export const semanticQueryMethods = {
     for (const m of metrics) if (!known.has(m)) throw new ToolError(`${q.at}: unknown metric in context: '${m}'. Available: ${[...known].join(', ') || '(none)'}`, { stage: 'validate', field: 'steps' });
     // a metric the context declares but its layer could not carry (a measure on a slowly-changing
     // model is dropped from what dbt parses) is refused HERE, not by MetricFlow minutes later
-    const emitted = new Set(renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() }).metricNames);
+    const emitted = new Set(renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() }).metricNames);
     const dropped = metrics.filter((m) => !emitted.has(m));
     if (dropped.length) throw new ToolError(`${q.at}: metric${dropped.length > 1 ? 's' : ''} ${dropped.map((m) => `'${m}'`).join(', ')} ${dropped.length > 1 ? 'are' : 'is'} declared in this context but not in its semantic layer: ${dropped.length > 1 ? 'they read' : 'it reads'} a measure on a slowly-changing model, where MetricFlow allows no measure (it is a join target only). Count on an events source instead (count_distinct of the user key), and group by that model's attributes. Queryable here: ${[...emitted].join(', ') || '(none)'}`, { stage: 'validate', field: 'steps' });
 
@@ -808,7 +819,7 @@ export const semanticQueryMethods = {
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail covers every source this context reads, whichever one the metrics come from
-    const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k)).map((k) => `source ${k}`);
+    const guarded = (ctx.state.usedModels || []).filter((k) => this._catalogOf(ctx).requireTimeRangeFor(k)).map((k) => `source ${k}`);
     const { bounds, windowWarnings } = this._metricWindow(input, guarded);
     const paging = this._metricPaging(input, tail.ordered);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, metrics);
@@ -818,7 +829,7 @@ export const semanticQueryMethods = {
     // inside the call or after it was handed back as a job.
     // …and the partition filter this query adds for its window, named as the caller would name it
     const [source] = this._measureSources(ctx);
-    const partitionToken = source && this.catalog.primaryEntityName(source) ? [[`${this.catalog.primaryEntityName(source)}__${PARTITION_DIM}`, `${source}_${PARTITION_DIM}`]] : [];
+    const partitionToken = source && this._catalogOf(ctx).primaryEntityName(source) ? [[`${this._catalogOf(ctx).primaryEntityName(source)}__${PARTITION_DIM}`, `${source}_${PARTITION_DIM}`]] : [];
     const spelled = new Map([...this._queryTokens((ctx.state.metrics || []).map((m) => m.name)), ...partitionToken, ...whereNames, ...rename]);
     const speak = this._callerSpelling(spelled);
     const respond = async (res) => {
@@ -836,8 +847,10 @@ export const semanticQueryMethods = {
       // in the context, plus a non-events source (a spend table) only when the task aggregates it.
       // A dimension joined for its attributes (installs) has a time axis too, but its latest install
       // says nothing about how complete a spend or events result is.
-      const contributes = (k) => this.catalog.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(this.catalog.getModel(k).measures || {}).length > 0;
-      const factsRead = (ctx.state.usedModels || []).filter((k) => this.catalog.getModel(k).time?.column && contributes(k));
+      // (a build's own table is as fresh as its build: no freshness of the warehouse's is read for it)
+      const cc = this._catalogOf(ctx);
+      const contributes = (k) => cc.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(cc.getModel(k).measures || {}).length > 0;
+      const factsRead = (ctx.state.usedModels || []).filter((k) => !cc.getModel(k).built && cc.getModel(k).time?.column && contributes(k));
       const freshByFact = {};
       await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f); }));
       const knownFresh = Object.values(freshByFact).filter(Boolean);

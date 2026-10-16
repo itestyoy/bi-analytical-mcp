@@ -21,11 +21,10 @@ const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'dev
 const step = (extra = {}) => ({ stage: 'semantic_model', measures: [COUNT], metrics: N, ...extra });
 const start = (e, steps, source = 'events') => e.build_model({ action: 'start', name: 'lay', source, ...(steps.length ? { steps } : {}) });
 
-test('the step is a build\'s last, and one: refused before another step, twice, and with steps before it (until a table can carry it)', async () => {
+test('the step is a build\'s last, and one: refused before another step and twice', async () => {
   const e = engine();
   await assert.rejects(() => start(e, [step(), { stage: 'limit', limit: 1 }]), /a semantic_model step is the build's last — put it after the others/);
   await assert.rejects(() => start(e, [step(), step()]), /a build has one semantic_model step/);
-  await assert.rejects(() => start(e, [{ stage: 'limit', limit: 1 }, step()]), /over the rows of steps before it is not built yet/);
   // added after a start, it is the last step, and nothing is added after it
   const s = await start(e, []);
   const added = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [step()] });
@@ -76,4 +75,27 @@ test('preview shows the layer; edit_step replaces the step, delete_step and trun
   assert.deepEqual(cut.steps, []);
   const gone = await e.build_model({ action: 'delete_step', context_id: s.context_id, index });
   assert.equal(gone.steps_count, 0);
+});
+
+// OVER A TABLE THE STEPS BEFORE IT BUILT: the table is a model of the context, read on the time axis the
+// step names, its foreign keys the ones its joins name — each part a column of the table, the time the
+// axis. The build's name is the model's, so it is named apart from the catalog's models and keys.
+test('over the table of the steps before it: its time axis named, its joins keyed by its columns', async () => {
+  const e = engine();
+  const sessions = [
+    { stage: 'aggregate', group_by: ['player_id_of_internal', 'session_number'], measures: [{ name: 'session_start', expr: { fn: 'min', args: [{ column: 'device_time' }] } }, { name: 'n_events', expr: { fn: 'count' } }] },
+  ];
+  const over = (st) => e.build_model({ action: 'start', name: 'sess', source: 'events', steps: [...sessions, st] });
+  await assert.rejects(() => over(step()), /time: name the column of the table the steps before this one built that is its time axis/);
+  await assert.rejects(() => over(step({ time: 'no_such' })), /time: 'no_such' is no column of the table/);
+  await assert.rejects(() => over(step({ time: 'n_events' })), /time: 'n_events' is int, not a moment/);
+  const join = (on) => ({ source: 'users', on: { user: 'player_id_of_internal', time: 'session_start', ...on } });
+  await assert.rejects(() => over(step({ time: 'session_start', join: [join({ time: 'n_events' })] })), /on\.time is 'session_start', the main model's time axis/);
+  await assert.rejects(() => over(step({ time: 'session_start', join: [join({ user: 'no_such' })] })), /on\.user names 'no_such', which is no column of the table/);
+  const ok = await over(step({ time: 'session_start', join: [join()], measures: [COUNT, { name: 'per_session', expr: { fn: 'average', args: [{ column: 'n_events' }] } }], metrics: [...N, { name: 'per_session', type: 'simple', measure: 'per_session' }] }));
+  const effect = ok.step_effects.find((x) => x.stage === 'semantic_model');
+  assert.deepEqual(effect.semantic_models.sort(), ['sess', 'users']);
+  assert.deepEqual(effect.metrics.sort(), ['sess_n', 'sess_per_session']);
+  // a build named as a model or a key of the catalog would name its table so
+  await assert.rejects(() => e.build_model({ action: 'start', name: 'users', source: 'events', steps: [...sessions, step({ time: 'session_start' })] }), /the build's name 'users' is a model or a key of the catalog/);
 });

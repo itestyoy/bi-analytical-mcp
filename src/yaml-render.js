@@ -127,7 +127,10 @@ export function renderBaseModel(catalog, key) {
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
   const peExpr = pe.key ? entityExpr(catalog, pe) : undefined;
-  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
+  // a model with no key of its own (a build's table: src/catalog/built-model.js) names its identity
+  // alone — its dimensions are reached under it, and nothing joins onto it
+  if (m.built) sm.primary_entity = peName;
+  sm.entities = m.built ? [] : [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }

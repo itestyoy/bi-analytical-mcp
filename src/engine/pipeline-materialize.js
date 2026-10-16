@@ -150,9 +150,10 @@ export const pipelineMaterializeMethods = {
     );
   },
 
-  async _draftMaterialize(ctx, draft) {
-    // a build that ends in its semantic_model step materializes the layer it declares
-    if (draft.semantic) return this._materializeLayer(ctx, draft);
+  async _draftMaterialize(ctx, draft, { stagesOnly = false } = {}) {
+    // a build that ends in its semantic_model step materializes the layer it declares (its steps first,
+    // when they are no table yet: _materializeLayer builds them through here, stagesOnly)
+    if (draft.semantic && !stagesOnly) return this._materializeLayer(ctx, draft);
     if (!draft.stages.length) throw new ToolError('draft has no steps to materialize — add_steps first', { stage: 'validate', field: 'context_id' });
     if (draft.base && (!this.ctxs.has(draft.base.owner) || !this.ctxs.hasPipelineModel(ctx.id, draft.base.model))) {
       throw new ToolError(`the table this draft starts from (${draft.base.model}, task ${draft.base.task_id}) is gone — its context was dropped. Run that task again and start a new draft from it`, { stage: 'validate', field: 'context_id', code: RESULT_GONE });

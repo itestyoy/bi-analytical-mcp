@@ -510,9 +510,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
 - BUILD, QUERY, SHOW (HARD RULE). ONE builder, `build_model` — a build of steps: the pipeline's stages,
-  and as its LAST step a `semantic_model` step, the semantic layer over the build's source (or, once 3b
-  lands, over the table the steps before it built: src/pipeline/semantic-stage.js; its form
-  `SEMANTIC_MODEL_STEP`, src/schema/fields.js, offered by `STAGE_PLACES.build`) — and ONE query tool,
+  and as its LAST step a `semantic_model` step, the semantic layer over the build's source, or over the
+  table the steps before it built (src/pipeline/semantic-stage.js; its form `SEMANTIC_MODEL_STEP`,
+  src/schema/fields.js, offered by `STAGE_PLACES.build`). That table is a model of the CONTEXT's catalog
+  (`Engine._catalogOf`, src/catalog/built-model.js) — its time axis the step's `time`, its foreign keys
+  its joins', named `{ semantic_model: [<the build's name>], dimension }` in a query, no model of the
+  server's catalog — built first by the same materialize, the layer parsed once it stands — and ONE query tool,
   `query_model`, for both sides; the sides stay inside the engine (`TASK_KINDS`, src/engine.js: a
   semantic layer's parse and a pipeline's build are build_model's tasks, a metric query and a read
   query_model's). A context holds ONE semantic layer, its build's step: it is changed by edit_step and

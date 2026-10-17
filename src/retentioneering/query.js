@@ -9,7 +9,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { READ_PAGE } from '../schema/fields.js';
 import { pageBlock } from '../engine/helpers.js';
-import { retentioneeringFacts } from './schema.js';
+import { retentioneeringFacts, checkConditionPairs } from './schema.js';
 import { pathParts, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
@@ -132,6 +132,7 @@ export function validateAnalyses(es, shape, analyses) {
 
 export async function query(engine, feature, input) {
   engine.host.validate(QUERY, input);
+  checkConditionPairs(input.analyses, 'analyses');
   if (input.cancel) return engine.tasks.cancel(input, SIDE);
   if (input.task_ids) return readTasks(engine, feature, input);
   if (!input.analyses) throw new ToolError(`${QUERY} takes { context_id, analyses } to start analyses, or { task_ids } to read them back`, { stage: 'validate' });

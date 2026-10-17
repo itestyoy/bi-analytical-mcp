@@ -155,29 +155,24 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
 (Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
 
 - **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads. Its rows are an
-  events source in a time window prepared by its `steps`, the pipeline's own stages that keep them
-  events — `steps: [...]` of `where` (the events kept or dropped, a slice of the source, a condition on an
-  event property), `compute` (events renamed, merged or split by a parameter — a `case` or a `concat`
-  into a column that `columns.event` then names — or an event property read into a column) and
-  `join` (a related model's columns through the declared relationship; a slowly-changing model
-  states its `between`, and a join of one without it is refused, since every version would repeat
-  each event). Then it names its columns: `columns: { event, time }` when not the source's own,
-  `path` — the column(s) one path is (the user by default; a bidfloor id, a tracking id, a level, or
-  several as a composite key) — and `segments`, columns carried as segments. `top` keeps the N most
-  frequent event names and merges the rest into `other`; `sessions` splits paths at a gap. The window
-  bounds the partition column as well when the catalog declares one next to the time axis (the days
-  the window touches, and `partition_late_days` more for events filed under the day they arrived),
-  and a source whose catalog sets `require_time_range` refuses a build without a window — as a
-  pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users with
+  events source's own, in a time window, or the table a `build_model` pipeline made (`from_task` +
+  `path: [<column>]` + `columns: { event, time }`): the rows are prepared there — `where` (the events
+  kept or dropped, a slice of the source, a condition on an event property), `compute` (events renamed,
+  merged or split by a parameter, an event property read into a column), `join` (a related model's
+  columns on its join contract), a funnel, several sources, a cohort chosen by an aggregate, a python
+  step. A start takes no steps of its own. Then it names its columns: `columns: { event, time }` when
+  not the source's own, `path` — the column(s) one path is (the user by default; a bidfloor id, a
+  tracking id, a level, or several as a composite key) — and `segments`, columns carried as segments.
+  `top` keeps the N most frequent event names and merges the rest into `other`; `sessions` splits paths
+  at a gap. The window bounds the partition column as well when the catalog declares one next to the
+  time axis (the days the window touches, and `partition_late_days` more for events filed under the day
+  they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
+  as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users with
   their whole paths; `events` keeps a share of the rows of the named events (for one that drowns the
-  rest), whose counts and surrounding transitions are then approximate. For event logic these stages
-  cannot say — a match_recognize, several sources joined, a cohort chosen by an aggregate, a python
-  step — the table is built with `build_model` and the eventstream starts from its task
-  (`from_task` + `path: [<column>]` + `columns: { event, time }`), reading that table's columns; its
-  cards are the same transition graph, step matrix and sankey. A start kept in an earlier spelling
-  (its list as `stages`, `events.include` / `split`, segment objects) is read in this one, and a new
-  call in it is refused with the converted request (one that only names its list `stages` is told
-  the field's name, `steps`).
+  rest), whose counts and surrounding transitions are then approximate. Its cards are the same
+  transition graph, step matrix and sankey whichever rows it reads. A start kept in an earlier spelling
+  (its steps, `events.include` / `split`, segment objects) is read as it was built, and a new call in one
+  is refused.
   It is built in SQL where the data lives and materialized; the call returns a task.
   Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_steps"` with
   `steps: [...]` takes one or several of the library's own steps, in order (each

@@ -30,7 +30,7 @@ export const FUNNEL = ['tutorial', 'level_started', 'shop_opened', 'iap_purchase
 /** A read of every row of every table of a task: one page as long as a read takes. */
 export const EVERY_ROW = { limit: 100000 };
 
-/** A start's step that brings the user's platform: a join of the users model on its contract, at the
+/** A pipeline's step that brings the user's platform: a join of the users model on its contract, at the
  *  event's time (the version valid then). */
 export const usersJoin = (attrs) => ({ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs });
 export const USERS_PLATFORM = usersJoin([{ column: 'platform' }]);
@@ -103,12 +103,35 @@ export async function openWorld() {
     return r.analyses;
   };
 
+  /**
+   * An eventstream over rows a build_model pipeline prepared — the way a start reads anything but a
+   * source's own columns: the pipeline's `steps` over `source` (and its window) are materialized, and the
+   * eventstream starts from that build's task, its path the user unless `path` says, its event and time
+   * the source's own columns unless `columns` names others. → the start's answer ({ task_id, context_id }).
+   */
+  const startPrepared = async ({ steps, source = 'events', time_range, path, columns = {}, ...rest }) => {
+    const p = await engine.build_model({ action: 'start', name: `${rest.name}_rows`, source, steps, ...(time_range ? { time_range } : {}), materialize: true });
+    assert.ok(p.materialize?.task_id, `the rows are built: ${JSON.stringify(p.materialize)}`);
+    for (;;) {
+      const r = await one(engine.query_model({ task_ids: [p.materialize.task_id] }));
+      if (r.status === 'running') continue;
+      assert.equal(r.status, 'done', `the rows: ${JSON.stringify(r.error)}`);
+      break;
+    }
+    const m = catalog.getModel(source);
+    return engine.build_retentioneering_model({
+      ...rest, from_task: p.materialize.task_id, source,
+      path: path || ['player_id_of_internal'],
+      columns: { event: columns.event || catalog.eventNameColumn(source), time: columns.time || m.time.column },
+    });
+  };
+
   try {
     // the rows every expectation is counted from: each event, its user, its time — in path order
     rows = (await wh.query('select player_id_of_internal as u, event_name as e, device_time as t from fct_analytics_events order by 1, 3, 2')).rows;
-    // the platform arrives by a join step — users is slowly changing, so at each event's time — and
-    // is carried as a segment under its column's name
-    const b = await engine.build_retentioneering_model({ name: 'paths', source: 'events', steps: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
+    // the platform arrives by a join of the pipeline the eventstream reads — users is slowly changing, so
+    // at each event's time — and is carried as a segment under its column's name
+    const b = await startPrepared({ name: 'paths', steps: [USERS_PLATFORM], segments: ['platform'], sessions: { gap_minutes: 30 } });
     built = await readDone(b.task_id);
     assert.equal(built.status, 'done', `the users' paths: ${JSON.stringify(built.error)}`);
     perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows
@@ -132,5 +155,5 @@ export async function openWorld() {
     return { ctx, added, read };
   };
 
-  return { engine, wh, rows, built, perPlatform, readDone, paths, analyze, stepsContext, shaped, close };
+  return { engine, wh, rows, built, perPlatform, readDone, paths, analyze, stepsContext, shaped, startPrepared, close };
 }

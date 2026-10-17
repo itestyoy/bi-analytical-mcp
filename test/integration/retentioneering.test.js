@@ -474,7 +474,7 @@ test('analyses without a card: the library\'s tables, the rows\' numbers, every 
 test('filter_events.where: every operator, a number compared as a number, not(…) keeps a missing value where neq drops it, a kept tree re-checked — the rows the warehouse keeps', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select event_name as e, level_id_of_event_data as l, device_time as t from fct_analytics_events')).rows;
-  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', steps: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
+  const b = await w.startPrepared({ name: 'levels', source: 'events', steps: [{ stage: 'compute', name: 'level', expr: { property: 'level_id_of_event_data' } }], segments: ['level'] });
   const levels = await readDone(b.task_id);
   assert.equal(levels.status, 'done', `T16 levels: ${JSON.stringify(levels.error)}`);
   const ctx = levels.context_id;
@@ -599,9 +599,9 @@ test('filter_events.where: every operator, a number compared as a number, not(�
   // T14 — a name that is not a column of the eventstream is the library's refusal, as the step is added
   await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'levels', name: 'bad_where', after: 0 });
   await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ column: 'no_such_col' }, { value: 'x' }] }] }] }), (e) => e.field === 'steps[0]' && /no_such_col/.test(e.message), 'T14: a column the eventstream does not have');
-  // …and an event property is the source's, not the eventstream's: refused at this place, naming what it
-  // takes — the start's compute stage is where a property becomes a column (as `level` above)
-  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: '1' }] }] }] }), (e) => e.field === 'steps[0].where' && /\{ property \} is not what filter_events' where takes/.test(e.message), 'an event property at filter_events\' place');
+  // …and an event property is the source's, not the eventstream's: no form of this place's expression, so
+  // its schema refuses it — the pipeline's compute stage is where a property becomes a column (as `level` above)
+  await assert.rejects(engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'bad_where', steps: [{ type: 'filter_events', where: [{ fn: 'eq', args: [{ property: 'level_id_of_event_data' }, { value: '1' }] }] }] }), (e) => /invalid input: `steps\.0\.where\.0\.args\.0`/.test(e.message), 'an event property at filter_events\' place');
 });
 
 // G — one context's eventstreams over time (a context of its own, deleted at the end): a start, its
@@ -610,8 +610,8 @@ test('filter_events.where: every operator, a number compared as a number, not(�
 test('a context\'s eventstreams over time: a later start makes a table of its own, a fork keeps its rows and description, a keyword segment is carried, a preview is not held behind a build — and once the context is gone its task is refused', opts, async (t) => {
   if (skip(t)) return;
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it — the
-  // platform a join stage brings under that name
-  const first = await readDone((await engine.build_retentioneering_model({ name: 'origin', source: 'events', description: 'every event', steps: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
+  // platform the pipeline's join brings under that name
+  const first = await readDone((await w.startPrepared({ name: 'origin', source: 'events', description: 'every event', steps: [usersJoin([{ column: 'platform', name: 'group' }])], segments: ['group'] })).task_id);
   assert.equal(first.status, 'done', `T23 origin: ${JSON.stringify(first.error)}`);
   const ctx = first.context_id;
   assert.deepEqual(Object.fromEntries(first.segment_levels.group.levels.map((l) => [l.level, l.users])), perPlatform, 'T23: a segment named for a keyword is carried, level by level');
@@ -630,7 +630,7 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
 
   // T28 + T21 — a later start of the same name, and a step on it that waits for that build — while a
   // preview of another eventstream of the context answers at once
-  const restart = await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
+  const restart = await w.startPrepared({ context_id: ctx, name: 'origin', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] }] });
   const order = [];
   const stepping = engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'origin', steps: [{ type: 'collapse_events', loops: true }] }).then(() => order.push('step'));
   await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'origin_copy' }).then(() => order.push('preview'));
@@ -673,12 +673,12 @@ test('a context\'s eventstreams over time: a later start makes a table of its ow
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, display: { analysis: 'transition_graph' } }), (e) => e.code === 'result_gone' && e.stage === 'validate', 'T28: a task whose context is gone');
 });
 
-test('the source\'s own columns and event properties filter the paths and carry as segments, by the start\'s steps — no join needed', opts, async (t) => {
+test('the source\'s own columns and event properties filter the paths and carry as segments, by the pipeline the start reads — no join needed', opts, async (t) => {
   if (skip(t)) return;
   const own = (await wh.query('select player_id_of_internal as u, event_name as e, bundle_id as b, level_id_of_event_data as l from fct_analytics_events')).rows;
   // a where on a column of the source, a compute copying a column under another name, a compute reading
   // an event property into a column — and the two columns carried as segments
-  const b = await engine.build_retentioneering_model({
+  const b = await w.startPrepared({
     name: 'one_app', source: 'events',
     steps: [
       { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'com.omg.colorfit' }] }] },
@@ -696,8 +696,8 @@ test('the source\'s own columns and event properties filter the paths and carry 
   assert.deepEqual([...new Set(es.map((x) => x.app))], ['com.omg.colorfit'], 'the column carried as a segment');
   const byLevel = (list, key) => list.reduce((m, x) => m.set(String(x[key] ?? ''), (m.get(String(x[key] ?? '')) || 0) + Number(x.n ?? 1)), new Map());
   assert.deepEqual(byLevel(es, 'level'), byLevel(kept.map((x) => ({ level: x.l })), 'level'), 'the property carried as a segment, value by value');
-  // a column the table does not have is refused before anything runs, by the step that names it, with the ones it has
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'no_such' }, { value: 1 }] }] }] }), (e) => e.field === 'steps[0]' && /no_such/.test(e.message) && /bundle_id/.test(e.message));
+  // a start takes no steps of its own: the rows are prepared by build_model, said with where
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'bundle_id' }, { value: 'x' }] }] }] }), (e) => e.field === 'steps' && /an eventstream's start takes no steps/.test(e.message) && /build_model/.test(e.message));
 });
 
 // K — FROM A PIPELINE'S TASKS. An event only a window can define — a level started again right after a
@@ -730,8 +730,8 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   const m = await engine.build_model({ action: 'materialize', context_id: p.context_id });
   const firstBuild = await one(engine.query_model({ task_ids: [m.task_id] }));
   assert.equal(firstBuild.status, 'done', `T41 the draft's first build: ${JSON.stringify(firstBuild.error)}`);
-  // the start's steps run over the task's table as over a source: here a compute copying a column under the segment's name
-  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, steps: [{ stage: 'compute', name: 'app', expr: { column: 'bundle_id' } }], segments: ['app'] });
+  // the task's table's own columns name the path, the event, its time and a segment
+  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, segments: ['bundle_id'] });
   const r = await readDone(b.task_id);
   assert.equal(r.status, 'done', `T41 from_pipe: ${JSON.stringify(r.error)}`);
   assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected, 'T41: the events a window defined, counted from the rows');
@@ -743,7 +743,7 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   assert.equal(g.status, 'done', JSON.stringify(g.error));
   assert.equal(new Map(table(g.analyses.transition_graph, 'events').map((n) => [n.event, n.count])).get('level_restarted'), expected.get('level_restarted'), 'T41: the analysis reads the window-defined event');
   // what the table cannot say is refused before anything runs, with where it belongs
-  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] }] }), (e) => e.field === 'steps[0]' && /result_of_event_data/.test(e.message), 'T41: a property of the source is not the table\'s');
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' }, segments: ['result_of_event_data'] }), (e) => e.field === 'segments' && /result_of_event_data/.test(e.message), 'T41: a property of the source is not the table\'s');
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, path: ['no_such'], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /ev/.test(e.message), 'T41: a path column the table does not have');
 
   // T43 — the draft's second build (every event but the first launch; the case renames only level_started)

@@ -1,12 +1,12 @@
 // THE EVENTSTREAM — the one table a path analysis reads, prepared in SQL where the data lives
 // (AGENTS.md: what SQL can compute is computed in SQL; the python step receives a prepared table).
 //
-// The rows are prepared by the pipeline's own stages (src/pipeline.js): the time window as a `where`,
-// then the start's steps as the caller wrote them — a `where` scoping the events, a `compute` renaming
-// them or reading a property into a column, a `join` bringing an attribute by a relationship the catalog
-// declares (point in time for a slowly-changing model, as the caller states it) — so the dialect, the
-// relationship keys and the typing of every comparison are exactly a pipeline's. On top of that one
-// statement shapes the path table from the columns the start names:
+// The rows are a source's own, read by the pipeline's own stages (src/pipeline.js) with the time window
+// as a `where`, or a task's table build_model prepared (a where scoping the events, a compute renaming
+// them or reading a property into a column, a join bringing an attribute — there, as a pipeline's) — so
+// the dialect and the typing of every comparison are exactly a pipeline's. (A start kept from an earlier
+// version may carry such steps of its own: they are read as it was built.) On top of that one statement
+// shapes the path table from the columns the start names:
 //
 //   user_id     the path owner: the source's per-user key, or the path's columns (several joined by
 //               '|', a composite key), as text — rows without every part are left out
@@ -36,8 +36,8 @@ export function pathParts(spec) {
   return spec.path || null;
 }
 
-/** The stages the rows are prepared by: the time window (the engine's own where, the window a pipeline
- *  applies), then the start's steps as written. */
+/** The stages the rows are read by: the time window (the engine's own where, the window a pipeline
+ *  applies) — and the steps of a start kept from an earlier version, as it was built. */
 function eventstreamStages(spec, { timeConditions = null } = {}) {
   return [...(timeConditions ? [{ stage: 'where', conditions: timeConditions }] : []), ...(spec.steps || [])];
 }

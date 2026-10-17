@@ -22,7 +22,7 @@ import { eachSchema, transportSchema } from '../../src/schema/transport.js';
 import { PLACES, AGGREGATE_FNS } from '../../src/pipeline/compute.js';
 import { STAGE_PLACES, stageDef } from '../../src/pipeline.js';
 import { REF_PLACES, refKind } from '../../src/schema/refs.js';
-import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema, startPlace } from '../../src/retentioneering/schema.js';
+import { buildSchema as eventstreamSchema, querySchema as pathQuerySchema, displaySchema as pathDisplaySchema, FILTER_PLACE, LIBRARY_STEPS } from '../../src/retentioneering/schema.js';
 import { buildToolDefs } from '../../src/mcp-surface.js';
 import { Engine } from '../../src/engine.js';
 import { ContextManager } from '../../src/context-manager.js';
@@ -284,7 +284,7 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
     query_model: ['expr', 'over', 'over_frame', 'stage', 'ref'],
     semantic_index: ['ref'],
     memory: ['ref'],
-    build_retentioneering_model: ['expr', 'over', 'over_frame', 'stage'],
+    build_retentioneering_model: ['expr', 'stage'],
   };
   const PER_PLACE = ['pipeline_stage', 'read_stage', 'eventstream_stage', 'read_expr', 'eventstream_expr'];
   for (const [name, schema] of Object.entries(all)) {
@@ -297,8 +297,8 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
   // the stage is grouped by what a step needs — SQL over rows, over a source's events, on a runtime, in
   // the semantic layer — and each group's forms are tagged by `stage`; a tool's holds the groups its
   // places take (a group left empty is left out): a metric query's steps are a read's and its metrics
-  // step, which no other tool offers; the retentioneering tool's start takes SQL stages that keep the rows
-  // events, and its library's ops are its runtime group
+  // step, which no other tool offers; the retentioneering tool takes no SQL stage (the rows are prepared
+  // by build_model, read from its task): its library's ops are its one group, the runtime's
   const groups = (schema) => deref(schema, schema.$defs.stage).anyOf.map((g) => deref(schema, g).title);
   const SQL = 'SQL over rows — needs a table';
   const RUNTIME = 'on a runtime, not SQL — needs its runtime, after SQL has prepared the rows';
@@ -307,7 +307,7 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
   assert.deepEqual(groups(all.query_model), [SQL, SEMANTIC], 'a metric query\'s: a read\'s, and its metrics step');
   const semanticGroup = deref(all.query_model, all.query_model.$defs.stage).anyOf.map((g) => deref(all.query_model, g)).find((g) => g.title === SEMANTIC);
   assert.deepEqual(forms(all.query_model, semanticGroup).flatMap((f) => pinned(all.query_model, f, 'stage')), ['metrics']);
-  assert.deepEqual(groups(all.build_retentioneering_model), [SQL, RUNTIME]);
+  assert.deepEqual(groups(all.build_retentioneering_model), [RUNTIME]);
   // the ref is grouped by what it names: the catalog, the semantic layer — a tool's holding what its places take
   const refGroups = (schema) => deref(schema, schema.$defs.ref).anyOf.map((g) => deref(schema, g).title.split(':')[0]);
   assert.deepEqual(refGroups(all.query_model), ['the catalog', 'the semantic layer'], 'a metric query groups by a column, a property and the semantic layer\'s names');
@@ -321,15 +321,15 @@ test('each tool schema holds one expr of each kind, its window, one stage and on
 // pins, a window by its `over` (and its partition by a relationship, by `entity`), a step by its `stage`, a
 // ref by its fields — and held to the tables the
 // build-time checks read (PLACES, STAGE_PLACES, REF_PLACES). The retentioneering tool's places are its
-// own: its start's steps and filter_events' where (a place of a read's shape), its library's ops its
-// runtime group.
+// own: filter_events' where (conditions over the eventstream's columns), its library's ops its runtime
+// group and no stage of the pipeline.
 for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) {
   test(`each tool's $defs.expr, $defs.stage and $defs.ref offer no form none of its places take (${label} catalog)`, () => {
     const c = loadCatalog(path, {});
     const tools = [
       ...listed(path).map((t) => [t.name, t.inputSchema, TOOL_PLACES[t.name] || {}]),
       ['build_model.pipeline', transportSchema(buildSchemas(c)['build_model.pipeline']), TOOL_PLACES.build_model],
-      ['build_retentioneering_model', transportSchema(eventstreamSchema(c)), { expr: ['source_rows', PLACES.stored_rows], stage: [startPlace(c)] }],
+      ['build_retentioneering_model', transportSchema(eventstreamSchema(c)), { expr: [FILTER_PLACE], stage: [LIBRARY_STEPS] }],
     ];
     const placesIn = (table, names = []) => names.map((p) => (typeof p === 'string' ? table[p] : p));
     // what a form names, by the fields it requires: a ref ({ source, column } is no { column }), or a row's leaf

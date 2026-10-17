@@ -616,13 +616,13 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   delete_context — `deletes`, collected by `featureDeletes`). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
 - RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
-  PIPELINE — `start` declares the eventstream: an events source (or a task's table) prepared by its
-  `steps`, the pipeline's own stages that keep the rows events (where, compute, join — the one
-  `$defs.stage`, the core's with the library's ops as this tool's runtime group; a start's steps take
-  where / compute / join and add_steps / edit_step / insert_step the library's ops, each refused at its
-  place naming what it takes; a join names its model's contract, the time part included),
+  PIPELINE — `start` declares the eventstream: the rows of an events source (its own columns, within a
+  window) or of a task's table — a build_model pipeline's, where the rows are PREPARED (where, compute,
+  join: a start takes no steps, so the tool carries no stage of the pipeline and no row expression of
+  its own; its one `$defs.stage` is the core's with the library's ops as its runtime group, taken by
+  add_steps / edit_step / insert_step, a SQL stage there refused naming build_model and from_task),
   then the columns it names (`columns.event` / `time`,
-  `path`, `segments` — column names of the prepared rows), rendered in SQL, materialized, its
+  `path`, `segments` — column names of the rows), rendered in SQL, materialized, its
   summary carrying the vocabulary and every segment's levels; then the library's own steps
   (`add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
@@ -660,16 +660,21 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
   What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
   src/retentioneering/schema.js — today `filter_events.where`, a condition slot of the one expression
-  grammar at its own place (the one `$defs.expr`, at filter_events' place — `PLACES.stored_rows`: a
-  column of the eventstream, a constant or the current time, conditions, `and` / `or` / `not`, the
-  scalar functions — no raw, no event property, no window), written into the library's
+  grammar at its own place (the one `$defs.expr`, at filter_events' place — `FILTER_PLACE`: a column of
+  the eventstream, a constant or the current time, the conditions and `and` / `or` / `not` — no scalar
+  function, no raw, no event property, no window: a value computed from columns is a column build_model
+  makes), written into the library's
   `sql` by the one writer for DuckDB with every name and constant quoted, a column compared as its
   constants' kind, and a comparison with a missing value not holding (neq / not_in / not_like mean
   present and different; `not(…)` keeps one, as the library's drop does; a kept step's negation is
   carried over as `not(…)`, so it keeps what it kept). The path-pattern
   language (path_pattern, an anchor's pattern, matches_pattern) is the library's parser's own, extracted
   into the sheet (`path_patterns`) and rendered in the guide; the library's relative doc links are made
-  absolute in the sheet.
+  absolute in the sheet. WHAT EVERY REQUEST CARRIES IS KEPT SMALL: a library parameter is said in its
+  docstring's first sentence in the schema (`firstSentence`), its whole docstring in the guide
+  (`parameters`); a path metric's condition is ONE form per metric (`compactCondition` — a comparison and
+  a membership, its value a constant or a list), the pairing of `op` and value checked in the call
+  (`checkConditionPairs`).
   WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: every step as it is added, and every
   analysis of a query, is run by the library itself on the feature's environment — one warm process
   (python/retentioneering_check.py --serve, src/retentioneering/checker.js) — over two stand-in
@@ -684,10 +689,11 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   draws it reads every row. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
-  eventstream's shape rules out. The build reaches the source's OWN columns and event properties, a
-  related model's columns, and events renamed, merged or split by a parameter, through the
-  pipeline's own stages (where, compute, join) — all in SQL; a kept start in an earlier spelling is
-  carried over on read (src/retentioneering/earlier.js), and a new call in one is refused by the schema. The analyses with a card are CARD_KINDS (the charted ones and a
+  eventstream's shape rules out. The build reads a source's OWN columns; event properties, a related
+  model's columns, and events renamed, merged or split by a parameter are a build_model pipeline's
+  (where, compute, join — all in SQL), its task the start's `from_task`; a kept start in an earlier
+  spelling (its steps among it) is carried over on read (src/retentioneering/earlier.js) and read as it
+  was built, and a new call in one is refused by the schema. The analyses with a card are CARD_KINDS (the charted ones and a
   distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps — which kinds have a card, and which diff keeps its analysis's own shape, is ONE
   table, `KINDS` in src/retentioneering/view-model.js, that the query spec carries to the analysis
   step and its pre-run check (`diff_charted`), and a stored diff says which form it holds); any other

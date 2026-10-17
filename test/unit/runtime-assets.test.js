@@ -39,6 +39,17 @@ test('the Dockerfile copies every directory a runtime asset lives in', () => {
   }
 });
 
+// A production failure of the same kind: Node ran as the container's PID 1, which the kernel hands every
+// orphaned process to — and Node reaps only the processes it started itself, so each dbt / Python run left
+// a zombie (1,687 in three days), and it ignored SIGTERM. PID 1 is an init that reaps and forwards signals.
+test('the image runs the server under an init that reaps orphaned processes (tini as PID 1)', () => {
+  const dockerfile = readFileSync(join(ROOT, 'Dockerfile'), 'utf8');
+  const entry = dockerfile.match(/^ENTRYPOINT\s+(\[.*\])\s*$/m);
+  assert.ok(entry, 'the Dockerfile declares no ENTRYPOINT: Node would be PID 1');
+  assert.deepEqual(JSON.parse(entry[1]), ['/usr/bin/tini', '--']);
+  assert.match(dockerfile, /apt-get install[^\n]*\btini\b/, 'tini is not installed in the image');
+});
+
 // …and the same directory must not be excluded on the way in.
 test('no runtime asset directory is excluded by .dockerignore', () => {
   const ignore = existsSync(join(ROOT, '.dockerignore')) ? readFileSync(join(ROOT, '.dockerignore'), 'utf8') : '';

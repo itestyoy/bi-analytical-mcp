@@ -8,6 +8,9 @@ import { ToolError } from './validate.js';
 /** The fewest conversions, and non-conversions, a group needs for a z-test's normal approximation to hold. */
 const SMALL_SAMPLE_OUTCOMES = 10;
 
+/** The fewest users a group needs for a test of means to read its p-value without assuming normal values. */
+const SMALL_SAMPLE_MEAN_USERS = 30;
+
 /** A mean-test group as { n, mean, stddev }: given so, as it is; given { n, sum, sum_squares }, computed (n − 1 in the variance). */
 function meanFromSums(g) {
   if (!g || g.mean !== undefined || g.sum === undefined) return g;
@@ -44,15 +47,15 @@ export function abTest(input) {
   const alternative = input.alternative || 'two_sided';
   const correction = input.correction || 'holm';
   const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
-  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`experiment analyze, metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
+  const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`experiment analyze, metric=${metric}: group '${g === control ? labelOf(g, -1) : labelOf(g, (input.variants || []).indexOf(g))}' is missing '${f}'`, { stage: 'validate', field: f }); };
 
   // Cross-field guard the schema cannot express: for a proportion, a group's success
   // count cannot exceed its sample size (a rate > 100% is impossible). Reject it instead
   // of silently returning control_rate > 1 and a meaningless lift.
   if (metric === 'proportion') {
-    for (const g of [control, ...(input.variants || [])]) {
+    for (const [i, g] of [control, ...(input.variants || [])].entries()) {
       if (g && g.conversions != null && g.conversions > g.n) {
-        throw new ToolError(`metric=proportion: conversions (${g.conversions}) cannot exceed n (${g.n}) for group '${g.label || '?'}' — a rate cannot exceed 100%`, { stage: 'validate', field: 'conversions' });
+        throw new ToolError(`metric=proportion: conversions (${g.conversions}) cannot exceed n (${g.n}) for group '${labelOf(g, i - 1)}' — a rate cannot exceed 100%`, { stage: 'validate', field: 'conversions' });
       }
     }
   }
@@ -90,8 +93,16 @@ export function abTest(input) {
         if (Array.isArray(r.confidence_interval)) r = { ...r, confidence_interval: r.confidence_interval.map((x) => Math.max(-1, Math.min(1, x))) };
       } else {
         need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
+        // a mean's spread is read from the sample: one user has none, and two groups with none leave
+        // nothing to test a difference against — Welch's t is not defined there, so no verdict is given
+        const one = [control, v].find((g) => g.n < 2);
+        if (one) throw new ToolError(`group '${labelOf(one, one === control ? -1 : i)}' has ${one.n} user(s): a test of means needs at least 2 in each group to read its spread — collect more users first`, { stage: 'validate', field: one === control ? 'control.n' : `variants[${i}].n` });
+        if (!(control.stddev > 0) && !(v.stddev > 0)) throw new ToolError(`'${labelOf(control, -1)}' and '${labelOf(v, i)}' both have stddev 0: with no spread there is nothing to test a difference of means against — check the stddev you computed (the sample's, over each user's value)`, { stage: 'validate', field: 'stddev' });
         r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
         delta = v.mean - control.mean; variance = (control.stddev ** 2) / control.n + (v.stddev ** 2) / v.n;
+        // a t-test's p-value leans on each group's mean being near normal: below ~30 users a skewed
+        // value (revenue, sessions) can read significant by chance — said, not hidden
+        if (Math.min(control.n, v.n) < SMALL_SAMPLE_MEAN_USERS) r = { ...r, small_sample: true };
       }
       // the smallest effect this sample could detect (power 0.8 at the test's own α, the smaller
       // group's n) — what an inconclusive result could have seen, never a power computed from the
@@ -132,13 +143,14 @@ export function abTest(input) {
     const lift = r.absolute_lift ?? 0;
     return { ...r, outcome: !sig || lift === 0 ? 'no_difference' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
   });
-  const worse = results.filter((r) => r.outcome === 'worse').map((r) => r.variant);
   const thin = results.filter((r) => r.small_sample).map((r) => r.variant);
+  // a verdict on a group too small to read is not stated as one: the small-sample warning speaks for it
+  const worse = results.filter((r) => r.outcome === 'worse' && !r.small_sample).map((r) => r.variant);
   const anySig = results.some((r) => (r.significant_adjusted ?? r.significant));
   const split = input.expected_ratio ? srmTest({ groups: groupsIn.map((g, i) => ({ label: labelOf(g, i - 1), n: g.n })), ratios: input.expected_ratio }) : null;
   const recommendations = [
     ...(split?.srm_detected ? [`Sample ratio mismatch (p = ${split.p_value.toExponential(2)}): the groups are not the split that was designed, so randomization or logging is broken and none of these lifts can be trusted until the cause is found.`] : []),
-    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, significant or not. Collect more users before deciding.`] : []),
+    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `a test of means needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, significant or not. Collect more users before deciding.`] : []),
     `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
     ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
     ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),

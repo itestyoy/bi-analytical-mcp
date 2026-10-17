@@ -116,3 +116,28 @@ test('names are stored as declared: a grain, a governed measure\'s name and anot
   const ok = await start(e, [step({ metrics: [...N, { name: 'spend', type: 'simple', measure: 'total_spend' }] })]);
   assert.deepEqual(ok.step_effects[0].metrics.sort(), ['rows', 'spend']);
 });
+
+// A START WITH STAGES AND ITS LAYER answers every step it added, and a filter is not said to add a column it
+// only passes through (the source's payload column among them).
+test('a start with stages and a semantic_model step: every step listed as added, a where adds no column', async () => {
+  const e = engine();
+  const tutorial = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] };
+  const out = await start(e, [tutorial, step({ time: 'device_time' })]);
+  assert.deepEqual(out.steps_added.map((s) => s.index), [1, 2]);
+  assert.deepEqual(out.step_effects[0].columns_added, []);
+});
+
+// A MEASURE OF A PROPERTY SEVERAL EVENTS CARRY (a price on a completed and on a failed purchase) folds it on
+// all of them: said, with the events, unless the measure names its event.
+test('a measure over a property several events carry is said to fold it on all of them', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', { coverage: [
+    { event: 'ad_started', rowCount: 10, nonNull: 10 },
+    { event: 'ad_finished', rowCount: 10, nonNull: 10 },
+  ] });
+  const prop = { fn: 'count_distinct', args: [{ property: 'ad_type_of_event_data' }] };
+  const notes = async (expr) => (await start(e, [step({ measures: [{ name: 'types', expr }], metrics: [{ name: 'types', type: 'simple', measure: 'types' }] })])).step_effects[0].recommendations || [];
+  assert.ok((await notes(prop)).some((r) => /measure 'types' folds 'ad_type_of_event_data' on every event that carries it — ad_finished, ad_started/.test(r)));
+  const scoped = { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'ad_started' }] }], then: { property: 'ad_type_of_event_data' } }] }] };
+  assert.ok(!(await notes(scoped)).some((r) => /folds 'ad_type_of_event_data'/.test(r)));
+});

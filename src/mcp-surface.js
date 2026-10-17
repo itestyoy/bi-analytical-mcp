@@ -211,7 +211,9 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   if (!renders && def.appsOnly && !def.appCallable) {
     logLine(name, '✗ from a client without the Apps extension');
     failed(name, `${name} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate' });
-    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_model ({ task_ids })`, 'validate'), raw: null };
+    // (read with the query tool of the same part of the server: a feature's own, or the core's)
+    const reader = [...toolsOf(engine).values()].find((t) => t.reads && (t.feature ?? null) === (def.feature ?? null))?.name || 'query_model';
+    return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with ${reader} ({ task_ids }) and answer in words`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
   // (only a card ASKED for: `false` asks for none, which every client already gets)

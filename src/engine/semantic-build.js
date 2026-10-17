@@ -237,10 +237,23 @@ export const semanticBuildMethods = {
     const taskMeasureNames = new Set(add.measures.map((m) => m.name));
     const dependents = ctx.state.metrics.filter((m) => [...measureRefs(m, ctx.state.metrics)].some((mm) => taskMeasureNames.has(mm)));
     if (dependents.length && !input.cascade) {
-      throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate' });
+      throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')} — add cascade: true to remove them with it, or edit the semantic_model step (build_model, action: "edit_step") to keep them on other measures`, { stage: 'validate', field: 'cascade' });
     }
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
+    // the layer is the build's semantic_model step: the step says the same, or the next materialize
+    // would build the removed model back (and a step with no metric left is no layer)
+    const draft = ctx.state.draft;
+    if (draft?.semantic) {
+      const gone = new Set(dependents.map((d) => d.name));
+      const st = { ...draft.semantic };
+      st.measures = (st.measures || []).filter((m) => !taskMeasureNames.has(m.name));
+      st.metrics = (st.metrics || []).filter((m) => !gone.has(m.name));
+      st.join = (st.join || []).filter((j) => j.source !== modelKey);
+      if (add.dimensions?.length) delete st.dimensions;
+      for (const k of ['measures', 'join']) if (!st[k].length) delete st[k];
+      if (st.metrics.length) draft.semantic = st; else delete draft.semantic;
+    }
     const render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() });
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);

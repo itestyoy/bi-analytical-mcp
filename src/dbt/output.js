@@ -30,7 +30,10 @@ export function formatDbtError(stdout = '', stderr = '') {
     .map((l) => l.replace(/^\s*\d{2}:\d{2}:\d{2}(\.\d+)?\s+/, '').replace(/\s+$/, '')) // dbt log timestamps
     .filter((l) => l.trim() !== '')
     // dbt v2 appends a Rust backtrace to an internal error: frames, not a reason
-    .filter((l) => !/^\s+\d+: [\w:<>{}_ .]+$|^\s+at \.\/|^\s+at \/rustc\//.test(l));
+    .filter((l) => !/^\s+\d+: [\w:<>{}_ .]+$|^\s+at \.\/|^\s+at \/rustc\//.test(l))
+    // MetricFlow's CLI frame around its reason: the spinner, where its own log file is on this
+    // server, and where to report a bug in MetricFlow — none of it says what to change in the query
+    .filter((l) => !/^\s*[⠀-⣿]|metricflow\.log|github\.com\/dbt-labs\/metricflow\/issues|^\s*(If you think you've found a bug|Please (check|see) the logs?)/i.test(l));
   const lines = cleaned;
   // dbt boilerplate we never want in the surfaced message.
   const noise = /^(Running with dbt|Registered adapter|Unable to do partial parsing|Starting full parse|Performance info|Found \d|Concurrency:|Sending event|Flushing usage|Update available|Your version of dbt|You can find instructions|Core:|Plugins:|- installed:|- latest:|Installed:)/i;

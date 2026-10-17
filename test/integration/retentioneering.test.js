@@ -778,6 +778,17 @@ test('from a pipeline\'s tasks: an eventstream over a window-defined event, and 
   assert.equal(result.status, 'done', `T44 the metric query stores its result: ${JSON.stringify(result.error)}`);
   await assert.rejects(asStream(stored.task_id), (e) => e.field === 'from_task' && semantic.test(e.message), 'T44: a metric query stored with materialize');
   // …while the pipeline's own build is still taken, the rows it stored counted as events
-  const again = await readDone((await engine.build_retentioneering_model({ name: 'from_pipe_again', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } })).task_id);
+  const againStart = await engine.build_retentioneering_model({ name: 'from_pipe_again', from_task: second.task_id, path: ['player_id_of_internal'], columns: { event: 'ev', time: 'device_time' } });
+  const again = await readDone(againStart.task_id);
   assert.equal(again.events, n, 'T44: a pipeline build stays a source of an eventstream');
+  // T45 — the other way round: an eventstream's task is no table a build starts from (said as it is, not
+  // as a restart), the query tool of the core does not read a path-analysis context, and a refused start
+  // leaves no context behind
+  await assert.rejects(engine.build_model({ action: 'start', name: 'from_rete', from_task: againStart.task_id }),
+    (e) => e.field === 'from_task' && /was started by build_retentioneering_model, and a build starts only from a pipeline build or a metric query run with materialize: true/.test(e.message), 'T45: from an eventstream\'s task');
+  await assert.rejects(engine.query_model({ context_id: againStart.context_id, steps: [{ stage: 'limit', limit: 1 }] }), (e) => e.field === 'context_id' && /holds no semantic layer and no pipeline table/.test(e.message), 'T45: query_model on a path-analysis context');
+  const contexts = () => engine.ctxs.list().length;
+  const count = contexts();
+  await assert.rejects(engine.build_retentioneering_model({ name: 'bad_path', from_task: second.task_id, path: ['no_such_column'], columns: { event: 'ev', time: 'device_time' } }), (e) => e.field === 'path' && /'no_such_column' is not a column of/.test(e.message), 'T45: a start refused at its rows\' columns');
+  assert.equal(contexts(), count, 'T45: a refused start leaves no context');
 });

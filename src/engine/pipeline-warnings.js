@@ -197,6 +197,26 @@ export class PipelineAdvisor {
     return warnings;
   }
 
+  /** The same gotcha in a semantic layer: a measure that folds an event property populated on SEVERAL
+   *  events (a price on a completed and on a failed purchase) folds it on all of them unless it names
+   *  the event — said, with the events, so a total is not read as one event's. */
+  measureScopeWarnings(source, measures) {
+    const c = this.catalog;
+    if (!c.isFact(source)) return [];
+    const props = c.eventProps(source);
+    const applies = this.valueIndex.appliesMap(source, props);
+    const evCol = c.eventNameColumn(source);
+    const out = [];
+    for (const m of measures || []) {
+      if (m.source !== undefined) continue;
+      const s = JSON.stringify(m.expr ?? {});
+      if (s.includes(`"column":"${evCol}"`)) continue; // the measure names its event(s)
+      const p = props.find((x) => s.includes(`"property":"${x}"`) && (applies[x] || []).length > 1);
+      if (p) out.push(`measure '${m.name}' folds '${p}' on every event that carries it — ${applies[p].join(', ')} — not one of them: to read one event's, fold a case that yields it on that event alone ({ fn: "case", cases: [{ when: [{ fn: "eq", args: [{ column: "${evCol}" }, { value: "<event>" }] }], then: { property: "${p}" } }] })`);
+    }
+    return out;
+  }
+
   /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
    *  are not scoped by an upstream where on event_name → it reads NULL elsewhere. */
   eventScopeWarnings(draft, stage) {

@@ -69,3 +69,15 @@ test('a log longer than the budget keeps its opening and its END — where a run
   assert.match(msg, /Could not find a version that satisfies the requirement gensim/, 'why it failed — the last line — is kept');
   assert.match(msg, /characters of the log left out/, 'the cut is said');
 });
+
+test('MetricFlow\'s CLI frame around its reason is left out: the spinner, its log file, where to report its bugs', () => {
+  const stderr = [
+    '⠋ Initiating query…',
+    'ERROR: Unable to resolve group-by item `users__os_version` for metric `spend`',
+    'Check the logs at /tmp/ws/logs/metricflow.log for details.',
+    'If you think you\'ve found a bug, please report it to https://github.com/dbt-labs/metricflow/issues',
+  ].join('\n');
+  const msg = formatDbtError('', stderr);
+  assert.match(msg, /Unable to resolve group-by item/);
+  assert.doesNotMatch(msg, /⠋|metricflow\.log|github\.com\/dbt-labs\/metricflow/);
+});

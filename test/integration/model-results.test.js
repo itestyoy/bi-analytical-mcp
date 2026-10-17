@@ -524,9 +524,9 @@ test('query_model: conditional aggregates and a second aggregate stage count the
     { stage: 'aggregate', measures: [{ name: 's', expr: { fn: 'sum', args: [{ column: 'event_name' }] } }] },
   ] }), /steps\[1\]: .*unknown column 'event_name'/);
   // a read's stage and expression are the one definitions built for a read's place: a stage that makes a
-  // new table, and raw SQL, are a build's — no form of the read tool's, each refused by its schema in the
-  // call, naming what a read takes
-  await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), /invalid input: .*`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  // new table is a build's (refused in the call with where it is built), and raw SQL no form of the read
+  // tool's, refused by its schema naming what a read takes
+  await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), /steps\[0\]: a read takes where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — a join stage makes a new table: build it from the task/);
   await assert.rejects(() => engine.query_model({ context_id: s.context_id, steps: [{ stage: 'compute', name: 'one', expr: { fn: 'raw', sql: '1' } }] }), /invalid input: .*`steps\.0\.expr\.fn` must be one of/);
 });
 

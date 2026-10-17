@@ -225,12 +225,6 @@ async function start(engine, feature, input) {
   // the source's real columns, and those of every model a join stage brings in, as a pipeline's are
   // grounded: a column is compared in the type the warehouse stores it in (a flag kept as text as text)
   const physicalCols = found ? null : await engine.host.grounding(spec.source, spec.steps || []);
-  const ctx = contextFor(engine, input);
-  const state = ctx.state.retentioneering;
-  // a table of its own for every start: a later start of the same name makes a new one, so a fork of
-  // the earlier eventstream (and that build's task) keep reading the rows they were made from
-  state.builds = (state.builds || 0) + 1;
-  const modelName = `rete_es${state.builds}_${spec.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const timeConditions = found ? null : engine.host.timeRangeConditions(spec.source, spec.time_range);
   // the catalog's cost guardrail, as a pipeline applies it: an eventstream over the whole history
   // of a source that requires a window would scan every partition (a task's table was bounded by
@@ -238,10 +232,18 @@ async function start(engine, feature, input) {
   if (!found && !timeConditions && engine.catalog.requireTimeRangeFor(spec.source)) {
     throw new ToolError(`source '${spec.source}' requires a bounded time window (require_time_range): pass time_range { start, end } — the eventstream is scanned only within it`, { stage: 'validate', field: 'time_range' });
   }
+  const ctx = contextFor(engine, input);
+  const state = ctx.state.retentioneering;
+  // a table of its own for every start: a later start of the same name makes a new one, so a fork of
+  // the earlier eventstream (and that build's task) keep reading the rows they were made from
+  state.builds = (state.builds || 0) + 1;
+  const modelName = `rete_es${state.builds}_${spec.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   let rendered;
   try {
     rendered = renderEventstream(engine.catalog, spec, { modelName, physicalCols, timeConditions, from: found ? { model: found.base.model, columns: found.base.columns } : null });
   } catch (e) {
+    // a refused start leaves nothing behind: a context it made for itself goes with it
+    if (!input.context_id) engine.ctxs.drop(ctx.id); else state.builds -= 1;
     throw e instanceof ToolError ? e : new ToolError(e?.message || String(e), { stage: 'validate' });
   }
   if (found) engine.host.holdTaskBase(ctx, found.base);

@@ -25,6 +25,13 @@ test('localToUtc converts wall-clock boundaries to UTC instants (incl. DST)', ()
   assert.ok(!isValidTimezone('Mars/Olympus'));
 });
 
+test('resolveTimeRange: a window that ends before it starts is refused; a date-only end is its whole day', () => {
+  assert.throws(() => resolveTimeRange({ start: '2026-01-31', end: '2026-01-01' }), /time_range ends before it starts \(start '2026-01-31', end '2026-01-01'\) — swap them/);
+  assert.throws(() => resolveTimeRange({ start: '2026-01-02 10:00', end: '2026-01-02 09:00', timezone: 'UTC' }), /ends before it starts/);
+  assert.equal(resolveTimeRange({ start: '2026-01-02 10:00', end: '2026-01-02' }).endExclusive, '2026-01-03');
+  assert.equal(resolveTimeRange({ start: '2026-01-01', end: '2026-01-01' }).endExclusive, '2026-01-02');
+});
+
 test('resolveTimeRange: date-only end = WHOLE local day (exclusive next midnight)', () => {
   const r = resolveTimeRange({ start: '2026-01-01', end: '2026-01-31', timezone: 'Europe/Berlin' });
   assert.equal(r.start, '2025-12-31 23:00:00');           // Jan 1 00:00 Berlin

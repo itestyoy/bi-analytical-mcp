@@ -75,7 +75,8 @@ export const pipelineDraftMethods = {
       throw new ToolError(`steps[${at}]: ${e.message}`, { stage: e.stage || 'validate', field: `steps[${at}]${e.field ? `.${e.field}` : ''}`, code: e.code });
     }
     const answer = this._draftSemanticAnswer(ctx, draft, effect, 'add_steps', inc);
-    return added ? { ...added, ...answer, step_effects: [...added.step_effects, effect] } : answer;
+    // (the stages added with it, then the step itself: every step this call added)
+    return added ? { ...added, ...answer, ...(added.steps_added && answer.steps_added ? { steps_added: [...added.steps_added, ...answer.steps_added] } : {}), step_effects: [...added.step_effects, effect] } : answer;
   },
 
   /** The semantic_model step, checked as it would be built (its layer compiled and rendered), put in place. */
@@ -83,10 +84,12 @@ export const pipelineDraftMethods = {
     const { render } = await this._semanticLayerOf(ctx, draft, st);
     draft.semantic = st;
     this.ctxs.touch(ctx.id);
+    // (over a catalog source: a measure of an event property carried by several events)
+    const recs = [...(render.warnings || []), ...(!draft.stages.length && !draft.base ? this.advisor.measureScopeWarnings(draft.source, st.measures) : [])];
     return {
       step_index: draft.stages.length + 1, stage: SEMANTIC_STAGE,
       semantic_models: render.semanticModels, metrics: render.metricNames,
-      ...(render.warnings?.length ? { recommendations: render.warnings } : {}),
+      ...(recs.length ? { recommendations: recs } : {}),
     };
   },
 
@@ -598,6 +601,11 @@ export const pipelineDraftMethods = {
     // mends them, and the render below validates the whole of it
     let before;
     try { before = this._draftColumns(draft, physSet); } catch { before = []; }
+    // (a source's rows as the steps read them — its payload column among them, which the declared list
+    // leaves out: the first step is not said to add a column it only passes through)
+    if (!draft.stages.length && !draft.base) {
+      try { before = [...renderPipeline(this.catalog, this.catalog.dialect, draft.source, [], { physicalCols: physSet }).columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })); } catch { /* the declared list stands */ }
+    }
     // Validate what will actually be built: from the last live checkpoint when there is one (the
     // steps it baked are a TABLE now, not stages to re-validate), else from the source with the
     // draft's time_range as the leading where materialize will add. An edit at step i first

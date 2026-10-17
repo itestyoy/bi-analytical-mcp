@@ -73,6 +73,11 @@ export const CROSS_PATH_SPELLING = {
   mode: 'between_steps',
 };
 
+/** What a value spelled another tool's way needs besides its name here. */
+const SPELLING_NOTE = {
+  ratio: 'a derived metric has no numerator / denominator: its expr divides one metric by the other, { fn: "div", args: [{ metric: <numerator> }, { metric: <denominator> }] }',
+};
+
 /** A query's fields that are said in its steps — where each goes, for a request that wrote it beside them. */
 const STEP_FIELDS = {
   metrics: 'a query names its metrics in a step: steps: [{ stage: "metrics", metrics: [...], group_by: [...] }]',
@@ -142,7 +147,7 @@ function oneOf(at, vals, used, alt, elsewhere = null) {
   const near = typeof used === 'string' && !alt && !elsewhere ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
   return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
     + (near.length ? `. Did you mean ${near.map((v) => `'${v}'`).join(' or ')}?` : '')
-    + (alt ? `. Here '${used}' is spelled '${alt}'` : '')
+    + (alt ? `. Here '${used}' is spelled '${alt}'${SPELLING_NOTE[used] ? ` — ${SPELLING_NOTE[used]}` : ''}` : '')
     + (elsewhere ? `. '${used}' is not taken here: it stands in ${elsewhere}` : '');
 }
 
@@ -163,7 +168,15 @@ function takenElsewhere(root, key, used, whole) {
   // row): it stands there — wrapped in that kind — rather than wherever else its function does
   for (const def of Object.values(root?.$defs || {})) {
     const arg = isPlainObject(def) && def.title ? deref(root, deref(root, def.properties?.args)?.items) : null;
-    if (isPlainObject(arg) && arg !== def && isPlainObject(whole) && nodeValidator(root, arg)(whole)) return `the argument of ${def.title}: { fn: <one of them>, args: [{ ${key}: "${used}", … }] }`;
+    if (isPlainObject(arg) && arg !== def && isPlainObject(whole) && nodeValidator(root, arg)(whole)) {
+      // a formula OVER the kind's own functions (a ratio of two sums) is no argument of one of them —
+      // wrapped, it would fold the per-row ratio instead: it is one measure per aggregate, and a
+      // derived metric over them
+      const own = new Set((def.anyOf || [def]).flatMap((b) => pinsOf(root, b).get(key) || []));
+      const inner = JSON.stringify(whole.args ?? []);
+      if (own.size && [...own].some((f) => inner.includes(`"${key}":"${f}"`))) return `a derived metric over one measure per aggregate (each { name, expr: { fn: <aggregate>, args } }) — { type: "derived", expr: { fn: "${used}", args: [{ metric: <one> }, { metric: <other> }] } }; inside one aggregate it would fold the value of each row instead`;
+      return `the argument of ${def.title}: { fn: <one of them>, args: [{ ${key}: "${used}", … }] }`;
+    }
   }
   for (const def of Object.values(root?.$defs || {})) {
     if (!isPlainObject(def) || !def.title || !Array.isArray(def.anyOf)) continue;

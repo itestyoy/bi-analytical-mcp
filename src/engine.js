@@ -343,7 +343,9 @@ export class Engine {
   _taskBase(input) {
     const job = this.jobs.get(input.from_task);
     if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
-    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
+    // a task of another part of the server (a feature's) holds no table a pipeline reads: said as it is
+    if (!['semantic', 'pipeline'].includes(this.tasks.sideOf(job.tool))) throw new ToolError(`task ${job.id} was started by ${job.tool}, and a build starts only from a pipeline build or a metric query run with materialize: true — build the rows you need with build_model from the source instead`, { stage: 'validate', field: 'from_task' });
+    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start from it`, { stage: 'validate', field: 'from_task' });
     if (job.status !== 'ready' || !job.table) {
       // a query over a pipeline model reads that model's table and stores nothing: the table it read
       // is the one to start from, the query's steps given again as the draft's

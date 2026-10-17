@@ -223,3 +223,18 @@ test('an expression says what it is missing, in words', () => {
   const ok = renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'flag', expr: { value: 1 } }], { physicalCols: new Set(['player_id_of_internal']) });
   assert.ok(ok.columns.has('flag'));
 });
+
+// a ratio of two sums is no single measure: the hint names the derived metric over two measures, never an
+// aggregate of the per-row ratio (another number); a `ratio` metric is told how a derived one divides
+test('a formula over aggregates in a measure is pointed at a derived metric, and a ratio metric at its expr', () => {
+  const sum = (column) => ({ fn: 'sum', args: [{ column }] });
+  const div = text(layer('acquisition', { measures: [{ name: 'cpc', expr: { fn: 'div', args: [sum('cost'), sum('clicks')] } }], metrics: [{ name: 'cpc', type: 'simple', measure: 'cpc' }] }));
+  assert.match(div, /'div' is not taken here: it stands in a derived metric over one measure per aggregate/);
+  assert.doesNotMatch(div, /args: \[\{ fn: "div"/);
+  const ratio = text(layer('events', { measures: [{ name: 'rows', expr: { fn: 'count' } }], metrics: [{ name: 'r', type: 'ratio', numerator: 'rows', denominator: 'rows' }] }));
+  assert.match(ratio, /Here 'ratio' is spelled 'derived' — a derived metric has no numerator \/ denominator: its expr divides one metric by the other/);
+});
+
+test('a name pattern is said in words', () => {
+  assert.match(text(check('build_model', { action: 'start', name: 'x', source: 'events' })), /`name` must be a name of 3 to 41 lowercase letters, digits and underscores, a letter first/);
+});

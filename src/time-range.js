@@ -81,6 +81,9 @@ export function resolveTimeRange(tr) {
     if (utc == null) throw new ToolError(`time_range.${which}: '${v}' is not a date or a date-time (YYYY-MM-DD, or YYYY-MM-DD HH:mm[:ss[.fff]] with an optional Z or ±hh[:mm])`, { stage: 'validate', field: `time_range.${which}` });
     return utc;
   };
+  // a window that ends before it starts holds no moment: refused, never read as an empty result
+  // (a date-only end is its whole day: the window holds a moment while start is before the next day)
+  if (start && end && (isDateOnly(end) ? at(start, 'start') >= at(nextDay(end), 'end') : at(start, 'start') > at(end, 'end'))) throw new ToolError(`time_range ends before it starts (start '${start}', end '${end}') — swap them`, { stage: 'validate', field: 'time_range' });
   if (!timezone) {
     // warehouse-native (UTC): a wall-clock bound stands as written, an instant with an offset of its own
     // is written as the UTC instant it is — so the partition day taken from it is that instant's day

@@ -17,6 +17,7 @@ import { formatDbtError } from '../dbt/index.js';
 import { getDialect } from '../dialects/index.js';
 import { renderRead, stageAt, STAGE_PLACES } from '../pipeline.js';
 import { eachNode } from '../pipeline/compute.js';
+import { stageDef } from '../pipeline/stages.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, pageBlock, samplingNote } from './helpers.js';
 import { KEPT_ROWS, METRICS_STEP } from '../schema/fields.js';
@@ -158,6 +159,19 @@ export const semanticQueryMethods = {
     throw new ToolError(`${at}: '${label}' does not cut ${reads} — a metric is grouped by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it cuts ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or group by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
   },
 
+  /** A stage of the pipeline's registry that no step of a query takes (a join, an unnest, a funnel, a
+   *  python model: each makes a new table) — said with where it is built; the schema says the rest. */
+  _readPlaces(steps, field) {
+    if (!Array.isArray(steps)) return;
+    const m = steps.findIndex((st) => st?.stage === METRICS_STEP.stage);
+    for (const [i, st] of steps.entries()) {
+      // (a read's own stages in the wrong place are said by the query's own check, with where they go)
+      if (i === m || typeof st?.stage !== 'string' || !stageDef(st.stage) || STAGE_PLACES.read.stages.includes(st.stage)) continue;
+      const place = m < 0 ? 'read' : 'metric_result';
+      try { stageAt(place, st, `${field}[${i}]`); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: `${field}[${i}]` }); }
+    }
+  },
+
   /** That the dbt project's own semantic layer is queried in its own contexts — the refusal of one of
    *  its names in a task's context. */
   _projectNameHere(said, at, field) {
@@ -277,8 +291,28 @@ export const semanticQueryMethods = {
    * nothing.
    */
   _taskEntities(ctx) {
+    return [...new Set(this._measureSources(ctx).flatMap((s) => this._entitiesOfSource(ctx, s)))];
+  },
+
+  /** The keys a source of measures carries — what its rows can be grouped by as entities. */
+  _entitiesOfSource(ctx, s) {
     const c = this._catalogOf(ctx);
-    return [...new Set(this._measureSources(ctx).flatMap((s) => Object.keys(c.isFact(s) ? c.getModel(s).entities || {} : c.entitiesOf(s))))];
+    return Object.keys(c.isFact(s) ? c.getModel(s).entities || {} : c.entitiesOf(s));
+  },
+
+  /** The entities a metric can be grouped by: the keys every model it folds carries. */
+  _metricEntities(ctx, metric) {
+    const models = this._metricModels(ctx, metric);
+    if (!models.length) return this._taskEntities(ctx);
+    return models.map((s) => this._entitiesOfSource(ctx, s)).reduce((a, b) => a.filter((e) => b.includes(e)));
+  },
+
+  /** An entity named in a query of metrics whose rows do not carry it is refused here, in the call. */
+  _checkEntityCuts(ctx, entity, metrics, at) {
+    const not = metrics.filter((m) => !this._metricEntities(ctx, m).includes(entity));
+    if (!not.length) return;
+    const cut = metrics.filter((m) => !not.includes(m));
+    throw new ToolError(`${at}: the entity '${entity}' does not cut ${not.map((m) => `'${m}' (it folds ${this._metricModels(ctx, m).join(', ')}, whose rows carry ${this._metricEntities(ctx, m).join(', ') || 'no key'})`).join(', ')}${cut.length ? `; it cuts ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or group by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
   },
 
   /** An entity — a key a source whose measures the task reads carries (_taskEntities) — grouped by as
@@ -305,10 +339,19 @@ export const semanticQueryMethods = {
    * stops them, { queries } starts several — of either kind — side by side.
    */
   async query_model(input) {
+    // a stage of the pipeline that a read does not take (a join, a funnel…) is said with where it is
+    // built, before the schema lists only what a read takes
+    this._readPlaces(input?.steps, 'steps');
+    for (const [i, q] of (Array.isArray(input?.queries) ? input.queries : []).entries()) this._readPlaces(q?.steps, `queries[${i}].steps`);
     this._validate('query_model', input);
     if (input.cancel) return this._cancelTasks(input, QUERY_SIDES);
     if (input.task_ids) return this._pollTasks(input, QUERY_SIDES);
     const ctx = this._ctx(input.context_id);
+    // a context that holds neither a semantic layer nor a pipeline's rows was made by another tool:
+    // nothing here reads it, and saying which metrics it lacks would send the caller the wrong way
+    if (!ctx.state.engine && !ctx.state.draft && !ctx.state.pipeline_model && !(ctx.state.metrics || []).length && !Object.keys(ctx.state.additions || {}).length) {
+      throw new ToolError(`context ${ctx.id} holds no semantic layer and no pipeline table — a context another tool made is read by that tool's own query tool, and an emptied one has nothing to read (context({ request: { action: "describe", context_id: "${ctx.id}" } }) says what it holds)`, { stage: 'validate', field: 'context_id' });
+    }
     // a metric query has a metrics step; a context that holds no pipeline table has nothing else to read,
     // so a query of it without one is a metric query too — refused there, naming the metrics it offers
     // (a draft that is only its semantic_model step is a semantic layer, with no table to read)
@@ -813,6 +856,7 @@ export const semanticQueryMethods = {
       const at = `${q.at} group_by[${i}]`;
       const r = this._taskRef(ctx, g, at, 'steps');
       if (r.kind === 'dimension') this._checkCuts(ctx, g.source ?? g.semantic_model.at(-1), r.label, metrics, at);
+      if (r.kind === 'entity') this._checkEntityCuts(ctx, r.path, metrics, at);
       if (metrics.includes(r.column) || [...rename.values()].includes(r.column)) throw new ToolError(`${at}: '${r.label}' would produce a result column '${r.column}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'steps' });
       // a time dimension is asked for at its grain — the column MetricFlow names with it
       const tok = r.kind === 'time' ? `metric_time__${r.grain}` : r.grain ? `${r.path}__${r.grain}` : r.path;
@@ -828,6 +872,7 @@ export const semanticQueryMethods = {
       const r = this._taskRef(ctx, ref, at, 'steps');
       if (r.kind === 'time') return { kind: 'metric_time', grain: ref.grain };
       if (r.kind === 'dimension') this._checkCuts(ctx, ref.source ?? ref.semantic_model.at(-1), r.label, metrics, at);
+      if (r.kind === 'entity') this._checkEntityCuts(ctx, r.path, metrics, at);
       whereNames.set(r.path, r.column);
       return r.kind === 'entity' ? { kind: 'entity', name: r.path } : { kind: 'dimension', path: r.path };
     }, w.at));
@@ -898,7 +943,9 @@ export const semanticQueryMethods = {
       if (fresh) {
         const freshDay = String(fresh).slice(0, 10);
         const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
-        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
+        // (several sources: the one whose data ends first, named — the others run further)
+        const stalest = factsRead.length > 1 ? Object.keys(freshByFact).find((f) => freshByFact[f] === fresh) : null;
+        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).');

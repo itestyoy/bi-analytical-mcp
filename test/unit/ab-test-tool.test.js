@@ -48,6 +48,22 @@ test('experiment analyze, proportion: a group too small for the normal approxima
   assert.equal(big.results[0].small_sample, undefined);
 });
 
+// a test of means reads each group's spread from its sample: one user, or no spread in either group, is
+// no test at all (refused), and a group under ~30 users is flagged; a verdict on a flagged comparison is
+// not stated as a regression — the small-sample warning speaks for it
+test('experiment analyze, mean: one user or no spread is refused, a small group flagged, its verdict not stated', () => {
+  const mean = (c, v) => engine._analyzeExperiment({ metric: 'mean', control: { label: 'control', ...c }, variants: [{ label: 'B', ...v }] });
+  assert.throws(() => mean({ n: 1, mean: 5, stddev: 0 }, { n: 1, mean: 7, stddev: 0 }), /group 'control' has 1 user\(s\): a test of means needs at least 2 in each group/);
+  assert.throws(() => mean({ n: 3, mean: 5, stddev: 0 }, { n: 3, mean: 7, stddev: 0 }), /'control' and 'B' both have stddev 0/);
+  const thin = mean({ n: 12, mean: 5, stddev: 1 }, { n: 12, mean: 3, stddev: 1 });
+  assert.equal(thin.results[0].small_sample, true);
+  assert.match(thin.recommendations[0], /^Too few users to read B: a test of means needs about 30 users in each group/);
+  assert.ok(!thin.recommendations.some((r) => /significantly WORSE/.test(r)), JSON.stringify(thin.recommendations));
+  assert.equal(mean({ n: 500, mean: 5, stddev: 1 }, { n: 500, mean: 3, stddev: 1 }).results[0].small_sample, undefined);
+  // a group named by its place when it carries no label
+  assert.throws(() => engine._analyzeExperiment({ metric: 'proportion', control: { n: 3, conversions: 1 }, variants: [{ n: 3, conversions: 5 }] }), /for group 'variant_1'/);
+});
+
 test('experiment analyze, mean: Welch t-test path', () => {
   const r = engine._analyzeExperiment({
     metric: 'mean',

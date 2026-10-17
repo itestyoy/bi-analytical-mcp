@@ -174,7 +174,8 @@ test('query_model: the steps are checked in the call, and a query behind a build
   // stored table has no source for: none is a form of the read tool's definitions (the one stage and the
   // one expression, built for a read's place), so its schema refuses each in the call
   const refusedAt = (steps, said) => assert.rejects(() => e.query_model({ context_id, steps }), (err) => err.stage === 'validate' && /^invalid input: /.test(err.message) && said.test(err.message));
-  await refusedAt([{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }], /`steps\.0\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project/);
+  // (a stage of the pipeline that makes a new table is said with where it is built)
+  await assert.rejects(() => e.query_model({ context_id, steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }] }), (err) => err.stage === 'validate' && /^steps\[0\]: a read takes where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project — a join stage makes a new table: build it from the task/.test(err.message));
   await refusedAt([{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: 'upper({1})', args: [{ column: 'event_name' }] } }], /`steps\.0\.expr\.fn` must be one of/);
   await refusedAt([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ property: 'result_of_event_data' }, { value: 'win' }] }] }], /`steps\.0\.conditions\.0\.args\.0`/);
   // a model's column is a metric query's (before its metrics step): a read of stored rows refuses it at its step
@@ -271,7 +272,7 @@ test('the steps after the metrics step are checked against the result\'s columns
   // definitions (built for its places: the where steps', the metrics step's and the read's), refused by
   // its schema; a ref — a where step's before the metrics step — passes the schema and is refused after it
   for (const [steps, said] of [
-    [[{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }], /^invalid input: .*`steps\.1\.stage` must be one of: where, compute, aggregate, pivot, unpivot, order_by, limit, sample, project, metrics/],
+    [[{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal', time: 'device_time' }, attrs: [{ column: 'country' }] }], /^steps\[1\]: a step after the metrics step takes where, .* — a join stage makes a new table: store the result \(materialize: true\) and build from its task/],
     [[{ stage: 'compute', name: 'x', expr: { fn: 'raw', sql: '{1} * 2', args: [{ column: 'cnt' }] } }], /^invalid input: .*`steps\.1\.expr\.fn` must be one of/],
   ]) {
     await assert.rejects(() => e.query_model({ context_id, ...daily(...steps) }), (err) => err.stage === 'validate' && said.test(err.message), JSON.stringify(steps));

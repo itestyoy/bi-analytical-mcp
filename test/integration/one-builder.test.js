@@ -108,6 +108,27 @@ test('a metric is cut by the columns its own rows reach: another model\'s column
   const spend = await engine.query_model({ context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW });
   assert.equal(spend.ok, true, JSON.stringify(spend.error));
   assert.equal(spend.provenance.source, 'acquisition');
+  // an entity is a key the metric's own rows carry: a session cuts the events, not the spend
+  const entitiesOf = async (metric) => (await engine.context({ action: 'describe', context_id: ctx, metric })).metrics[0].group_by.entities.map((x) => x.entity);
+  assert.ok((await entitiesOf('evts')).includes('session'));
+  assert.ok(!(await entitiesOf('spend')).includes('session'));
+  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['spend'], { group_by: [{ entity: 'session' }] })], time_range: WINDOW }), /the entity 'session' does not cut 'spend' \(it folds acquisition/);
+});
+
+test('a model removed with its metrics (cascade) stays removed: the build\'s semantic_model step says the same', opts, async (t) => {
+  if (skip(t) || !ctx) return;
+  // without cascade the refusal says how to take the metrics with it
+  await assert.rejects(() => engine.delete_context({ what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition' }), /metrics depend on this model's measures: spend — add cascade: true/);
+  const removed = await engine.delete_context({ what: 'semantic_model', context_id: ctx, semantic_model: 'acquisition', cascade: true });
+  assert.equal(removed.removed, true);
+  const { steps } = await engine.build_model({ action: 'preview', context_id: ctx });
+  const layer = steps.find((x) => x.stage === 'semantic_model');
+  assert.ok(!layer.measures.some((m) => m.source === 'acquisition') && !layer.metrics.some((m) => m.name === 'spend'), JSON.stringify(layer));
+  const built = await engine.raw.build_model({ action: 'materialize', context_id: ctx });
+  await taskResult(engine, built.task_id);
+  await assert.rejects(() => engine.query_model({ context_id: ctx, steps: [metrics(['spend'])], time_range: WINDOW }), /unknown metric in context: 'spend'/);
+  const r = await engine.query_model({ context_id: ctx, steps: [metrics(['evts'])], time_range: WINDOW });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
 });
 
 test('edit_step and materialize replace the layer: the new metric answers, the old one is gone', opts, async (t) => {

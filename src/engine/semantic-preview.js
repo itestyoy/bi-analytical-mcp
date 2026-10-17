@@ -141,7 +141,7 @@ export const semanticPreviewMethods = {
         // the keys its measure sources carry — named in full for one metric, as a project's are
         // (only the dimensions that cut THIS metric: of the model its measures fold, and of the models that joins to)
         const own = groupable.filter((r) => !this._uncut(ctx, r.source ?? r.semantic_model?.at(-1), [m.name]).length);
-        cut = { ...(input.metric ? { dimensions: own, entities: this._taskEntities(ctx).map((entity) => ({ entity })) } : {}), ...time };
+        cut = { ...(input.metric ? { dimensions: own, entities: this._metricEntities(ctx, m.name).map((entity) => ({ entity })) } : {}), ...time };
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
       return { ...m, definition: def, group_by: cut };

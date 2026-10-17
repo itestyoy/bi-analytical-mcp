@@ -12,13 +12,9 @@ import { form, pick, timeRange, measureForm } from '../schema-kit.js';
 import { exprDefs, EXPR_REF, EXPR_KINDS, PLACES } from '../pipeline/compute.js';
 import { CONTEXT_ID } from '../context-manager.js';
 import { contractOnSchema } from '../catalog/joins.js';
-import { SEMANTIC_NAME } from './names.js';
+import { SEMANTIC_NAME, NAME, TASK } from './names.js';
 
-export const NAME = '^[a-z][a-z0-9_]{0,40}$';
-
-export const TASK = '^[a-z][a-z0-9_]{2,40}$';
-
-export { SEMANTIC_NAME } from './names.js';
+export { SEMANTIC_NAME, NAME, TASK } from './names.js';
 
 export const CTX = CONTEXT_ID;
 

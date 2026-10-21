@@ -71,10 +71,44 @@ export const CROSS_PATH_SPELLING = {
   name_as: 'name_column',
   value_as: 'value_column',
   mode: 'between_steps',
+  // what another tool calls them: the columns a projection keeps, a test's level, a note's text
+  columns: 'keep',
+  alpha: 'confidence',
+  finding: 'note',
 };
+
+/**
+ * A docstring's or a description's first sentence — what a thing is, said where a refusal names it; an
+ * abbreviation's dot (e.g., i.e., vs.) and a dot inside code ends no sentence.
+ */
+export function firstSentence(doc) {
+  const text = String(doc || '');
+  let code = false;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '`') code = !code;
+    if (code || !'.!?'.includes(text[i]) || !(i + 1 === text.length || /\s/.test(text[i + 1]))) continue;
+    if (/\b(e\.g|i\.e|vs|etc|cf)\.$/i.test(text.slice(Math.max(0, i - 4), i + 1))) continue;
+    return text.slice(0, i + 1);
+  }
+  return text;
+}
+
+/**
+ * A field of the request written in each member of a list beside it — a batch's `context_id` in every
+ * query: said where it goes, once, at the top. → the hint, or null.
+ */
+function hoisted(ctx, instancePath, used) {
+  const m = /^\/(\w+)\/\d+$/.exec(String(instancePath || ''));
+  if (!m || !isPlainObject(ctx.input)) return null;
+  const root = ctx.schema;
+  const forms = (n) => (Array.isArray(n?.anyOf) ? n.anyOf.map((b) => deref(root, b)) : [n]);
+  const holder = forms(root).find((f) => f?.properties?.[m[1]] && f.properties[used]);
+  return holder ? ` — it is written once, at the top of the request beside ${m[1]}, not in each of them` : null;
+}
 
 /** What a value spelled another tool's way needs besides its name here. */
 const SPELLING_NOTE = {
+  alpha: 'confidence = 1 − alpha: alpha 0.05 is confidence 0.95',
   ratio: 'a derived metric has no numerator / denominator: its expr divides one metric by the other, { fn: "div", args: [{ metric: <numerator> }, { metric: <denominator> }] }',
 };
 
@@ -206,7 +240,12 @@ function describe(e, ctx = {}) {
     case 'required': {
       const field = e.params.missingProperty;
       const node = deref(ctx.schema, e.parentSchema);
-      return `${at} is missing required property '${field}'${takesValues(deref(ctx.schema, node?.properties?.[field]), ctx.schema)}`;
+      // what the field is, in its own description's first sentence — a part a caller has not met (a
+      // join's time, a contract's own part) is said, not only named
+      const prop = deref(ctx.schema, node?.properties?.[field]);
+      const values = takesValues(prop, ctx.schema);
+      const said = !values && typeof prop?.description === 'string' ? firstSentence(prop.description) : '';
+      return `${at} is missing required property '${field}'${values || (said ? ` — ${said}` : '')}`;
     }
     case 'additionalProperties': {
       const used = e.params.additionalProperty;
@@ -218,7 +257,9 @@ function describe(e, ctx = {}) {
       const takes = node?.title && node.properties ? ` — ${node.title} takes ${fields.length ? fields.join(', ') : 'no fields'}` : '';
       // what a metric query said beside its steps is said IN them: a field of a step, not of the request
       const inStep = !alt && node?.properties?.steps ? STEP_FIELDS[used] : null;
-      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'` : inStep ? ` — ${inStep}` : takes}`;
+      // a field of the request written in each member of a list beside it (a batch's context_id)
+      const top = !alt && !inStep ? hoisted(ctx, e.instancePath, used) : null;
+      return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}'${SPELLING_NOTE[used] ? ` (${SPELLING_NOTE[used]})` : ''}` : inStep ? ` — ${inStep}` : top || takes}`;
     }
     case 'enum': {
       // A long enum is the schema being exact; a long MESSAGE is just noise — name enough to act on.
@@ -240,6 +281,13 @@ function describe(e, ctx = {}) {
         const req = node.required || [];
         const fields = [...req, ...Object.keys(node.properties).filter((k) => !req.includes(k)).map((k) => `${k}?`)];
         return `${at} must be an object { ${fields.join(', ')} }`;
+      }
+      // an array written as one of its items: said with that item in a list
+      if (want === 'array') {
+        const used = valueAt(ctx.input, e.instancePath);
+        const item = deref(ctx.schema, node?.items);
+        const fits = used !== undefined && !Array.isArray(used) && (!item || !ctx.schema || nodeValidator(ctx.schema, item)(used));
+        return `${at} must be an array${fits ? ` — write [${JSON.stringify(used)}]` : ''}`;
       }
       return `${at} must be ${want}`;
     }

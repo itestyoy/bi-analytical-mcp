@@ -356,12 +356,12 @@ export const STAGES = {
         measure: { ...EXPR, description: 'What each cell holds — an aggregate ({ fn: "count" }, { fn: "sum", args: [{ column: "revenue" }] }) or a formula over aggregates, over the group\'s rows where `on` equals the cell\'s value.' },
         values: {
           type: 'array', minItems: 1, uniqueItems: true,
-          description: 'The values of `on` that become columns, each with its column\'s name.',
+          description: 'The values of `on` that become columns: [{ value: "US" }, { value: "GB", name: "uk" }].',
           items: {
-            type: 'object', additionalProperties: false, required: ['value', 'name'],
+            type: 'object', additionalProperties: false, required: ['value'],
             properties: {
               value: { ...SCALAR, description: 'A value of `on`, in its type (a number for a numeric column); null is the rows where it is missing.' },
-              name: { type: 'string', pattern: NAME, description: 'The name of the column it becomes.' },
+              name: { type: 'string', pattern: NAME, description: 'The name of the column it becomes (default: `on` and the value, as a column name — country_us).' },
             },
           },
         },
@@ -371,7 +371,9 @@ export const STAGES = {
       const groupBy = p.group_by || [];
       [...groupBy, p.on].forEach((c) => requireCol(cols, c));
       const taken = new Set(groupBy); const seen = new Set();
-      for (const v of p.values) {
+      // a value without a name of its own is named for `on` and itself (country + 'US' → country_us)
+      const values = p.values.map((v) => (v.name !== undefined ? v : { ...v, name: `${p.on}_${String(v.value ?? 'null')}`.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/_+$/, '').slice(0, 41) }));
+      for (const v of values) {
         if (taken.has(v.name)) throw new Error(`pivot: '${v.name}' names ${groupBy.includes(v.name) ? 'a group_by column' : 'two values'} — give each value a column name of its own`);
         taken.add(v.name);
         const key = JSON.stringify(v.value);
@@ -379,7 +381,7 @@ export const STAGES = {
         seen.add(key);
       }
       // each cell: the measure, its every aggregate folding only the rows of that value
-      const cells = p.values.map((v) => {
+      const cells = values.map((v) => {
         const cell = v.value === null ? { fn: 'is_null', args: [{ column: p.on }] } : { fn: 'eq', args: [{ column: p.on }, { value: v.value }] };
         return { name: v.name, expr: mapAggregates(p.measure, (agg) => foldWhere(agg, [cell])) };
       });

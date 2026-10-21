@@ -172,7 +172,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     offset: { type: 'integer', minimum: 0, description: 'The row of each task\'s result the page starts at: 0 is its first row, next_offset where the previous page ended.' },
     limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of each task's result the page holds (default ${READ_PAGE}).` },
   };
-  const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `Several ${what} in one call, run side by side: each item takes a single query's fields (context_id stays at the top). All are checked first — one mistake refuses the batch. Returns task_ids, in order.`, items: item });
+  const batchOf = (item, what) => ({ type: 'array', minItems: 1, description: `Several ${what} in one call, run side by side: each item is a single query's own fields — { steps, time_range?, … } — and context_id is written once, at the top beside queries, not in an item: { context_id, queries: [{ steps }, { steps }] }. All are checked first — one mistake refuses the batch. Returns task_ids, in order.`, items: item });
 
   // A METRIC QUERY IS ITS STEPS: one metrics step (what the semantic layer computes), where steps before
   // it, a read of its result after it — every rule of where a step may stand checked as the query is built

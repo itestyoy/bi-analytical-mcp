@@ -238,3 +238,16 @@ test('a formula over aggregates in a measure is pointed at a derived metric, and
 test('a name pattern is said in words', () => {
   assert.match(text(check('build_model', { action: 'start', name: 'x', source: 'events' })), /`name` must be a name of 3 to 41 lowercase letters, digits and underscores, a letter first/);
 });
+
+// What agents tripped on, said in the refusal: another tool's field name told its name here (a projection's
+// columns, a test's alpha, a note's finding), a batch's context_id written once at the top, a missing part
+// said with what it is (a join's time), and an array written as one of its items shown as a list.
+test('the refusals agents met say the fix: keep / confidence / note, context_id at the top, what a missing part is, a list', () => {
+  const said = (tool, input) => text(check(tool, input));
+  assert.match(said('build_model', { action: 'start', name: 'scd', source: 'users', steps: [{ stage: 'project', columns: ['country'] }] }), /unexpected property 'columns' — here that field is called 'keep'/);
+  assert.match(said('experiment', { action: 'analyze', metric: 'proportion', control: { n: 100, conversions: 10 }, variants: [{ n: 100, conversions: 15 }], alpha: 0.05 }), /here that field is called 'confidence' \(confidence = 1 − alpha/);
+  assert.match(said('memory', { action: 'record', notes: [{ finding: 'x', about: [{ source: 'events' }] }] }), /unexpected property 'finding' — here that field is called 'note'/);
+  assert.match(said('query_model', { queries: [{ context_id: 'abcabcabcabc', steps: [{ stage: 'metrics', metrics: ['x'] }] }] }), /`queries\.0` has an unexpected property 'context_id' — it is written once, at the top of the request beside queries/);
+  assert.match(said('build_model', { action: 'start', name: 'bad', source: 'events', steps: [{ stage: 'join', source: 'users', on: { user: 'player_id_of_internal' }, attrs: [{ column: 'country' }] }] }), /missing required property 'time' — A column of the rows: the moment the version of users valid then is joined/);
+  assert.match(said('build_model', { action: 'start', name: 'arr', source: 'events', steps: [{ stage: 'aggregate', group_by: 'event_name', measures: [{ name: 'n', expr: { fn: 'count' } }] }] }), /`steps\.0\.group_by` must be an array — write \["event_name"\]/);
+});

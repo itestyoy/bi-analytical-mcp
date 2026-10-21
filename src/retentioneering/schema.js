@@ -21,7 +21,7 @@
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
-import { ToolError } from '../validate.js';
+import { ToolError, firstSentence } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
@@ -265,22 +265,8 @@ export function pathPatternUses() {
   return [...of(f.analyses), ...of(f.ops), ...Object.entries(f.metric_args).filter(([, a]) => a.pattern !== undefined).map(([m]) => `the ${m} metric`)];
 }
 
-/**
- * A docstring's first sentence — what a parameter is, said where it is written; the rest of the text (its
- * cases, examples, edge rules) is the guide's (`parameters`), read when it is needed rather than carried
- * by every request. An abbreviation's dot (e.g., i.e., vs.) and a dot inside code ends no sentence.
- */
-export function firstSentence(doc) {
-  const text = String(doc || '');
-  let code = false;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === '`') code = !code;
-    if (code || !'.!?'.includes(text[i]) || !(i + 1 === text.length || /\s/.test(text[i + 1]))) continue;
-    if (/\b(e\.g|i\.e|vs|etc|cf)\.$/i.test(text.slice(Math.max(0, i - 4), i + 1))) continue;
-    return text.slice(0, i + 1);
-  }
-  return text;
-}
+// a docstring's first sentence: the one reader, the refusals' (src/validate.js)
+export { firstSentence };
 
 /** A library parameter as a schema property: its type, its default, its docstring's first sentence. */
 function param(p) {

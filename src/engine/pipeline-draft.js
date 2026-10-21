@@ -9,6 +9,7 @@ import { comparisonOf, eachCondition } from '../pipeline/compute.js';
 import { currentSpelling } from '../pipeline/earlier.js';
 import { isSemanticStep, SEMANTIC_STAGE } from '../pipeline/semantic-stage.js';
 import { physicalColumnType } from '../catalog/column-types.js';
+import { MAX_WAIT_SECONDS } from '../schema.js';
 
 /** The comparisons of a column with constants that bound a scan of it (require_time_range). */
 const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
@@ -390,6 +391,9 @@ export const pipelineDraftMethods = {
   async _draftStart(input) {
     // materialize builds the steps the call adds: a start that adds none would build nothing
     if (input.materialize && !input.steps?.length) throw new ToolError('materialize: true builds the steps this start adds — give them in `steps`, or materialize later with build_model({ request: { action: "materialize", context_id } })', { stage: 'validate', field: 'materialize' });
+    // a task still running is waited for (up to a read's wait), as a read of it would: the build it
+    // starts reads the table it stores, so starting from it is the next thing to do, not a refusal
+    if (input.from_task && this.jobs.get(input.from_task)?.status === 'running') await this.tasks.await([input.from_task], MAX_WAIT_SECONDS);
     const found = input.from_task ? this._taskBase(input) : null;
     if (input.context_id) this._ctxToWrite(input.context_id); // refused before the warehouse is asked
     const base = found ? await this._baseWithPhysical(found.base) : null;

@@ -141,3 +141,10 @@ test('a measure over a property several events carry is said to fold it on all o
   const scoped = { fn: 'count_distinct', args: [{ fn: 'case', cases: [{ when: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'ad_started' }] }], then: { property: 'ad_type_of_event_data' } }] }] };
   assert.ok(!(await notes(scoped)).some((r) => /folds 'ad_type_of_event_data'/.test(r)));
 });
+
+// A pivot's value may leave its column's name out: it is named for `on` and the value, as a column name.
+test('a pivot value without a name becomes the column <on>_<value>', async () => {
+  const e = engine();
+  const out = await start(e, [{ stage: 'pivot', on: 'event_name', values: [{ value: 'tutorial' }, { value: 'Level Started!' }, { value: 'shop_opened', name: 'shop' }], measure: { fn: 'count' } }]);
+  assert.deepEqual(out.step_effects[0].columns_added.map((c) => c.name), ['event_name_tutorial', 'event_name_level_started', 'shop']);
+});

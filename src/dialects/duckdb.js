@@ -181,6 +181,9 @@ export class DuckDBDialect extends Dialect {
     return `date_trunc('${granularity}', CAST(${expr} AS TIMESTAMP))`;
   }
 
+  // a moment (stored as UTC) as the wall clock of `tz`: the UTC instant, then that zone's local time
+  inTimezone(expr, tz) { return `timezone(${this.sqlLiteral(tz)}, timezone('UTC', CAST(${expr} AS TIMESTAMP)))`; }
+
   // (DuckDB's week is the ISO week: it starts on Monday)
   dateTrunc(granularity, expr) {
     if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);

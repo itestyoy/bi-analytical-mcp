@@ -228,6 +228,8 @@ export class Dialect {
   /** Truncate a moment (a date, a datetime or a timestamp) to a granularity (day|week|month|quarter|year),
    *  as a timestamp. A week is the ISO week, starting on Monday, on every warehouse (as MetricFlow's week is). */
   dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
+  /** A moment as the wall-clock time of the IANA timezone `tz`. */
+  inTimezone(_expr, _tz) { throw new Error('abstract inTimezone'); }
 
   /**
    * A join KEY truncated to its declared grain. Separate from `dateTrunc` because a key column's

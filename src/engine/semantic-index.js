@@ -313,7 +313,7 @@ export const semanticIndexMethods = {
   },
 
   /** { source, column }: one column of a model — its meaning, its values, NULL coverage and indexing history. */
-  _indexColumn(input) {
+  async _indexColumn(input) {
     const c = this.catalog;
     // The SOURCE is a separate argument and the view has no source-less spelling: the schema
     // pairs each column with the model that carries it, so both arrive named.
@@ -336,6 +336,20 @@ export const semanticIndexMethods = {
     // yet (a table whose columns have not been introspected) has no enum to project, and the
     // field degrades to an open string. Answer that with the catalog's own refusal instead of
     // reading `.type` off a column that is not there.
+    // the time axis and the partition column: what they are, and how recent the rows are — no value
+    // distribution (every row has its own moment)
+    if (col === m.time?.column || col === m.partition_column) {
+      const axis = col === m.time?.column;
+      const out = {
+        column: col, source: mk, role: axis ? 'time axis' : 'partition', type: c.modelColumns(mk).find((x) => x.name === col)?.type ?? null, description: c.columnDescriptions(mk)[col],
+        ...(m.time?.column ? { data_freshness: await this.probe.dataFreshness(mk) } : {}),
+        recommendations: [axis
+          ? `'${col}' is each row's time: metric_time in a metric query ({ time: "metric_time", grain }), bounded by time_range; in a pipeline a { column } like any other.`
+          : `'${col}' is the partition the warehouse prunes by: a time_range bounds it for you. It can lag the time axis (a row filed in a later partition), so count by '${m.time?.column || 'the time axis'}', not by it.`],
+      };
+      this.notes.attach(out, { kind: 'column', source: mk, name: col });
+      return out;
+    }
     const dim = (m.dimensions || {})[col];
     if (!dim) throw this._notOf(mk, col, 'column');
     const dDescs = c.columnDescriptions(mk);

@@ -43,7 +43,7 @@ const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'dev
 const LAYER = {
   stage: 'semantic_model',
   join: [USERS],
-  dimensions: [{ name: 'is_purchase', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }, { name: 'weekday', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'dow' } }],
+  dimensions: [{ name: 'is_purchase', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }, { name: 'weekday', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'dow' } }, { name: 'la_day', expr: { fn: 'date_trunc', grain: 'day', args: [{ fn: 'in_timezone', timezone: 'America/Los_Angeles', args: [{ column: 'device_time' }] }] } }],
   measures: [
     { name: 'evts', expr: { fn: 'count' } },
     { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } },
@@ -137,6 +137,15 @@ test('a build whose one step is its layer: joined on the contract, an amount com
     group by 1 order by 1 nulls last`)).rows.map((r) => [r.w == null ? null : String(r.w), num(r.n)]);
   assert.deepEqual(gotWeeks, weeks);
 
+  // a window after the metrics step names its columns as the query does: the day before's count by lag,
+  // ordered by the day as group_by names it
+  const dayRef = { time: 'metric_time', grain: 'day' };
+  const lagged = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [dayRef] }),
+    { stage: 'compute', name: 'prev', expr: { fn: 'lag', args: [{ metric: 'evts' }], over: { order_by: [{ key: dayRef }] } } },
+    { stage: 'order_by', keys: [{ key: dayRef }] }] });
+  assert.equal(lagged.ok, true, JSON.stringify(lagged.error));
+  assert.deepEqual(lagged.rows.map((r) => (r.prev == null ? null : num(r.prev))), [null, ...lagged.rows.slice(0, -1).map((r) => num(r.evts))]);
+
   // a window inside a week, grouped by week: MetricFlow counts the week whole — the rows of every day of
   // it, as the warehouse counts them — and the answer says the days it covers
   const midWeek = await engine.query_model({ context_id: ctx, time_range: { start: '2026-01-06', end: '2026-01-07' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'week' }] })] });
@@ -151,6 +160,16 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   const days = (await wh.query("select strftime(date_trunc('day', device_time), '%Y-%m-%d') as d, count(*) as n from fct_analytics_events where device_time >= '2026-01-02' and device_time < '2026-01-05' group by 1 order by 1")).rows.map((r) => [r.d, num(r.n)]);
   assert.deepEqual(la.rows.map((r) => [String(r.metric_time_day).slice(0, 10), num(r.evts)]), days);
   assert.ok(la.warnings.some((w) => w.includes('2026-01-02 … 2026-01-04 UTC')), JSON.stringify(la.warnings));
+  // the timezone's own days, as the warning says to count them: a computed dimension of each row's local
+  // day, kept to the days asked — as the warehouse counts Los Angeles days (UTC−8 in January)
+  const laDay = { semantic_model: ['events'], dimension: 'la_day' };
+  const local = await engine.query_model({ context_id: ctx, steps: [
+    { stage: 'where', conditions: [{ fn: 'between', args: [laDay, { value: '2026-01-02' }, { value: '2026-01-03' }] }] },
+    metrics(['evts'], { group_by: [laDay] }), { stage: 'order_by', keys: [{ key: laDay }] }] });
+  assert.equal(local.ok, true, JSON.stringify(local.error));
+  const lacol = local.group_by_resolved['events.la_day'];
+  const laDays = (await wh.query("select strftime(cast(device_time - interval 8 hour as date), '%Y-%m-%d') as d, count(*) as n from fct_analytics_events where cast(device_time - interval 8 hour as date) between '2026-01-02' and '2026-01-03' group by 1 order by 1")).rows.map((r) => [r.d, num(r.n)]);
+  assert.deepEqual(local.rows.map((r) => [String(r[lacol]).slice(0, 10), num(r.evts)]), laDays);
 
   // a text column holding a flag, filtered by true before the metrics step: compared as the text it holds
   // ('true', '1', 't' in any case), as a pipeline compares it — MetricFlow is never handed text = TRUE
@@ -276,6 +295,14 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   assert.ok(listed[s.context_id].holds.some((h) => /built table/.test(h)), JSON.stringify(listed[s.context_id]));
   // a build whose one step is its semantic layer holds that layer, built
   assert.deepEqual(listed[ctx].holds, ['a semantic layer'], JSON.stringify(listed[ctx]));
+  // a step edited after the build: the table is the earlier steps' — the list and a read of it say so
+  // (the rows read are still the build's: one per player who did a tutorial)
+  await engine.build_model({ action: 'edit_step', context_id: s.context_id, index: 2, step: { ...perPlayer, measures: [{ name: 'n', expr: { fn: 'count' } }] } });
+  const relisted = (await engine.context({ action: 'list', limit: 50 })).contexts.find((c) => c.context_id === s.context_id);
+  assert.ok(relisted.holds.some((h) => /older than the steps/.test(h)), JSON.stringify(relisted));
+  const stale = await engine.query_model({ context_id: s.context_id, steps: [{ stage: 'limit', limit: 1000 }] });
+  assert.equal(stale.rows.length, num(p));
+  assert.ok((stale.warnings || []).some((w) => /built before the steps changed/.test(w)), JSON.stringify(stale.warnings));
 });
 
 // A DATE column compared with a moment at midnight written ISO, with its zone (2026-01-03T00:00:00Z): the
@@ -293,3 +320,22 @@ test('a date column against a midnight written ISO keeps the rows of that day on
   }
 });
 
+
+// A layer over the table the steps built: a flag column the steps made, declared a dimension by its column,
+// reads back as true / false — the player-days of each, as the warehouse counts them.
+test('a flag column of a built table, declared a dimension, reads back as a flag', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.build_model({ action: 'start', name: 'busy_days', source: 'events', materialize: true, steps: [
+    { stage: 'compute', name: 'day', expr: { fn: 'date_trunc', grain: 'day', args: [{ column: 'device_time' }] } },
+    { stage: 'aggregate', group_by: ['player_id_of_internal', 'day'], measures: [{ name: 'evts', expr: { fn: 'count' } }] },
+    { stage: 'compute', name: 'busy', expr: { fn: 'gt', args: [{ column: 'evts' }, { value: 3 }] } },
+    { stage: 'semantic_model', time: 'day', dimensions: [{ column: 'busy' }], measures: [{ name: 'player_days', expr: { fn: 'count' } }], metrics: [{ name: 'player_days', type: 'simple', measure: 'player_days' }] },
+  ] });
+  await taskResult(engine, out.materialize.task_id);
+  const r = await engine.query_model({ context_id: out.context_id, steps: [{ stage: 'metrics', metrics: ['player_days'], group_by: [{ semantic_model: ['busy_days'], dimension: 'busy' }] }] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const col = r.group_by_resolved['busy_days.busy'];
+  assert.ok(r.rows.every((row) => typeof row[col] === 'boolean'), JSON.stringify(r.rows));
+  const want = Object.fromEntries((await wh.query("select n > 3 as b, count(*) as k from (select player_id_of_internal, date_trunc('day', device_time) as d, count(*) as n from fct_analytics_events group by 1, 2) group by 1")).rows.map((x) => [String(x.b), num(x.k)]));
+  assert.deepEqual(Object.fromEntries(r.rows.map((row) => [String(row[col]), num(row.player_days)])), want);
+});

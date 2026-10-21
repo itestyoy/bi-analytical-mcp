@@ -208,7 +208,7 @@ export const semanticQueryMethods = {
     //    declared with)
     if (declaredRef?.column !== undefined) {
       const grain = declared.type === 'time' ? ref.grain || declared.type_params?.time_granularity || 'day' : null;
-      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}${ref.grain && grain ? `_${ref.grain}` : ''}`, label, type: grain ? 'time' : 'unknown' };
+      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}${ref.grain && grain ? `_${ref.grain}` : ''}`, label, type: grain ? 'time' : declared._type || 'unknown' };
     }
     const target = c.getModel(model);
     // the model's own columns: its dimensions and, on an events source, the event name (one set with
@@ -683,15 +683,17 @@ export const semanticQueryMethods = {
       return columnFor(node, where);
     };
     const isRef = (node) => REF_PLACES.metric_result.takes.includes(refKind(node));
+    // a slot that names a column (a group_by key, a sort key, a pivot's on, a window's…) takes the column's name
+    const name = (x, where) => (isRef(x) ? nameOf(x, where) : x);
+    const nameList = (list, where) => (Array.isArray(list) ? list.map((x) => name(x, where)) : list);
+    const windowNamed = (over, where) => ({ ...over, ...(over.partition_by ? { partition_by: nameList(over.partition_by, where) } : {}), ...(Array.isArray(over.order_by) ? { order_by: over.order_by.map((k) => ({ ...k, key: name(k.key, where) })) } : {}) });
     const resolve = (node, where) => {
       if (Array.isArray(node)) return node.map((x) => resolve(x, where));
       if (!node || typeof node !== 'object') return node;
       if (isRef(node)) return { column: nameOf(node, where) };
-      return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, resolve(v, where)]));
+      const n = node.fn !== undefined && node.over && typeof node.over === 'object' ? { ...node, over: windowNamed(node.over, where) } : node;
+      return Object.fromEntries(Object.entries(n).map(([k, v]) => [k, k === 'over' ? v : resolve(v, where)]));
     };
-    // a slot that names a column (a group_by key, a sort key, a pivot's on…) takes the column's name
-    const name = (x, where) => (isRef(x) ? nameOf(x, where) : x);
-    const nameList = (list, where) => (Array.isArray(list) ? list.map((x) => name(x, where)) : list);
     const named = (st, where) => {
       if (!st || typeof st !== 'object') return st;
       const out = { ...st };
@@ -1115,7 +1117,10 @@ export function wholeBucketWarnings(tr, bounds, groupBy) {
     const from = start ? floor(start, g) : null; const to = endExcl ? ceil(endExcl, g) : null;
     if (!((from && from.getTime() !== start.getTime()) || (to && to.getTime() !== endExcl.getTime()))) return [];
     const range = `${from ? said(from, g) : 'the start'} … ${to ? `${said(to, g, g !== 'hour')}${g === 'hour' ? ' (exclusive)' : ''}` : 'the end'}`;
-    return [`metric_time at ${g}: each ${g} is a UTC ${g}, counted whole — so the result covers ${range} UTC, not ${asked}${tr?.timezone ? `. To keep to the window, group by a finer grain (hour) or drop the timezone and give UTC bounds` : `. Set the window on whole ${g}s, or group by a finer grain for its exact bounds`}`];
+    const local = `{ fn: "date_trunc", grain: "${g === 'hour' ? 'day' : g}", args: [{ fn: "in_timezone", timezone: "${tr?.timezone}", args: [{ column: "<the time column>" }] }] }`;
+    return [`metric_time at ${g}: each ${g} is a UTC ${g}, counted whole — so the result covers ${range} UTC, not ${asked}${tr?.timezone
+      ? `. For ${tr.timezone}'s own ${g}s, declare a computed dimension in the semantic_model step — ${local} — group by it, and keep the ${g}s you want with a where step on it before the metrics step; or give UTC bounds of whole ${g}s`
+      : `. Set the window on whole ${g}s${g !== 'day' && g !== 'hour' ? ', or group by day for its exact days' : ''}`}`];
   });
 }
 

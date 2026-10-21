@@ -383,3 +383,15 @@ test('a search the catalog misses and a note matches says the note matched', asy
   assert.equal(s.memory_matches?.length, 1);
   assert.ok(s.recommendations.some((r) => /^No catalog match for 'zebrawing', but 1 saved note\(s\) mention it/.test(r)), JSON.stringify(s.recommendations));
 });
+
+// a source's time axis and its partition are columns of it to look at and to note: a view says what each
+// is, and a note about one surfaces there
+test('the time axis and the partition are columns a view and a note name', async () => {
+  const e = engine();
+  const axis = await e.semantic_index({ source: 'events', column: 'device_time' });
+  assert.equal(axis.role, 'time axis');
+  const part = await e.semantic_index({ source: 'events', column: 'event_date' });
+  assert.equal(part.role, 'partition');
+  const rec = (await e.memory({ action: 'record', notes: [{ note: 'event_date can lag device_time', about: [{ source: 'events', column: 'event_date' }] }] })).notes[0];
+  assert.ok((await e.semantic_index({ source: 'events', column: 'event_date' })).memory?.some((m) => m.id === rec.id));
+});

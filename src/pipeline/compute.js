@@ -35,6 +35,7 @@ import { OPS, predicateSql, typedValue } from '../conditions.js';
 import { form, strEnum, SCALAR, conditionSlot } from '../schema-kit.js';
 import { REFS, VALUE_REFS, REF_PLACES, refKind, valueRefForms } from '../schema/refs.js';
 import { rankFuzzy } from '../fuzzy.js';
+import { isValidTimezone } from '../time-range.js';
 
 // ── The function names, by kind — what a level picks its vocabulary from ──────────────────────────
 /** The conditions: comparisons, membership, a range, the null tests, the text tests (src/conditions.js OPS). */
@@ -53,9 +54,9 @@ export const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']);
 export const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
 // (built when the schema is: what the window parameters reference is read lazily)
-const ORDER = () => ({ type: 'array', items: SORT_KEY, description: 'Window ordering: each key a column, its direction and where its NULLs go (last unless said).' });
+const ORDER = (refNames = false) => ({ type: 'array', items: refNames ? { ...SORT_KEY, properties: { ...SORT_KEY.properties, key: { anyOf: [SORT_KEY.properties.key, { $ref: '#/$defs/ref' }], description: 'The column to order by — after a metrics step also a group_by item as group_by names it, or { metric }.' } } } : SORT_KEY, description: 'Window ordering: each key a column, its direction and where its NULLs go (last unless said).' });
 // `entities`: whether the rows are a source's, so a declared relationship { entity } may name a partition
-const PARTITION = (catalog, entities) => ({ type: 'array', uniqueItems: true, items: partitionItem(catalog, { entities }), description: `What the window restarts per: columns${entities ? ', or a declared relationship { entity } (its key column)' : ''}. Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.` });
+const PARTITION = (catalog, entities, refNames = false) => ({ type: 'array', uniqueItems: true, items: refNames && !entities ? { anyOf: [{ title: 'a column', type: 'string', description: 'A column available here.' }, { $ref: '#/$defs/ref' }] } : partitionItem(catalog, { entities }), description: `What the window restarts per: columns${entities ? ', or a declared relationship { entity } (its key column)' : ''}. Without them the window is one global window over every row, held by one worker — on a large table, "Resources exceeded". For a table-wide number use an aggregate stage with no group_by instead.` });
 
 // a frame bound: an offset, or the edge of the partition
 const BOUND = { anyOf: [{ type: 'integer', minimum: 0, title: 'an offset' }, { const: 'unbounded', title: '"unbounded"' }] };
@@ -82,11 +83,11 @@ export const OVER_FRAME_REF = '#/$defs/over_frame';
  * a frame on a window function is refused by the schema, not ignored.
  * `entities`: whether the rows are a source's, so a partition may name a declared relationship.
  */
-export function overSchema(catalog, { entities = true, frame = false } = {}) {
+export function overSchema(catalog, { entities = true, frame = false, refNames = false } = {}) {
   return {
     type: 'object', additionalProperties: false,
     description: frame ? 'The window: the rows it is computed over, in order, and the frame of them each value reads.' : 'The window: the rows it is computed over, in order.',
-    properties: { partition_by: PARTITION(catalog, entities), order_by: ORDER(), ...(frame ? { frame: FRAME } : {}) },
+    properties: { partition_by: PARTITION(catalog, entities, refNames), order_by: ORDER(refNames), ...(frame ? { frame: FRAME } : {}) },
   };
 }
 
@@ -104,6 +105,7 @@ const params = ({ ref }) => ({
   unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'The unit of the difference: the whole units elapsed from the first argument to the second, truncated toward zero (1 h 59 min is 1 hour; a day is 24 hours, not a calendar boundary — date_trunc both to the day for calendar days), an integer, negative when the second is earlier.' },
   grain: { enum: GRAINS, description: 'The time bucket to truncate to (a week starts on Monday, the ISO week).' },
   part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
+  timezone: { type: 'string', minLength: 1, description: 'An IANA timezone name (Europe/Berlin, America/New_York, UTC).' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
   sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). It is one expression: no ; or comment, a text with one in `args` as { value }. E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
@@ -351,7 +353,7 @@ export const FNS = {
   length: one('length', 'int'),
   trim: one('trim', 'string'),
   unix_date: { args: 1, sql: ({ d, a }) => ({ expr: d.unixDateExpr(a[0]), type: 'int' }) },
-  hll_extract: { args: 1, title: '[sketch]', sql: ({ d, a, t, at }) => { needsSketch('hll_extract', t[0], at); return { expr: d.hllExtract(a[0]), type: 'int' }; } },
+  hll_extract: { args: 1, title: '[sketch] → the distinct count of one sketch', sql: ({ d, a, t, at }) => { needsSketch('hll_extract', t[0], at); return { expr: d.hllExtract(a[0]), type: 'int' }; } },
   json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: arrayColumnType('string') }) }, // STRING JSON array → native array of its texts (then unnest)
   coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
   least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
@@ -377,6 +379,13 @@ export const FNS = {
   element_at: { args: 1, needs: ['index'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: elementType(t[0]) }; } },
   array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: elementType(t[0]) }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
+  // the wall-clock time of a moment in a timezone — its local day, hour, week (date_trunc / date_part of it)
+  in_timezone: {
+    args: 1, needs: ['timezone'], sql: ({ d, a, p, at }) => {
+      if (!isValidTimezone(p.timezone)) throw new Error(`${at} in_timezone: unknown timezone '${p.timezone}' — an IANA name like 'Europe/Berlin' or 'UTC'`);
+      return { expr: d.inTimezone(a[0], p.timezone), type: 'time' };
+    },
+  },
   date_trunc: { args: 1, needs: ['grain'], sql: ({ d, a, p }) => ({ expr: d.dateTrunc(p.grain, a[0]), type: 'time' }) },
   // (a time of day has its hour alone: no date, so no day, week, month, quarter, year, doy or dow); the
   // values a part takes ride with it, so a constant compared with it outside them is refused
@@ -447,9 +456,10 @@ export const FNS = {
   not: { kind: 'logic', args: 1, title: '[condition]', sql: ({ a }) => ({ expr: `(NOT COALESCE(${a[0]}, FALSE))`, type: 'boolean' }) },
   // aggregates: each folds a group's rows into one value where a measure is written (an aggregate stage,
   // a pivot, a semantic model) — or, with `over`, sum / average / min / max / count compute over a window
-  ...Object.fromEntries(['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'median', 'stddev', 'variance', 'hll_init'].map((fn) => [fn, aggregate(fn)])),
-  hll_merge: aggregate('hll_merge', { title: '[sketch]' }),
-  hll_merge_partial: aggregate('hll_merge_partial', { title: '[sketch]' }),
+  ...Object.fromEntries(['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'median', 'stddev', 'variance'].map((fn) => [fn, aggregate(fn)])),
+  hll_init: aggregate('hll_init', { title: '[x] → a sketch of its distinct values' }),
+  hll_merge: aggregate('hll_merge', { title: '[sketch] → the distinct count (a number)' }),
+  hll_merge_partial: aggregate('hll_merge_partial', { title: '[sketch] → a merged sketch' }),
   count: aggregate('count', { args: { min: 0, max: 1 }, title: '[] counts the rows, [x] the rows where x is present' }),
   percentile: aggregate('percentile', { needs: ['percentile'] }),
   // window functions: each over its `over` — the rank of a row, the value of a neighbour
@@ -524,7 +534,7 @@ export const PLACES = {
     hint: 'It filters the rows a metric folds, named as group_by names them; an aggregate is what a metric\'s measure is, and a condition on a metric\'s value is a where step after the metrics step',
   },
   metric_result: {
-    what: 'a step after the metrics step', leaves: ['column', 'value', 'now', ...REF_PLACES.group_by.takes, 'metric'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,
+    what: 'a step after the metrics step', refNames: true, leaves: ['column', 'value', 'now', ...REF_PLACES.group_by.takes, 'metric'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,
     hint: 'A group_by item is named as group_by names it ({ source, column }, { semantic_model, dimension }, { time, grain }…), a metric as { metric }, a column a step after the metrics step made by its name ({ column }); raw SQL and an event property are a build\'s (build_model from the task)',
   },
   derived_metric: {
@@ -757,12 +767,14 @@ export function exprDefs(catalog, { project = null, kinds = {} } = {}) {
   const windowed = named.filter((k) => EXPR_KINDS[k].windows !== false).flatMap((k) => (exprPlacesOf(kinds[k]) || Object.values(PLACES)).filter((p) => p.windows));
   if (!windowed.length) return defs;
   const entities = windowed.some((p) => p.entities);
+  // after a metrics step a window's columns are named as the query names them, as every column there
+  const refNames = windowed.some((p) => p.refNames);
   // each window definition a form refers to: a window function's, an aggregate over a window's
   const refs = new Set(Object.values(defs).flatMap((d) => d.anyOf.map((f) => f.properties?.over?.$ref)));
   return {
     ...defs,
-    ...(refs.has(OVER_REF) ? { over: overSchema(catalog, { entities }) } : {}),
-    ...(refs.has(OVER_FRAME_REF) ? { over_frame: overSchema(catalog, { entities, frame: true }) } : {}),
+    ...(refs.has(OVER_REF) ? { over: overSchema(catalog, { entities, refNames }) } : {}),
+    ...(refs.has(OVER_FRAME_REF) ? { over_frame: overSchema(catalog, { entities, frame: true, refNames }) } : {}),
   };
 }
 

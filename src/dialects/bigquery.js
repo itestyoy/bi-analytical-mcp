@@ -245,6 +245,9 @@ export class BigQueryDialect extends Dialect {
   // sides of a comparison of moments are read as TIMESTAMP — a date is its midnight, as DuckDB reads it
   timeOperand(expr) { return `CAST(${expr} AS TIMESTAMP)`; }
 
+  // a moment as the wall clock of `tz`, kept a TIMESTAMP as every moment here is (its digits the local time)
+  inTimezone(expr, tz) { return `CAST(DATETIME(${this.timeOperand(expr)}, ${this.sqlLiteral(tz)}) AS TIMESTAMP)`; }
+
   roundExpr(expr, places = 0) { return `ROUND(${expr}, ${Number(places)})`; }
 
   // SAFE cast only: a bad value yields NULL instead of failing the whole query (no unsafe CAST). ONE RULE

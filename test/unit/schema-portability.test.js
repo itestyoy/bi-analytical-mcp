@@ -360,9 +360,11 @@ for (const [label, path] of [['fixture', CATALOG], ['production', PRODUCTION]]) 
             // a window function reads its partition whole; an aggregate over a window also a frame of it
             const framed = fns.some((fn) => AGGREGATE_FNS.includes(fn));
             assert.equal(deref(doc, f.properties.over), framed ? defs.over_frame : defs.over, `${name}: ${f.title} — its window is $defs.${framed ? 'over_frame' : 'over'}`);
-            // a window restarts per a declared relationship { entity } only over a source's rows
+            // a window restarts per a declared relationship { entity } only over a source's rows (an
+            // { entity } of the ref, after a metrics step, names the result's column a group_by item gave)
             const partition = deref(doc, deref(doc, f.properties.over).properties?.partition_by);
-            const byEntity = forms(doc, partition?.items).some((item) => item?.properties?.entity);
+            const items = partition?.items?.anyOf ? partition.items.anyOf.filter((i) => i.$ref !== '#/$defs/ref') : [partition?.items];
+            const byEntity = items.flatMap((i) => forms(doc, i)).some((item) => item?.properties?.entity);
             if (byEntity) assert.ok(ps.some((p) => p.entities), `${name}: a window partitioned by { entity } (${f.title}) — no place of the tool reads a source's rows`);
           }
         }

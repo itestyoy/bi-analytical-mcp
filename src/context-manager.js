@@ -134,6 +134,15 @@ export function mergeCompiled(state, compiled) {
   return state;
 }
 
+/** Whether a context's built table is older than its draft's steps: an edit since the build retired the
+ *  checkpoint of the last step, or steps were added after it — a read of the table reads the old steps. */
+export function builtBehind(state) {
+  const built = state?.pipeline_model?.model;
+  const draft = state?.draft;
+  if (!built || !draft || !Array.isArray(draft.stages)) return false;
+  return !(draft.checkpoints || []).some((cp) => cp.at === draft.stages.length && cp.model === built);
+}
+
 export class ContextManager {
   constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'duckdb', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
     this.baseProjectDir = baseProjectDir;
@@ -230,7 +239,7 @@ export class ContextManager {
       ...(c.state.draft?.name || c.state.semantic_model ? { name: c.state.draft?.name || c.state.semantic_model } : {}),
       holds: [
         ...(c.state.engine === 'project' ? ['the dbt project\'s semantic model'] : []),
-        ...(c.state.pipeline_model ? [`a built table (${c.state.pipeline_model.model})`] : []),
+        ...(c.state.pipeline_model ? [`a built table (${c.state.pipeline_model.model})${builtBehind(c.state) ? ', older than the steps — they changed since it was built: materialize to rebuild it' : ''}`] : []),
         ...((c.state.metrics || []).length && c.state.engine !== 'project' ? ['a semantic layer'] : []),
         ...(c.state.draft && !c.state.pipeline_model && !(c.state.metrics || []).length ? ['a draft, not built yet'] : []),
       ],

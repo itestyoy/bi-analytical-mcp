@@ -5,7 +5,7 @@
 
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
-import { RESULT_MODEL_PREFIX } from '../context-manager.js';
+import { RESULT_MODEL_PREFIX, builtBehind } from '../context-manager.js';
 import { formatDbtError } from '../dbt/index.js';
 import { renderRead, stageAt, STAGE_PLACES } from '../pipeline.js';
 import { physicalColumnType } from '../catalog/column-types.js';
@@ -270,7 +270,8 @@ export const taskResultMethods = {
       const stored = this._storedColumns(ctx.id, table, ctx.state.pipeline_model?.task_id);
       if (input.dry_run) return this._pipelineReadSql(ctx, table, input, stored);
       const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? KEPT_ROWS, { stages: input.steps, columns: stored });
-      return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table, ...(out.sampled ? { approximate: true } : {}) } };
+      const behind = builtBehind(ctx.state) ? [`${table} was built before the steps changed (edit_step, add_steps since): these rows are the earlier steps' — materialize to rebuild it`] : [];
+      return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table, ...(out.sampled ? { approximate: true } : {}) }, ...(behind.length ? { warnings: [...(out.warnings || []), ...behind] } : {}) };
     };
   },
 

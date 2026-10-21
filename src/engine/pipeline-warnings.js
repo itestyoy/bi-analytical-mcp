@@ -258,7 +258,7 @@ export class PipelineAdvisor {
     const p = risky[0]; const evs = applies[p] || [];
     return [hasScope
       ? `'${p}' is populated only on event(s) ${evs.join(', ')} — your event_name scope also keeps ${missing(evs).join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`
-      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
+      : `'${p}' is populated only on event(s) ${evs.join(', ')} — add an earlier where on event_name to those, or it reads NULL on the other rows${evs.length > 1 ? `; and it is on several events, so a total over it adds each one's (a failed purchase's price beside a completed one's) — keep the one you mean` : ''} (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
   }
 
   /**

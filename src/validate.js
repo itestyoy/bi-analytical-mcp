@@ -290,6 +290,17 @@ function describe(e, ctx = {}) {
         const fits = used !== undefined && !Array.isArray(used) && (!item || !ctx.schema || nodeValidator(ctx.schema, item)(used));
         return `${at} must be an array${fits ? ` — write [${JSON.stringify(used)}]` : ''}`;
       }
+      // a column slot given a ref: the rows' columns are named here — a property or another model's column
+      // becomes one first
+      if (want === 'string') {
+        const used = valueAt(ctx.input, e.instancePath);
+        if (used && typeof used === 'object' && !Array.isArray(used) && (used.property !== undefined || used.column !== undefined)) {
+          const how = used.property !== undefined
+            ? `read it into one first — { stage: 'compute', name: '${used.property}', expr: { property: '${used.property}' } } — then name it here`
+            : used.source !== undefined ? `if '${used.column}' is not one yet, a join step brings it — { stage: 'join', source: '${used.source}', on, attrs: [{ column: '${used.column}' }] } — then name it here` : `write '${used.column}'`;
+          return `${at} must be the name of a column of the rows here — ${how}`;
+        }
+      }
       return `${at} must be ${want}`;
     }
     case 'minimum': return `${at} must be >= ${e.params.limit}`;

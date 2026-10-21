@@ -44,7 +44,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
   // form that offers it: a wrong name fails within the source it was asked of, so the refusal names
   // that source's form and lists its names. A view reads a column where it is: `via` only if the place
   // reads a relationship.
-  const refs = refForms(catalog, { project, via: !!REF_PLACES.index_view.via });
+  const refs = refForms(catalog, { project, via: !!REF_PLACES.index_view.via, timeColumns: !!REF_PLACES.index_view.timeColumns });
   const refView = (kind, title, description, extra = {}) => refs[kind].map((f) => ({ ...f, title, description: description(f.properties.source), properties: { ...f.properties, ...extra } }));
   const sourceOf = (s) => s.const ?? null;
   const refViews = {

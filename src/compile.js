@@ -240,7 +240,9 @@ function compileDimension(catalog, modelKey, decl) {
       return { name: decl.column, type: 'time', expr: decl.column, type_params: { time_granularity: decl.grain || known.granularity || 'day' }, ...label, _attribute: decl.column };
     }
     if (decl.grain !== undefined) fail(`dimension '${decl.column}' is categorical — a grain goes with a time column of '${modelKey}'`, 'dimensions.grain');
-    return { name: decl.column, type: 'categorical', expr: decl.column, ...label, _attribute: decl.column };
+    // (the column's own type, as a computed one's: a flag or a number read back as one)
+    const held = catalog.modelColumns(modelKey).find((c) => c.name === decl.column)?.type;
+    return { name: decl.column, type: 'categorical', expr: decl.column, ...label, _attribute: decl.column, ...(READ_BACK_TYPES.has(held) ? { _type: held } : {}) };
   }
   if (decl.property !== undefined) {
     if (!props.includes(decl.property)) {

@@ -50,7 +50,7 @@ export const TOOL_PLACES = {
   build_model: { expr: ['source_rows', 'semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'], stage: ['build'] },
   // a query: a metric query (where steps, its metrics step, then a read of its result) or a read of a
   // stored table (its read steps)
-  query_model: { expr: ['metric_where', 'stored_rows'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by'] },
+  query_model: { expr: ['metric_where', 'stored_rows', 'metric_result'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by'] },
   // its views of the catalog's things, and the notes' filter by what they are about
   semantic_index: { ref: ['index_view', 'about'] },
   memory: { ref: ['about'] },

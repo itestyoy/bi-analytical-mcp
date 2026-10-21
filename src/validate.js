@@ -254,7 +254,8 @@ function describe(e, ctx = {}) {
       const alt = otherSpelling(used, Object.keys(node?.properties || {}), ctx.schema && fieldTakes(ctx.schema, node, valueAt(ctx.input, e.instancePath)?.[used]));
       // a form of a union names what it takes: the field is not one of them (src/schema-kit.js form)
       const fields = Object.keys(node?.properties || {});
-      const takes = node?.title && node.properties ? ` — ${node.title} takes ${fields.length ? fields.join(', ') : 'no fields'}` : '';
+      // (an untitled object says its fields too: a window's frame, a sort key)
+      const takes = node?.properties ? ` — ${node.title ? `${node.title} takes` : 'it takes'} ${fields.length ? fields.join(', ') : 'no fields'}` : '';
       // what a metric query said beside its steps is said IN them: a field of a step, not of the request
       const inStep = !alt && node?.properties?.steps ? STEP_FIELDS[used] : null;
       // a field of the request written in each member of a list beside it (a batch's context_id)

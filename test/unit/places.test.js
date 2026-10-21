@@ -122,7 +122,7 @@ test('each place takes the refs its row in REF_PLACES lists, and the refusal nam
   assert.equal(refAt('group_by', { source: 'users', column: 'country', via: 'user' }, 'group_by[0]'), 'source_column', 'a group_by reads a relationship chosen for a column');
   // a value that is no ref, and a field a ref's form does not take
   assert.match(message(() => refAt('group_by', { column: 'country' }, 'group_by[0]')), /a metric query's group_by takes .* — \{"column":"country"\} is none of them/);
-  assert.match(message(() => refAt('group_by', { source: 'users', column: 'country', grain: 'day' }, 'group_by[0]')), /\{ source, column \} takes source, column, via, not grain/);
+  assert.match(message(() => refAt('group_by', { source: 'users', column: 'country', unit: 'day' }, 'group_by[0]')), /\{ source, column \} takes source, column, via, grain, not unit/);
 });
 
 // The ref is closed per source, as semantic_index's views have always been: a name is never written
@@ -180,8 +180,9 @@ test('a metric query refuses in the call what its group_by and its where steps d
   for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'rows' }]) {
     await assert.rejects(() => query(metrics({ group_by: [ref] })), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.group_by\.0`/.test(err.message), JSON.stringify(ref));
   }
-  // a metric in a where step: no leaf any place of the tool takes
-  await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'rows' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.conditions\.0\.args\.0`/.test(err.message));
+  // a metric in a where step before the metrics step: it filters the rows a metric folds, not the metric —
+  // refused at that place (a where after the metrics step takes it)
+  await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'rows' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /\{ metric \} is not what a where before the metrics step takes/.test(err.message));
   // a column of the rows and an aggregate: the steps' after the metrics step (a read of the result),
   // refused at the place of a where before it
   const at = PLACES.metric_where.what.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

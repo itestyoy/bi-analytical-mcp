@@ -424,12 +424,19 @@ export const STAGES = {
   },
 
   order_by: {
-    schema: () => ({
+    // (after a metrics step a key may name a group_by item as group_by names it: the result's column it gave)
+    schema: (catalog, { sortRefs = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
       description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering. NULLs go last unless a key says first — the same on every warehouse.',
-      properties: { stage: { enum: ['order_by'] }, keys: { type: 'array', minItems: 1, items: SORT_KEY, description: 'The sort keys, in order.' } },
+      properties: {
+        stage: { enum: ['order_by'] },
+        keys: { type: 'array', minItems: 1, items: sortRefs ? { ...SORT_KEY, properties: { ...SORT_KEY.properties, key: { anyOf: [SORT_KEY.properties.key, { $ref: '#/$defs/ref' }], description: 'The column to sort by — after a metrics step, a group_by item as group_by names it ({ source, column }, { time: "metric_time", grain }…) or a metric by its name.' } } } : SORT_KEY, description: 'The sort keys, in order.' },
+      },
     }),
-    build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, direction: k.direction, nulls: k.nulls })) }, cols }; },
+    build: ({ cols }, p) => {
+      const named = p.keys.find((k) => typeof k.key !== 'string');
+      if (named) throw new Error(`order_by: a key named by a reference (${JSON.stringify(named.key)}) sorts a metrics step's result — here name the column`);
+      p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, direction: k.direction, nulls: k.nulls })) }, cols }; },
   },
 
   limit: {
@@ -514,7 +521,7 @@ export const STAGE_PLACES = {
   },
   metric_scope: { what: 'a step up to the metrics step', stages: ['where', METRICS_STEP.stage], offers: [METRICS_STEP] },
   metric_result: {
-    what: 'a step after the metrics step', stages: READ_STAGES,
+    what: 'a step after the metrics step', stages: READ_STAGES, sortRefs: true,
     elsewhere: 'makes a new table: store the result (materialize: true) and build from its task, build_model({ request: { action: "start", name, from_task } })',
   },
 };
@@ -587,10 +594,12 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
   const at = stagePlacesOf(places);
   const registry = Object.entries(STAGES).filter(([, s]) => typeof s.available !== 'function' || s.available(catalog));
   const taken = registry.filter(([name]) => (at || [STAGE_PLACES.build]).some((p) => takes(p, name)));
+  // a sort key may name a group_by item by its ref where a place of the tool sorts a metrics step's result
+  const sortRefs = (at || []).some((p) => p.sortRefs);
   // the steps the places offer of their own (no stage of the registry), each once
   const own = [...new Map((at || []).flatMap((p) => p.offers || []).map((s) => [s.stage, s])).values()];
   const forms = (group) => [
-    ...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project })),
+    ...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project, sortRefs })),
     ...own.filter((s) => s.group === group).map((s) => s.schema(catalog, { project })),
     ...(group === 'runtime' ? runtime : []),
   ];

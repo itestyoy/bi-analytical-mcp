@@ -226,7 +226,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   (a part may be `{ by: <select part>, columns: { <word>: <column> } }`: the column a
   word picks), `time: { within: [<from>, <to>] } | { same_day: <column> }`, `select:
   { <part>: <column> | [<words>] }` (a value the model is filtered to before the join, or
-  a choice among words). A model without one is not joinable (an events source declares
+  a choice among words). A model without one is not joinable (an events source usually declares
   none), and a contract naming a column the warehouse lacks is dropped at grounding. The
   join step names EVERY part and nothing else — `{ stage: "join", source, on: { <part>:
   <a column of the rows | a value> }, attrs }`, one closed form per joinable model — each
@@ -402,8 +402,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   source's rows (a pipeline build, an eventstream's start) `{ column }`, `{ property, field? }`
   (an event property read where it is stored, while the rows are that source's events), `{ value }` (a
   scalar, never a list) and `{ now: true }`, every function; a read of stored rows (query_model without a metrics step,
-  the steps after a metrics step, a drill — and filter_events, the eventstream's columns) the same
-  without `{ property }` and `raw`; a semantic model's where, dimensions and measures `{ column }` (a
+  a drill) the same without `{ property }` and `raw`; the steps after a metrics step (`metric_result`)
+  those and the refs its group_by takes and `{ metric }`; filter_events (the feature's `FILTER_PLACE`)
+  a column, a constant and the conditions; a semantic model's where, dimensions and measures `{ column }` (a
   column, an entity key, a declared amount), `{ property }` on an events source, `{ value }` and
   `{ now: true }`, no window and no `raw`; a where step before a metric query's metrics step
   (`metric_where`) the refs its group_by takes and
@@ -528,9 +529,12 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   metrics, group_by? }` — what the semantic layer computes (`STAGE_PLACES.metric_scope`, its own group of
   `$defs.stage`); before it only where steps, the rows its metrics fold (their leaves what group_by names
   — `PLACES.metric_where` —, every one ANDed into MetricFlow's where); after it a read
-  (`STAGE_PLACES.metric_result`) over its result's columns as the caller names them, a where there
-  filtering the result (a having — one naming a dimension is refused: the result's column, or "put it
-  before the metrics step"). A read in `steps` is of the pipeline's own stages, those that keep it one table: where,
+  (`STAGE_PLACES.metric_result`, `PLACES.metric_result`) over its result, NAMED AS THE QUERY NAMES IT — a
+  group_by item by the same ref group_by takes (in an expression and as an order_by key), a metric as
+  `{ metric }`, a column a step there made by its name — each resolved to the result's column it gave
+  (`_metricTail`), so no caller learns how result columns are spelled; one the query is not grouped by
+  is refused (add it to group_by, or filter before the metrics step), a where there filtering the result
+  (a having). A read in `steps` is of the pipeline's own stages, those that keep it one table: where,
   compute, aggregate, pivot, unpivot, order_by, limit, sample, project — of the stored table, or of a
   metric query's result; a join, an unnest, a
   funnel or a python step is a build from the task) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it

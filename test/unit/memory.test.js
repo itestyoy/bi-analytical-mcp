@@ -374,3 +374,12 @@ test('a note an earlier server kept about a model column as a property is read a
   assert.ok((await e.semantic_index({ source: 'users', column: 'country' })).memory?.some((m) => m.id === 'old2'), 'the column view carries it');
   assert.deepEqual(store.memory.get('old2').targets, targets, 'the stored row is not rewritten');
 });
+
+// a word only a saved note knows is no catalog match, and the answer says where it was found instead
+test('a search the catalog misses and a note matches says the note matched', async () => {
+  const e = engine();
+  await e.memory({ action: 'record', notes: [{ note: 'the zebrawing cohort is the users of platform ios', about: [{ source: 'users', column: 'platform' }], aliases: ['zebrawing'] }] });
+  const s = await e.semantic_index({ search: 'zebrawing', fuzzy: false });
+  assert.equal(s.memory_matches?.length, 1);
+  assert.ok(s.recommendations.some((r) => /^No catalog match for 'zebrawing', but 1 saved note\(s\) mention it/.test(r)), JSON.stringify(s.recommendations));
+});

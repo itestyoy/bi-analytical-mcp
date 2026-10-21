@@ -43,6 +43,7 @@ const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'dev
 const LAYER = {
   stage: 'semantic_model',
   join: [USERS],
+  dimensions: [{ name: 'is_purchase', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }],
   measures: [
     { name: 'evts', expr: { fn: 'count' } },
     { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } },
@@ -91,6 +92,42 @@ test('a build whose one step is its layer: joined on the contract, an amount com
     group by 1`;
   const want = Object.fromEntries((await wh.query(sql)).rows.map((r) => [String(r.k), num(r.n)]));
   assert.deepEqual(got, want);
+
+  // after the metrics step a group_by item is named as group_by names it, a metric as { metric }: the same
+  // rows as the result's column names give, the platforms with more than one event, the biggest first
+  const platform = { source: 'users', column: 'platform' };
+  const byRef = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
+    { stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 1 }] }, { fn: 'is_not_null', args: [platform] }] },
+    { stage: 'order_by', keys: [{ key: 'evts', direction: 'desc' }, { key: platform }] }] });
+  assert.equal(byRef.ok, true, JSON.stringify(byRef.error));
+  const expected = Object.entries(want).filter(([k, n]) => k !== 'null' && n > 1).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  assert.deepEqual(byRef.rows.map((r) => [String(r[col]), num(r.evts)]), expected);
+
+  // a time column of the joined model at a bucket of its own: events by the ISO week of the install, as
+  // the warehouse counts them for the version valid at each event
+  const week = { source: 'users', column: 'install_date', grain: 'week' };
+  const byWeek = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [week] }), { stage: 'order_by', keys: [{ key: week }] }] });
+  assert.equal(byWeek.ok, true, JSON.stringify(byWeek.error));
+  const wcol = byWeek.group_by_resolved['users.install_date'];
+  const gotWeeks = byWeek.rows.map((r) => [r[wcol] == null ? null : String(r[wcol]).slice(0, 10), num(r.evts)]);
+  const weeks = (await wh.query(`select strftime(date_trunc('week', u.install_date), '%Y-%m-%d') as w, count(*) as n from fct_analytics_events e
+    left join dim_users u on u.player_id_of_internal = e.player_id_of_internal
+     and e.device_time >= u.install_time_valid_from and (u.install_time_valid_until is null or e.device_time < u.install_time_valid_until)
+    group by 1 order by 1 nulls last`)).rows.map((r) => [r.w == null ? null : String(r.w), num(r.n)]);
+  assert.deepEqual(gotWeeks, weeks);
+
+  // a computed boolean dimension reads back as true / false, whichever path ran the query — MetricFlow's
+  // own (its CSV writes Python's 'True') or the SQL it compiles with a step after it
+  const flag = { semantic_model: ['events'], dimension: 'is_purchase' };
+  const [{ n: purchases }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'iap_purchase_completed'")).rows;
+  const counts = { true: num(purchases), false: num(truth.evts) - num(purchases) };
+  for (const tail of [[], [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 0 }] }] }]]) {
+    const byFlag = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [flag] }), ...tail] });
+    assert.equal(byFlag.ok, true, JSON.stringify(byFlag.error));
+    const fcol = byFlag.group_by_resolved['events.is_purchase'];
+    assert.deepEqual(Object.fromEntries(byFlag.rows.map((r) => [r[fcol], num(r.evts)])), counts, `${tail.length ? 'over its SQL' : 'mf query'}: ${JSON.stringify(byFlag.rows)}`);
+    assert.ok(byFlag.rows.every((r) => typeof r[fcol] === 'boolean'), JSON.stringify(byFlag.rows));
+  }
 });
 
 test('a metric is cut by the columns its own rows reach: another model\'s column refused in the call, described per metric, its freshness its own source\'s', opts, async (t) => {

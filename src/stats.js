@@ -123,9 +123,14 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   const zStar = normalQuantile(1 - (1 - confidence) / 2);
   const seDiff = Math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2);
   const diff = p2 - p1;
-  // CI on the RELATIVE lift (p2/p1 − 1) via the log-ratio delta method (independent groups).
+  // a difference of two rates lies in [−p1, 1 − p1] (the variant's rate is in [0, 1]), and so does its interval
+  const ci = [Math.max(-p1, diff - zStar * seDiff), Math.min(1 - p1, diff + zStar * seDiff)];
+  // CI on the RELATIVE lift (p2/p1 − 1) via the log-ratio delta method (independent groups). A control
+  // that always converts has no spread to log: its relative lift is the absolute one (p1 = 1), and so
+  // is its interval — two methods there would disagree on the same difference.
   let relCi = null;
-  if (p1 > 0 && p2 > 0) {
+  if (p1 === 1) relCi = ci;
+  else if (p1 > 0 && p2 > 0) {
     const seLog = Math.sqrt((1 - p1) / (n1 * p1) + (1 - p2) / (n2 * p2));
     const lr = Math.log(p2 / p1);
     relCi = [Math.exp(lr - zStar * seLog) - 1, Math.exp(lr + zStar * seLog) - 1];
@@ -133,7 +138,7 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   return {
     control_rate: p1, variant_rate: p2,
     absolute_lift: diff, relative_lift: p1 ? diff / p1 : null, relative_lift_ci: relCi,
-    z, p_value: pValue, confidence_interval: [diff - zStar * seDiff, diff + zStar * seDiff],
+    z, p_value: pValue, confidence_interval: ci,
     significant: pValue < 1 - confidence,
   };
 }

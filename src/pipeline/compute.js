@@ -140,6 +140,9 @@ export function concatSql(d, parts) {
   return texts.length === 1 ? texts[0] : `(${texts.join(' || ')})`;
 }
 
+/** The values each date part takes, on every warehouse (dow ISO: Monday 1 … Sunday 7). */
+const PART_RANGE = { dow: [1, 7], hour: [0, 23], day: [1, 31], week: [1, 53], month: [1, 12], quarter: [1, 4], doy: [1, 366] };
+
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
 const arith = (sym) => ({ args: 2, title: '[left, right]', sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
 // An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
@@ -342,11 +345,12 @@ export const FNS = {
   array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: elementType(t[0]) }; } },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
   date_trunc: { args: 1, needs: ['grain'], sql: ({ d, a, p }) => ({ expr: d.dateTrunc(p.grain, a[0]), type: 'time' }) },
-  // (a time of day has its hour alone: no date, so no day, week, month, quarter, year, doy or dow)
+  // (a time of day has its hour alone: no date, so no day, week, month, quarter, year, doy or dow); the
+  // values a part takes ride with it, so a constant compared with it outside them is refused
   date_part: {
     args: 1, needs: ['part'], sql: ({ d, a, t, p, at }) => {
       if (t[0] === 'time_of_day' && p.part !== 'hour') throw new Error(`${at} date_part: its argument is a time of day, which has an hour and no date — part '${p.part}' needs a date or a timestamp`);
-      return { expr: d.datePart(p.part, a[0], t[0]), type: 'int' };
+      return { expr: d.datePart(p.part, a[0], t[0]), type: 'int', ...(PART_RANGE[p.part] ? { range: PART_RANGE[p.part] } : {}) };
     },
   },
   // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h buckets,
@@ -462,6 +466,9 @@ const NOT_OVER_DIMENSIONS = new Set(['raw', 'json_parse_array', 'json_field', 'a
  *                    window: a semantic model has no order of rows);
  *   metric_where   — a where step before a metric query's metrics step, the rows its metrics fold: what
  *                    group_by names, and constants;
+ *   metric_result  — the steps after a metrics step, over its result: what a read of stored rows takes,
+ *                    and a group_by item named as group_by names it, a metric as { metric } — each the
+ *                    result's column it gave (src/engine/semantic-query.js _metricTail);
  *   derived_metric — a derived metric's value: other metrics and constants, in arithmetic.
  */
 export const PLACES = {
@@ -480,6 +487,10 @@ export const PLACES = {
   metric_where: {
     what: 'a where before the metrics step', leaves: [...REF_PLACES.group_by.takes, 'value'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => !NOT_OVER_DIMENSIONS.has(fn))], windows: false,
     hint: 'It filters the rows a metric folds, named as group_by names them; an aggregate is what a metric\'s measure is, and a condition on a metric\'s value is a where step after the metrics step',
+  },
+  metric_result: {
+    what: 'a step after the metrics step', leaves: ['column', 'value', 'now', ...REF_PLACES.group_by.takes, 'metric'], fns: Object.keys(FNS).filter((fn) => fn !== 'raw'), windows: true,
+    hint: 'A group_by item is named as group_by names it ({ source, column }, { semantic_model, dimension }, { time, grain }…), a metric as { metric }, a column a step after the metrics step made by its name ({ column }); raw SQL and an event property are a build\'s (build_model from the task)',
   },
   derived_metric: {
     what: 'a derived metric\'s expr', leaves: ['metric', 'value'], fns: ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest'], windows: false,
@@ -907,7 +918,7 @@ function writer(d, cols, opts) {
       sub: (x, what) => render(x, `${at} ${fn} ${what}`, inner),
       conds: (list, what) => conditions(list, `${at} ${fn} ${what}`, inner),
     });
-    return { sql: out.expr, type: out.type || 'numeric', name: `${fn}(…)`, ...(out.declared ? { declared: true } : {}) };
+    return { sql: out.expr, type: out.type || 'numeric', name: `${fn}(…)`, ...(out.declared ? { declared: true } : {}), ...(out.range ? { range: out.range, part: e.part } : {}) };
   }
 
   // a condition slot: a list of booleans that all hold; no window can stand in one

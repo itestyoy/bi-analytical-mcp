@@ -183,6 +183,10 @@ test('complex array in a JSON-typed column: coverage counted from data (no JSON-
   const view = await engine.semantic_index({ source: 'events', property: asJson });
   assert.equal(view.complex, true);
   assert.ok(view.sample_values.length > 0 && view.sample_values.every((s) => /^\s*\[/.test(s.value)), 'examples are JSON arrays');
+  // an example is counted nowhere: it carries no frequency, and there is no top value to state
+  assert.ok(view.sample_values.every((s) => s.freq === undefined), JSON.stringify(view.sample_values));
+  assert.equal(view.value_stats.top_freq, null);
+  assert.equal(view.value_stats.non_null_count, lc.non_null);
   // the complex pass now leaves per-property diagnostics rows, like the scalar pass
   const runId = index.syncStatus({ recent: 1 }).last_run.id;
   const props = index.runProperties(runId, { limit: 10000 });

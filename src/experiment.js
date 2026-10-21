@@ -87,10 +87,8 @@ export function abTest(input) {
         delta = p2 - p1; variance = p1 * (1 - p1) / control.n + p2 * (1 - p2) / v.n;
         // the z-test reads each group's rate as normal, which holds only with enough of both outcomes
         // (the usual rule: at least 10 conversions and 10 non-conversions per group); below that its
-        // p-value and interval are not to be trusted — said, not hidden. A difference of two rates
-        // lies in [-1, 1], and so does its interval.
+        // p-value and interval are not to be trusted — said, not hidden.
         if ([[control.n, p1], [v.n, p2]].some(([n, p]) => n * p < SMALL_SAMPLE_OUTCOMES || n * (1 - p) < SMALL_SAMPLE_OUTCOMES)) r = { ...r, small_sample: true };
-        if (Array.isArray(r.confidence_interval)) r = { ...r, confidence_interval: r.confidence_interval.map((x) => Math.max(-1, Math.min(1, x))) };
       } else {
         need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
         // a mean's spread is read from the sample: one user has none, and two groups with none leave
@@ -126,6 +124,12 @@ export function abTest(input) {
     });
   }
 
+  // a ratio's delta method and CUPED's adjusted means are read as normal too: below ~30 users a group's
+  // sums say little about their spread — said, not hidden, as a mean's
+  if (metric === 'ratio' || metric === 'cuped') {
+    results = results.map((r, i) => (Math.min(control.n, input.variants[i].n) < SMALL_SAMPLE_MEAN_USERS ? { ...r, small_sample: true } : r));
+  }
+
   // Correct the p-values across the variant family (FWER via Holm, or FDR via BH)
   // so several arms don't inflate false positives; raw `significant` is kept too.
   // family_p_values: p-values of other metrics in the same experiment readout —
@@ -150,11 +154,11 @@ export function abTest(input) {
   const split = input.expected_ratio ? srmTest({ groups: groupsIn.map((g, i) => ({ label: labelOf(g, i - 1), n: g.n })), ratios: input.expected_ratio }) : null;
   const recommendations = [
     ...(split?.srm_detected ? [`Sample ratio mismatch (p = ${split.p_value.toExponential(2)}): the groups are not the split that was designed, so randomization or logging is broken and none of these lifts can be trusted until the cause is found.`] : []),
-    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `a test of means needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, significant or not. Collect more users before deciding.`] : []),
+    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `${metric === 'ratio' ? 'the delta method' : metric === 'cuped' ? 'CUPED' : 'a test of means'} needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, significant or not. Collect more users before deciding.`] : []),
     `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
     ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
     ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
-    ...(anySig ? [] : ['No significant lift: that is inconclusive, not proof of no effect — detectable_lift says how large an effect this sample could have seen.']),
+    ...(anySig ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
     ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
   ];
   return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, recommendations };

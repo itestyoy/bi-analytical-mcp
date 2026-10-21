@@ -207,8 +207,8 @@ export const semanticQueryMethods = {
     // 1. a column the step declared on this model → that dimension (a time column at the grain it was
     //    declared with)
     if (declaredRef?.column !== undefined) {
-      const grain = declared.type === 'time' ? declared.type_params?.time_granularity || 'day' : null;
-      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}`, label, type: grain ? 'time' : 'unknown' };
+      const grain = declared.type === 'time' ? ref.grain || declared.type_params?.time_granularity || 'day' : null;
+      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain, column: `${model}_${name}${ref.grain && grain ? `_${ref.grain}` : ''}`, label, type: grain ? 'time' : 'unknown' };
     }
     const target = c.getModel(model);
     // the model's own columns: its dimensions and, on an events source, the event name (one set with
@@ -223,8 +223,10 @@ export const semanticQueryMethods = {
     // a time column is read at the catalog's granularity for it: MetricFlow names a time dimension's
     // column with its grain (`<path>__<grain>`), and the column comes back under the caller's name
     const dim = (target.dimensions || {})[name];
-    const grain = dim?.type === 'time' ? dim.granularity || 'day' : null;
-    const out = (path) => ({ kind: 'dimension', path, grain, column: `${model}_${name}`, label, type: grain ? 'time' : c.modelColumns(model).find((x) => x.name === name)?.type || 'unknown' });
+    // (a grain asked for buckets a time column — an install week; a column of no time takes none)
+    if (ref.grain !== undefined && dim?.type !== 'time') throw new ToolError(`${at}: '${label}' is no time column, so it takes no grain — leave grain out`, { stage: 'validate', field });
+    const grain = dim?.type === 'time' ? ref.grain || dim.granularity || 'day' : null;
+    const out = (path) => ({ kind: 'dimension', path, grain, column: `${model}_${name}${ref.grain ? `_${ref.grain}` : ''}`, label, type: grain ? 'time' : c.modelColumns(model).find((x) => x.name === name)?.type || 'unknown' });
     // The sources whose MEASURES this task reads: a path starts from one of them. A model loaded
     // only to be joined to (an item with only `source`) — even another events source — is a join
     // TARGET here, reached through the relationship a measure source declares towards it.
@@ -281,7 +283,7 @@ export const semanticQueryMethods = {
       throw new ToolError(`${at}: '${label}' is not a dimension this context computed on '${model}'. ${computed.length ? `It computed: ${computed.join(', ')}.` : 'It computed none there.'} A dimension computed from the row is declared { name, expr } in the dimensions of the build's semantic_model step.`, { stage: 'validate', field });
     }
     if (ref.grain !== undefined) throw new ToolError(`${at}: '${label}' is a computed dimension, which is categorical — it takes no grain`, { stage: 'validate', field });
-    return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${ref.dimension}`, label, type: 'unknown' };
+    return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${ref.dimension}`, label, type: declared._type || 'unknown' };
   },
 
   /**
@@ -658,20 +660,35 @@ export const semanticQueryMethods = {
    * step runs over the SQL it compiles for the query (`viaSql`, _metricRead).
    * → { steps, columns, orderBy, viaSql, ordered, outputColumns, sample }
    */
-  _metricTail(steps, { columns, rename, first = 0, carried = () => [] }) {
+  _metricTail(given, { columns, rename, first = 0, carried = () => [] }) {
     const at = (i) => `steps[${first + i}]`;
     const refuse = (message) => new ToolError(message, { stage: 'validate', field: 'steps' });
-    steps.forEach((st, i) => {
-      try { stageAt(STAGE_PLACES.metric_result, st, at(i)); } catch (e) { throw refuse(e.message); }
-      if (st?.stage !== 'where') return;
-      let ref = null;
-      eachNode(st.conditions, (n) => { ref ||= REF_PLACES.group_by.takes.includes(refKind(n)) ? n : null; });
-      if (!ref) return;
-      const cols = carried(ref, at(i));
+    const names = new Set(columns.map((c) => c.name));
+    // a group_by item named as group_by names it is the result's column it gave — one, or one per grain
+    // for a time named without its grain (then the grain is said), or none (not grouped by: said where it goes)
+    const columnFor = (ref, where) => {
+      const cols = carried(ref, where);
+      if (cols.length === 1) return cols[0];
       const named = cols.map((c) => `{ column: '${c}' }`).join(' or ');
-      const there = cols.length > 1 ? `is in the result as its columns ${cols.slice(0, -1).map((c) => `'${c}'`).join(', ')} and '${cols[cols.length - 1]}', one per grain the metrics step groups it by — name the one you mean (${named}); or put the where before the metrics step`
-        : cols.length ? `is its column '${cols[0]}' there (${named}); or put the where before the metrics step` : 'is a dimension the result does not carry: put it before the metrics step';
-      throw refuse(`${at(i)}: a where after the metrics step reads the result's columns — ${refText(ref)} ${there}, where it filters the rows the metrics fold`);
+      throw refuse(`${where}: ${refText(ref)} ${cols.length > 1
+        ? `is in the result as its columns ${cols.slice(0, -1).map((c) => `'${c}'`).join(', ')} and '${cols[cols.length - 1]}', one per grain the metrics step groups it by — name the one you mean (its grain, or ${named})`
+        : 'is no group_by item of this query, so the result does not carry it: add it to the metrics step\'s group_by, or filter the rows by it in a where step before the metrics step'}`);
+    };
+    const resolve = (node, where) => {
+      if (Array.isArray(node)) return node.map((x) => resolve(x, where));
+      if (!node || typeof node !== 'object') return node;
+      const kind = refKind(node);
+      if (kind === 'metric') {
+        if (!names.has(node.metric)) throw refuse(`${where}: { metric: '${node.metric}' } is no metric of this query — its result has ${[...names].join(', ')}`);
+        return { column: node.metric };
+      }
+      if (kind && REF_PLACES.group_by.takes.includes(kind)) return { column: columnFor(node, where) };
+      return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, resolve(v, where)]));
+    };
+    const steps = given.map((st, i) => {
+      try { stageAt(STAGE_PLACES.metric_result, st, at(i)); } catch (e) { throw refuse(e.message); }
+      if (st?.stage === 'order_by') return { ...st, keys: st.keys.map((k) => (typeof k.key === 'string' ? k : { ...k, key: columnFor(k.key, at(i)) })) };
+      return resolve(st, at(i));
     });
     let read;
     // (the read numbers its steps from 0; here they follow the metrics step)
@@ -956,6 +973,13 @@ export const semanticQueryMethods = {
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
+      // a slowly-changing model's attribute: a user whose version changed inside the window is counted
+      // under each version's value, so the groups' distinct counts add up to more than the whole
+      const c = this._catalogOf(ctx);
+      const versioned = [...new Set(q.groupBy.map((g) => g.source ?? g.semantic_model?.at(-1)).filter((m) => m && c.models[m]?.scd))];
+      if (usesDistinct && versioned.length) {
+        recs.push(`count_distinct grouped by ${versioned.map((m) => `'${m}'`).join(', ')}, a slowly-changing model: a user whose version changed inside the window is counted under each value it held, so the groups add up to more than the users in all — read the total from a query without that group_by, not from their sum.`);
+      }
       if (page.has_more) recs.push(this._keptRowsNote(page));
       recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_model({ request: { action: \'start\', name, from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
@@ -1019,18 +1043,20 @@ function callerNamed(raw, rename) {
  * A metric query's rows in ONE FORM, whichever path ran it: `mf query` writes a CSV, every dimension as
  * text (a moment as Python prints it, '2026-01-01 00:00:00'; a number as its digits), while the dbt
  * client's show writes JSON (the moment ISO, a number a number). Keyed by the result's typed columns
- * (`columns`, [{ name, type }]): a moment is written ISO, 'T' between its day and its time, and a numeric
- * column's number is a number — an integer past 2^53 kept as the digits written, as show keeps one
+ * (`columns`, [{ name, type }]): a moment is written ISO, 'T' between its day and its time, a flag
+ * (Python's 'True' / 'False') is true / false, and a numeric column's number is a number — an integer past 2^53 kept as the digits written, as show keeps one
  * (src/dbt/output.js). Every other value, a failure and a compiled query are as they came.
  */
 function oneForm(raw, columns = []) {
   if (!raw?.ok || !Array.isArray(raw.rows)) return raw;
   const time = new Set(columns.filter((c) => c.type === 'time').map((c) => c.name));
   const numeric = new Set(columns.filter((c) => NUMERIC_TYPES.has(c.type)).map((c) => c.name));
-  if (!time.size && !numeric.size) return raw;
+  const flags = new Set(columns.filter((c) => c.type === 'boolean').map((c) => c.name));
+  if (!time.size && !numeric.size && !flags.size) return raw;
   const written = (k, v) => {
     if (typeof v !== 'string') return v;
     if (time.has(k)) return v.replace(/^(\d{4}-\d{2}-\d{2}) (?=\d)/, '$1T');
+    if (flags.has(k)) return /^true$/i.test(v) ? true : /^false$/i.test(v) ? false : v;
     if (!numeric.has(k) || v.trim() === '' || !Number.isFinite(Number(v))) return v;
     return /^\s*-?\d+\s*$/.test(v) && !Number.isSafeInteger(Number(v)) ? v : Number(v);
   };

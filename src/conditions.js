@@ -154,6 +154,12 @@ export function predicateSql(op, args, { timeOperand = (x) => x, literal = null,
   // the first argument that is not a constant: the constants are written in its type
   const anchor = args.find((a) => !isConstant(a)) || null;
   const constants = args.filter(isConstant).map((a) => a.value);
+  // a date part takes the values of its numbering: a constant outside them matches nothing, or every row —
+  // most often a day of the week counted from 0 (Sunday 0, Saturday 6), which here is Saturday 6, Sunday 7
+  const outside = anchor?.range ? constants.find((v) => typeof v === 'number' && (v < anchor.range[0] || v > anchor.range[1])) : undefined;
+  if (outside !== undefined) {
+    throw new Error(`${op} compares date_part '${anchor.part}' with ${outside}, which it never is — '${anchor.part}' runs ${anchor.range[0]} … ${anchor.range[1]}${anchor.part === 'dow' ? ' (ISO: Monday 1 … Saturday 6, Sunday 7 — a weekend is in [6, 7])' : ''}`);
+  }
   const named = (a) => `'${a?.name ?? 'the expression'}'`;
   if (TEXT_OPS.has(op)) {
     const pattern = rest[0];

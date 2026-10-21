@@ -222,7 +222,8 @@ function compileDimension(catalog, modelKey, decl) {
     checkLeaves(catalog, modelKey, decl.expr, 'dimensions.expr', `dimension '${decl.name}'`);
     const { d, opts } = modelWriter(catalog, modelKey);
     const r = attempt('dimensions.expr', () => exprSql(d, null, decl.expr, `dimension '${decl.name}'`, opts));
-    return { name: decl.name, type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name };
+    // (`_type` keeps what the result's values are — a boolean read back as one, whichever path ran the query)
+    return { name: decl.name, type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name, ...(r.type === 'boolean' ? { _type: 'boolean' } : {}) };
   }
   if (decl.column !== undefined) {
     if (!columns.includes(decl.column)) fail(`dimension: '${decl.column}' is not a groupable column of '${modelKey}'.${nearest(decl.column, columns)} Its groupable columns: ${columns.join(', ') || '(none)'}; a value computed from the row is { name, expr }.`, 'dimensions.column');

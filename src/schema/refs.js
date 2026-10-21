@@ -27,7 +27,7 @@ const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 export const REFS = {
   source: { group: 'catalog', fields: ['source'], says: '{ source }' },
   source_event: { group: 'catalog', fields: ['source', 'event'], says: '{ source, event }' },
-  source_column: { group: 'catalog', fields: ['source', 'column', 'via'], says: '{ source, column }', value: true },
+  source_column: { group: 'catalog', fields: ['source', 'column', 'via', 'grain'], says: '{ source, column }', value: true },
   source_property: { group: 'catalog', fields: ['source', 'property'], says: '{ source, property }', value: true },
   dimension: { group: 'semantic', fields: ['semantic_model', 'dimension', 'grain'], says: '{ semantic_model, dimension }', value: true },
   entity: { group: 'semantic', fields: ['entity'], says: '{ entity }', value: true },
@@ -53,6 +53,11 @@ export function refKind(v) {
   if (v.metric !== undefined) return 'metric';
   if (v.time !== undefined) return 'time';
   return null;
+}
+
+/** A model's time columns: the dimensions the catalog declares of type time. */
+function timeColumns(catalog, model) {
+  return Object.entries(catalog.getModel(model).dimensions || {}).filter(([, d]) => d?.type === 'time').map(([n]) => n);
 }
 
 /** The columns of a model a ref names: its groupable attributes (the dimensions the catalog declares and,
@@ -107,6 +112,8 @@ export function refForms(catalog, { project = null, via: offerVia = true } = {})
           source: { const: k, description: `The model '${k}'.` },
           column: strEnum(columns, `A column of '${k}', as semantic_index({ request: { source: "${k}" } }) lists it.`),
           ...(vias.length > 1 ? { via: { enum: vias, description: `The relationship '${k}' is reached through — several lead to it.` } } : {}),
+          // a time column of the model grouped by at a bucket of its own (an install week)
+          ...(offerVia && timeColumns(catalog, k).length ? { grain: { ...grain, description: `For a time column of '${k}' (${timeColumns(catalog, k).join(', ')}): the bucket it is grouped by (default: its own granularity).` } } : {}),
         },
       })];
     }),

@@ -401,7 +401,10 @@ export const semanticIndexMethods = {
     // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction)
     // + NULL coverage per event + indexing freshness: ONE page = the full truth about the
     // column (meaning, values, completeness, profiling recency).
-    const { samples, value_stats } = this.indexViews.valueListing(propFact, propName, input);
+    const listed = this.indexViews.valueListing(propFact, propName, input);
+    // a complex value is kept as an EXAMPLE of its shape, counted nowhere: no frequency, no top value
+    const samples = complex ? listed.samples.map(({ freq: _f, ...v }) => v) : listed.samples;
+    const value_stats = complex ? { ...listed.value_stats, top_value: null, top_freq: null, top_share: null, examples_only: true } : listed.value_stats;
     const { nulls, coverage, recs: nullRecs } = this.indexViews.nullCoverage(propFact, propName, { eventScoped: true });
     Object.assign(value_stats, nulls);
     const dc = value_stats.distinct_count;
@@ -562,7 +565,11 @@ export const semanticIndexMethods = {
     // used, recorded as an alias, resolves straight back to the real field it described.
     const mem = await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false });
     const memHits = mem.notes.map(memoryView);
-    if (memHits.length) res.memory_matches = memHits;
+    if (memHits.length) {
+      res.memory_matches = memHits;
+      // a saved note is a match too: "no catalog match" is said of the catalog, with where the word was found
+      res.recommendations = (res.recommendations || []).map((r) => (r.startsWith('No catalog match') ? `No catalog match for '${input.search}', but ${memHits.length} saved note(s) mention it — memory_matches says what each one recorded (an alias names the real field it meant).` : r));
+    }
     // Surface a semantic-search failure here too (don't hide it just because this path
     // also returns catalog hits) — otherwise a broken embedder looks like "no memory".
     if (memHits.length || mem.semantic_error) res.memory_semantic = mem.semantic;

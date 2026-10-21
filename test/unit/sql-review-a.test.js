@@ -50,3 +50,18 @@ test('date_part of a time of day takes its hour; a date part of it is refused, n
     }
   }
 });
+
+// A DATE PART TAKES THE VALUES OF ITS NUMBERING: a constant compared with it outside them would match no
+// row (or every row) without a word — a weekend counted as [0, 6] where dow is ISO (Saturday 6, Sunday 7).
+test('a date part compared with a constant outside its numbering is refused, naming the range', () => {
+  const columns = [{ name: 'at', type: physicalColumnType('TIMESTAMP') }];
+  const dow = { fn: 'date_part', args: [{ column: 'at' }], part: 'dow' };
+  const keep = (fn, ...values) => ({ stage: 'where', conditions: [{ fn, args: [dow, ...values.map((value) => ({ value }))] }] });
+  for (const dialect of DIALECTS) {
+    const read = (steps) => renderRead(catalog, "{{ ref('t') }}", columns, steps, { dialect });
+    assert.throws(() => read([keep('in', 0, 6)]), /'dow' runs 1 … 7 \(ISO: Monday 1 … Saturday 6, Sunday 7/, `${dialect}: a weekend counted from 0`);
+    assert.throws(() => read([keep('gt', 8)]), /compares date_part 'dow' with 8/, `${dialect}: past the last day`);
+    assert.doesNotThrow(() => read([keep('in', 6, 7)]), `${dialect}: the ISO weekend`);
+    assert.throws(() => read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'date_part', args: [{ column: 'at' }], part: 'hour' }, { value: 24 }] }] }]), /'hour' runs 0 … 23/, `${dialect}: hour 24`);
+  }
+});

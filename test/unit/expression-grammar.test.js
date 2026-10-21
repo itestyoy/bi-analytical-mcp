@@ -118,10 +118,11 @@ test('every tool that takes an expression carries the row expression, $defs.expr
   for (const fn of ['raw', 'row_number', 'lag', 'hll_init', 'approx_count_distinct']) {
     for (const kind of ['aggregate', 'metric_expr']) assert.ok(!exprDef(sem, sem.$defs[kind]).fns.has(fn), `a semantic_model step's ${kind} takes no ${fn}`);
   }
-  // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — no metric, no event property, no raw
+  // a metric query: what its where steps name (group_by's refs) and the rows after its metrics step — the
+  // same refs there, and a metric of the query by { metric } — no event property, no raw
   const sq = of('query_model').leaves;
-  for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }']) assert.ok(sq.includes(leaf), `query_model: ${leaf}`);
-  for (const leaf of ['{ metric }', 'an event property — { property }']) assert.ok(!sq.includes(leaf), `query_model: no ${leaf}`);
+  for (const leaf of ['a column — { column }', '{ source: "users", column }', '{ source: "events", property }', '{ semantic_model, dimension }', '{ entity }', '{ time: "metric_time" }', '{ metric }']) assert.ok(sq.includes(leaf), `query_model: ${leaf}`);
+  for (const leaf of ['an event property — { property }']) assert.ok(!sq.includes(leaf), `query_model: no ${leaf}`);
   assert.ok(!of('query_model').fns.has('raw'));
 });
 
@@ -180,7 +181,7 @@ test('each place takes what its row in PLACES says, and a refusal names the plac
   const refused = (place, e, said) => assert.throws(() => sql(place, e), (err) => err.message.startsWith(`x: ${said} is not what ${PLACES[place].what} takes — it takes `), `${place}: ${JSON.stringify(e)}`);
   const OVER_S = { partition_by: ['s'], order_by: [{ key: 't' }] };
   const raw = { fn: 'raw', sql: 'upper({1})', args: [{ column: 's' }] };
-  assert.deepEqual(Object.keys(PLACES).sort(), ['derived_metric', 'metric_where', 'semantic_model', 'source_rows', 'stored_rows']);
+  assert.deepEqual(Object.keys(PLACES).sort(), ['derived_metric', 'metric_result', 'metric_where', 'semantic_model', 'source_rows', 'stored_rows']);
   // a step over a source's rows: the rows' leaves and every function — a metric, a ref of another model are elsewhere
   assert.ok(sql('source_rows', raw).sql);
   refused('source_rows', { metric: 'revenue' }, '{ metric }');

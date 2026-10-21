@@ -278,15 +278,16 @@ test('the steps after the metrics step are checked against the result\'s columns
     await assert.rejects(() => e.query_model({ context_id, ...daily(...steps) }), (err) => err.stage === 'validate' && said.test(err.message), JSON.stringify(steps));
   }
   await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'users', column: 'country' }, { value: 'US' }] }] }) }),
-    (err) => err.field === 'steps' && /^steps\[1\]: a where after the metrics step reads the result's columns — \{ source: 'users', column: 'country' \} is a dimension the result does not carry: put it before the metrics step/.test(err.message));
+    (err) => err.field === 'steps' && /^steps\[1\]: \{ source: 'users', column: 'country' \} is no group_by item of this query, so the result does not carry it: add it to the metrics step's group_by, or filter the rows by it in a where step before the metrics step/.test(err.message));
   // metric_time named without its grain is the result's column of the grain the metrics step groups it
-  // by — each of them, when it groups it by several
+  // by — when it groups it by several, the grain is said
   const at = (...grains) => ({ ...CNT, group_by: grains.map((grain) => ({ time: 'metric_time', grain })) });
   const since = { stage: 'where', conditions: [{ fn: 'gte', args: [{ time: 'metric_time' }, { value: '2026-01-01' }] }] };
-  await assert.rejects(() => e.query_model({ context_id, steps: [at('month'), since] }),
-    (err) => err.field === 'steps' && /^steps\[1\]: .*\{ time: 'metric_time' \} is its column 'metric_time_month' there \(\{ column: 'metric_time_month' \}\); or put the where before the metrics step/.test(err.message));
   await assert.rejects(() => e.query_model({ context_id, steps: [at('day', 'month'), since] }),
-    (err) => err.field === 'steps' && /^steps\[1\]: .*\{ time: 'metric_time' \} is in the result as its columns 'metric_time_day' and 'metric_time_month', one per grain the metrics step groups it by — name the one you mean \(\{ column: 'metric_time_day' \} or \{ column: 'metric_time_month' \}\)/.test(err.message));
+    (err) => err.field === 'steps' && /^steps\[1\]: \{ time: 'metric_time' \} is in the result as its columns 'metric_time_day' and 'metric_time_month', one per grain the metrics step groups it by — name the one you mean/.test(err.message));
+  // a metric of the query is { metric }: one it does not have is refused with the result's columns
+  await assert.rejects(() => e.query_model({ context_id, ...daily({ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'nope' }, { value: 1 }] }] }) }),
+    (err) => err.field === 'steps' && /^steps\[1\]: \{ metric: 'nope' \} is no metric of this query — its result has metric_time_day, cnt/.test(err.message));
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
 });
 
@@ -316,15 +317,17 @@ test('a metric query has one metrics step, only where steps before it, and the r
   }
   // a where before it names what group_by names, not a column of the result
   await assert.rejects(() => query(where({ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }), byCountry), refused(new RegExp(`^steps\\[0\\] conditions\\[0\\] .*\\{ column \\} is not what ${esc(PLACES.metric_where.what)} takes`)));
-  // a where after it reads the result's columns: a dimension the result carries is its column there, one it does not goes before the metrics step
-  await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'country' }, 'US'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'country' \} is its column 'users_country' there \(\{ column: 'users_country' \}\); or put the where before the metrics step/));
-  await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'platform' }, 'ios'))), refused(/^steps\[1\]: .*\{ source: 'users', column: 'platform' \} is a dimension the result does not carry: put it before the metrics step/));
+  // a where after it reads the result: a group_by item named as group_by names it is its column there, one
+  // the query is not grouped by goes in group_by or before the metrics step
+  await assert.rejects(() => query(byCountry, where(is({ source: 'users', column: 'platform' }, 'ios'))), refused(/^steps\[1\]: \{ source: 'users', column: 'platform' \} is no group_by item of this query, so the result does not carry it: add it to the metrics step's group_by, or filter the rows by it in a where step before the metrics step/));
   // a metric the context does not offer is named at its step
   await assert.rejects(() => query({ stage: 'metrics', metrics: ['nope'] }), refused(/^steps\[0\]: unknown metric in context: 'nope'/));
   assert.equal(e._listTasks().tasks.length, before, 'no task was started for any of them');
   // what is taken: several where steps before it (all of them hold), a where after it on the result's column
   assert.ok(isStartedTask(await query(where(is({ source: 'users', column: 'platform' }, 'ios')), where({ fn: 'neq', args: [{ source: 'users', column: 'country' }, { value: 'DE' }] }), byCountry)));
   assert.ok(isStartedTask(await query(byCountry, where(is({ column: 'users_country' }, 'US')), { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] })));
+  // …the same named as group_by names it, a metric as { metric }, a sort key as a ref
+  assert.ok(isStartedTask(await query(byCountry, where(is({ source: 'users', column: 'country' }, 'US'), { fn: 'gt', args: [{ metric: 'cnt' }, { value: 1 }] }), { stage: 'order_by', keys: [{ key: { source: 'users', column: 'country' } }, { key: 'cnt', direction: 'desc' }] })));
 });
 
 test('a metric query answers in the caller\'s names whatever its steps — ordered by an order_by step, approximate after a sample', async () => {

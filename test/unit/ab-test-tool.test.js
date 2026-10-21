@@ -288,3 +288,24 @@ test('the A/B card reads the split check and the detectable effect in the unit i
   assert.equal(v.detectable, r.results[0].detectable_relative_lift);
   assert.equal(v.significant, false);
 });
+
+// a ratio's delta method reads its sums as normal too: a group under ~30 users is flagged as a mean's
+// is, and a recommendation names detectable_lift only where a result carries one (a ratio's does not)
+test('experiment analyze, ratio: a small group is flagged; detectable_lift is named only where it is computed', () => {
+  const group = (n, num, den) => ({ n, numerator: { sum: num * n, sum_squares: num * num * n * 1.5 }, denominator: { sum: den * n, sum_squares: den * den * n * 1.2 }, sum_products: num * den * n * 1.1 });
+  const thin = engine._analyzeExperiment({ metric: 'ratio', control: { label: 'control', ...group(12, 2, 1) }, variants: [{ label: 'B', ...group(12, 2.05, 1) }] });
+  assert.equal(thin.results[0].small_sample, true);
+  assert.match(thin.recommendations[0], /^Too few users to read B: the delta method needs about 30 users in each group/);
+  assert.equal(thin.results[0].detectable_lift, undefined);
+  assert.ok(thin.recommendations.some((r) => /^No significant lift/.test(r)) && !thin.recommendations.some((r) => /detectable_lift/.test(r)), JSON.stringify(thin.recommendations));
+  assert.equal(engine._analyzeExperiment({ metric: 'ratio', control: group(500, 2, 1), variants: [{ label: 'B', ...group(500, 2.01, 1) }] }).results[0].small_sample, undefined);
+});
+
+// a control that always converts has no spread to log: its relative lift is its absolute one (p1 = 1),
+// and so is the relative interval — both inside what a difference of rates can take, [−1, 0] there
+test('experiment analyze, proportion: a control converting every user gives one interval for both lifts', () => {
+  const [b] = engine._analyzeExperiment({ metric: 'proportion', control: { label: 'control', n: 20, conversions: 20 }, variants: [{ label: 'B', n: 22, conversions: 5 }] }).results;
+  assert.deepEqual(b.relative_lift_ci, b.confidence_interval);
+  assert.equal(b.relative_lift, b.absolute_lift);
+  assert.ok(b.confidence_interval[0] >= -1 && b.confidence_interval[1] <= 0, JSON.stringify(b.confidence_interval));
+});

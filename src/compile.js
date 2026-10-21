@@ -211,6 +211,9 @@ function compileMeasure(catalog, modelKey, decl, smScope) {
  * booleans …) is never missing, false where it cannot be decided, as a compute stage stores it). What a
  * column or a property IS comes from the catalog, never from the caller.
  */
+/** The types a computed dimension's values are read back as (any other stays the text it is written as). */
+const READ_BACK_TYPES = new Set(['boolean', 'int', 'numeric', 'float', 'time']);
+
 function compileDimension(catalog, modelKey, decl) {
   const label = decl.label ? { label: decl.label } : {};
   const columns = catalog.modelDimensionColumns(modelKey);
@@ -222,8 +225,9 @@ function compileDimension(catalog, modelKey, decl) {
     checkLeaves(catalog, modelKey, decl.expr, 'dimensions.expr', `dimension '${decl.name}'`);
     const { d, opts } = modelWriter(catalog, modelKey);
     const r = attempt('dimensions.expr', () => exprSql(d, null, decl.expr, `dimension '${decl.name}'`, opts));
-    // (`_type` keeps what the result's values are — a boolean read back as one, whichever path ran the query)
-    return { name: decl.name, type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name, ...(r.type === 'boolean' ? { _type: 'boolean' } : {}) };
+    // (`_type` keeps what the result's values are — a boolean, a number, a moment read back as one,
+    // whichever path ran the query: MetricFlow writes every dimension as text)
+    return { name: decl.name, type: 'categorical', expr: r.type === 'boolean' ? `COALESCE(${r.sql}, FALSE)` : r.sql, ...label, _attribute: decl.name, ...(READ_BACK_TYPES.has(r.type) ? { _type: r.type } : {}) };
   }
   if (decl.column !== undefined) {
     if (!columns.includes(decl.column)) fail(`dimension: '${decl.column}' is not a groupable column of '${modelKey}'.${nearest(decl.column, columns)} Its groupable columns: ${columns.join(', ') || '(none)'}; a value computed from the row is { name, expr }.`, 'dimensions.column');

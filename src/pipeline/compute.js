@@ -143,6 +143,17 @@ export function concatSql(d, parts) {
 /** The values each date part takes, on every warehouse (dow ISO: Monday 1 … Sunday 7). */
 const PART_RANGE = { dow: [1, 7], hour: [0, 23], day: [1, 31], week: [1, 53], month: [1, 12], quarter: [1, 4], doy: [1, 366] };
 
+/** A function of one text: a value of another known type is refused, saying to cast it — no warehouse
+ *  runs upper or replace over a number. */
+const text = (fn, write) => ({
+  args: 1,
+  sql: ({ d, a, t, p, at }) => {
+    const said = { int: 'a number', numeric: 'a number', float: 'a number', boolean: 'a flag (true / false)', time: 'a moment', time_of_day: 'a time of day' }[t[0]];
+    if (said) throw new Error(`${at} ${fn}: its argument is ${said}, and ${fn} reads text — cast it first: { fn: "cast", args: [<it>], type: "string" }`);
+    return { expr: write(a[0], d, p), type: 'string' };
+  },
+});
+
 const one = (fn, type) => ({ args: 1, sql: ({ a }) => ({ expr: `${fn}(${a[0]})`, type }) });
 const arith = (sym) => ({ args: 2, title: '[left, right]', sql: ({ a }) => ({ expr: sym === '/' ? `(${a[0]} / NULLIF(${a[1]}, 0))` : `(${a[0]} ${sym} ${a[1]})` }) });
 // An array function's argument is checked when the stage is ADDED, not at warehouse run time: only a
@@ -285,6 +296,28 @@ function aggregateType(fn, argType) {
   return 'numeric';
 }
 
+/** The aggregates that fold numbers: over a text, a flag or a moment the warehouse has no such function. */
+const NUMBER_FOLDS = new Set(['sum', 'average', 'median', 'percentile', 'stddev', 'variance']);
+function needsNumber(fn, type, at) {
+  const said = { string: 'text', boolean: 'a flag (true / false)', time: 'a moment', time_of_day: 'a time of day', json: 'JSON text' }[type];
+  if (!said) return;
+  const fix = type === 'boolean'
+    ? 'count the rows where it holds — count of { fn: "case", cases: [{ when: [<it>], then: { value: 1 } }] } — or average a case of then 1 else 0 for a share'
+    : type === 'time' || type === 'time_of_day' ? 'fold a number made from it (date_diff, date_part, unix_date), or take its min / max'
+      : 'read the number it holds first: { fn: "cast", args: [<it>], type: "numeric" }';
+  throw new Error(`${at} ${fn}: its argument is ${said}, which ${fn} cannot fold — ${fix}`);
+}
+
+/** The aggregates that merge sketches (hll_init's) — into a coarser sketch, or into the count. */
+const MERGE_FNS = new Set(['hll_merge', 'hll_merge_partial']);
+/** A function that reads a sketch refuses a value known to be something else — a number most often: the
+ *  count hll_merge already gave, or a column of the rows. */
+function needsSketch(fn, type, at) {
+  if (type && type !== 'sketch' && type !== 'unknown' && type !== 'string' && type !== 'bytes') {
+    throw new Error(`${at} ${fn}: its argument is ${type === 'int' || type === 'numeric' || type === 'float' ? 'a number' : `of type ${type}`}, not a sketch — ${fn} reads what hll_init or hll_merge_partial built (hll_merge already gives the count: read it as it is)`);
+  }
+}
+
 const condition = (op, args, title) => ({
   kind: 'condition', args, title,
   sql: ({ d, r, opts }) => ({ expr: predicateSql(op, r, { timeOperand: (x) => d.timeOperand(x), castToConstant: !!opts.castToConstant, dialect: d }), type: 'boolean' }),
@@ -292,7 +325,7 @@ const condition = (op, args, title) => ({
 
 const aggregate = (fn, { args = 1, title, needs } = {}) => ({
   kind: 'aggregate', args, title, ...(needs ? { needs } : {}), windowable: WINDOW_AGGREGATE_FNS.includes(fn),
-  sql: ({ d, cols, a, t, p, window, opts }) => (window
+  sql: ({ d, cols, a, t, p, window, opts, at }) => (MERGE_FNS.has(fn) && needsSketch(fn, t[0], at), NUMBER_FOLDS.has(fn) && needsNumber(fn, t[0], at), window
     ? { expr: `${sqlAgg(fn)}(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: aggregateType(fn, t[0]) }
     : { expr: aggregateSql(d, fn, a.length ? a[0] : null, p.percentile), type: aggregateType(fn, t[0]) }),
 });
@@ -313,12 +346,12 @@ export const FNS = {
   floor: one('floor'),
   ceil: one('ceil'),
   abs: one('abs'),
-  upper: one('upper', 'string'),
-  lower: one('lower', 'string'),
+  upper: text('upper', (a) => `upper(${a})`),
+  lower: text('lower', (a) => `lower(${a})`),
   length: one('length', 'int'),
   trim: one('trim', 'string'),
   unix_date: { args: 1, sql: ({ d, a }) => ({ expr: d.unixDateExpr(a[0]), type: 'int' }) },
-  hll_extract: { args: 1, sql: ({ d, a }) => ({ expr: d.hllExtract(a[0]), type: 'int' }) },
+  hll_extract: { args: 1, title: '[sketch]', sql: ({ d, a, t, at }) => { needsSketch('hll_extract', t[0], at); return { expr: d.hllExtract(a[0]), type: 'int' }; } },
   json_parse_array: { args: 1, sql: ({ d, a }) => ({ expr: d.jsonParseArray(a[0]), type: arrayColumnType('string') }) }, // STRING JSON array → native array of its texts (then unnest)
   coalesce: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `coalesce(${a.join(', ')})`, type: commonType(t, 'string') }) },
   least: { args: { min: 2 }, sql: ({ a, t }) => ({ expr: `least(${a.join(', ')})`, type: commonType(t, 'numeric') }) },
@@ -329,8 +362,8 @@ export const FNS = {
   // type is the caller's word for what its SQL yields, never checked: it converts as a value of no known
   // type does (read as its text), which takes every one of them
   cast: { args: 1, needs: ['type'], sql: ({ d, a, t, r, p }) => ({ expr: d.castExpr(a[0], p.type, r[0].declared ? null : t[0]), type: p.type }) },
-  substring: { args: 1, needs: ['start'], may: ['len'], sql: ({ d, a, p }) => ({ expr: d.substringExpr(a[0], p.start, p.len), type: 'string' }) },
-  replace: { args: 1, needs: ['search', 'replacement'], sql: ({ d, a, p }) => ({ expr: `replace(${a[0]}, ${d.sqlLiteral(p.search)}, ${d.sqlLiteral(p.replacement)})`, type: 'string' }) },
+  substring: { ...text('substring', (a, d, p) => d.substringExpr(a, p.start, p.len)), needs: ['start'], may: ['len'] },
+  replace: { ...text('replace', (a, d, p) => `replace(${a}, ${d.sqlLiteral(p.search)}, ${d.sqlLiteral(p.replacement)})`), needs: ['search', 'replacement'] },
   // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
   // TEXT and has to be parsed first, or the json operators do not apply to it. What it reads is text
   // (cast converts it): a field read out of JSON.
@@ -414,7 +447,9 @@ export const FNS = {
   not: { kind: 'logic', args: 1, title: '[condition]', sql: ({ a }) => ({ expr: `(NOT COALESCE(${a[0]}, FALSE))`, type: 'boolean' }) },
   // aggregates: each folds a group's rows into one value where a measure is written (an aggregate stage,
   // a pivot, a semantic model) — or, with `over`, sum / average / min / max / count compute over a window
-  ...Object.fromEntries(['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'median', 'stddev', 'variance', 'hll_init', 'hll_merge', 'hll_merge_partial'].map((fn) => [fn, aggregate(fn)])),
+  ...Object.fromEntries(['sum', 'average', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'median', 'stddev', 'variance', 'hll_init'].map((fn) => [fn, aggregate(fn)])),
+  hll_merge: aggregate('hll_merge', { title: '[sketch]' }),
+  hll_merge_partial: aggregate('hll_merge_partial', { title: '[sketch]' }),
   count: aggregate('count', { args: { min: 0, max: 1 }, title: '[] counts the rows, [x] the rows where x is present' }),
   percentile: aggregate('percentile', { needs: ['percentile'] }),
   // window functions: each over its `over` — the rank of a row, the value of a neighbour
@@ -695,6 +730,7 @@ export function exprSchema(catalog, { project = null, places = null, kind = 'exp
     ...(CONDITION_FNS.some((fn) => offered.includes(fn)) ? ['A condition is a function: eq / neq / gt / gte / lt / lte [a, b], in / not_in [a, member, …], between [a, low, high], is_null / is_not_null [a], like / not_like / contains / starts_with / ends_with [text, pattern]; and / or join two or more, not negates one. A constant is compared in the type of what it meets; a comparison with a missing value does not hold — test it with is_null.'] : []),
     ...(aggregates.length && leaves.length ? [`An aggregate (sum, average, min, max, count — with no args it counts rows —, count_distinct, median, percentile with \`percentile\`, …) folds rows where a measure is written, skipping a missing value. ${FOLD_SAID}`] : []),
     ...(aggregates.length && !leaves.length ? [FOLD_SAID] : []),
+    ...(has('hll_init') ? ['Distinct counts that add up across buckets: hll_init [x] folds values into a sketch; hll_merge_partial [sketch] merges sketches into a sketch (a coarser bucket); hll_merge [sketch] merges them into the count; hll_extract [sketch] reads the count of one sketch in a row.'] : []),
     ...(windows ? ['With `over`, sum / average / min / max / count — and row_number, rank, dense_rank, lag, lead — compute over a window of rows, in a compute stage.'] : []),
     ...(has('raw') ? ['raw is a build\'s escape hatch: dialect SQL in `sql`, its columns in `args` ({1}, {2}, … in the SQL).'] : []),
   ].join(' ');

@@ -74,7 +74,9 @@ export function whereSql(dialect, list, resolve, at = 'where') {
     const kind = refKind(e);
     if (!kind) return undefined; // a constant: the writer's own
     const field = resolve(e, where, kind);
-    return { sql: renderField(field), type: field.kind === 'metric_time' || field.kind === 'time_dimension' ? 'time' : null, name: refLabel(e) };
+    // a column's type where the resolver knows it (the warehouse's, so a text holding a flag or a number
+    // is compared as the text it is); a time axis a moment
+    return { sql: renderField(field), type: field.kind === 'metric_time' || field.kind === 'time_dimension' ? 'time' : field.type ?? null, ...(field.type ? { physical: true } : {}), name: refLabel(e) };
   };
   return conditionListSql(getDialect(dialect), null, list, at, { place: 'metric_where', leaf });
 }

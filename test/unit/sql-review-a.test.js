@@ -65,3 +65,38 @@ test('a date part compared with a constant outside its numbering is refused, nam
     assert.throws(() => read([{ stage: 'where', conditions: [{ fn: 'eq', args: [{ fn: 'date_part', args: [{ column: 'at' }], part: 'hour' }, { value: 24 }] }] }]), /'hour' runs 0 … 23/, `${dialect}: hour 24`);
   }
 });
+
+// A SKETCH IS READ WHERE ONE IS: hll_extract, hll_merge and hll_merge_partial read what hll_init (or
+// hll_merge_partial) built; a value known to be a number — the count hll_merge already gave — is refused
+// when the step is built, on both warehouses, instead of failing in the warehouse.
+test('an HLL function over a number is refused when the step is built; over a sketch it builds', () => {
+  const columns = [{ name: 'day', type: physicalColumnType('DATE') }, { name: 'player', type: physicalColumnType('VARCHAR') }];
+  const daily = { stage: 'aggregate', group_by: ['day'], measures: [{ name: 's', expr: { fn: 'hll_init', args: [{ column: 'player' }] } }] };
+  for (const dialect of DIALECTS) {
+    const read = (steps) => renderRead(catalog, "{{ ref('t') }}", columns, steps, { dialect });
+    const merged = (fn) => ({ stage: 'aggregate', measures: [{ name: 'm', expr: { fn, args: [{ column: 's' }] } }] });
+    assert.doesNotThrow(() => read([daily, merged('hll_merge')]), `${dialect}: merged into the count`);
+    assert.doesNotThrow(() => read([daily, merged('hll_merge_partial'), { stage: 'compute', name: 'n', expr: { fn: 'hll_extract', args: [{ column: 'm' }] } }]), `${dialect}: a merged sketch read`);
+    assert.throws(() => read([daily, merged('hll_merge'), { stage: 'compute', name: 'n', expr: { fn: 'hll_extract', args: [{ column: 'm' }] } }]), /hll_extract: its argument is a number, not a sketch — .*hll_merge already gives the count/, `${dialect}: extract of a count`);
+    assert.throws(() => read([daily, merged('hll_merge'), { stage: 'aggregate', measures: [{ name: 'again', expr: { fn: 'hll_merge', args: [{ column: 'm' }] } }] }]), /hll_merge: its argument is a number, not a sketch/, `${dialect}: a count merged again`);
+  }
+});
+
+// WHAT NO WAREHOUSE RUNS IS REFUSED WHEN THE STEP IS BUILT, saying how to write it: a number folded from
+// text (sum, average…), a text function over a number, a whole number compared with a fraction.
+test('a fold of text, a text function of a number and a fraction against a whole number are refused, naming the fix', () => {
+  const columns = [{ name: 'name', type: physicalColumnType('VARCHAR') }, { name: 'n', type: physicalColumnType('BIGINT') }, { name: 'ok', type: physicalColumnType('BOOLEAN') }];
+  for (const dialect of DIALECTS) {
+    const read = (steps) => renderRead(catalog, "{{ ref('t') }}", columns, steps, { dialect });
+    const fold = (fn, column) => ({ stage: 'aggregate', measures: [{ name: 'v', expr: { fn, args: [{ column }] } }] });
+    for (const fn of ['sum', 'average', 'median', 'stddev']) assert.throws(() => read([fold(fn, 'name')]), new RegExp(`${fn}: its argument is text, which ${fn} cannot fold — read the number it holds first`), `${dialect}: ${fn} of text`);
+    assert.throws(() => read([fold('sum', 'ok')]), /sum: its argument is a flag \(true \/ false\), which sum cannot fold — count the rows where it holds/, `${dialect}: sum of a flag`);
+    assert.doesNotThrow(() => read([fold('max', 'name'), fold('sum', 'v')].slice(0, 1)), `${dialect}: max of text`);
+    for (const fn of ['upper', 'replace']) {
+      const expr = { fn, args: [{ column: 'n' }], ...(fn === 'replace' ? { search: '1', replacement: '2' } : {}) };
+      assert.throws(() => read([{ stage: 'compute', name: 'r', expr }]), new RegExp(`${fn}: its argument is a number, and ${fn} reads text — cast it first`), `${dialect}: ${fn} of a number`);
+    }
+    const counted = { stage: 'aggregate', group_by: ['name'], measures: [{ name: 'c', expr: { fn: 'count' } }] };
+    assert.throws(() => read([counted, { stage: 'where', conditions: [{ fn: 'in', args: [{ column: 'c' }, { value: 1 }, { value: 2.5 }] }] }]), /'c' is a whole number: 2\.5 is never one/, `${dialect}: a count against a fraction`);
+  }
+});

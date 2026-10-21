@@ -766,7 +766,7 @@ export const semanticQueryMethods = {
     // Window honesty: warn when unbounded or when the window reaches into today (the trailing bucket
     // is incomplete) — so partial periods are never reported silently.
     const bounds = resolveTimeRange(input.time_range) || {};
-    return { bounds, windowWarnings: [...timeRangeWarnings(input.time_range), ...wholeBucketWarnings(input.time_range, groupBy)] };
+    return { bounds, windowWarnings: [...timeRangeWarnings(input.time_range), ...wholeBucketWarnings(input.time_range, bounds, groupBy)] };
   },
 
   /**
@@ -906,7 +906,9 @@ export const semanticQueryMethods = {
       if (r.kind === 'dimension') this._checkCuts(ctx, ref.source ?? ref.semantic_model.at(-1), r.label, metrics, at);
       if (r.kind === 'entity') this._checkEntityCuts(ctx, r.path, metrics, at);
       whereNames.set(r.path, r.column);
-      return r.kind === 'entity' ? { kind: 'entity', name: r.path } : { kind: 'dimension', path: r.path };
+      // a column of a model: compared in the type the warehouse holds it in (a text flag as text)
+      const held = ref.source !== undefined && ref.column !== undefined ? this._catalogOf(ctx).modelColumns(ref.source).find((c) => c.name === ref.column)?.type : null;
+      return r.kind === 'entity' ? { kind: 'entity', name: r.path } : { kind: 'dimension', path: r.path, ...(held && held !== 'unknown' && held !== 'time' ? { type: held } : {}) };
     }, w.at));
     const conditions = q.wheres.flatMap((w) => w.conditions);
     if (conditions.length) {
@@ -1079,32 +1081,41 @@ function oneForm(raw, columns = []) {
   return { ...raw, rows: raw.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, written(k, v)]))) };
 }
 /**
- * MetricFlow widens a window to whole buckets of the time grain a query groups metric_time by: at a week,
- * a month, a quarter or a year the first and last buckets hold every day of theirs, inside the window or
- * not. Said when the window's bounds fall inside a bucket, with the days the result covers.
+ * MetricFlow widens a window to whole buckets of the grain a query groups metric_time by — buckets of UTC
+ * time: the first and last hold every moment of theirs, inside the window or not (a day at a timezone's
+ * bounds, a week from inside it). Said when the window's bounds (`bounds`, the UTC instants it resolved
+ * to) fall inside a bucket, with what the result covers.
  */
-export function wholeBucketWarnings(tr, groupBy) {
-  const coarse = ['week', 'month', 'quarter', 'year'];
-  const grains = [...new Set(groupBy.map((t) => /^metric_time__(\w+)$/.exec(t)?.[1]).filter((g) => coarse.includes(g)))];
-  const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? new Date(`${v.slice(0, 10)}T00:00:00Z`) : null);
-  const start = day(tr?.start); const end = day(tr?.end);
-  if (!grains.length || (!start && !end)) return [];
-  const iso = (d) => d.toISOString().slice(0, 10);
-  const first = (d, g) => {
-    if (g === 'week') return new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400000);
+export function wholeBucketWarnings(tr, bounds, groupBy) {
+  const order = ['hour', 'day', 'week', 'month', 'quarter', 'year'];
+  const grains = [...new Set(groupBy.map((t) => /^metric_time__(\w+)$/.exec(t)?.[1]).filter((g) => order.includes(g)))];
+  const instant = (v) => {
+    if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(v)) return null;
+    const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? v.replace(' ', 'T') : `${v.replace(' ', 'T')}${v.length === 10 ? 'T00:00:00' : ''}Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+  const start = instant(bounds?.start);
+  const endExcl = instant(bounds?.endExclusive) || (instant(bounds?.end) ? new Date(instant(bounds.end).getTime() + 1000) : null);
+  if (!grains.length || (!start && !endExcl)) return [];
+  const DAY = 86400000;
+  const floor = (d, g) => {
+    if (g === 'hour') return new Date(Math.floor(d.getTime() / 3600000) * 3600000);
+    const day = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    if (g === 'day') return day;
+    if (g === 'week') return new Date(day.getTime() - ((day.getUTCDay() + 6) % 7) * DAY);
     const m = g === 'month' ? d.getUTCMonth() : g === 'quarter' ? d.getUTCMonth() - (d.getUTCMonth() % 3) : 0;
     return new Date(Date.UTC(d.getUTCFullYear(), m, 1));
   };
-  const last = (d, g) => {
-    if (g === 'week') return new Date(first(d, g).getTime() + 6 * 86400000);
-    const months = { month: 1, quarter: 3, year: 12 }[g];
-    const f = first(d, g);
-    return new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth() + months, 0));
-  };
+  const next = (d, g) => (g === 'hour' ? new Date(d.getTime() + 3600000) : g === 'day' ? new Date(d.getTime() + DAY) : g === 'week' ? new Date(d.getTime() + 7 * DAY)
+    : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + { month: 1, quarter: 3, year: 12 }[g], 1)));
+  const ceil = (d, g) => (floor(d, g).getTime() === d.getTime() ? d : next(floor(d, g), g));
+  const said = (d, g, last) => (g === 'hour' ? d.toISOString().slice(0, 16).replace('T', ' ') : new Date(d.getTime() - (last ? DAY : 0)).toISOString().slice(0, 10));
+  const asked = `${tr?.start ?? 'the start'} … ${tr?.end ?? 'the end'}${tr?.timezone ? ` in ${tr.timezone}` : ''}`;
   return grains.flatMap((g) => {
-    const from = start ? first(start, g) : null; const to = end ? last(end, g) : null;
-    const widened = (from && iso(from) !== iso(start)) || (to && iso(to) !== iso(end));
-    return widened ? [`metric_time at ${g}: each ${g} is counted whole, so the result covers ${from ? iso(from) : 'the start'} … ${to ? iso(to) : 'the end'}, not ${tr.start ?? 'the start'} … ${tr.end ?? 'the end'} — set the window on whole ${g}s, or group by day for its exact days`] : [];
+    const from = start ? floor(start, g) : null; const to = endExcl ? ceil(endExcl, g) : null;
+    if (!((from && from.getTime() !== start.getTime()) || (to && to.getTime() !== endExcl.getTime()))) return [];
+    const range = `${from ? said(from, g) : 'the start'} … ${to ? `${said(to, g, g !== 'hour')}${g === 'hour' ? ' (exclusive)' : ''}` : 'the end'}`;
+    return [`metric_time at ${g}: each ${g} is a UTC ${g}, counted whole — so the result covers ${range} UTC, not ${asked}${tr?.timezone ? `. To keep to the window, group by a finer grain (hour) or drop the timezone and give UTC bounds` : `. Set the window on whole ${g}s, or group by a finer grain for its exact bounds`}`];
   });
 }
 

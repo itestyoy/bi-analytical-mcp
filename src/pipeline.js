@@ -51,8 +51,8 @@
 //                            matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
-//   sample     |> TABLESAMPLE  keep a share of the rows for a FAST approximate first estimate
-//                            on large data (BigQuery TABLESAMPLE SYSTEM; DuckDB random()).
+//   sample     |> WHERE RAND() keep a share of the rows for a FAST approximate first estimate
+//                            on large data (a row-level sample: BigQuery RAND(), DuckDB random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
 //                            funnel; TERMINAL stage → one row per user/session match.

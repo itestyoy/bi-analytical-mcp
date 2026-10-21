@@ -324,7 +324,17 @@ export class Engine {
    */
   _timeRangeConditions(source, tr) {
     if (tr?.timezone && !isValidTimezone(tr.timezone)) throw new ToolError(`unknown timezone '${tr.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    this._timeAxisFor(source, tr);
     return timeRangeConditions(this.catalog.getModel(source), tr);
+  }
+
+  /** A window is a source's time axis bounded: a source with none (assignments, a dimension) is refused
+   *  one — it would bound nothing — naming the time columns a where step can bound instead. */
+  _timeAxisFor(source, tr) {
+    const m = source && this.catalog.models[source];
+    if (!tr || !m || m.time?.column) return;
+    const times = Object.entries(m.dimensions || {}).filter(([, d]) => d?.type === 'time').map(([n]) => n);
+    throw new ToolError(`'${source}' has no time axis, so time_range bounds nothing there — leave it out${times.length ? ` and bound its own time columns in a where step (${times.join(', ')}): { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: '${times[0]}' }, { value: '<start>' }] }] }` : ''}`, { stage: 'validate', field: 'time_range' });
   }
 
   /** The conditions on a source's partition column for a window on its time axis. */

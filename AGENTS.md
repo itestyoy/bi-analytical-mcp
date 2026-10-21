@@ -356,7 +356,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   filter_events and its library steps), each is checked when the value is built, as a function's
   placement is, and the refusal names the place and what it takes. What the schema does not say, the
   build checks: a name's existence and scope at its step, types (text against a number, a property of
-  another source), a column outside an aggregate only when grouped by, a function's placement (an
+  another source, a number folded from text, a text function of a number, a sketch where one is read), a column outside an aggregate only when grouped by, a function's placement (an
   aggregate in a row only with `over`, a window only in a compute stage — the schema holds it only where a
   kind is its own, a semantic measure's), name collisions, metric cycles, the order of stages. A list of
   a table's OWN columns stays a list of names (an aggregate's `group_by`,

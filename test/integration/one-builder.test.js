@@ -43,7 +43,7 @@ const USERS = { source: 'users', on: { user: 'player_id_of_internal', time: 'dev
 const LAYER = {
   stage: 'semantic_model',
   join: [USERS],
-  dimensions: [{ name: 'is_purchase', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }],
+  dimensions: [{ name: 'is_purchase', expr: { fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] } }, { name: 'weekday', expr: { fn: 'date_part', args: [{ column: 'device_time' }], part: 'dow' } }],
   measures: [
     { name: 'evts', expr: { fn: 'count' } },
     { name: 'players', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } },
@@ -144,6 +144,20 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   const [{ n: wholeWeek }] = (await wh.query("select count(*) as n from fct_analytics_events where device_time >= '2026-01-05' and device_time < '2026-01-12'")).rows;
   assert.deepEqual(midWeek.rows.map((r) => num(r.evts)), [num(wholeWeek)]);
   assert.ok(midWeek.warnings.some((w) => w.includes('2026-01-05 … 2026-01-11')), JSON.stringify(midWeek.warnings));
+  // a window in a timezone, grouped by day: the days are UTC days, the first and last counted whole —
+  // the days MetricFlow returns are those the answer names, each its whole UTC day as the warehouse counts it
+  const la = await engine.query_model({ context_id: ctx, time_range: { start: '2026-01-02', end: '2026-01-03', timezone: 'America/Los_Angeles' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] }), { stage: 'order_by', keys: [{ key: { time: 'metric_time', grain: 'day' } }] }] });
+  assert.equal(la.ok, true, JSON.stringify(la.error));
+  const days = (await wh.query("select strftime(date_trunc('day', device_time), '%Y-%m-%d') as d, count(*) as n from fct_analytics_events where device_time >= '2026-01-02' and device_time < '2026-01-05' group by 1 order by 1")).rows.map((r) => [r.d, num(r.n)]);
+  assert.deepEqual(la.rows.map((r) => [String(r.metric_time_day).slice(0, 10), num(r.evts)]), days);
+  assert.ok(la.warnings.some((w) => w.includes('2026-01-02 … 2026-01-04 UTC')), JSON.stringify(la.warnings));
+
+  // a text column holding a flag, filtered by true before the metrics step: compared as the text it holds
+  // ('true', '1', 't' in any case), as a pipeline compares it — MetricFlow is never handed text = TRUE
+  const [{ n: flagged }] = (await wh.query("select count(*) as n from fct_analytics_events where lower(trim(bundle_id)) in ('true', '1', 't')")).rows;
+  const byFlagText = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ source: 'events', column: 'bundle_id' }, { value: true }] }] }, metrics(['evts'])] });
+  assert.equal(byFlagText.ok, true, JSON.stringify(byFlagText.error));
+  assert.equal(num(byFlagText.rows[0]?.evts ?? 0), num(flagged));
 
   // a computed boolean dimension reads back as true / false, whichever path ran the query — MetricFlow's
   // own (its CSV writes Python's 'True') or the SQL it compiles with a step after it
@@ -156,6 +170,16 @@ test('a build whose one step is its layer: joined on the contract, an amount com
     const fcol = byFlag.group_by_resolved['events.is_purchase'];
     assert.deepEqual(Object.fromEntries(byFlag.rows.map((r) => [r[fcol], num(r.evts)])), counts, `${tail.length ? 'over its SQL' : 'mf query'}: ${JSON.stringify(byFlag.rows)}`);
     assert.ok(byFlag.rows.every((r) => typeof r[fcol] === 'boolean'), JSON.stringify(byFlag.rows));
+  }
+  // a computed number reads back as a number too: events per ISO day of the week, as the warehouse counts them
+  const weekdays = Object.fromEntries((await wh.query('select isodow(device_time) as d, count(*) as n from fct_analytics_events group by 1')).rows.map((r) => [num(r.d), num(r.n)]));
+  for (const tail of [[], [{ stage: 'where', conditions: [{ fn: 'gt', args: [{ metric: 'evts' }, { value: 0 }] }] }]]) {
+    const wd = { semantic_model: ['events'], dimension: 'weekday' };
+    const byDay = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [wd] }), ...tail] });
+    assert.equal(byDay.ok, true, JSON.stringify(byDay.error));
+    const dcol = byDay.group_by_resolved['events.weekday'];
+    assert.ok(byDay.rows.every((r) => typeof r[dcol] === 'number'), JSON.stringify(byDay.rows));
+    assert.deepEqual(Object.fromEntries(byDay.rows.map((r) => [r[dcol], num(r.evts)])), weekdays);
   }
 });
 
@@ -250,4 +274,22 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   const listed = Object.fromEntries((await engine.context({ action: 'list', limit: 50 })).contexts.map((c) => [c.context_id, c]));
   assert.equal(listed[s.context_id].name, 'fork_src');
   assert.ok(listed[s.context_id].holds.some((h) => /built table/.test(h)), JSON.stringify(listed[s.context_id]));
+  // a build whose one step is its semantic layer holds that layer, built
+  assert.deepEqual(listed[ctx].holds, ['a semantic layer'], JSON.stringify(listed[ctx]));
 });
+
+// A DATE column compared with a moment at midnight written ISO, with its zone (2026-01-03T00:00:00Z): the
+// day it names — the rows the warehouse keeps for that day — as a date written plainly keeps.
+test('a date column against a midnight written ISO keeps the rows of that day on', opts, async (t) => {
+  if (skip(t)) return;
+  const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_date >= DATE '2026-01-03'")).rows;
+  for (const value of ['2026-01-03T00:00:00Z', '2026-01-03 00:00:00', '2026-01-03']) {
+    const out = await engine.build_model({ action: 'start', name: 'iso_day', source: 'events', materialize: true, steps: [
+      { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'event_date' }, { value }] }] },
+      { stage: 'aggregate', measures: [{ name: 'n', expr: { fn: 'count' } }] },
+    ] });
+    const r = await taskResult(engine, out.materialize.task_id);
+    assert.equal(num(r.rows[0].n), num(n), value);
+  }
+});
+

@@ -232,7 +232,7 @@ export class ContextManager {
         ...(c.state.engine === 'project' ? ['the dbt project\'s semantic model'] : []),
         ...(c.state.pipeline_model ? [`a built table (${c.state.pipeline_model.model})`] : []),
         ...((c.state.metrics || []).length && c.state.engine !== 'project' ? ['a semantic layer'] : []),
-        ...(c.state.draft && !c.state.pipeline_model ? ['a draft, not built yet'] : []),
+        ...(c.state.draft && !c.state.pipeline_model && !(c.state.metrics || []).length ? ['a draft, not built yet'] : []),
       ],
       tasks: c.state.tasks || [],
       // What the caller said this context is FOR. A listing of ids, task names and metric names

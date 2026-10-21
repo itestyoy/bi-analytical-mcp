@@ -67,6 +67,8 @@ export function typedValue(type, v, where) {
     return b;
   }
   if (isNumericType(type)) {
+    // a whole number (a count, a date part) is never a fraction: a fraction compared with it matches nothing
+    if (type === 'int' && typeof v === 'number' && !Number.isInteger(v)) throw new Error(`${where} is a whole number: ${v} is never one — compare it with a whole number, or cast it to numeric`);
     if (typeof v === 'number') return v;
     if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
     throw new Error(`${where} is a number: compare it with a number, not ${JSON.stringify(v)}`);
@@ -75,7 +77,11 @@ export function typedValue(type, v, where) {
   if (isTimeType(type) && typeof v === 'string' && DATE_TIME.test(v.trim())) {
     const utc = localToUtc(v.trim());
     if (utc == null) throw new Error(`${where} is a moment: write it YYYY-MM-DD[ HH:mm[:ss[.ffffff]]] with an optional Z or ±hh[:mm] (a zone name, or an offset of one digit, is not read alike by every warehouse), not ${JSON.stringify(v)}`);
-    return hasOffset(v.trim()) ? utc : v;
+    // a moment at midnight is written as its day: a DATE column reads no time of day in a literal, and a
+    // timestamp's midnight is the same instant either way
+    const at = (hasOffset(v.trim()) ? utc : v.trim()).replace('T', ' ');
+    const day = /^(\d{4}-\d{2}-\d{2}) 00:00(?::00(?:\.0+)?)?$/.exec(at);
+    return day ? day[1] : at;
   }
   return v;
 }

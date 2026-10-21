@@ -141,8 +141,10 @@ test('a read refuses what is not a column of the table, a name that is no identi
   assert.throws(() => read([{ stage: 'aggregate', measures: [{ name: 'v', expr: { fn: 'percentile', args: [{ column: 'n' }], percentile: 1.5 } }] }]), /aggregate measure 'v': percentile needs `percentile` in \(0,1\)/);
   assert.throws(() => read([{ stage: 'aggregate', group_by: ['day'], measures: [{ name: 'v', expr: { column: 'n' } }] }]), /'n' stands outside an aggregate, so it has to be one of the group_by columns \(day\)/);
   // a count goes without an argument: it counts rows; a sketch a pipeline stored is merged into a number
+  // (a stored sketch reads back as the warehouse stores it: text on DuckDB, BYTES on BigQuery)
+  const withSketch = [...COLUMNS, { name: 'sk', type: 'string' }];
   for (const fn of ['count', 'approx_count_distinct', 'hll_merge', 'count_distinct']) {
-    assert.equal(read([{ stage: 'aggregate', group_by: ['day'], measures: [{ name: 'v', expr: { fn, args: fn === 'count' ? [] : [{ column: 'n' }] } }] }]).columns.get('v').type, 'int', fn);
+    assert.equal(read([{ stage: 'aggregate', group_by: ['day'], measures: [{ name: 'v', expr: { fn, args: fn === 'count' ? [] : [{ column: fn === 'hll_merge' ? 'sk' : 'n' }] } }] }], withSketch).columns.get('v').type, 'int', fn);
   }
 });
 

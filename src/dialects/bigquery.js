@@ -316,7 +316,10 @@ export class BigQueryDialect extends Dialect {
   // ── Pipeline lowering: native |> pipe operators ────────────────────────────
   renderPipeline(baseRelation, ops) {
     const lines = [`FROM ${baseRelation}`];
-    for (const op of ops) lines.push(this._step(op));
+    // each join its own alias (j1, j2, …): the table names of one pipe stay in scope down it, and two
+    // joins under one name are refused ("Duplicate table alias")
+    let joins = 0;
+    for (const op of ops) lines.push(this._step(op.op === 'join' ? { ...op, alias: `${op.alias}${++joins}`, base: `base${joins}` } : op));
     return lines.join('\n');
   }
 
@@ -366,7 +369,8 @@ export class BigQueryDialect extends Dialect {
         // Both sides come from the SAME builder, so a part's grain truncates both — never just the
         // projected one. `USING` can only equate bare columns, so it is used only when neither side
         // needs an expression; a truncated part joins `ON`, like a validity window does.
-        const keys = this.joinKeyParts(op, (c) => `base.${c}`, (c) => c);
+        const base = op.base || 'base';
+        const keys = this.joinKeyParts(op, (c) => `${base}.${c}`, (c) => c);
         if (!op.between && !this.joinKeyIsExpression(op)) {
           const proj = [...keys.map((k) => (k.right === k.name ? k.name : `${k.right} AS ${k.name}`)), ...attrs];
           return `|> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} USING (${keys.map((k) => k.name).join(', ')})`;
@@ -383,10 +387,10 @@ export class BigQueryDialect extends Dialect {
         const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
         const on = [
           ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
-          ...(op.between ? [this.validityWindow(`base.${this.quoteIdent(op.between.column)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
+          ...(op.between ? [this.validityWindow(`${base}.${this.quoteIdent(op.between.column)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
         ];
         const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
-        return `|> AS base
+        return `|> AS ${base}
 |> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} ON ${on.join(' AND ')}
 |> DROP ${drop.join(', ')}`;
       }
@@ -401,8 +405,9 @@ export class BigQueryDialect extends Dialect {
       case 'order_by':
         return `|> ORDER BY ${op.keys.map((k) => this.orderKey(this.quoteIdent(k.key), k.direction, k.nulls)).join(', ')}`;
       case 'sample':
-        // the share as BigQuery's percent, without a float's tail (0.07 * 100 = 7.000000000000001)
-        return `|> TABLESAMPLE SYSTEM (${+(Number(op.share) * 100).toPrecision(12)} PERCENT)`;
+        // a row-level (Bernoulli) sample that works at any step, as DuckDB's: TABLESAMPLE takes a base
+        // table only — not a view, nor the rows of a step before it
+        return `|> WHERE RAND() < ${Number(op.share)}`;
       case 'limit':
         return `|> LIMIT ${Number(op.limit)}`;
       case 'project':

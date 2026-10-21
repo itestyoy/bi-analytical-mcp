@@ -86,3 +86,14 @@ test('an earlier { model, attribute } is no ref: refused by the schema as any va
     }, JSON.stringify(about));
   }
 });
+
+// A model with no time axis takes no window (it would bound nothing), and no semantic layer stands on a
+// model with no primary entity: each refused in the call with what to write instead, nothing created.
+test('a window on a source with no time axis, and a layer over a model with no primary entity, are refused with the way out', async () => {
+  const before = ctxs.list().length;
+  await assert.rejects(engine.build_model({ action: 'start', name: 'exp_window', source: 'experiments', time_range: { start: '2026-01-01', end: '2026-01-31' } }),
+    (e) => e.field === 'time_range' && /'experiments' has no time axis, so time_range bounds nothing there — leave it out and bound its own time columns in a where step \(assigned_at/.test(e.message));
+  await assert.rejects(engine.build_model({ action: 'start', name: 'exp_layer', source: 'experiments', steps: [{ stage: 'semantic_model', measures: [{ name: 'assigned', expr: { fn: 'count' } }], metrics: [{ name: 'assigned', type: 'simple', measure: 'assigned' }] }] }),
+    /'experiments' has no primary entity, .* join it in this step \(join: \[\{ source: 'experiments', on \}\]/);
+  assert.equal(ctxs.list().length, before, 'no context was created');
+});

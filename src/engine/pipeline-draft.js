@@ -397,6 +397,7 @@ export const pipelineDraftMethods = {
     const found = input.from_task ? this._taskBase(input) : null;
     if (input.context_id) this._ctxToWrite(input.context_id); // refused before the warehouse is asked
     const base = found ? await this._baseWithPhysical(found.base) : null;
+    if (!found) this._timeAxisFor(input.source, input.time_range); // refused before a context is made
     const ctx = input.context_id ? this._ctxToWrite(input.context_id) : this.ctxs.create();
     const source = found ? found.source : input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };

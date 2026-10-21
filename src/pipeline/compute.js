@@ -298,13 +298,13 @@ function aggregateType(fn, argType) {
 
 /** The aggregates that fold numbers: over a text, a flag or a moment the warehouse has no such function. */
 const NUMBER_FOLDS = new Set(['sum', 'average', 'median', 'percentile', 'stddev', 'variance']);
-function needsNumber(fn, type, at) {
+function needsNumber(fn, type, at, arg) {
   const said = { string: 'text', boolean: 'a flag (true / false)', time: 'a moment', time_of_day: 'a time of day', json: 'JSON text' }[type];
   if (!said) return;
   const fix = type === 'boolean'
     ? 'count the rows where it holds — count of { fn: "case", cases: [{ when: [<it>], then: { value: 1 } }] } — or average a case of then 1 else 0 for a share'
     : type === 'time' || type === 'time_of_day' ? 'fold a number made from it (date_diff, date_part, unix_date), or take its min / max'
-      : 'read the number it holds first: { fn: "cast", args: [<it>], type: "numeric" }';
+      : `read the number it holds first: { fn: "${fn}", args: [{ fn: "cast", args: [${arg === undefined ? '<it>' : JSON.stringify(arg)}], type: "numeric" }] }`;
   throw new Error(`${at} ${fn}: its argument is ${said}, which ${fn} cannot fold — ${fix}`);
 }
 
@@ -325,7 +325,7 @@ const condition = (op, args, title) => ({
 
 const aggregate = (fn, { args = 1, title, needs } = {}) => ({
   kind: 'aggregate', args, title, ...(needs ? { needs } : {}), windowable: WINDOW_AGGREGATE_FNS.includes(fn),
-  sql: ({ d, cols, a, t, p, window, opts, at }) => (MERGE_FNS.has(fn) && needsSketch(fn, t[0], at), NUMBER_FOLDS.has(fn) && needsNumber(fn, t[0], at), window
+  sql: ({ d, cols, a, t, p, window, opts, at }) => (MERGE_FNS.has(fn) && needsSketch(fn, t[0], at), NUMBER_FOLDS.has(fn) && needsNumber(fn, t[0], at, p.args?.[0]), window
     ? { expr: `${sqlAgg(fn)}(${a.length ? a[0] : '*'}) ${overSql(d, cols, p.over, { frame: true, opts })}`, type: aggregateType(fn, t[0]) }
     : { expr: aggregateSql(d, fn, a.length ? a[0] : null, p.percentile), type: aggregateType(fn, t[0]) }),
 });

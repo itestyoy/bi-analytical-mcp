@@ -89,7 +89,10 @@ test('a fold of text, a text function of a number and a fraction against a whole
   for (const dialect of DIALECTS) {
     const read = (steps) => renderRead(catalog, "{{ ref('t') }}", columns, steps, { dialect });
     const fold = (fn, column) => ({ stage: 'aggregate', measures: [{ name: 'v', expr: { fn, args: [{ column }] } }] });
-    for (const fn of ['sum', 'average', 'median', 'stddev']) assert.throws(() => read([fold(fn, 'name')]), new RegExp(`${fn}: its argument is text, which ${fn} cannot fold — read the number it holds first`), `${dialect}: ${fn} of text`);
+    for (const fn of ['sum', 'average', 'median', 'stddev']) {
+      const said = `${fn}: its argument is text, which ${fn} cannot fold — read the number it holds first: { fn: "${fn}", args: [{ fn: "cast", args: [{"column":"name"}], type: "numeric" }] }`;
+      assert.throws(() => read([fold(fn, 'name')]), (e) => e.message.includes(said), `${dialect}: ${fn} of text`);
+    }
     assert.throws(() => read([fold('sum', 'ok')]), /sum: its argument is a flag \(true \/ false\), which sum cannot fold — count the rows where it holds/, `${dialect}: sum of a flag`);
     assert.doesNotThrow(() => read([fold('max', 'name'), fold('sum', 'v')].slice(0, 1)), `${dialect}: max of text`);
     for (const fn of ['upper', 'replace']) {

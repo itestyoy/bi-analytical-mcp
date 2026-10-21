@@ -171,7 +171,6 @@ function compileMeasure(catalog, modelKey, decl, smScope) {
   if (isAggregateCall(e)) checkLeaves(catalog, modelKey, e.args || [], field, at);
   else checkLeaves(catalog, modelKey, e, field);
   const { d, opts } = modelWriter(catalog, modelKey);
-  attempt(field, () => exprSql(d, null, e, at, { ...opts, context: 'measure', aggregates: [...TASK_MEASURE_AGGS] }));
   // the model's where (a measure that folds only some rows says which in its own case: a funnel step's
   // users are a count_distinct over a case naming the event and a property value)
   const scope = smScope || null;
@@ -193,6 +192,8 @@ function compileMeasure(catalog, modelKey, decl, smScope) {
     }
     value = attempt(field, () => exprSql(d, null, arg, `${at} ${e.fn} args[0]`, opts).sql);
   }
+  // (after the measure's own refusals above, which name the value to cast where a case yields it)
+  attempt(field, () => exprSql(d, null, e, at, { ...opts, context: 'measure', aggregates: [...TASK_MEASURE_AGGS] }));
   const m = { name, agg, expr: applyScope(value, scope), ...(decl.label ? { label: decl.label } : {}) };
   if (e.fn === 'percentile') m.agg_params = { percentile: e.percentile, use_discrete_percentile: false };
   return m;

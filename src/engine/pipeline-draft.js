@@ -715,7 +715,11 @@ export const pipelineDraftMethods = {
     if (!this.runner?.run) throw new ToolError('no warehouse runner configured — nothing to validate against', { stage: 'validate' });
     const physSet = await this.probe.grounding(draft.source, draft.stages);
     const plan = this._renderPlan(draft);
-    if (plan.checkpoint && !plan.stages.length) throw new ToolError(`nothing to validate: every step is already materialized as ${plan.checkpoint.model}`, { stage: 'validate', field: 'context_id' });
+    // every step already built: the warehouse ran it whole, which is the check — answered so, not refused
+    if (plan.checkpoint && !plan.stages.length) {
+      const built = this._startTask(ctx, 'build_pipeline_model', async () => ({ ok: true, validated: true, context_id: ctx.id, checked: [], note: `every step is already materialized as ${plan.checkpoint.model}: the warehouse built it, so there is nothing left to check — query it, or add_steps and validate those` }), { input: { action: 'preview', validate: true, context_id: ctx.id, name: draft.name } });
+      return this._taskStarted(built, { context_id: ctx.id });
+    }
     // names of its own (pipe_…_chk): the check never writes over a table a build made or reads
     const modelName = `${this._nextPipelineModel(ctx, draft.name)}_chk`;
     const rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });

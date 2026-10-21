@@ -232,6 +232,8 @@ export function addCol(cols, name, type) {
 
 export function requireCol(cols, name) {
   if (cols.has(name)) return;
+  // a column named by a reference is a metrics step's result's — anywhere else a column is its name
+  if (name !== null && typeof name === 'object') throw new Error(`pipeline: ${JSON.stringify(name)} names a column of a metrics step's result by what the query grouped or computed — here name the column itself (available: ${[...cols.keys()].join(', ')})`);
   // '*' is SQL's spelling for "the rows themselves"; here a count with no argument counts the rows, so
   // say that instead of listing every column and leaving the caller to guess what a SQL habit translates to
   if (name === '*') {

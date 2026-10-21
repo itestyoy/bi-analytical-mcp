@@ -321,7 +321,8 @@ export const taskResultMethods = {
     // alike (the rows still held are not the result any more: nothing reads past them, draws or starts
     // from them)
     if (stored && (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table))) {
-      return { ok: false, ...head, status: 'error', table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone) — run it again to rebuild it` } };
+      const gone = !this.ctxs.has(job.contextId);
+      return { ok: false, ...head, status: 'error', table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: gone ? `the result table ${job.table} was deleted with its context ${job.contextId} — build it again in a new context (build_model start), then query that` : `the result table ${job.table} was deleted (its model is gone) — run the query or build that made it again to rebuild it` } };
     }
     if (held && page && (!stored || !more || page.offset + page.limit <= held.rows.length)) return { ...head, ...this._heldPage(job, held, page, stored), ...this._showHint(id, held) };
     // an answer with no rows to page (a query only compiled: its SQL) is that answer, paged or not

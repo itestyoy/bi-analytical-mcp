@@ -50,7 +50,7 @@ export const TOOL_PLACES = {
   build_model: { expr: ['source_rows', 'semantic_model'], aggregate: ['semantic_model'], metric_expr: ['derived_metric'], stage: ['build'] },
   // a query: a metric query (where steps, its metrics step, then a read of its result) or a read of a
   // stored table (its read steps)
-  query_model: { expr: ['metric_where', 'stored_rows', 'metric_result'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by'] },
+  query_model: { expr: ['metric_where', 'stored_rows', 'metric_result'], stage: ['metric_scope', 'metric_result', 'read'], ref: ['group_by', 'metric_result'] },
   // its views of the catalog's things, and the notes' filter by what they are about
   semantic_index: { ref: ['index_view', 'about'] },
   memory: { ref: ['about'] },
@@ -183,7 +183,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: `How many rows of the result the task keeps (default ${KEPT_ROWS}): a read ({ task_ids, offset, limit }) pages through them, and a card draws them; a built table itself is in its build's task, paged to its last row. With materialize the table stores every row and a read pages it to the last one; limit is then the rows the task keeps for a plain card (a drill-down reads its own views).` },
       materialize: { type: 'boolean', description: 'A metric query only: store every row of the result as a table. A stored result survives a restart, a read ({ task_ids, offset, limit }) pages it to its last row, it can be drawn as a drill-down, and it can start a pipeline (from_task).' },
-      dry_run: { type: 'boolean', description: DRY_RUN('the query\'s SQL — a metric query\'s MetricFlow\'s, with the steps after it; a read\'s written over the stored table as {{ ref("<model>") }} — and the columns it answers with (it waits for the context\'s build only)') },
+      dry_run: { type: 'boolean', description: DRY_RUN('the query\'s SQL — a metric query\'s MetricFlow\'s, with the steps after it; a read\'s written over the stored table as {{ ref("<model>") }} — and the columns it answers with. It is a task as any query is — read it with { task_ids }; it waits for the context\'s build only') },
       include: { type: 'array', uniqueItems: true, items: { enum: ['plan'] }, description: 'What else a metric query\'s dry_run shows: "plan" — MetricFlow\'s dataflow plan (thousands of tokens; the SQL alone is usually what is wanted).' },
   }, METRIC_QUERY_FIELDS);
   const queryContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id a build returned' : ': the context_id a build returned'}. The context decides which metrics there are and how a dimension is named in group_by and a where; its built pipeline table is what a query without a metrics step reads.`);

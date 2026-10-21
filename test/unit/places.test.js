@@ -176,10 +176,12 @@ test('a metric query refuses in the call what its group_by and its where steps d
   const metrics = (extra = {}) => ({ stage: 'metrics', metrics: ['rows'], ...extra });
   const query = (...steps) => e.query_model({ context_id, steps });
   const where = (...conditions) => ({ stage: 'where', conditions });
-  // a source, an event, a metric: no ref the tool's group_by takes, so no form of its $defs.ref
-  for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }, { metric: 'rows' }]) {
+  // a source, an event: no ref the tool takes, so no form of its $defs.ref
+  for (const ref of [{ source: 'users' }, { source: 'events', event: 'tutorial' }]) {
     await assert.rejects(() => query(metrics({ group_by: [ref] })), (err) => err.stage === 'validate' && /^invalid input: .*`steps\.0\.group_by\.0`/.test(err.message), JSON.stringify(ref));
   }
+  // a metric: a ref the steps after the metrics step take, not its group_by — refused there, naming the place
+  await assert.rejects(() => query(metrics({ group_by: [{ metric: 'rows' }] })), (err) => err.stage === 'validate' && /\{ metric \} is not what a metric query's group_by takes/.test(err.message));
   // a metric in a where step before the metrics step: it filters the rows a metric folds, not the metric —
   // refused at that place (a where after the metrics step takes it)
   await assert.rejects(() => query(where({ fn: 'gt', args: [{ metric: 'rows' }, { value: 1 }] }), metrics()), (err) => err.stage === 'validate' && /\{ metric \} is not what a where before the metrics step takes/.test(err.message));

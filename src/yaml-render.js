@@ -9,7 +9,8 @@ import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
 import { measureRefs } from './compile.js';
 
-const EVENT_TIME_DIM = 'event_time';
+/** An events source's time axis as a dimension of its semantic model (MetricFlow's agg_time_dimension). */
+export const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
  *  the window on metric_time, so the warehouse reads only the partitions the window touches. */
 export const PARTITION_DIM = 'partition_day';

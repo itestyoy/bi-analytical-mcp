@@ -124,3 +124,15 @@ test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', asyn
   assert.equal(anyExact, false);
   assert.ok(out.recommendations.some((r) => /closest matches by similarity/i.test(r)));
 });
+
+// a word of a name mistyped scores by how close it is to that word, so the event it names comes before a
+// column whose description merely shares letters with it, and the first recommendation is that event's view
+test('a mistyped word of an event name ranks that event first', async () => {
+  const e = engine();
+  const r = await e.semantic_index({ search: 'purchse' });
+  const ev = r.event_names.find((x) => x.event === 'iap_purchase_completed');
+  assert.ok(ev, JSON.stringify(r.event_names));
+  const others = [...r.column_matches, ...r.property_matches].filter((m) => !/purchase/.test(m.column ?? m.property));
+  assert.ok(others.every((m) => m.score < ev.score), JSON.stringify(others.map((m) => [m.column ?? m.property, m.score])));
+  assert.ok(r.recommendations.find((t) => /^See what event 'iap_purchase/.test(t)) === r.recommendations.find((t) => /^(See what event|Drill into property|Column|Recipe)/.test(t)), JSON.stringify(r.recommendations));
+});

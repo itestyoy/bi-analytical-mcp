@@ -103,6 +103,27 @@ test('a build whose one step is its layer: joined on the contract, an amount com
   const expected = Object.entries(want).filter(([k, n]) => k !== 'null' && n > 1).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   assert.deepEqual(byRef.rows.map((r) => [String(r[col]), num(r.evts)]), expected);
 
+  // every slot that names a column takes the same refs: grouped by platform and country, folded back to
+  // platform by an aggregate whose group_by names it as group_by does, the metric summed as { metric },
+  // sorted by { metric } — the per-platform counts again; a pivot's on and a project's keep alike
+  const country = { source: 'users', column: 'country' };
+  const refold = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform, country] }),
+    { stage: 'where', conditions: [{ fn: 'is_not_null', args: [platform] }] },
+    { stage: 'aggregate', group_by: [platform], measures: [{ name: 'n', expr: { fn: 'sum', args: [{ metric: 'evts' }] } }] },
+    { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }, { key: platform }] },
+    { stage: 'project', keep: [platform, 'n'] }] });
+  assert.equal(refold.ok, true, JSON.stringify(refold.error));
+  const perPlatform = Object.entries(want).filter(([k]) => k !== 'null').sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  assert.deepEqual(refold.rows.map((r) => [String(r[col]), num(r.n)]), perPlatform);
+  const sorted = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }), { stage: 'order_by', keys: [{ key: { metric: 'evts' }, direction: 'desc' }, { key: platform }] }] });
+  assert.equal(sorted.ok, true, JSON.stringify(sorted.error));
+  assert.deepEqual(sorted.rows.map((r) => num(r.evts)), Object.values(want).sort((a, b) => b - a));
+  const [first] = Object.keys(want).filter((k) => k !== 'null').sort();
+  const pivoted = await engine.query_model({ context_id: ctx, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [platform] }),
+    { stage: 'pivot', on: platform, measure: { fn: 'sum', args: [{ metric: 'evts' }] }, values: [{ value: first, name: 'first_platform' }] }] });
+  assert.equal(pivoted.ok, true, JSON.stringify(pivoted.error));
+  assert.equal(num(pivoted.rows[0].first_platform), want[first]);
+
   // a time column of the joined model at a bucket of its own: events by the ISO week of the install, as
   // the warehouse counts them for the version valid at each event
   const week = { source: 'users', column: 'install_date', grain: 'week' };
@@ -115,6 +136,14 @@ test('a build whose one step is its layer: joined on the contract, an amount com
      and e.device_time >= u.install_time_valid_from and (u.install_time_valid_until is null or e.device_time < u.install_time_valid_until)
     group by 1 order by 1 nulls last`)).rows.map((r) => [r.w == null ? null : String(r.w), num(r.n)]);
   assert.deepEqual(gotWeeks, weeks);
+
+  // a window inside a week, grouped by week: MetricFlow counts the week whole — the rows of every day of
+  // it, as the warehouse counts them — and the answer says the days it covers
+  const midWeek = await engine.query_model({ context_id: ctx, time_range: { start: '2026-01-06', end: '2026-01-07' }, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'week' }] })] });
+  assert.equal(midWeek.ok, true, JSON.stringify(midWeek.error));
+  const [{ n: wholeWeek }] = (await wh.query("select count(*) as n from fct_analytics_events where device_time >= '2026-01-05' and device_time < '2026-01-12'")).rows;
+  assert.deepEqual(midWeek.rows.map((r) => num(r.evts)), [num(wholeWeek)]);
+  assert.ok(midWeek.warnings.some((w) => w.includes('2026-01-05 … 2026-01-11')), JSON.stringify(midWeek.warnings));
 
   // a computed boolean dimension reads back as true / false, whichever path ran the query — MetricFlow's
   // own (its CSV writes Python's 'True') or the SQL it compiles with a step after it
@@ -193,6 +222,9 @@ test('describe shows the layer as dbt parsed it; validate runs each metric over 
   assert.equal(v.valid, true, JSON.stringify(v));
   const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'tutorial'")).rows;
   assert.equal(num(v.ran.metrics.find((x) => x.metric === 'tutorials').value), num(n));
+  // the source's dimensions are named as the source names its columns — its time column among them
+  const own = v.ran.semantic_models.find((x) => x.semantic_model === 'events');
+  assert.ok(own?.checked && own.dimensions.includes('device_time') && !own.dimensions.includes('event_time'), JSON.stringify(own));
 });
 
 test('a fork after step N is the build taken back to it: its rows are those of the steps it kept', opts, async (t) => {
@@ -210,4 +242,12 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   const orig = await taskResult(engine, (await engine.raw.build_model({ action: 'materialize', context_id: s.context_id })).task_id);
   const [{ p }] = (await wh.query("select count(distinct player_id_of_internal) as p from fct_analytics_events where event_name = 'tutorial'")).rows;
   assert.equal(orig.page?.total_rows ?? orig.total_rows ?? orig.rows.length, num(p));
+  // a build whose every step is built is checked by its build: validate answers so, it is not refused
+  const checked = await taskResult(engine, (await engine.raw.build_model({ action: 'preview', context_id: s.context_id, validate: true })).task_id);
+  assert.equal(checked.ok, true, JSON.stringify(checked));
+  assert.deepEqual(checked.checked, []);
+  // the list names each build and says what it holds
+  const listed = Object.fromEntries((await engine.context({ action: 'list', limit: 50 })).contexts.map((c) => [c.context_id, c]));
+  assert.equal(listed[s.context_id].name, 'fork_src');
+  assert.ok(listed[s.context_id].holds.some((h) => /built table/.test(h)), JSON.stringify(listed[s.context_id]));
 });

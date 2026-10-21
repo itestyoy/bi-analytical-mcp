@@ -197,6 +197,8 @@ export const REF_PLACES = {
   index_view: { what: 'a semantic_index view', takes: ['source', 'source_event', 'source_column', 'source_property'] },
   about: { what: "a memory note's about", takes: ['source', 'source_event', 'source_column', 'source_property'] },
   group_by: { what: 'a metric query\'s group_by', takes: ['source_column', 'source_property', 'dimension', 'entity', 'time'], via: true },
+  // a column of a metric query's result, named as the query names it: a group_by item, or a metric
+  metric_result: { what: 'a step after the metrics step', takes: ['source_column', 'source_property', 'dimension', 'entity', 'time', 'metric'], via: true },
 };
 
 /**

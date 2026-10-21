@@ -10,6 +10,7 @@ import { formatDbtError } from '../dbt/index.js';
 import { resolveTimeRange, isValidTimezone } from '../time-range.js';
 import { currentSignal } from '../request-context.js';
 import { uniqueRefs } from './helpers.js';
+import { EVENT_TIME_DIM, PARTITION_DIM } from '../yaml-render.js';
 
 export const semanticPreviewMethods = {
   /**
@@ -234,7 +235,12 @@ export const semanticPreviewMethods = {
         if (!cuts.length) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no dimension or entity to cut by' }); continue; }
         const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: cs.map((c) => c.token), ...window, limit: 1 }));
         const failed = r.filter((x) => !x.ok).map((x) => ({ [x.item.entity ? 'entity' : 'dimension']: x.item.name, error: x.error }));
-        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: own.map((c) => c.name), entities: keys.map((c) => c.name), ...(failed.length ? { failed } : {}) });
+        // a task's layer names an events source's time and partition columns by MetricFlow's own names
+        // (event_time, partition_day): said as the source's columns, as a query names them
+        const model = ctx.state.engine === 'project' ? null : this._catalogOf(ctx).models[sm.name];
+        const shown = (n) => (model && n === EVENT_TIME_DIM && model.time?.column ? model.time.column : model && n === PARTITION_DIM && model.partition_column ? model.partition_column : n);
+        const failedShown = failed.map((f) => (f.dimension !== undefined ? { ...f, dimension: shown(f.dimension) } : f));
+        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: own.map((c) => shown(c.name)), entities: keys.map((c) => c.name), ...(failed.length ? { failed: failedShown } : {}) });
       }
       result.window = input.time_range;
       result.ran = {

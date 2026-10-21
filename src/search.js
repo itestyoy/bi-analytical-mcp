@@ -140,10 +140,14 @@ export class CatalogSearch {
       recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
       if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
-    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.`);
-    if (column_matches.length) { const d = column_matches[0]; recs.push(`Column '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ request: { source: '${d.source}', column: '${d.column}' } }).`); }
-    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ request: { source: '${pm.source}', property: '${pm.property}' } }).`); }
-    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ request: { source: '${ev.source}', event: '${ev.event}' } }).`); }
+    // the schema's best matches, the closest first (an event before a column at the same score)
+    const named = [
+      ...(event_names.length ? [{ score: event_names[0].score, text: `See what event '${event_names[0].event}' of source '${event_names[0].source}' carries: semantic_index({ request: { source: '${event_names[0].source}', event: '${event_names[0].event}' } }).` }] : []),
+      ...(property_matches.length ? [{ score: property_matches[0].score, text: `Drill into property '${property_matches[0].property}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}' } }).` }] : []),
+      ...(column_matches.length ? [{ score: column_matches[0].score, text: `Column '${column_matches[0].column}' of source '${column_matches[0].source}' matches — drill its values with semantic_index({ request: { source: '${column_matches[0].source}', column: '${column_matches[0].column}' } }).` }] : []),
+      ...(recipe_matches.length ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
+    ];
+    recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
 
     const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {

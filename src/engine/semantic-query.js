@@ -583,7 +583,7 @@ export const semanticQueryMethods = {
     const reads = [...new Set(metrics.flatMap((m) => known.get(m).semantic_models))];
     // (keyed by the dbt model dbt itself records each semantic model reads)
     const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
-    const { bounds, windowWarnings } = this._metricWindow(input, guarded);
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy);
     const conversionNotes = this._conversionNotes(layer, metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
     const paging = this._metricPaging(input, tail.ordered);
     const explain = this._compileOnly(input);
@@ -674,21 +674,35 @@ export const semanticQueryMethods = {
         ? `is in the result as its columns ${cols.slice(0, -1).map((c) => `'${c}'`).join(', ')} and '${cols[cols.length - 1]}', one per grain the metrics step groups it by — name the one you mean (its grain, or ${named})`
         : 'is no group_by item of this query, so the result does not carry it: add it to the metrics step\'s group_by, or filter the rows by it in a where step before the metrics step'}`);
     };
+    // the result's column a reference names: a metric's own, or the one a group_by item gave
+    const nameOf = (node, where) => {
+      if (refKind(node) === 'metric') {
+        if (!names.has(node.metric)) throw refuse(`${where}: { metric: '${node.metric}' } is no metric of this query — its result has ${[...names].join(', ')}`);
+        return node.metric;
+      }
+      return columnFor(node, where);
+    };
+    const isRef = (node) => REF_PLACES.metric_result.takes.includes(refKind(node));
     const resolve = (node, where) => {
       if (Array.isArray(node)) return node.map((x) => resolve(x, where));
       if (!node || typeof node !== 'object') return node;
-      const kind = refKind(node);
-      if (kind === 'metric') {
-        if (!names.has(node.metric)) throw refuse(`${where}: { metric: '${node.metric}' } is no metric of this query — its result has ${[...names].join(', ')}`);
-        return { column: node.metric };
-      }
-      if (kind && REF_PLACES.group_by.takes.includes(kind)) return { column: columnFor(node, where) };
+      if (isRef(node)) return { column: nameOf(node, where) };
       return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, resolve(v, where)]));
+    };
+    // a slot that names a column (a group_by key, a sort key, a pivot's on…) takes the column's name
+    const name = (x, where) => (isRef(x) ? nameOf(x, where) : x);
+    const nameList = (list, where) => (Array.isArray(list) ? list.map((x) => name(x, where)) : list);
+    const named = (st, where) => {
+      if (!st || typeof st !== 'object') return st;
+      const out = { ...st };
+      for (const k of ['group_by', 'columns', 'keep', 'drop']) if (out[k] !== undefined) out[k] = nameList(out[k], where);
+      if (out.stage === 'pivot' && out.on !== undefined) out.on = name(out.on, where);
+      if (out.stage === 'order_by' && Array.isArray(out.keys)) out.keys = out.keys.map((k) => ({ ...k, key: name(k.key, where) }));
+      return out;
     };
     const steps = given.map((st, i) => {
       try { stageAt(STAGE_PLACES.metric_result, st, at(i)); } catch (e) { throw refuse(e.message); }
-      if (st?.stage === 'order_by') return { ...st, keys: st.keys.map((k) => (typeof k.key === 'string' ? k : { ...k, key: columnFor(k.key, at(i)) })) };
-      return resolve(st, at(i));
+      return resolve(named(st, at(i)), at(i));
     });
     let read;
     // (the read numbers its steps from 0; here they follow the metrics step)
@@ -739,7 +753,7 @@ export const semanticQueryMethods = {
 
   /** The window: the cost guardrail (`guarded` names what requires a bounded one), the timezone, the
    *  bounds, and the warnings an open or still-filling window gets. → { bounds, windowWarnings } */
-  _metricWindow(input, guarded = []) {
+  _metricWindow(input, guarded = [], groupBy = []) {
     // Cost guardrail (require_time_range): block an unbounded scan over what the query reads
     if (guarded.length && !input.time_range?.start) {
       throw new ToolError(`${guarded.join(', ')} require${guarded.length === 1 ? 's' : ''} a bounded time window (require_time_range): pass time_range { start, end } to prune partitions`, { stage: 'validate', field: 'time_range' });
@@ -751,7 +765,8 @@ export const semanticQueryMethods = {
     }
     // Window honesty: warn when unbounded or when the window reaches into today (the trailing bucket
     // is incomplete) — so partial periods are never reported silently.
-    return { bounds: resolveTimeRange(input.time_range) || {}, windowWarnings: timeRangeWarnings(input.time_range) };
+    const bounds = resolveTimeRange(input.time_range) || {};
+    return { bounds, windowWarnings: [...timeRangeWarnings(input.time_range), ...wholeBucketWarnings(input.time_range, groupBy)] };
   },
 
   /**
@@ -920,7 +935,7 @@ export const semanticQueryMethods = {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail covers every source this context reads, whichever one the metrics come from
     const guarded = (ctx.state.usedModels || []).filter((k) => this._catalogOf(ctx).requireTimeRangeFor(k)).map((k) => `source ${k}`);
-    const { bounds, windowWarnings } = this._metricWindow(input, guarded);
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy);
     const paging = this._metricPaging(input, tail.ordered);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, metrics);
     const explain = this._compileOnly(input);
@@ -962,7 +977,8 @@ export const semanticQueryMethods = {
         const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
         // (several sources: the one whose data ends first, named — the others run further)
         const stalest = factsRead.length > 1 ? Object.keys(freshByFact).find((f) => freshByFact[f] === fresh) : null;
-        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
+        const each = stalest ? Object.entries(freshByFact).filter(([, v]) => v).map(([f, v]) => `${f} through ${String(v).slice(0, 10)}`).join(', ') : null;
+        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).');
@@ -1062,6 +1078,36 @@ function oneForm(raw, columns = []) {
   };
   return { ...raw, rows: raw.rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, written(k, v)]))) };
 }
+/**
+ * MetricFlow widens a window to whole buckets of the time grain a query groups metric_time by: at a week,
+ * a month, a quarter or a year the first and last buckets hold every day of theirs, inside the window or
+ * not. Said when the window's bounds fall inside a bucket, with the days the result covers.
+ */
+export function wholeBucketWarnings(tr, groupBy) {
+  const coarse = ['week', 'month', 'quarter', 'year'];
+  const grains = [...new Set(groupBy.map((t) => /^metric_time__(\w+)$/.exec(t)?.[1]).filter((g) => coarse.includes(g)))];
+  const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? new Date(`${v.slice(0, 10)}T00:00:00Z`) : null);
+  const start = day(tr?.start); const end = day(tr?.end);
+  if (!grains.length || (!start && !end)) return [];
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const first = (d, g) => {
+    if (g === 'week') return new Date(d.getTime() - ((d.getUTCDay() + 6) % 7) * 86400000);
+    const m = g === 'month' ? d.getUTCMonth() : g === 'quarter' ? d.getUTCMonth() - (d.getUTCMonth() % 3) : 0;
+    return new Date(Date.UTC(d.getUTCFullYear(), m, 1));
+  };
+  const last = (d, g) => {
+    if (g === 'week') return new Date(first(d, g).getTime() + 6 * 86400000);
+    const months = { month: 1, quarter: 3, year: 12 }[g];
+    const f = first(d, g);
+    return new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth() + months, 0));
+  };
+  return grains.flatMap((g) => {
+    const from = start ? first(start, g) : null; const to = end ? last(end, g) : null;
+    const widened = (from && iso(from) !== iso(start)) || (to && iso(to) !== iso(end));
+    return widened ? [`metric_time at ${g}: each ${g} is counted whole, so the result covers ${from ? iso(from) : 'the start'} … ${to ? iso(to) : 'the end'}, not ${tr.start ?? 'the start'} … ${tr.end ?? 'the end'} — set the window on whole ${g}s, or group by day for its exact days`] : [];
+  });
+}
+
 /** The column types whose values are numbers. */
 const NUMERIC_TYPES = new Set(['numeric', 'int', 'float']);
 

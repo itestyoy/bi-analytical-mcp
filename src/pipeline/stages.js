@@ -20,6 +20,11 @@ import { METRICS_STEP, SEMANTIC_MODEL_STEP } from '../schema/fields.js';
 import { TIME_PART, describeContract, onPartsError, contractOnSchema } from '../catalog/joins.js';
 import { isNumericType } from '../dialects/base.js';
 
+/** A slot that names a column of the rows: its name — and after a metrics step also what the query named
+ *  it by (a group_by item as group_by names it, a metric as { metric }), resolved to the result's column. */
+const columnSlot = (refNames, base = { type: 'string' }) => (refNames ? { anyOf: [base, { $ref: '#/$defs/ref' }] } : base);
+const REF_NAMES_NOTE = ' After a metrics step a column may also be named as the query names it: a group_by item as group_by names it ({ source, column }, { time: "metric_time", grain }…), a metric as { metric }.';
+
 const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 /** The refusal of a column a step would add under a name the rows already have: two columns sharing one
@@ -309,7 +314,7 @@ export const STAGES = {
       // tool's analyze is a GENERAL two-sample significance test (not only randomized experiments).
       'Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ request: { action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) } }) for the p-value and CI.',
     ],
-    schema: (catalog) => ({
+    schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
       // The last two sentences are the memory lesson, and they are not decoration: a global
       // analytic (`OVER ()` with no PARTITION BY) keeps every row and attaches the value to each,
@@ -321,7 +326,7 @@ export const STAGES = {
         + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
-        group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
+        group_by: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Grouping columns (empty = grand total).${refNames ? REF_NAMES_NOTE : ''}` },
         measures: {
           type: 'array', minItems: 1, description: 'What each group folds to. For distinct counts prefer the HLL sketch: approx_count_distinct (one shot), or hll_init per group → hll_merge (mergeable across buckets and segments); exact count_distinct does not re-aggregate across groups.',
           items: measureForm({ ref: '#/$defs/expr', pattern: NAME, exprDescription: 'An aggregate of the rows, or a formula over aggregates; a column outside every aggregate is one of group_by.' }),
@@ -346,13 +351,13 @@ export const STAGES = {
     // that holds a value only where the cell's condition holds (`on` equals the value; is missing for
     // null: foldWhere) — so it counts, sums and takes a percentile, or a formula of them, alike on every
     // warehouse.
-    schema: () => ({
+    schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'measure', 'values'],
       description: 'Turn listed values of `on` into columns: one row per group_by group, and for each value a column holding `measure` over that group\'s rows where `on` equals it (count the rows, sum an amount, a ratio of two aggregates…). The values are listed explicitly, each with the name of its column. For dashboard-ready matrices (revenue as one column per country, retention day as columns).',
       properties: {
         stage: { enum: ['pivot'] },
-        group_by: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
-        on: { type: 'string', description: 'The column whose values become columns.' },
+        group_by: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Row keys kept (empty = one row).${refNames ? REF_NAMES_NOTE : ''}` },
+        on: { ...columnSlot(refNames), description: 'The column whose values become columns.' },
         measure: { ...EXPR, description: 'What each cell holds — an aggregate ({ fn: "count" }, { fn: "sum", args: [{ column: "revenue" }] }) or a formula over aggregates, over the group\'s rows where `on` equals the cell\'s value.' },
         values: {
           type: 'array', minItems: 1, uniqueItems: true,
@@ -394,13 +399,13 @@ export const STAGES = {
   },
 
   unpivot: {
-    schema: () => ({
+    schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_column', 'value_column'],
       description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too) — so the folded columns are of one type (numbers alike; cast the others first). The result is exactly `keep` + those two columns; every other column is dropped. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { enum: ['unpivot'] },
-        columns: { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' }, description: 'Columns to fold into rows.' },
-        keep: { type: 'array', uniqueItems: true, items: { type: 'string' }, description: 'Columns carried as they are onto each folded row (default: none).' },
+        columns: { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames), description: `Columns to fold into rows.${refNames ? REF_NAMES_NOTE : ''}` },
+        keep: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: 'Columns carried as they are onto each folded row (default: none).' },
         name_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds each folded column\'s name.' },
         value_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds its value.' },
       },
@@ -424,18 +429,16 @@ export const STAGES = {
   },
 
   order_by: {
-    // (after a metrics step a key may name a group_by item as group_by names it: the result's column it gave)
-    schema: (catalog, { sortRefs = false } = {}) => ({
+    // (after a metrics step a key may name a group_by item or a metric as the query names it: the result's column it gave)
+    schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
       description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering. NULLs go last unless a key says first — the same on every warehouse.',
       properties: {
         stage: { enum: ['order_by'] },
-        keys: { type: 'array', minItems: 1, items: sortRefs ? { ...SORT_KEY, properties: { ...SORT_KEY.properties, key: { anyOf: [SORT_KEY.properties.key, { $ref: '#/$defs/ref' }], description: 'The column to sort by — after a metrics step, a group_by item as group_by names it ({ source, column }, { time: "metric_time", grain }…) or a metric by its name.' } } } : SORT_KEY, description: 'The sort keys, in order.' },
+        keys: { type: 'array', minItems: 1, items: refNames ? { ...SORT_KEY, properties: { ...SORT_KEY.properties, key: { ...columnSlot(true, SORT_KEY.properties.key), description: `The column to sort by.${REF_NAMES_NOTE}` } } } : SORT_KEY, description: 'The sort keys, in order.' },
       },
     }),
     build: ({ cols }, p) => {
-      const named = p.keys.find((k) => typeof k.key !== 'string');
-      if (named) throw new Error(`order_by: a key named by a reference (${JSON.stringify(named.key)}) sorts a metrics step's result — here name the column`);
       p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, direction: k.direction, nulls: k.nulls })) }, cols }; },
   },
 
@@ -458,11 +461,11 @@ export const STAGES = {
   },
 
   project: {
-    schema: () => {
-      const names = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string' } };
+    schema: (catalog, { refNames = false } = {}) => {
+      const names = { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames) };
       return {
         type: 'object',
-        description: 'Trim the columns before they are materialized: `keep` keeps exactly these (in this order), `drop` removes these and keeps the rest.',
+        description: `Trim the columns before they are materialized: \`keep\` keeps exactly these (in this order), \`drop\` removes these and keeps the rest.${refNames ? REF_NAMES_NOTE : ''}`,
         anyOf: [
           form({ title: 'keep these columns', required: ['stage', 'keep'], properties: { stage: { enum: ['project'] }, keep: { ...names, description: 'The columns to keep, in order.' } } }),
           form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: { ...names, description: 'The columns to remove; every other column stays.' } } }),
@@ -521,7 +524,7 @@ export const STAGE_PLACES = {
   },
   metric_scope: { what: 'a step up to the metrics step', stages: ['where', METRICS_STEP.stage], offers: [METRICS_STEP] },
   metric_result: {
-    what: 'a step after the metrics step', stages: READ_STAGES, sortRefs: true,
+    what: 'a step after the metrics step', stages: READ_STAGES, refNames: true,
     elsewhere: 'makes a new table: store the result (materialize: true) and build from its task, build_model({ request: { action: "start", name, from_task } })',
   },
 };
@@ -595,11 +598,11 @@ export function stageSchema(catalog, { runtime = [], places = null, project = nu
   const registry = Object.entries(STAGES).filter(([, s]) => typeof s.available !== 'function' || s.available(catalog));
   const taken = registry.filter(([name]) => (at || [STAGE_PLACES.build]).some((p) => takes(p, name)));
   // a sort key may name a group_by item by its ref where a place of the tool sorts a metrics step's result
-  const sortRefs = (at || []).some((p) => p.sortRefs);
+  const refNames = (at || []).some((p) => p.refNames);
   // the steps the places offer of their own (no stage of the registry), each once
   const own = [...new Map((at || []).flatMap((p) => p.offers || []).map((s) => [s.stage, s])).values()];
   const forms = (group) => [
-    ...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project, sortRefs })),
+    ...taken.filter(([, s]) => (s.group || 'sql') === group).map(([, s]) => s.schema(catalog, { project, refNames })),
     ...own.filter((s) => s.group === group).map((s) => s.schema(catalog, { project })),
     ...(group === 'runtime' ? runtime : []),
   ];

@@ -360,7 +360,8 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   aggregate in a row only with `over`, a window only in a compute stage — the schema holds it only where a
   kind is its own, a semantic measure's), name collisions, metric cycles, the order of stages. A list of
   a table's OWN columns stays a list of names (an aggregate's `group_by`,
-  project, unpivot, an eventstream's segments and path); anything else names a thing through a ref or
+  project, unpivot, an eventstream's segments and path) — after a metrics step a name or what the query
+  named it by; anything else names a thing through a ref or
   an expression leaf. Its SQL comes from ONE writer (`exprSql`, and `conditionListSql` for a slot, each
   told the place); the
   functions are one table (`FNS`, src/pipeline/compute.js — scalar, condition, logic, aggregate,
@@ -530,8 +531,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   `$defs.stage`); before it only where steps, the rows its metrics fold (their leaves what group_by names
   — `PLACES.metric_where` —, every one ANDed into MetricFlow's where); after it a read
   (`STAGE_PLACES.metric_result`, `PLACES.metric_result`) over its result, NAMED AS THE QUERY NAMES IT — a
-  group_by item by the same ref group_by takes (in an expression and as an order_by key), a metric as
-  `{ metric }`, a column a step there made by its name — each resolved to the result's column it gave
+  group_by item by the same ref group_by takes, a metric as `{ metric }` — in an expression and in
+  every slot that names a column (a sort key, an aggregate's or a pivot's group_by, a pivot's on,
+  unpivot, project; `REF_PLACES.metric_result`) —, a column a step there made by its name — each resolved to the result's column it gave
   (`_metricTail`), so no caller learns how result columns are spelled; one the query is not grouped by
   is refused (add it to group_by, or filter before the metrics step), a where there filtering the result
   (a having). A read in `steps` is of the pipeline's own stages, those that keep it one table: where,

@@ -226,6 +226,14 @@ export class ContextManager {
     // an internal context (the parsed copy the project's own contexts share) is nobody's to address
     return [...this.contexts.values()].filter((c) => !c.state?.internal).map((c) => ({
       context_id: c.id,
+      // the build's name, and what the context holds: a pipeline's table, a semantic layer, a draft
+      ...(c.state.draft?.name || c.state.semantic_model ? { name: c.state.draft?.name || c.state.semantic_model } : {}),
+      holds: [
+        ...(c.state.engine === 'project' ? ['the dbt project\'s semantic model'] : []),
+        ...(c.state.pipeline_model ? [`a built table (${c.state.pipeline_model.model})`] : []),
+        ...((c.state.metrics || []).length && c.state.engine !== 'project' ? ['a semantic layer'] : []),
+        ...(c.state.draft && !c.state.pipeline_model ? ['a draft, not built yet'] : []),
+      ],
       tasks: c.state.tasks || [],
       // What the caller said this context is FOR. A listing of ids, task names and metric names
       // says what is in a context, never why it exists — which is the thing you need when several

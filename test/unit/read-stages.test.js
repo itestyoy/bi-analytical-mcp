@@ -123,8 +123,9 @@ test('a stored table has no source: an event property, a ref and a declared rela
   // refuses it before the place is asked
   const v = makeValidators(buildSchemas(catalog));
   assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'p', expr: { property: 'price_in_usd_of_event_data' } }] }).ok, false);
-  // …nor a window restarting per a declared relationship (a source's rows alone have one)
-  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, false);
+  // …while a window's { entity } passes it — after a metrics step it names the result's column a group_by
+  // item gave — and a read of a stored table refuses it when the step is built (above)
+  assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: [{ entity: 'user' }], order_by: [{ key: 'day' }] } } }] }).ok, true);
   assert.equal(validateInput(v.query_model, { context_id: 'abcdef123456', steps: [{ stage: 'compute', name: 'rn', expr: { fn: 'row_number', over: { partition_by: ['user_id'], order_by: [{ key: 'day' }] } } }] }).ok, true);
 });
 

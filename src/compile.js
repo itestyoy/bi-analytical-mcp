@@ -407,7 +407,8 @@ export function compileDeclaration(catalog, decl, { measures = [], metrics: cont
       if (md.window) ctp.window = md.window;
       if (md.grain_to_date) ctp.grain_to_date = md.grain_to_date;
       if (md.period_agg) ctp.period_agg = md.period_agg;
-      declareMetric({ name, type: 'cumulative', ...label, type_params: { measure: { name: resolveMeasure(md.measure) }, cumulative_type_params: ctp } }, md);
+      // (a window that holds no row sums nothing: 0, not a missing value — as a count over no rows is)
+      declareMetric({ name, type: 'cumulative', ...label, type_params: { measure: { name: resolveMeasure(md.measure), ...(md.window || md.grain_to_date ? { fill_nulls_with: 0 } : {}) }, cumulative_type_params: ctp } }, md);
     } else if (md.type === 'derived') {
       if (!isObj(md.expr)) fail(`derived metric '${md.name}': expr is an expression of the metrics it reads — e.g. { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }`, 'metrics.expr');
       // An input is named as it was declared; it is resolved once every metric of this declaration is

@@ -23,6 +23,7 @@ const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
 const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
+const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
 
 export class CatalogSearch {
   constructor({ catalog, recipes, valueIndex }) {
@@ -141,7 +142,8 @@ export class CatalogSearch {
       const exact = list.some((m) => m.match === 'exact');
       return list.filter((m) => m.match === 'exact' || (!exact && (m.score ?? 0) >= best - MATCH_SPREAD));
     };
-    for (const k of Object.keys(lists)) lists[k] = near(lists[k]);
+    // (where nothing matches closely, a few resemblances per list are enough to say so)
+    for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);
     const recommendations = this._recommend({ query, fuzzy, ...lists });
 
     return { query, fuzzy, ...lists, recommendations };

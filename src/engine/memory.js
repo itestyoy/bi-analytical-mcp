@@ -43,7 +43,7 @@ export class MemoryTool {
     }
     if (kind === 'source_column') {
       const column = String(t.column).trim();
-      const columns = refColumns(c, source, { timeColumns: true });
+      const columns = refColumns(c, source, { timeColumns: true, keyColumns: true });
       if (!columns.includes(column)) throw miss('column', column, columns);
       return memoryTarget('column', source, column);
     }

@@ -5,6 +5,7 @@
 import { describeContract, contractParts } from '../catalog/joins.js';
 import { ToolError } from '../validate.js';
 import { TASK_MEASURE_AGGS } from '../catalog.js';
+import { AGGREGATE_FNS } from '../pipeline/compute.js';
 import { frameProfile } from '../python-model.js';
 import { buildGuide } from '../guide.js';
 import { pythonAuthoringGuide } from '../python-guide.js';
@@ -754,7 +755,8 @@ export const semanticIndexMethods = {
     ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
     // a task's vocabulary, keyed as the declaration's fields are: a measure's aggregate (its expr's fn), a
     // metric's type, a grain
-    enums: { fn: [...TASK_MEASURE_AGGS], type: ['simple', 'cumulative', 'derived'], grain: c.timeGranularities() },
+    // (a semantic measure's ONE aggregate is one of `measure_fn`; a pipeline's aggregate stage takes more)
+    enums: { measure_fn: [...TASK_MEASURE_AGGS], aggregate_fn: [...AGGREGATE_FNS], metric_type: ['simple', 'cumulative', 'derived'], grain: c.timeGranularities() },
     // Ready-made task templates, fetched in full via semantic_index({ request: { recipe: id } }).
     ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
     // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW

@@ -145,7 +145,8 @@ export function abTest(input) {
   results = results.map((r) => {
     const sig = !!(r.significant_adjusted ?? r.significant);
     const lift = r.absolute_lift ?? 0;
-    return { ...r, outcome: !sig || lift === 0 ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
+    // (a group too small to read gives no verdict: its significance stands as computed, its outcome is inconclusive)
+    return { ...r, outcome: !sig || lift === 0 || r.small_sample ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
   });
   const thin = results.filter((r) => r.small_sample).map((r) => r.variant);
   // a verdict on a group too small to read is not stated as one: the small-sample warning speaks for it
@@ -163,7 +164,11 @@ export function abTest(input) {
     ...(anySig ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
     ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
   ];
-  return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, recommendations };
+  // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
+  const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))
+    ? { intervals_note: 'confidence_interval is of the absolute lift (variant − control), in the metric\'s own unit, symmetric around absolute_lift; relative_lift_ci is of the relative lift (variant / control − 1), from the log of the ratio (the delta method), so it is asymmetric around relative_lift and never below −100%; the two are computed apart, so near 0 one may hold it and the other not — read significance from p_value.' }
+    : {};
+  return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, ...intervals, recommendations };
 }
 
 /**

@@ -7,7 +7,7 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { stageDef, listSome } from '../pipeline.js';
+import { stageDef } from '../pipeline.js';
 import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition } from '../pipeline/compute.js';
 
 /** The values a where's own conditions scope `column` to — each a comparison of the column with
@@ -339,7 +339,7 @@ export class PipelineAdvisor {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...this.dateBoundWarnings(stage, available),
-      ...(own ? own(available, stage) : [`Reference any column available now in the next stage (${listSome(available)}; include: ["columns"] lists them all).`]),
+      ...(own ? own(available, stage) : []),
       ...(building ? [] : ['Preview the SQL anytime with build_model({ request: { action: "preview", context_id } }); materialize when done.']),
     ];
   }

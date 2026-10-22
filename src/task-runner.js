@@ -71,6 +71,22 @@ export class TaskRunner {
    * how many failed) — a tool error, as the call that waited on it reports it.
    */
   static readAnswer(results, reader, extra = {}) {
+    // a note several results carry alike (a query's advice, said for each task of a batch) is said once:
+    // with the first result that carries it
+    if (results.length > 1) {
+      const said = new Set();
+      results = results.map((r) => {
+        if (!isPlainObject(r)) return r;
+        const out = { ...r };
+        for (const key of ['warnings', 'recommendations']) {
+          if (!Array.isArray(r[key])) continue;
+          const kept = r[key].filter((n) => typeof n !== 'string' || !said.has(n));
+          r[key].forEach((n) => said.add(n));
+          if (kept.length) out[key] = kept; else delete out[key];
+        }
+        return out;
+      });
+    }
     const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
     // a task cancelled on purpose did what was asked of it: it is final, not a failure of the read
     const cancelled = (r) => r.status === 'cancelled' || r.error?.code === 'cancelled';

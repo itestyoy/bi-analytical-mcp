@@ -661,7 +661,8 @@ export const semanticQueryMethods = {
       if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
       if (page.has_more) recs.push(this._keptRowsNote(page));
       return {
-        ok: true, columns: raw.columns || [], rows: pageRows, row_count: pageRows.length, page,
+        // (a result with no rows still says its columns: those the query names)
+        ok: true, columns: raw.columns?.length ? raw.columns : tail.outputColumns, rows: pageRows, row_count: pageRows.length, page,
         ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
         provenance: { tier: 'project_metric', metrics, semantic_models: reads },
         warnings: [...windowWarnings, ...conversionNotes],
@@ -941,7 +942,7 @@ export const semanticQueryMethods = {
         ? await this._withNotes(await this._materialize(ctx, tail.steps.length ? { ...qopts, orderBy: [] } : qopts, input, rename, id, speak, { columns: tail.columns, steps: tail.steps }), respond)
         : await respond(oneForm(tail.viaSql
           ? await this._metricRead(ctx, { qopts, input, rename, explain, tail })
-          : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: wants(input, 'plan') }), rename), tail.outputColumns));
+          : inQueryOrder(callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: wants(input, 'plan') }), rename), [...(qopts.groupBy || []).map((g) => rename.get(g) ?? g), ...qopts.metrics]), tail.outputColumns));
       // a result read through a sample of its rows is approximate, and says so (as a sampled read does)
       return tail.sample && !explain && out?.ok !== false ? { ...out, sampled: true, sampling: samplingNote(tail.sample.share, 'the metric query\'s result rows') } : out;
     };
@@ -1071,14 +1072,21 @@ export const semanticQueryMethods = {
         // (several sources: the one whose data ends first, named — the others run further)
         const stalest = factsRead.length > 1 ? Object.keys(freshByFact).find((f) => freshByFact[f] === fresh) : null;
         const each = stalest ? Object.entries(freshByFact).filter(([, v]) => v).map(([f, v]) => `${f} through ${String(v).slice(0, 10)}`).join(', ') : null;
-        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+        const startsAfter = input.time_range?.start && String(input.time_range.start).slice(0, 10) > freshDay; // (said below, as the reason for 0 rows)
+        if ((!endDay || endDay > freshDay) && !startsAfter) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {
         // a window that ends before the data does may lie before it begins: say what is known of the data's range
         const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
         const before = fresh && endDay && endDay < String(fresh).slice(0, 10);
-        recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
+        // a window that starts after the data ends holds nothing to find: said as that, with the last week there is
+        const lastDay = fresh ? String(fresh).slice(0, 10) : null;
+        const startDay = input.time_range?.start ? String(input.time_range.start).slice(0, 10) : null;
+        if (lastDay && startDay && startDay > lastDay) {
+          const weekBefore = new Date(Date.parse(`${lastDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+          recs.push(`0 rows because the window starts ${startDay}, after the data ends (${lastDay}) — nothing is wrong with the query. The latest full week there is: time_range { start: "${weekBefore}", end: "${lastDay}" }.`);
+        } else recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
       }
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();
@@ -1089,7 +1097,11 @@ export const semanticQueryMethods = {
       // said where a step after the metrics step folds the per-bucket values again (an aggregate or a pivot)
       // — and folds them ACROSS the time buckets: one that keeps metric_time among its keys reads a
       // bucket's value as it is (a cohort grid: one value per cell)
-      const timeKey = (x) => (x && typeof x === 'object' ? x.time !== undefined : typeof x === 'string' && x.startsWith('metric_time'));
+      // (a column a compute step derived from metric_time — a cohort's week, a period's month — keys time too)
+      const readsTime = (e) => Array.isArray(e) ? e.some(readsTime) : !!e && typeof e === 'object'
+        && (e.time !== undefined || Object.values(e).some(readsTime));
+      const timeCols = new Set((q.tail || []).filter((st) => st?.stage === 'compute' && readsTime(st.expr)).map((st) => st.name));
+      const timeKey = (x) => (x && typeof x === 'object' ? x.time !== undefined : typeof x === 'string' && (x.startsWith('metric_time') || timeCols.has(x)));
       const keepsTime = (st) => [...(st.group_by || []), ...(st.stage === 'pivot' ? [st.on] : [])].some(timeKey);
       const refolds = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st));
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
@@ -1114,7 +1126,7 @@ export const semanticQueryMethods = {
       if (page.has_more) recs.push(this._keptRowsNote(page));
       const out = {
         ok: true,
-        columns: res.columns,
+        columns: res.columns?.length ? res.columns : tail.outputColumns,
         rows: pageRows,
         row_count: pageRows.length,
         page,
@@ -1160,6 +1172,20 @@ export const semanticQueryMethods = {
 
 /** What `mf query` answered, under the caller's names: its columns and each row's keys renamed
  *  (`rename`: MetricFlow's token → the result column). A failure or a compiled query is as it came. */
+/** A result's columns in the order the query named them — its group_by items, then its metrics — which
+ *  is not the order MetricFlow writes them in (metric_time first). Columns it does not name keep their
+ *  place after them. */
+function inQueryOrder(raw, names) {
+  if (!raw?.ok || !Array.isArray(raw.rows) || !names.length) return raw;
+  const rank = (n) => { const i = names.indexOf(n); return i < 0 ? names.length : i; };
+  const order = (keys) => [...keys].sort((a, b) => rank(a) - rank(b));
+  return {
+    ...raw,
+    ...(Array.isArray(raw.columns) ? { columns: [...raw.columns].sort((a, b) => rank(a.name) - rank(b.name)) } : {}),
+    rows: raw.rows.map((r) => Object.fromEntries(order(Object.keys(r)).map((k) => [k, r[k]]))),
+  };
+}
+
 function callerNamed(raw, rename) {
   if (!raw?.ok || !Array.isArray(raw.rows)) return raw;
   return {

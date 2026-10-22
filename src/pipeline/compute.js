@@ -536,7 +536,7 @@ export const PLACES = {
     hint: 'Raw SQL and an event property are a build\'s: build from the task — build_model({ request: { action: "start", name, from_task } }) (a pipeline build\'s task, or a query run with materialize: true)',
   },
   semantic_model: {
-    what: 'a semantic model\'s where, dimension or measure', leaves: ['column', 'property', 'value', 'now'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw'), ...TASK_MEASURE_AGGS], windows: false,
+    what: 'a semantic model\'s computed dimension or measure', leaves: ['column', 'property', 'value', 'now'], fns: [...CONDITION_FNS, ...LOGIC_FNS, ...SCALAR_FNS.filter((fn) => fn !== 'raw'), ...TASK_MEASURE_AGGS], windows: false,
     hint: 'A window or raw SQL is a pipeline\'s (build_model)',
   },
   metric_where: {

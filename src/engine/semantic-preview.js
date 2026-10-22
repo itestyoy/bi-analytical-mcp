@@ -69,7 +69,10 @@ export const semanticPreviewMethods = {
   _previewScope(ctx, layer, input) {
     // a context of the project's layer is ONE semantic model: its metrics, and the models they read
     const project = ctx.state.engine === 'project';
-    const base = project ? this._projectMetricsOf(ctx) : layer.metrics;
+    // (a task's layer: the metrics its step declares — the spec may hold more, a measure written as a
+    // metric for another to read, which no query names)
+    const declared = new Set((ctx.state.metrics || []).map((m) => m.name));
+    const base = project ? this._projectMetricsOf(ctx) : layer.metrics.filter((m) => !declared.size || declared.has(m.name));
     const baseModels = project ? new Set([ctx.state.semantic_model, ...base.flatMap((m) => m.semantic_models)]) : null;
     const metricNames = new Set([...base.map((m) => m.name), ...(project ? [] : (ctx.state.metrics || []).map((m) => m.name))]);
     const smNames = project ? baseModels : new Set([...layer.semantic_models.map((m) => m.name), ...Object.keys(ctx.state.additions || {})]);
@@ -131,7 +134,7 @@ export const semanticPreviewMethods = {
       // metric's is what a query of it takes
       const inputOf = input.metric && m.name !== input.metric;
       let cut;
-      if (inputOf) cut = time;
+      if (inputOf) cut = { dimensions: `its own list, not repeated here — context({ request: { action: 'describe', context_id: '${ctx.id}', metric: '${m.name}' } })`, ...time };
       else if (project) {
         const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i) }));
         const dims = refs.filter((r) => r.item.kind === 'dimension');

@@ -85,10 +85,7 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
-    recommend: (available, p = {}) => [
-      `Reference any column available now in the next stage (${listSome(available)}; include: ["columns"] lists them all).`,
-      ...(exprCalls(p.expr).some((c) => c.fn === 'lag' || c.fn === 'lead') ? [NEIGHBOUR_NOTE] : []),
-    ],
+    recommend: (available, p = {}) => (exprCalls(p.expr).some((c) => c.fn === 'lag' || c.fn === 'lead') ? [NEIGHBOUR_NOTE] : []),
     // the expression grammar, once: every stage that takes an expression references it — the row
     // expression built for the expression places of the tool (`places`: what its stages' expressions take),
     // with the window its window forms refer to where one of them takes a window (a window function's

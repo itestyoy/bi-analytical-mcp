@@ -303,8 +303,8 @@ test('a task measure is one of the task\'s aggregates — no sum_boolean, no ske
   // compile refuses it too, for a caller that skips the schema (its place, PLACES.semantic_model)
   const compiled = async (expr) => (await import('../../src/compile.js')).compileDeclaration(catalog, { name: 'task_a', semantic_models: [{ source: 'events', measures: [{ name: 'val', expr }] }], metrics: [{ name: 'val', type: 'simple', measure: 'val' }] });
   for (const [bad, said] of [
-    [{ fn: 'hll_init', args: [{ column: 'event_name' }] }, /hll_init is not what a semantic model's where, dimension or measure takes/],
-    [{ fn: 'approx_count_distinct', args: [{ column: 'event_name' }] }, /approx_count_distinct is not what a semantic model's where, dimension or measure takes/],
+    [{ fn: 'hll_init', args: [{ column: 'event_name' }] }, /hll_init is not what a semantic model's computed dimension or measure takes/],
+    [{ fn: 'approx_count_distinct', args: [{ column: 'event_name' }] }, /approx_count_distinct is not what a semantic model's computed dimension or measure takes/],
     [{ fn: 'sum', args: [{ column: 'session_number' }], over: {} }, /a measure is ONE aggregate/],
     [{ fn: 'raw', sql: 'sum(1)' }, /a measure is ONE aggregate/],
   ]) {

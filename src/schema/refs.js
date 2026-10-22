@@ -62,9 +62,9 @@ function timeColumns(catalog, model) {
 
 /** The columns of a model a ref names: its groupable attributes (the dimensions the catalog declares and,
  *  on an events source, its event column). */
-export function refColumns(catalog, model, { timeColumns: withTime = false } = {}) {
+export function refColumns(catalog, model, { timeColumns: withTime = false, keyColumns: withKeys = false } = {}) {
   const m = catalog.getModel(model);
-  return [...new Set([...Object.keys(m.dimensions || {}), ...catalog.modelDimensionColumns(model), ...(withTime ? [m.time?.column, m.partition_column].filter(Boolean) : [])])];
+  return [...new Set([...Object.keys(m.dimensions || {}), ...catalog.modelDimensionColumns(model), ...(withTime ? [m.time?.column, m.partition_column].filter(Boolean) : []), ...(withKeys ? catalog.entityKeyColumns(model) : [])])];
 }
 
 /** The relationships that lead to `model`: each entity a model declares whose owner is `model`. */
@@ -89,7 +89,7 @@ const entityNames = (catalog, project) => [...new Set([
  * entities the semantic forms name too. A catalog-less build (null) has the semantic forms alone. `via`:
  * whether a column's form offers the relationship it is reached through (false where no place reads one).
  */
-export function refForms(catalog, { project = null, via: offerVia = true, timeColumns: withTime = false } = {}) {
+export function refForms(catalog, { project = null, via: offerVia = true, timeColumns: withTime = false, keyColumns: withKeys = false } = {}) {
   const grains = catalog?.timeGranularities ? catalog.timeGranularities() : [...GRAINS];
   const models = catalog ? catalog.modelKeys() : [];
   const facts = catalog ? catalog.facts : [];
@@ -103,7 +103,7 @@ export function refForms(catalog, { project = null, via: offerVia = true, timeCo
       properties: { source: { const: f, description: `The events source '${f}'.` }, event: strEnum(catalog.eventNames(f), `An event '${f}' declares.`) },
     })),
     source_column: models.flatMap((k) => {
-      const columns = refColumns(catalog, k, { timeColumns: withTime });
+      const columns = refColumns(catalog, k, { timeColumns: withTime, keyColumns: withKeys });
       if (!columns.length) return [];
       const vias = offerVia ? relationshipsTo(catalog, k) : [];
       return [form({
@@ -178,7 +178,7 @@ function refPlacesOf(places) {
  */
 export function refSchema(catalog, { project = null, places = null } = {}) {
   const at = refPlacesOf(places);
-  const forms = refForms(catalog, { project, via: !at || at.some((p) => p.via), timeColumns: !!at && at.every((p) => p.timeColumns) });
+  const forms = refForms(catalog, { project, via: !at || at.some((p) => p.via), timeColumns: !!at && at.every((p) => p.timeColumns), keyColumns: !!at && at.every((p) => p.keyColumns) });
   const kinds = Object.keys(REFS).filter((k) => (!at || at.some((p) => p.takes.includes(k))) && forms[k].length);
   const byGroup = Object.keys(REF_GROUPS).map((group) => [group, kinds.filter((k) => REFS[k].group === group)]).filter(([, ks]) => ks.length);
   const several = !at || new Set(at.map((p) => p.takes.join())).size > 1;
@@ -197,7 +197,8 @@ export const REF_PLACES = {
   // (a view and a note name every column a model has, its time axis and partition among them; the others
   // the attributes a metric is cut by)
   index_view: { what: 'a semantic_index view', takes: ['source', 'source_event', 'source_column', 'source_property'], timeColumns: true },
-  about: { what: "a memory note's about", takes: ['source', 'source_event', 'source_column', 'source_property'], timeColumns: true },
+  // (a note may be about any column a source view shows — its keys too)
+  about: { what: "a memory note's about", takes: ['source', 'source_event', 'source_column', 'source_property'], timeColumns: true, keyColumns: true },
   group_by: { what: 'a metric query\'s group_by', takes: ['source_column', 'source_property', 'dimension', 'entity', 'time'], via: true },
   // a column of a metric query's result, named as the query names it: a group_by item, or a metric
   metric_result: { what: 'a step after the metrics step', takes: ['source_column', 'source_property', 'dimension', 'entity', 'time', 'metric'], via: true },

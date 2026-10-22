@@ -246,7 +246,14 @@ export class Engine {
           if (col) of.set(col, [...new Set([...(of.get(col) || []), entity])]);
         }
       }
-      this._keyNotes = (used) => (of.has(used) ? `'${used}' is the key of ${of.get(used).map((n) => `'${n}'`).join(' / ')} — a metric query groups by and filters on it as { entity: "${of.get(used)[0]}" }` : null);
+      // …and an amount (a measure column): folded by a measure, never carried as an attribute
+      const amounts = new Map();
+      for (const k of this.catalog.modelKeys()) for (const a of this.catalog.aggregatableFields(k)) if (!amounts.has(a.name)) amounts.set(a.name, k);
+      this._keyNotes = (used) => (of.has(used)
+        ? `'${used}' is the key of ${of.get(used).map((n) => `'${n}'`).join(' / ')} — a metric query groups by and filters on it as { entity: "${of.get(used)[0]}" }`
+        : amounts.has(used)
+          ? `'${used}' is an amount of '${amounts.get(used)}', not an attribute: a join carries attributes, and an amount is folded by a measure of the semantic layer — a semantic_model step's measure with source: '${amounts.get(used)}' (e.g. { name, source: '${amounts.get(used)}', expr: { fn: "sum", args: [{ column: "${used}" }] } })`
+          : null);
     }
     return this._keyNotes;
   }

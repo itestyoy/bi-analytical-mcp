@@ -444,8 +444,6 @@ export const pipelineDraftMethods = {
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first step can reference (include: ["columns"] lists them); nothing before it is recomputed.`
           : `The source has ${cols.length} columns your first step can reference; get the full list with build_model({ request: { action: "start", ..., include: ["columns"] } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
-        `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/compute then aggregate.`,
-        buildHint,
       ],
     };
     const inc = included(input);

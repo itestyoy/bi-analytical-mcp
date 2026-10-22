@@ -251,8 +251,11 @@ test('5b. experiment({analyze}) on the per-variant aggregates: significant drop 
   close(v.control_rate, 1.0);
   close(v.variant_rate, 1 / 6);
   close(v.absolute_lift, 1 / 6 - 1);
-  assert.equal(v.significant, true); // 100% vs 17% on n=6 is a clear drop
-  assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
+  // 100% vs 17% is a clear drop on its p-value, but n=6 a group is too few to read: no verdict is stated
+  assert.ok(Number.isFinite(v.p_value) && v.p_value < 0.05, `p=${v.p_value}`);
+  assert.equal(v.small_sample, true);
+  assert.equal(v.significant, null);
+  assert.equal(v.outcome, 'inconclusive');
 });
 
 test('5c. experiment({check_split}) on the warehouse-computed split: clean 6 vs 6 passes', opts, async (t) => {

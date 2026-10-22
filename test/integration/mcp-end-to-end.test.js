@@ -360,7 +360,10 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
   const arm = res.results[0];
   assert.equal(arm.variant, 'variant_b');
   assert.ok(arm.p_value < 0.05, `p=${arm.p_value}`);
-  assert.equal(arm.significant_adjusted ?? arm.significant, true, JSON.stringify(arm));
+  // (six users a group is too few to read: the p-value stands, the verdict is not read)
+  assert.equal(arm.small_sample, true, JSON.stringify(arm));
+  assert.equal(arm.significant_adjusted ?? arm.significant, null, JSON.stringify(arm));
+  assert.equal(arm.outcome, 'inconclusive');
   assert.ok(num(arm.lift ?? arm.absolute_lift ?? arm.delta) < 0, `variant_b is worse, not better: ${JSON.stringify(arm)}`);
 });
 

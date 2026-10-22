@@ -223,6 +223,8 @@ export const semanticPreviewMethods = {
     // a metric that accumulates over a window (or to date within a grain) is a value per metric_time
     // bucket: it is compiled and run grouped by metric_time, as a query of it must be
     const windowed = new Set((ctx.state.engine === 'project' ? this._projectWindowed(layer, names) : this._windowedMetrics(ctx.state.metrics || [], names)).map((w) => w.through ?? w.metric));
+    // (one that accumulates since the data begins runs over the window with no time grain: the window's total)
+    const allTime = new Set(ctx.state.engine === 'project' ? [] : this._windowedMetrics(ctx.state.metrics || [], names, { allTime: true }).map((w) => w.through ?? w.metric));
     const timed = (ms) => (ms.some((m) => windowed.has(m)) ? { groupBy: ['metric_time__day'] } : {});
     const apart = async (items, opts) => [
       ...await eachOrAll(items.filter((m) => !windowed.has(m)), opts),
@@ -267,7 +269,7 @@ export const semanticPreviewMethods = {
       result.window = input.time_range;
       result.ran = {
         // (a windowed metric is a value per day: it ran grouped by metric_time, and its value is its first day's)
-        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? (windowed.has(c.item) ? { first_day_value: valueOf(c), note: 'accumulates over a window: a value per metric_time bucket — run grouped by day; this is the first day of the window' } : { value: valueOf(c) }) : { error: c.error }) })),
+        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? (windowed.has(c.item) ? { first_day_value: valueOf(c), note: 'accumulates over a window: a value per metric_time bucket — run grouped by day; this is the first day of the window' } : allTime.has(c.item) ? { value: valueOf(c), note: 'accumulates since the data begins only grouped by metric_time: run over the window with no time grain, this is the window\'s total, not all time' } : { value: valueOf(c) }) : { error: c.error }) })),
         semantic_models: dims,
       };
     }

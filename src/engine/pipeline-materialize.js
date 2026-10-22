@@ -238,8 +238,16 @@ export const pipelineMaterializeMethods = {
       if (result.materialized === 'view') {
         (result.warnings ||= []).push(`${modelName} is a VIEW, so the steps you add next re-run its SQL instead of reading a computed prefix — nothing is saved. Start the draft with materialized:'table' when the point of materializing is to stop recomputing.`);
       }
+      // what continuing on the draft means is said in full on its first build; later builds say it in a line
+      if (draft.told_checkpoints) {
+        result.assumptions = (result.assumptions || []).filter((a) => !a.startsWith('To re-slice it'));
+        result.assumptions.push(`Steps 1..${stages.length} are now the table ${modelName}; add_steps continues on top of it (as before).`
+          + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s).` : ''));
+        return result;
+      }
+      draft.told_checkpoints = true;
       (result.assumptions ||= []).push(
-        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_steps continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from '${draft.source}'.`
+        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_steps continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from ${draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`}.`
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;

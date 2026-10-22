@@ -446,6 +446,10 @@ export const pipelineDraftMethods = {
           : `The source has ${cols.length} columns your first step can reference; get the full list with build_model({ request: { action: "start", ..., include: ["columns"] } }) or inspect via semantic_index({ request: { source: '${source}' } }).`,
       ],
     };
+    // a partitioned source read with no window is read whole: said where the draft starts, while time_range
+    // can still be given (a where on the partition column bounds it too)
+    const part = !base && !input.time_range ? this.catalog.getModel(source)?.partition_column : null;
+    if (part) resp.warnings = [`No time_range: every build of this draft reads the whole of '${source}' (partitioned by ${part}). Bound it — start again with time_range, or add a where on ${part} as the first step — unless the whole history is the point.`];
     const inc = included(input);
     if (inc.columns) resp.available_columns = cols;
     if (!input.steps?.length) return resp;
@@ -468,6 +472,7 @@ export const pipelineDraftMethods = {
     // the start's own hints are for a draft with no steps, so with steps added only the one to build them
     // is still said — and not when this call builds them itself (its `next` says what comes after)
     const { steps: _none, recommendations: _hints, ...head } = resp;
+    if (head.warnings && rest.warnings) rest.warnings = [...head.warnings, ...rest.warnings];
     return this._draftThenBuild(ctx, ctx.state.draft, input, { ...head, ...rest, next: added.next || resp.next, ...(input.materialize ? {} : { recommendations: [buildHint] }) });
   },
 
@@ -735,7 +740,7 @@ export const pipelineDraftMethods = {
         : `Pipeline revalidated end-to-end after the ${action === 'delete_step' ? 'removal' : action === 'insert_step' ? 'insertion' : 'edit'}. Continue editing, preview, or materialize (include: ["columns"] for the full list).`,
       recommendations: [
         ...filterWarnings,
-        ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
+        ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from ${draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`}.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
       ],

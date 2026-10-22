@@ -43,7 +43,7 @@ const isObj = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 /** "did you mean" over the names a place offers. */
 const nearest = (name, names) => {
-  const near = typeof name === 'string' ? rankFuzzy(name, names, { fields: (x) => [x], limit: 3 }).map((x) => x.item) : [];
+  const near = typeof name === 'string' ? rankFuzzy(name, names, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((x) => x.item) : [];
   return near.length ? ` Did you mean ${near.map((x) => `'${x}'`).join(' or ')}?` : '';
 };
 

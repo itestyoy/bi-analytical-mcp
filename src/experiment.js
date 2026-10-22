@@ -145,8 +145,10 @@ export function abTest(input) {
   results = results.map((r) => {
     const sig = !!(r.significant_adjusted ?? r.significant);
     const lift = r.absolute_lift ?? 0;
-    // (a group too small to read gives no verdict: its significance stands as computed, its outcome is inconclusive)
-    return { ...r, outcome: !sig || lift === 0 || r.small_sample ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
+    // (a group too small to read gives no verdict: its p-value stands as computed, its significance is not
+    // read — null — and its outcome is inconclusive)
+    const unread = r.small_sample ? Object.fromEntries(['significant', 'significant_adjusted', 'significant_sequential'].filter((k) => k in r).map((k) => [k, null])) : {};
+    return { ...r, ...unread, outcome: !sig || lift === 0 || r.small_sample ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
   });
   const thin = results.filter((r) => r.small_sample).map((r) => r.variant);
   // a verdict on a group too small to read is not stated as one: the small-sample warning speaks for it
@@ -155,7 +157,7 @@ export function abTest(input) {
   const split = input.expected_ratio ? srmTest({ groups: groupsIn.map((g, i) => ({ label: labelOf(g, i - 1), n: g.n })), ratios: input.expected_ratio }) : null;
   const recommendations = [
     ...(split?.srm_detected ? [`Sample ratio mismatch (p = ${split.p_value.toExponential(2)}): the groups are not the split that was designed, so randomization or logging is broken and none of these lifts can be trusted until the cause is found.`] : []),
-    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `${metric === 'ratio' ? 'the delta method' : metric === 'cuped' ? 'CUPED' : 'a test of means'} needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, significant or not. Collect more users before deciding.`] : []),
+    ...(thin.length ? [`Too few users to read ${thin.join(', ')}: ${metric === 'proportion' ? `a z-test needs at least ${SMALL_SAMPLE_OUTCOMES} conversions and ${SMALL_SAMPLE_OUTCOMES} non-conversions in each group` : `${metric === 'ratio' ? 'the delta method' : metric === 'cuped' ? 'CUPED' : 'a test of means'} needs about ${SMALL_SAMPLE_MEAN_USERS} users in each group`}, and ${thin.length === 1 ? 'its comparison has' : 'their comparisons have'} a group with fewer (small_sample) — its p-value and interval are not reliable, so its significance is not read (null) and its outcome is inconclusive. Collect more users before deciding.`] : []),
     // the adjustment only differs from the raw verdict where there is a family: several variants or other metrics
     ...(results.length > 1 || familyExtra.length ? [`Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`] : []),
     // peeking inflates false positives: said where a positive was found, not with every answer
@@ -166,7 +168,7 @@ export function abTest(input) {
   ];
   // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
   const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))
-    ? { intervals_note: 'confidence_interval is of the absolute lift (variant − control), in the metric\'s own unit, symmetric around absolute_lift; relative_lift_ci is of the relative lift (variant / control − 1), from the log of the ratio (the delta method), so it is asymmetric around relative_lift and never below −100%; the two are computed apart, so near 0 one may hold it and the other not — read significance from p_value.' }
+    ? { intervals_note: `confidence_interval is of the absolute lift (variant − control), in the metric's own unit, symmetric around absolute_lift${metric === 'proportion' ? ' unless it reaches past ±1, where it is cut (a difference of two rates lies within [−1, 1])' : ''}; relative_lift_ci is of the relative lift (variant / control − 1), from the log of the ratio (the delta method), so it is asymmetric around relative_lift and never below −100%; the two are computed apart, so near 0 one may hold it and the other not — read significance from p_value.` }
     : {};
   return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, ...intervals, recommendations };
 }

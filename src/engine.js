@@ -134,7 +134,7 @@ export class Engine {
     // THE ERROR LOG (src/error-log.js): every failure, kept in the store for explore_errors — and what
     // this start could not serve is the first of them
     this.errors = new ErrorLog({ store: this.store });
-    this.errors.runtime = { node: process.version, dialect: catalog.dialect, ...(runner ? { dbt: { major: runner.major ?? null, environment: runner.environment?.name ?? null } } : {}), started_at: new Date().toISOString() };
+    this.errors.runtime = { dialect: catalog.dialect, ...(runner ? { dbt: { major: runner.major ?? null, environment: runner.environment?.name ?? null } } : {}), started_at: new Date().toISOString() };
     this.errors.contextOf = (id, message, opts) => this._errorContext(id, message, opts);
     if (this.projectError) this.errors.record({ source: 'startup', stage: 'project_semantic_layer', message: `the dbt project's own semantic models could not be read: ${this.projectError}` });
     for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
@@ -400,7 +400,9 @@ export class Engine {
     const fact = (owner.usedModels || []).filter((k) => this.catalog.isFact(k));
     const source = input.source || (owner.draft?.source ?? owner.pipeline_origin?.source) || (fact.length === 1 ? fact[0] : null);
     if (!source) throw new ToolError(`name the source the steps resolve properties and relationships against (source: one of ${this.catalog.modelKeys().join(', ')}) — task ${job.id} read ${fact.length ? fact.join(' and ') : 'no events source'}`, { stage: 'validate', field: 'source' });
-    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source, read: [...new Set(owner.usedModels || [])] };
+    // what the task read: a metric query's own sources (its provenance) — not every model its context holds
+    const read = kept?.provenance?.source ? [].concat(kept.provenance.source) : owner.usedModels || [];
+    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source, read: [...new Set(read)] };
   }
 
   /** Make a task's table readable from this draft's context, and keep its owner from being dropped under it. */

@@ -132,8 +132,10 @@ export const semanticQueryMethods = {
 
   /** The metrics among `names` — or the metrics they are built from — that accumulate over a trailing
    *  window or to date within a grain: each value is the window ending at a metric_time bucket.
-   *  → [{ metric, through, how }] (`through`: the asked metric it is an input of). */
-  _windowedMetrics(defs, names) {
+   *  → [{ metric, through, how }] (`through`: the asked metric it is an input of). `allTime`: those that
+   *  accumulate since the data begins instead (no window, no grain) — over a time_range without metric_time
+   *  MetricFlow folds them inside the window alone. */
+  _windowedMetrics(defs, names, { allTime = false } = {}) {
     const byName = new Map(defs.map((m) => [m.name, m]));
     const out = [];
     for (const name of names) {
@@ -142,7 +144,7 @@ export const semanticQueryMethods = {
         if (!m || seen.has(m.name)) return;
         seen.add(m.name);
         const ctp = m.type === 'cumulative' ? m.type_params?.cumulative_type_params || {} : {};
-        if (ctp.window || ctp.grain_to_date) out.push({ metric: m.name, through: m.name === name ? null : name, how: ctp.window ? `over a trailing ${ctp.window}` : `to date within each ${ctp.grain_to_date}` });
+        if (allTime ? m.type === 'cumulative' && !ctp.window && !ctp.grain_to_date : ctp.window || ctp.grain_to_date) out.push({ metric: m.name, through: m.name === name ? null : name, how: ctp.window ? `over a trailing ${ctp.window}` : `to date within each ${ctp.grain_to_date}` });
         for (const n of inputMetrics(m)) walk(byName.get(n));
       };
       walk(byName.get(name));
@@ -988,6 +990,11 @@ export const semanticQueryMethods = {
       columns.push({ name: r.column, type: r.type });
     }
     this._needsMetricTime(this._windowedMetrics(ctx.state.metrics || [], metrics), groupBy, q.at);
+    // a metric that accumulates since the data begins, asked over a window with no time grain, is folded
+    // inside the window alone (MetricFlow): its value is the window's total, not all time — said
+    const allTime = input.time_range && !groupBy.some((g) => String(g).startsWith('metric_time__'))
+      ? this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true }) : [];
+    const allTimeNotes = allTime.map((w) => `'${w.through ?? w.metric}'${w.through ? ` reads '${w.metric}', which` : ''} accumulates since the data begins only when grouped by metric_time: asked over time_range with no time grain, it is the window's total, not all time. For the running total as of each day, add { time: "metric_time", grain: "day" } to group_by.`);
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
@@ -1064,7 +1071,7 @@ export const semanticQueryMethods = {
       const knownFresh = Object.values(freshByFact).filter(Boolean);
       const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
       // Situational recommendations: surface a risk ONLY when it is actually present.
-      const recs = [];
+      const recs = []; const outside = [];
       // #1 STALENESS/incompleteness: the window reaches past the latest data → empty/partial tail.
       if (fresh) {
         const freshDay = String(fresh).slice(0, 10);
@@ -1072,21 +1079,21 @@ export const semanticQueryMethods = {
         // (several sources: the one whose data ends first, named — the others run further)
         const stalest = factsRead.length > 1 ? Object.keys(freshByFact).find((f) => freshByFact[f] === fresh) : null;
         const each = stalest ? Object.entries(freshByFact).filter(([, v]) => v).map(([f, v]) => `${f} through ${String(v).slice(0, 10)}`).join(', ') : null;
-        const startsAfter = input.time_range?.start && String(input.time_range.start).slice(0, 10) > freshDay; // (said below, as the reason for 0 rows)
-        if ((!endDay || endDay > freshDay) && !startsAfter) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+        const startDay = input.time_range?.start ? String(input.time_range.start).slice(0, 10) : null;
+        // a window that starts after the data ends holds nothing to measure: whatever it returns — no rows,
+        // or a 0 / null of a query not grouped by time — is no measurement, said as a warning with the last week there is
+        if (startDay && startDay > freshDay) {
+          const weekBefore = new Date(Date.parse(`${freshDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+          outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. The latest full week there is: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
+        } else if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {
         // a window that ends before the data does may lie before it begins: say what is known of the data's range
         const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
         const before = fresh && endDay && endDay < String(fresh).slice(0, 10);
-        // a window that starts after the data ends holds nothing to find: said as that, with the last week there is
-        const lastDay = fresh ? String(fresh).slice(0, 10) : null;
-        const startDay = input.time_range?.start ? String(input.time_range.start).slice(0, 10) : null;
-        if (lastDay && startDay && startDay > lastDay) {
-          const weekBefore = new Date(Date.parse(`${lastDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
-          recs.push(`0 rows because the window starts ${startDay}, after the data ends (${lastDay}) — nothing is wrong with the query. The latest full week there is: time_range { start: "${weekBefore}", end: "${lastDay}" }.`);
-        } else recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
+        // (a window after the data ends is said above, as the warning)
+        if (!outside.length) recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
       }
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();
@@ -1140,7 +1147,7 @@ export const semanticQueryMethods = {
           data_freshness: fresh,
           ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
         },
-        warnings: [...openPeriod(windowWarnings, fresh), ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
+        warnings: [...outside, ...allTimeNotes, ...openPeriod(windowWarnings, fresh), ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
         recommendations: recs,
       };
       return out;

@@ -85,7 +85,12 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
-    recommend: (available, p = {}) => (exprCalls(p.expr).some((c) => c.fn === 'lag' || c.fn === 'lead') ? [NEIGHBOUR_NOTE] : []),
+    // (a lag of a moment — the gap between events, a session's start — compares times itself: said only where
+    // a value is carried over from the neighbouring row)
+    recommend: (available, p = {}) => {
+      const moment = (a) => /date|time/i.test(String(available.find((c) => c.name === a?.column)?.type ?? ''));
+      return exprCalls(p.expr).some((c) => (c.fn === 'lag' || c.fn === 'lead') && !moment(c.args?.[0])) ? [NEIGHBOUR_NOTE] : [];
+    },
     // the expression grammar, once: every stage that takes an expression references it — the row
     // expression built for the expression places of the tool (`places`: what its stages' expressions take),
     // with the window its window forms refer to where one of them takes a window (a window function's

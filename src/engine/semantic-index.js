@@ -16,6 +16,8 @@ import { keyRef, keyView } from './value-index-views.js';
 
 /** The fields of a view that are its ref's (the rest — paging, include — are what the view reads). */
 const REF_KEYS = new Set(Object.values(REFS).flatMap((r) => r.fields));
+/** How many payload property names a source's view lists before it says how many there are. */
+const PAYLOAD_LISTED = 60;
 
 /** A column an example names: a categorical one where the model has one — a time or a validity bound
  *  reads as an odd first cut, and has no values to list. */
@@ -236,6 +238,10 @@ export const semanticIndexMethods = {
         out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
       const flat = c.eventProps(k).filter((p) => c.eventPropertySpec(p, k)?.column).length;
+      // the payload properties with no column of their own are named here too — by name only, each drilled on
+      // its own — so a property is found from the source as well as from an event that carries it
+      const payload = c.eventProps(k).filter((p) => !c.eventPropertySpec(p, k)?.column);
+      if (payload.length) out.payload_properties = payload.length > PAYLOAD_LISTED ? [...payload.slice(0, PAYLOAD_LISTED), `… ${payload.length} in all — semantic_index({ request: { search } }) finds one`] : payload;
       out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }.${flat ? ` A property held in a column of its own (${flat} of them here, listed under columns too) is named { property } — the spelling every tool takes, the semantic layer's included; a pipeline also reads it as { column }.` : ''} The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
     } else {
       // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
@@ -625,7 +631,10 @@ export const semanticIndexMethods = {
     // Recall caveat: indexed VALUES are the top-N by frequency per property, so a search
     // for a RARE value can miss even though the value exists. Say so when nothing matched,
     // so "not found" is not mistaken for "does not exist".
-    if (!(res.value_matches && res.value_matches.length)) {
+    // (said where nothing else answered the word either: a name found in the catalog or a saved note is
+    // what the word meant, not a missing value)
+    const found = ['event_names', 'property_matches', 'column_matches', 'value_matches', 'recipe_matches', 'memory_matches'].some((k) => res[k]?.length);
+    if (!found) {
       (res.recommendations ||= []).push('No indexed value matched. Indexed values are the top-N most frequent per property — a RARE value may not be indexed; confirm presence with a direct filter/query before concluding it does not exist.');
     }
     // App/bundle ids are not indexed as property VALUES, so match them here: a query that
@@ -765,7 +774,7 @@ export const semanticIndexMethods = {
     // Machine-readable map of the drill-down views (key → when to use it), so the next call
     // can be chosen without parsing prose. Exactly one view key per call (mutually exclusive).
     views: [
-      { view: 'source', arg: 'source (a model key)', when: "one model's columns/entities/time + dimension attributes with real sample values" },
+      { view: 'source', arg: 'source (a model key)', when: "one model's columns/entities/time — a model's attributes with real sample values, an events source's events and payload property names (each drilled on its own)" },
       { view: 'event', arg: 'event name', when: 'the properties populated on that event (what you can measure/group/filter)' },
       { view: 'column', arg: 'source + column', when: "one column of a model — its full passport: real value distribution (paged), NULL coverage, freshness" },
       { view: 'property', arg: 'source + property', when: "one event property's full passport: real value distribution (paged), NULL coverage per event, per-app split, freshness" },

@@ -181,7 +181,7 @@ function fieldRef(instancePath) {
  * it). A long list is cut: the schema is exact, the message names enough to act on.
  */
 function oneOf(at, vals, used, alt, elsewhere = null) {
-  const near = typeof used === 'string' && !alt && !elsewhere ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], limit: 3 }).map((r) => r.item) : [];
+  const near = typeof used === 'string' && !alt && !elsewhere ? rankFuzzy(used, vals.map(String), { fields: (v) => [v], threshold: 0.7, limit: 3 }).map((r) => r.item) : [];
   return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`
     + (near.length ? `. Did you mean ${near.map((v) => `'${v}'`).join(' or ')}?` : '')
     + (alt ? `. Here '${used}' is spelled '${alt}'${SPELLING_NOTE[used] ? ` — ${SPELLING_NOTE[used]}` : ''}` : '')

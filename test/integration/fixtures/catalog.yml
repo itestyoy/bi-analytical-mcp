@@ -170,7 +170,7 @@ models:
           meta: { mcp: { property: true } }
       - name: monetization_type_of_event_data
         data_type: string
-        description: "Monetization category. Events: currency_income, currency_outcome."
+        description: "Monetization category. Events: iap_purchase_completed, iap_purchase_failed."
         config:
           meta: { mcp: { property: true } }
       - name: price_in_usd_of_event_data

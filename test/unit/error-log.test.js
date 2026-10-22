@@ -127,7 +127,6 @@ test('an error carries what reproduces it: the draft a refused step was added to
   assert.deepEqual(full.context.state.draft.stages.map((st) => st.stage), ['where']);
   assert.equal(full.context.state.draft.source, source);
   assert.equal(full.args.request.steps[0].conditions[0].args[0].column, 'no_such_col');
-  assert.equal(full.runtime.node, process.version);
   assert.equal(full.runtime.dialect, engine.catalog.dialect);
   // a task that failed on a generated model keeps that model's code, as the message names it
   const ctx = engine.ctxs.get(s.context_id);

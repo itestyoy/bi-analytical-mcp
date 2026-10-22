@@ -552,7 +552,9 @@ test('a held result pages by its row numbers, and a page past the rows it kept s
   assert.equal(page.page.has_more, true);
   assert.equal(page.page.next_offset, undefined);
   assert.equal(page.page.held_rows, 2);
-  assert.ok(page.warnings.some((w) => /larger limit/.test(w)), JSON.stringify(page.warnings));
+  // how to have the rest is said once — as the answer's recommendation, not again as a warning
+  const said = [...(page.warnings || []), ...(page.recommendations || [])].filter((w) => /larger limit/.test(w));
+  assert.equal(said.length, 1, JSON.stringify({ warnings: page.warnings, recommendations: page.recommendations }));
 });
 
 test('a stored result pages to its last row: a page past the rows the task holds is read from its table', opts, async (t) => {

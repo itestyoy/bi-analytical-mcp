@@ -374,7 +374,7 @@ export const pipelineMaterializeMethods = {
     // `ok` as every step of a build says it (parse, run, show); `executed` says whether the model was
     // actually built and run, or only written to disk (no runner)
     let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
-    let rows = []; let columns = [...out.columns.keys()]; let more = false;
+    let rows = []; let columns = [...out.columns.keys()]; let more = false; let totalRows = null;
     if (this.runner) {
       // Select the chain's OWN models by name (space = dbt's union operator), in ref order — never
       // `+model`, whose ancestor operator would also select the catalog's base tables and REBUILD
@@ -386,6 +386,12 @@ export const pipelineMaterializeMethods = {
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, SHOWN_ROWS + 1);
       if (show.ok) { more = show.rows.length > SHOWN_ROWS; rows = show.rows.slice(0, SHOWN_ROWS); columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ...dbtFailure('show', show) };
+      // a table with more rows than shown says how many it holds — the first page knows its size, as a
+      // later page does (best effort: the page stands without it)
+      if (more) {
+        const n = await this.probe.bestEffort(`built-count:${ctx.id}:${modelName}:${Date.now()}`, () => this.runner.show(this.ctxs.dir(ctx.id), `SELECT count(*) AS n FROM {{ ref('${modelName}') }}`, 1));
+        if (n?.ok && n.rows?.[0]?.n != null) totalRows = Number(n.rows[0].n);
+      }
       build = { ok: true, executed: true };
       // a column whose type the stages could not say (what a python stage returns) is typed as the
       // built table has it — best effort: the answer stands without it
@@ -401,7 +407,7 @@ export const pipelineMaterializeMethods = {
       // (its SQL is the preview's — build_model({ action: 'preview' }) — not repeated with every read of its rows)
       row_count: rows.length, rows, build,
       // the rows shown are the table's first ones: in order when the pipeline ends sorted
-      page: pageBlock({ offset: 0, limit: SHOWN_ROWS, returned: rows.length, has_more: more, ordered: endsSorted(input.pipeline?.stages) }),
+      page: pageBlock({ offset: 0, limit: SHOWN_ROWS, returned: rows.length, has_more: more, total: totalRows, ordered: endsSorted(input.pipeline?.stages) }),
       ...(models.length > 1 ? { models: chainInfo } : {}),
       ...(hasPython ? { python: pyInfo } : {}),
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh

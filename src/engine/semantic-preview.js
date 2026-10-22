@@ -146,7 +146,7 @@ export const semanticPreviewMethods = {
         // the keys its measure sources carry — named in full for one metric, as a project's are
         // (only the dimensions that cut THIS metric: of the model its measures fold, and of the models that joins to)
         const own = groupable.filter((r) => !this._uncut(ctx, r.source ?? r.semantic_model?.at(-1), [m.name]).length);
-        cut = { ...(input.metric ? { dimensions: own, entities: this._metricEntities(ctx, m.name).map((entity) => ({ entity })) } : {}), ...time };
+        cut = { ...(input.metric ? { dimensions: own, entities: this._metricEntities(ctx, m.name).map((entity) => ({ entity })) } : { dimensions: 'the context\'s groupable, below, where this metric\'s rows reach it — describe the metric (metric) for its own list' }), ...time };
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
       // (one metric asked: what it is made of comes with it, each said so)
@@ -154,7 +154,10 @@ export const semanticPreviewMethods = {
     });
     const first = scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
-    const firstCut = first && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.[0] || null);
+    // (a categorical column where there is one: a time or a validity bound reads as an odd first cut)
+    const cat = this._catalogOf(ctx);
+    const plain = (r) => { const dim = r?.source !== undefined && r.column !== undefined ? cat.models[r.source]?.dimensions?.[r.column] : null; return dim && dim.type !== 'time'; };
+    const firstCut = first && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.find(plain) || groupable?.[0] || null);
     const errors = shown.filter((i) => i.severity === 'error').length;
     return {
       context_id: ctx.id,
@@ -237,13 +240,16 @@ export const semanticPreviewMethods = {
         if (signalled()) break;
         // one of its own metrics that ran carries the cut (so a failure is the cut's); a model no
         // such metric reads directly is not run
-        const via = ran.filter((c) => c.ok).map((c) => c.item).find((n) => layer.definition(n)?.semantic_model === sm.name);
+        // (a model the layer only joins: through a metric that reaches its columns)
+        const okRan = ran.filter((c) => c.ok).map((c) => c.item);
+        const via = okRan.find((n) => layer.definition(n)?.semantic_model === sm.name)
+          || okRan.find((n) => (groupBys[n] || []).some((i) => i.semantic_model === sm.name));
         // its dimensions and entities as MetricFlow lists them for that metric — each by its own token
         const listedFor = via ? groupBys[via] || [] : [];
         const own = listedFor.filter((i) => i.kind === 'dimension' && i.semantic_model === sm.name).map((i) => ({ name: i.name, token: tokenOf(i) }));
         const keys = listedFor.filter((i) => i.kind === 'entity' && i.semantic_model === sm.name).map((i) => ({ name: i.name, token: tokenOf(i), entity: true }));
         const cuts = [...own, ...keys];
-        if (!via) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no metric of it in view ran over the window — nothing to cut its rows with' }); continue; }
+        if (!via) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no metric in view that ran over the window reads this model or reaches its columns, so nothing could be cut by them — validate a metric of it (metric) to check it' }); continue; }
         if (!listed.groupBys) { dims.push({ semantic_model: sm.name, checked: false, reason: `MetricFlow did not list what ${via} can be grouped by${listed.error ? `: ${listed.error}` : ''}` }); continue; }
         if (!cuts.length) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no dimension or entity to cut by' }); continue; }
         const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: [...(timed([via]).groupBy || []), ...cs.map((c) => c.token)], ...window, limit: 1 }));
@@ -257,7 +263,8 @@ export const semanticPreviewMethods = {
       }
       result.window = input.time_range;
       result.ran = {
-        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? { value: valueOf(c) } : { error: c.error }) })),
+        // (a windowed metric is a value per day: it ran grouped by metric_time, and its value is its first day's)
+        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? (windowed.has(c.item) ? { first_day_value: valueOf(c), note: 'accumulates over a window: a value per metric_time bucket — run grouped by day; this is the first day of the window' } : { value: valueOf(c) }) : { error: c.error }) })),
         semantic_models: dims,
       };
     }

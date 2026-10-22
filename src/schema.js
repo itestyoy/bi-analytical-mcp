@@ -234,7 +234,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
   const deleteForms = {
     context: form({ title: 'the whole context', tag: ['what', 'context'], optionalTag: true, tagDescription: 'context (the default): tear the whole context down.', required: ['context_id'], properties: { context_id: deleteId, force: { type: 'boolean', description: 'Tear it down even though another draft reads a table it built (a fork that inherited a materialized prefix); those drafts then recompute that prefix from the source.' } } }),
     pipeline_model: form({ title: 'its pipeline model', tag: ['what', 'pipeline_model'], tagDescription: 'pipeline_model: remove the context\'s pipeline model and keep the context.', required: ['context_id'], properties: { context_id: deleteId } }),
-    semantic_model: form({ title: 'one semantic model\'s additions', tag: ['what', 'semantic_model'], tagDescription: 'semantic_model: remove one model\'s task additions.', required: ['context_id', 'semantic_model'], properties: { context_id: deleteId, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s task additions to remove.' }, cascade: { type: 'boolean', description: 'Also remove the metrics that depend on the removed measures.' } } }),
+    semantic_model: form({ title: 'one model of the semantic layer', tag: ['what', 'semantic_model'], tagDescription: 'semantic_model: remove one model from the context\'s semantic layer — the measures and dimensions its semantic_model step declares on it, and its join.', required: ['context_id', 'semantic_model'], properties: { context_id: deleteId, semantic_model: { type: 'string', enum: modelKeys, description: 'The model to remove from the layer (one its semantic_model step reads, declares on or joins).' }, cascade: { type: 'boolean', description: 'Also remove the metrics that depend on the removed measures.' } } }),
   };
   // …and a kind of build a feature's context holds, in the form the feature writes for it (src/features.js)
   for (const d of deletes) if (deleteForms[d.what]) throw new Error(`delete_context: a feature's form '${d.what}' collides with the core's`);
@@ -314,7 +314,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [], de
     // added to the form reaches the method's contract with it
     'delete_context.context': untagged(deleteForms.context, 'what', 'Tear down an entire isolated context (delete its files + artifacts).'),
     'delete_context.pipeline_model': untagged(deleteForms.pipeline_model, 'what', 'Delete the pipeline model of a context (remove its view + semantic model) and re-parse.'),
-    'delete_context.semantic_model': untagged(deleteForms.semantic_model, 'what', 'Remove a semantic model\'s task additions from a context.'),
+    'delete_context.semantic_model': untagged(deleteForms.semantic_model, 'what', 'Remove one model from a context\'s semantic layer.'),
     'context.describe': { type: 'object', anyOf: describeForms.map((f) => ({ title: f.title, ...untagged(f, 'action', f.title) })) },
     'experiment.analyze': analyzeContract(),
     'experiment.check_split': checkSplitContract(),

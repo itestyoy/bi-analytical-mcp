@@ -20,6 +20,8 @@ const NAME_WEIGHT = 2; // a name/id match outranks a description match
 const DESC_WEIGHT = 1;
 const RECIPE_MATCHES = 3; // recipes listed for one query, at most
 const RECIPE_SPREAD = 0.15; // and only those within this of the best score
+const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
+const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 
 export class CatalogSearch {
@@ -160,13 +162,17 @@ export class CatalogSearch {
       ...(event_names.length ? [{ score: event_names[0].score, text: `See what event '${event_names[0].event}' of source '${event_names[0].source}' carries: semantic_index({ request: { source: '${event_names[0].source}', event: '${event_names[0].event}' } }).` }] : []),
       ...(property_matches.length ? [{ score: property_matches[0].score, text: `Drill into property '${property_matches[0].property}' of source '${property_matches[0].source}' for its real values + cardinality: semantic_index({ request: { source: '${property_matches[0].source}', property: '${property_matches[0].property}' } }).` }] : []),
       ...(column_matches.length ? [{ score: column_matches[0].score, text: `Column '${column_matches[0].column}' of source '${column_matches[0].source}' matches — drill its values with semantic_index({ request: { source: '${column_matches[0].source}', column: '${column_matches[0].column}' } }).` }] : []),
-      ...(recipe_matches.length ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
+      // (a recipe is said to cover the task only where it matches it closely — a loose one is listed, not recommended)
+      ...(recipe_matches.length && (recipe_matches[0].match === 'exact' || recipe_matches[0].score >= RECIPE_CLOSE) ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
     ];
     recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
 
     const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {
-      recs.unshift(`No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
+      const best = Math.max(...all.map((m) => m.score ?? 0));
+      recs.unshift(best < WEAK_MATCH
+        ? `Nothing in the catalog matches '${query}' closely — the matches below only resemble it (fuzzy, best ${best}); the data may not hold it. Check the event list (semantic_index({ request: {} })) before building on one of them.`
+        : `No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
     }
     if (!all.length) recs.push(`No catalog match for '${query}'${fuzzy ? '' : ' (fuzzy disabled)'}. Try semantic_index({ request: {} }) for the event list, a broader substring${fuzzy ? '' : ', or drop fuzzy:false'}.`);
     return recs.slice(0, 4);

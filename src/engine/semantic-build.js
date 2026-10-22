@@ -91,6 +91,8 @@ export const semanticBuildMethods = {
     const model = ctx.state.model;
     // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
     // do the models of its earlier builds (`_cN`): the base name owns the whole family.
+    // (what the build stored it as: a table unless it asked for a view)
+    const stored = ctx.state.pipeline_model?.materialized === 'view' ? 'view' : 'table';
     const consumers = this._checkpointConsumers(ctx.id); // forks reading a table built here
     const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model.replace(/_c\d+$/, ''));
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.pipeline_model;
@@ -104,7 +106,7 @@ export const semanticBuildMethods = {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (delete_context({ request: { context_id } })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `model definition removed; the stored ${stored} may persist in the warehouse until the context is dropped (delete_context({ request: { context_id } })) or the store cleans ephemeral objects` };
   },
 
   /**
@@ -237,8 +239,15 @@ export const semanticBuildMethods = {
     this._validate('delete_context.semantic_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
-    const add = ctx.state.additions[modelKey];
-    if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
+    const draft0 = ctx.state.draft;
+    // a model the layer only joins (its columns to group by, no measure or dimension of its own): the
+    // join goes, and with it the model
+    const joined = (draft0?.semantic?.join || []).some((j) => j.source === modelKey);
+    const add = ctx.state.additions[modelKey] || (joined ? { measures: [], dimensions: [] } : null);
+    if (!add) {
+      const held = [...new Set([...Object.keys(ctx.state.additions || {}), ...(draft0?.semantic?.join || []).map((j) => j.source)])];
+      return { context_id: ctx.id, removed: false, reason: `the semantic layer of this context neither declares measures or dimensions on '${modelKey}' nor joins it${held.length ? ` — it holds ${held.map((k) => `'${k}'`).join(', ')}` : ''}` };
+    }
     const taskMeasureNames = new Set(add.measures.map((m) => m.name));
     const dependents = ctx.state.metrics.filter((m) => [...measureRefs(m, ctx.state.metrics)].some((mm) => taskMeasureNames.has(mm)));
     if (dependents.length && !input.cascade) {

@@ -19,6 +19,9 @@ const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
  *  column, every step. */
 const included = (input) => ({ columns: !!input.include?.includes('columns'), steps: !!input.include?.includes('steps') });
 
+/** A step as an answer says it back: where it stands, what it is, and the name it makes. */
+const stepBrief = (s) => ({ index: s.index, stage: s.stage, ...(s.name !== undefined ? { name: s.name } : {}) });
+
 /** What a change to the steps did, said in the answer of the build it started. */
 const said = (action) => ({ edit_step: 'The step is replaced', insert_step: 'The step is put in', delete_step: 'The step is removed' })[action] || 'The steps are added';
 
@@ -515,7 +518,8 @@ export const pipelineDraftMethods = {
     const all = this._draftSteps(draft, physSet);
     const resp = {
       context_id: ctx.id, action: 'add_steps',
-      ...(includeSteps ? { steps: all } : { steps_added: all.slice(-effects.length), steps_count: all.length }),
+      // (each said by where it stands and what it is: the caller just sent them — include: ["steps"] gives them whole)
+      ...(includeSteps ? { steps: all } : { steps_added: all.slice(-effects.length).map(stepBrief), steps_count: all.length }),
       // what EACH step did to the data, in order: read it top to bottom to see where it narrowed or widened
       step_effects: effects,
       column_count: after.length,
@@ -718,7 +722,7 @@ export const pipelineDraftMethods = {
     const resp = {
       context_id: ctx.id, action, step_index: stepIndex ?? draft.stages.length,
       ...(leanSteps
-        ? { ...(changedStage ? { step: allSteps.find((s) => s.index === (stepIndex ?? draft.stages.length)) || allSteps[allSteps.length - 1] } : {}), steps_count: allSteps.length }
+        ? { ...(changedStage ? { step: stepBrief(allSteps.find((s) => s.index === (stepIndex ?? draft.stages.length)) || allSteps[allSteps.length - 1]) } : {}), steps_count: allSteps.length }
         : { steps: allSteps }),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
@@ -735,7 +739,6 @@ export const pipelineDraftMethods = {
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
-        ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include: ["steps"] or use build_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
       ],
     };

@@ -96,17 +96,18 @@ test('bundle is integrated as a helper across the index views', async () => {
   // overview: points at the { bundle } view in next_actions + recommendations.
   const ov = await e.semantic_index();
   assert.ok(ov.next_actions.some((a) => /bundle: '/.test(a.call) && /source: '/.test(a.call)), 'overview next_actions includes the bundle view, with its source');
-  assert.ok(ov.recommendations.some((r) => /semantic_index\(\{ request: \{ source: '[a-z_]+', bundle:/.test(r)), 'overview recommends the bundle view per source');
+  // (a recommendation that only repeats a next_actions call is left out: the call is said once)
+  assert.ok(!ov.recommendations.some((r) => ov.next_actions.some((a) => r.includes(a.call))), 'no recommendation repeats a next_actions call');
 
   // { source } (events): surfaces the app/bundle column + a pointer.
   const ev = await e.semantic_index({ source: 'events' });
   assert.equal(ev.bundle_column, 'bundle_id');
   assert.ok(/bundle/i.test(ev.bundle_note));
-  assert.ok(ev.recommendations.some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
+  assert.ok([...ev.recommendations, ...ev.next_actions.map((a) => a.call)].some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
 
   // { event }: with >1 app, flags that a property may be empty for some apps.
   const evt = await e.semantic_index({ source: 'events', event: 'ad_finished' });
-  assert.ok(evt.recommendations.some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
+  assert.ok([...evt.recommendations, ...evt.next_actions.map((a) => `${a.call} ${a.why}`)].some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
 
   // { search }: a query matching an app routes to its bundle view.
   const s = await e.semantic_index({ search: 'relax' });

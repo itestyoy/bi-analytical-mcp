@@ -23,6 +23,14 @@ const exampleColumn = (m) => {
   return (dims.find(([, d]) => d?.type !== 'time') || dims[0] || [])[0];
 };
 
+/** A view's recommendations less those that only repeat a call its next_actions already give. */
+function saidOnce(out) {
+  if (!out || !Array.isArray(out.next_actions) || !Array.isArray(out.recommendations)) return out;
+  const calls = out.next_actions.map((a) => a?.call).filter(Boolean);
+  const recommendations = out.recommendations.filter((r) => !calls.some((call) => String(r).includes(call)));
+  return { ...out, recommendations };
+}
+
 export const semanticIndexMethods = {
   // Not a tool of its own — reached through semantic_index({ request: { recipe } }) and the skills.
   _recipe(input) {
@@ -57,6 +65,10 @@ export const semanticIndexMethods = {
    * Pass at most one drill-down key (mutually exclusive views).
    */
   async semantic_index(input = {}) {
+    return saidOnce(await this._semanticIndexView(input));
+  },
+
+  async _semanticIndexView(input = {}) {
     this._validate('semantic_index', input);
     // The view contract IS the schema: one branch per view, each listing exactly the fields it
     // takes and the vocabulary it accepts. Two views at once, a paging field on a view that does
@@ -115,6 +127,16 @@ export const semanticIndexMethods = {
     if (input.source) return this._indexModel(input);
 
     return this._indexOverview(input);
+  },
+
+  /** { data_through: { <source>: <its latest day> } } for every source with a time axis — best effort
+   *  (cached by the probe), and nothing where the warehouse was not asked. */
+  async _dataThrough() {
+    const c = this.catalog;
+    const keys = c.modelKeys().filter((k) => c.getModel(k).time?.column && !c.getModel(k).built);
+    const days = await Promise.all(keys.map(async (k) => { try { const f = await this.probe.dataFreshness(k); return f ? [k, String(f).slice(0, 10)] : null; } catch { return null; } }));
+    const known = days.filter(Boolean);
+    return known.length ? { data_through: Object.fromEntries(known) } : {};
   },
 
   /** { source }: one model in depth — its entities, time and dimensions with real values, and the warehouse's own columns. */
@@ -212,7 +234,8 @@ export const semanticIndexMethods = {
         out.bundle_column = c.bundleColumn(k);
         out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
-      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }. The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
+      const flat = c.eventProps(k).filter((p) => c.eventPropertySpec(p, k)?.column).length;
+      out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ request: { source: '${k}', event } }), one drilled as { source: '${k}', property }); a column of its own (the event column, the app column) is drilled as { source: '${k}', column }.${flat ? ` A property held in a column of its own (${flat} of them here, listed under columns too) is named { property } — the spelling every tool takes, the semantic layer's included; a pipeline also reads it as { column }.` : ''} The \`columns\` above are what you can reference in a pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
     } else {
       // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
       // keys them by (this model, column), so each source has its own value space.
@@ -619,7 +642,7 @@ export const semanticIndexMethods = {
   },
 
   /** The default view: a compact OVERVIEW of the catalog — no per-property dump, no warehouse calls. */
-  _indexOverview(input) {
+  async _indexOverview(input) {
     const c = this.catalog;
   const models = c.modelKeys().map((k) => {
     const m = c.getModel(k);
@@ -657,6 +680,8 @@ export const semanticIndexMethods = {
     dialect: c.dialect,
     // the date a relative window ("last week", "yesterday") is resolved against — the surface has no other
     today: new Date().toISOString().slice(0, 10),
+    // how far each source's data reaches (its latest moment): a relative window past it is empty
+    ...(await this._dataThrough()),
     models,
     // The events FACTS — independent and equal; none is a default. Every tool takes the
     // source as its own argument (optional only when there is exactly one).

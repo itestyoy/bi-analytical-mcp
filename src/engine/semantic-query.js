@@ -910,6 +910,24 @@ export const semanticQueryMethods = {
     return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(wants(input, 'plan') ? { plan: speak(res.plan) } : {}) };
   },
 
+  /** A stored result with what the same query says of its rows when it is not stored — its warnings,
+   *  recommendations, provenance and the columns its group_by gave (the window, the data's freshness,
+   *  a slowly-changing model's note): the rows are the table's, the notes the query's. */
+  async _withNotes(out, respond) {
+    if (!out || out.ok === false || !Array.isArray(out.rows)) return out;
+    let said;
+    try { said = await respond({ ok: true, rows: out.rows, columns: out.columns }); } catch { return out; }
+    if (!said || said.ok === false) return out;
+    const join = (k) => [...new Set([...(out[k] || []), ...(said[k] || [])])];
+    return {
+      ...out,
+      ...(said.group_by_resolved && !out.group_by_resolved ? { group_by_resolved: said.group_by_resolved } : {}),
+      ...(said.provenance && !out.provenance ? { provenance: said.provenance } : {}),
+      warnings: join('warnings'),
+      recommendations: join('recommendations'),
+    };
+  },
+
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
    *  the query — stored as a table after its steps with materialize; else run by MetricFlow when it
    *  says the whole of it (`mf query`), or over the SQL it compiles with the steps after it
@@ -920,7 +938,7 @@ export const semanticQueryMethods = {
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
       // (stored, the steps order the rows: MetricFlow's own order would be undone by them)
       const out = input.materialize && !explain
-        ? await this._materialize(ctx, tail.steps.length ? { ...qopts, orderBy: [] } : qopts, input, rename, id, speak, { columns: tail.columns, steps: tail.steps })
+        ? await this._withNotes(await this._materialize(ctx, tail.steps.length ? { ...qopts, orderBy: [] } : qopts, input, rename, id, speak, { columns: tail.columns, steps: tail.steps }), respond)
         : await respond(oneForm(tail.viaSql
           ? await this._metricRead(ctx, { qopts, input, rename, explain, tail })
           : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: wants(input, 'plan') }), rename), tail.outputColumns));
@@ -1069,14 +1087,27 @@ export const semanticQueryMethods = {
       // lag / lead over the result's rows compare a row with its neighbour — not with the previous period
       if ((q.tail || []).some((st) => st?.stage === 'compute' && exprCalls(st.expr).some((c) => c.fn === 'lag' || c.fn === 'lead'))) recs.push(NEIGHBOUR_NOTE);
       // said where a step after the metrics step folds the per-bucket values again (an aggregate or a pivot)
-      const refolds = (q.tail || []).some((st) => st?.stage === 'aggregate' || st?.stage === 'pivot');
+      // — and folds them ACROSS the time buckets: one that keeps metric_time among its keys reads a
+      // bucket's value as it is (a cohort grid: one value per cell)
+      const timeKey = (x) => (x && typeof x === 'object' ? x.time !== undefined : typeof x === 'string' && x.startsWith('metric_time'));
+      const keepsTime = (st) => [...(st.group_by || []), ...(st.stage === 'pivot' ? [st.on] : [])].some(timeKey);
+      const refolds = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st));
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — a step after the metrics step folds the per-bucket values, and their sum counts a user once per bucket. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       // a slowly-changing model's attribute: a user whose version changed inside the window is counted
       // under each version's value, so the groups' distinct counts add up to more than the whole
       const c = this._catalogOf(ctx);
-      const versioned = [...new Set(q.groupBy.map((g) => g.source ?? g.semantic_model?.at(-1)).filter((m) => m && c.models[m]?.scd))];
+      const scdModels = [...new Set(q.groupBy.map((g) => g.source ?? g.semantic_model?.at(-1)).filter((m) => m && c.models[m]?.scd))];
+      // (said where a grouped column of it does change between a key's versions — or that is not known)
+      const versioned = [];
+      if (usesDistinct) {
+        for (const m of scdModels) {
+          const cols = q.groupBy.filter((g) => g.source === m && g.column !== undefined).map((g) => g.column);
+          if (cols.length && await this.probe.versionsDiffer(m, cols) === false) continue;
+          versioned.push(m);
+        }
+      }
       if (usesDistinct && versioned.length) {
         recs.push(`count_distinct grouped by ${versioned.map((m) => `'${m}'`).join(', ')}, a slowly-changing model: a user whose version changed inside the window is counted under each value it held, so the groups add up to more than the users in all — read the total from a query without that group_by, not from their sum.`);
       }

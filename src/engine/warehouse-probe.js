@@ -164,6 +164,27 @@ export class WarehouseProbe {
    * scan, not a wall-clock timer. Best-effort: null with no runner/time column, if it fails, or if
    * it is slower than the interactive grace (bestEffort) — the next call reads the primed cache.
    */
+  /**
+   * Whether any key of a slowly-changing model holds versions that differ in one of `columns` — the
+   * one case its versions split a key across groups. true / false, or null where the warehouse was not
+   * asked (best effort, cached until the next index scan).
+   */
+  async versionsDiffer(modelKey, columns) {
+    const base = this.readDir();
+    const m = this.catalog.getModel(modelKey);
+    const key = Object.values(this.catalog.entitiesOf(modelKey)).find((e) => e.type === 'primary' || e.type === 'unique')?.key?.map((p) => p.column) || [];
+    if (!this.runner || !base || !key.length || !columns.length) return null;
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
+    const d = getDialect(this.catalog.dialect);
+    const q = (n) => d.quoteIdent(n);
+    return this.bestEffort(`versions:${modelKey}:${columns.join(',')}:${gen}`, async () => {
+      try {
+        const r = await this.runner.show(base, `SELECT 1 AS changed FROM {{ ref('${m.dbt_model}') }} GROUP BY ${key.map(q).join(', ')} HAVING ${columns.map((col) => `COUNT(DISTINCT ${q(col)}) > 1`).join(' OR ')}`, 1);
+        return r.ok ? (r.rows || []).length > 0 : null;
+      } catch { return null; }
+    });
+  }
+
   async dataFreshness(sourceKey) {
     const base = this.readDir();
     const m = this.catalog.getModel(sourceKey);

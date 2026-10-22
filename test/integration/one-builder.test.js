@@ -385,3 +385,26 @@ test('a numeric event property declared a dimension reads back as a number; a se
   const typeOf = Object.fromEntries(dry.output_columns.map((c) => [c.name, c.type]));
   assert.deepEqual([typeOf.evts, typeOf.spent], ['int', 'numeric']);
 });
+
+test('a model the layer only joins is removed with its join: grouping by it is refused after, the metrics stand', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.build_model({ action: 'start', name: 'joined_only', source: 'events', materialize: true, steps: [
+    { stage: 'semantic_model', join: [USERS], measures: [{ name: 'evts', expr: { fn: 'count' } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }] },
+  ] });
+  await taskResult(engine, out.materialize.task_id);
+  const country = { source: 'users', column: 'country' };
+  const before = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] });
+  assert.equal(before.ok, true, JSON.stringify(before.error));
+  const removed = await engine.delete_context({ what: 'semantic_model', context_id: out.context_id, semantic_model: 'users' });
+  assert.equal(removed.removed, true, JSON.stringify(removed));
+  const { steps } = await engine.build_model({ action: 'preview', context_id: out.context_id });
+  assert.equal(steps.find((x) => x.stage === 'semantic_model').join, undefined);
+  await taskResult(engine, (await engine.raw.build_model({ action: 'materialize', context_id: out.context_id })).task_id);
+  await assert.rejects(() => engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [country] })] }), /users/);
+  const total = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'])] });
+  const [{ n }] = (await wh.query(`select count(*) as n from fct_analytics_events where device_time >= '${WINDOW.start}' and device_time < '2026-02-01'`)).rows;
+  assert.equal(num(total.rows[0].evts), num(n));
+  // a model the layer neither declares on nor joins: said so, with what it holds
+  const none = await engine.delete_context({ what: 'semantic_model', context_id: out.context_id, semantic_model: 'acquisition' });
+  assert.deepEqual([none.removed, /holds 'events'/.test(none.reason)], [false, true], JSON.stringify(none));
+});

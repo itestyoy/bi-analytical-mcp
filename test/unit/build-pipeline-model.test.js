@@ -331,7 +331,10 @@ test('build_model: edit_step mutates in place, and a fork of steps 1..N goes bac
   // edit step 1 in place (replace the where literal) — count unchanged.
   const ed = await e.build_model({ action: 'edit_step', context_id: d, index: 1, step: { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] } });
   assert.equal(ed.action, 'edit_step');
-  assert.deepEqual(ed.step.conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
+  // (the answer says the step by where it stands; the draft holds it whole)
+  assert.deepEqual(ed.step, { index: 1, stage: 'where' });
+  const whole = await e.build_model({ action: 'preview', context_id: d });
+  assert.deepEqual(whole.steps[0].conditions[0].args[1], { value: 'tutorial' }, 'step 1 replaced in place');
   assert.deepEqual([ed.step.index, ed.steps_count], [1, 2], 'edit does not change the step count');
   // back to step 1: a fork of steps 1..1, the original untouched
   const back = await e.build_model({ action: 'fork', context_id: d, name: 'edit_back', after: 1, include: ['steps'] });

@@ -187,9 +187,13 @@ test('4b. an edit of the semantic_model step adds a payers metric (re-query = 7 
   // [derived] the three spellings read the same two stored metrics: 85 / 7
   for (const n of names) close(num(r.rows[0][n]), 85 / 7);
 
-  // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
-  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [{ time: 'metric_time', grain: 'day' }] }] });
-  assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
+  // Recommendation #4: count_distinct per day folded again after the metrics step is non-additive →
+  // prefer HLL sketches; the same series read as it is carries no such warning.
+  const day = { time: 'metric_time', grain: 'day' };
+  const byDay = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }] });
+  assert.ok(!byDay.recommendations.some((x) => /not additive/i.test(x)), `a series read as it is: ${JSON.stringify(byDay.recommendations)}`);
+  const summed = await engine.query_model({ context_id: S.semCtx, steps: [{ stage: 'metrics', metrics: ['payers'], group_by: [day] }, { stage: 'aggregate', measures: [{ name: 'payer_days', expr: { fn: 'sum', args: [{ metric: 'payers' }] } }] }] });
+  assert.ok(summed.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time refolded should warn + suggest HLL: ${JSON.stringify(summed.recommendations)}`);
 });
 
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {

@@ -398,7 +398,8 @@ export const pipelineMaterializeMethods = {
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
-      row_count: rows.length, rows, model_sql: out.sql, build,
+      // (its SQL is the preview's — build_model({ action: 'preview' }) — not repeated with every read of its rows)
+      row_count: rows.length, rows, build,
       // the rows shown are the table's first ones: in order when the pipeline ends sorted
       page: pageBlock({ offset: 0, limit: SHOWN_ROWS, returned: rows.length, has_more: more, ordered: endsSorted(input.pipeline?.stages) }),
       ...(models.length > 1 ? { models: chainInfo } : {}),

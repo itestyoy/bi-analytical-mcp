@@ -85,6 +85,10 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
+    recommend: (available, p = {}) => [
+      `Reference any column available now in the next stage (${listSome(available)}; include: ["columns"] lists them all).`,
+      ...(exprCalls(p.expr).some((c) => c.fn === 'lag' || c.fn === 'lead') ? [NEIGHBOUR_NOTE] : []),
+    ],
     // the expression grammar, once: every stage that takes an expression references it — the row
     // expression built for the expression places of the tool (`places`: what its stages' expressions take),
     // with the window its window forms refer to where one of them takes a window (a window function's
@@ -493,6 +497,9 @@ export function registerStage(name, def) { STAGES[name] = def; }
 export function stageDef(name) { return Object.hasOwn(STAGES, name) ? STAGES[name] : null; }
 
 /** The first few column names of a step's output, for a hint. */
+/** What lag / lead read: the neighbouring ROW in the window's order — said where a period is compared. */
+export const NEIGHBOUR_NOTE = 'lag / lead read the neighbouring ROW in the window\'s order, not the neighbouring period: where a day (a week…) has no row, the previous row is an earlier one. For a change against the previous calendar period, make sure every period has a row (or compare dates with date_diff).';
+
 export function listSome(columns, n = 6) {
   return `${columns.slice(0, n).map((c) => c.name).join(', ')}${columns.length > n ? ', …' : ''}`;
 }

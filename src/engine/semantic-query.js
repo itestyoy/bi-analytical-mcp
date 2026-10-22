@@ -8,7 +8,7 @@
 
 import { ToolError } from '../validate.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { measureRefs } from '../compile.js';
+import { measureRefs, inputMetrics } from '../compile.js';
 import { PARTITION_DIM, renderContext } from '../yaml-render.js';
 import { whereSql, referenceComparisons } from '../predicate.js';
 import { REFS, REF_PLACES, refAt, refKind } from '../schema/refs.js';
@@ -16,8 +16,8 @@ import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf } from '../g
 import { formatDbtError } from '../dbt/index.js';
 import { getDialect } from '../dialects/index.js';
 import { renderRead, stageAt, STAGE_PLACES } from '../pipeline.js';
-import { eachNode } from '../pipeline/compute.js';
-import { stageDef } from '../pipeline/stages.js';
+import { eachNode, exprCalls } from '../pipeline/compute.js';
+import { stageDef, NEIGHBOUR_NOTE } from '../pipeline/stages.js';
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../time-range.js';
 import { uniqueRefs, pageBlock, samplingNote } from './helpers.js';
 import { KEPT_ROWS, METRICS_STEP } from '../schema/fields.js';
@@ -40,6 +40,13 @@ function readOnly(q) {
   const extra = ['time_range', 'materialize', 'include'].filter((k) => q[k] !== undefined);
   if (extra.length) throw new ToolError(`${extra.join(', ')} ${extra.length > 1 ? 'belong' : 'belongs'} to a metric query — one with a metrics step; a query without one reads the context's stored table, and takes its steps, limit and dry_run${extra.includes('time_range') ? '. A window of its rows is a where step on its time column: { stage: "where", conditions: [{ fn: "gte", args: [{ column: <its time column> }, { value: <start> }] }, { fn: "lt", args: [{ column: <its time column> }, { value: <the day after the end> }] }] }' : ''}`, { stage: 'validate', field: extra[0] });
   return q;
+}
+
+/** The window's warnings, less the one about today's incomplete period where the data ends earlier
+ *  (`fresh`, its latest moment): the staleness note says that, and today's partial day is not in it. */
+function openPeriod(warnings, fresh) {
+  if (!fresh || String(fresh).slice(0, 10) >= new Date().toISOString().slice(0, 10)) return warnings;
+  return warnings.filter((w) => !w.startsWith('The window includes the current incomplete period'));
 }
 
 export const semanticQueryMethods = {
@@ -121,6 +128,51 @@ export const semanticQueryMethods = {
     if (kind === 'entity') return this._taskEntity(ctx, ref.entity, at, field);
     if (kind === 'dimension') return this._taskComputed(ctx, ref, at, field);
     return this._taskColumn(ctx, kind, ref, at, field);
+  },
+
+  /** The metrics among `names` — or the metrics they are built from — that accumulate over a trailing
+   *  window or to date within a grain: each value is the window ending at a metric_time bucket.
+   *  → [{ metric, through, how }] (`through`: the asked metric it is an input of). */
+  _windowedMetrics(defs, names) {
+    const byName = new Map(defs.map((m) => [m.name, m]));
+    const out = [];
+    for (const name of names) {
+      const seen = new Set();
+      const walk = (m) => {
+        if (!m || seen.has(m.name)) return;
+        seen.add(m.name);
+        const ctp = m.type === 'cumulative' ? m.type_params?.cumulative_type_params || {} : {};
+        if (ctp.window || ctp.grain_to_date) out.push({ metric: m.name, through: m.name === name ? null : name, how: ctp.window ? `over a trailing ${ctp.window}` : `to date within each ${ctp.grain_to_date}` });
+        for (const n of inputMetrics(m)) walk(byName.get(n));
+      };
+      walk(byName.get(name));
+    }
+    return out;
+  },
+
+  /** _windowedMetrics for the project's own layer, read off each metric's definition. */
+  _projectWindowed(layer, names) {
+    const out = [];
+    for (const name of names) {
+      const seen = new Set();
+      const walk = (n) => {
+        const def = n && !seen.has(n) ? layer.definition(n) : null;
+        if (!def) return;
+        seen.add(n);
+        if (def.window || def.grain_to_date) out.push({ metric: n, through: n === name ? null : name, how: def.window ? `over a trailing ${def.window}` : `to date within each ${def.grain_to_date}` });
+        for (const x of [def.numerator, def.denominator, def.input, def.base, ...(def.inputs || [])]) walk(x?.metric);
+      };
+      walk(name);
+    }
+    return out;
+  },
+
+  /** A windowed metric is a value per metric_time bucket: a query of it groups by metric_time — refused
+   *  in the call otherwise (MetricFlow would refuse it in the task). */
+  _needsMetricTime(windowed, groupBy, at) {
+    if (!windowed.length || groupBy.some((g) => String(g).startsWith('metric_time__'))) return;
+    const w = windowed[0];
+    throw new ToolError(`${at}: '${w.through ?? w.metric}'${w.through ? ` reads '${w.metric}', which` : ''} accumulates ${w.how} — each value is that window ending at one metric_time bucket, so the query groups by metric_time: add { time: "metric_time", grain: "day" } to the metrics step's group_by (the last day of the window is then the value as of it). A total over the whole window with no time grain is a simple metric over a time_range.`, { stage: 'validate', field: 'steps' });
   },
 
   /** What a metric's values are, as the steps after the metrics step read them: a count of rows or of
@@ -560,6 +612,7 @@ export const semanticQueryMethods = {
       columns.push({ name: column, type: grain ? 'time' : 'unknown' });
       if (!time) groupByResolved[labelOf(item)] = column;
     }
+    this._needsMetricTime(this._projectWindowed(layer, metrics), groupBy, q.at);
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
     // the where steps before the metrics step: each reference names one item MetricFlow listed, as
@@ -915,6 +968,7 @@ export const semanticQueryMethods = {
       if (r.kind !== 'time') groupByResolved[r.label] = r.column;
       columns.push({ name: r.column, type: r.type });
     }
+    this._needsMetricTime(this._windowedMetrics(ctx.state.metrics || [], metrics), groupBy, q.at);
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
@@ -1002,11 +1056,18 @@ export const semanticQueryMethods = {
         if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
-      if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).');
+      if (pageRows.length === 0) {
+        // a window that ends before the data does may lie before it begins: say what is known of the data's range
+        const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
+        const before = fresh && endDay && endDay < String(fresh).slice(0, 10);
+        recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
+      }
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
       const usesDistinct = distinctMeasures.size && metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...measureRefs(metric, ctx.state.metrics)].some((dm) => distinctMeasures.has(dm)); });
+      // lag / lead over the result's rows compare a row with its neighbour — not with the previous period
+      if ((q.tail || []).some((st) => st?.stage === 'compute' && exprCalls(st.expr).some((c) => c.fn === 'lag' || c.fn === 'lead'))) recs.push(NEIGHBOUR_NOTE);
       // said where a step after the metrics step folds the per-bucket values again (an aggregate or a pivot)
       const refolds = (q.tail || []).some((st) => st?.stage === 'aggregate' || st?.stage === 'pivot');
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
@@ -1036,7 +1097,7 @@ export const semanticQueryMethods = {
           data_freshness: fresh,
           ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
         },
-        warnings: [...windowWarnings, ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
+        warnings: [...openPeriod(windowWarnings, fresh), ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
         recommendations: recs,
       };
       return out;
@@ -1093,7 +1154,8 @@ function oneForm(raw, columns = []) {
   if (!time.size && !numeric.size && !flags.size) return raw;
   const written = (k, v) => {
     if (typeof v !== 'string') return v;
-    if (time.has(k)) return v.replace(/^(\d{4}-\d{2}-\d{2}) (?=\d)/, '$1T');
+    // one spelling of a moment, whichever path ran the query: a date alone is its midnight
+    if (time.has(k)) return /^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T00:00:00` : v.replace(/^(\d{4}-\d{2}-\d{2}) (?=\d)/, '$1T');
     if (flags.has(k)) return /^true$/i.test(v) ? true : /^false$/i.test(v) ? false : v;
     if (!numeric.has(k) || v.trim() === '' || !Number.isFinite(Number(v))) return v;
     return /^\s*-?\d+\s*$/.test(v) && !Number.isSafeInteger(Number(v)) ? v : Number(v);

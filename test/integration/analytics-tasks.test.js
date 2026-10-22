@@ -546,4 +546,14 @@ test('a cumulative metric over a time_range sums the days before the range that 
   const later = await engine.query_model({ ...query, steps: [cumulative, { stage: 'where', conditions: [{ fn: 'gte', args: [{ column: 'metric_time_day' }, { value: '2026-01-04' }] }] }, ...byDay] });
   assert.equal(later.ok, true, JSON.stringify(later.error));
   assert.deepEqual(later.rows.map((x) => [num(x.daily), num(x.two_day), num(x.to_date)]), got.slice(1), '[where step] the last two days, as the whole query gave them');
+  // a windowed metric is a value per metric_time bucket: a query of it without metric_time is refused in
+  // the call, saying so — before any task — and one with no window stands without it
+  await assert.rejects(() => engine.raw.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['two_day'] }] }), /'two_day' accumulates over a trailing 2 days? — .*groups by metric_time/);
+  const whole = await engine.query_model({ ...query, steps: [{ stage: 'metrics', metrics: ['to_date'] }] });
+  assert.equal(whole.ok, true, JSON.stringify(whole.error));
+  // validate compiles and runs it as a query of it must be written: grouped by metric_time
+  const checked = await taskResult(engine, (await engine.raw.context({ action: 'describe', context_id: created.context_id, validate: true, time_range: query.time_range })).task_id);
+  assert.deepEqual(checked.compiled.filter((c) => !c.ok), [], JSON.stringify(checked.compiled));
+  assert.deepEqual(checked.ran.metrics.filter((c) => !c.ok), [], JSON.stringify(checked.ran.metrics));
+  assert.equal(checked.valid, true, JSON.stringify(checked));
 });

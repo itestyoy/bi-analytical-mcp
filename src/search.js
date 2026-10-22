@@ -20,6 +20,7 @@ const NAME_WEIGHT = 2; // a name/id match outranks a description match
 const DESC_WEIGHT = 1;
 const RECIPE_MATCHES = 3; // recipes listed for one query, at most
 const RECIPE_SPREAD = 0.15; // and only those within this of the best score
+const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 
 export class CatalogSearch {
   constructor({ catalog, recipes, valueIndex }) {
@@ -129,9 +130,19 @@ export class CatalogSearch {
       if (ref.property !== undefined) return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
       return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null };
     });
-    const recommendations = this._recommend({ query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches });
+    // A loose match is said only near the best one: a query that names something exactly (or nearly)
+    // is answered by that, not by every name its letters resemble — within a list, an exact match
+    // leaves out the list's loose ones; across the lists, a match far below the best is left out.
+    const lists = { event_names, property_matches, column_matches, value_matches, recipe_matches };
+    const best = Math.max(0, ...Object.values(lists).flat().map((m) => m.score ?? 0));
+    const near = (list) => {
+      const exact = list.some((m) => m.match === 'exact');
+      return list.filter((m) => m.match === 'exact' || (!exact && (m.score ?? 0) >= best - MATCH_SPREAD));
+    };
+    for (const k of Object.keys(lists)) lists[k] = near(lists[k]);
+    const recommendations = this._recommend({ query, fuzzy, ...lists });
 
-    return { query, fuzzy, event_names, property_matches, column_matches, value_matches, recipe_matches, recommendations };
+    return { query, fuzzy, ...lists, recommendations };
   }
 
   /** Concrete next-move guidance from the matches (≤4), with a did-you-mean note. */

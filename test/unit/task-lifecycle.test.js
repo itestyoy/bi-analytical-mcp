@@ -344,7 +344,8 @@ test('a metric query answers in the caller\'s names whatever its steps — order
   ]) {
     const out = await read(steps);
     assert.equal(out.status, 'done', JSON.stringify(out.error || {}));
-    assert.deepEqual(out.rows, rows, JSON.stringify(steps));
+    // (a day comes back as its midnight, the one spelling of a moment whichever path ran the query)
+    assert.deepEqual(out.rows, rows.map((r) => ({ ...r, metric_time_day: `${r.metric_time_day}T00:00:00` })), JSON.stringify(steps));
     assert.deepEqual(out.columns.map((c) => c.name), ['metric_time_day', 'cnt'], JSON.stringify(steps));
     // (a page in no stated order says so; an ordered one has nothing to warn of)
     assert.equal(out.page.ordered, ordered ? undefined : false, JSON.stringify(steps));
@@ -523,7 +524,8 @@ test('a stored result is paged by the warehouse, each page in one shape, the bui
   const id = build.materialize.task_id;
   const first = await taskResult(e, id);
   assert.deepEqual([first.status, first.rows.length, first.page.has_more], ['done', 50, true]);
-  const details = ['model_sql', 'assumptions', 'output_columns', 'build'];
+  const details = ['assumptions', 'output_columns', 'build'];
+  assert.equal(first.model_sql, undefined, 'the SQL is the preview\'s, not repeated with the rows');
   for (const k of details) assert.ok(first[k] !== undefined, `the first page says the build's ${k}`);
   // a page within the rows held and a page read from the table: the same shape, with where the rows come from
   const held = await one(e.query_model({ task_ids: [id], offset: 10, limit: 5 }));

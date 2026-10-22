@@ -190,7 +190,7 @@ models:
           meta: { mcp: { property: true } }
       - name: status_of_event_data
         data_type: string
-        description: "Result status. Events: iap_*, ad_*."
+        description: "Result status of a purchase. Events: iap_*."
         config:
           meta: { mcp: { property: true } }
       - name: ad_type_of_event_data

@@ -214,7 +214,15 @@ export const semanticPreviewMethods = {
       }
       return out;
     };
-    const compiled = await eachOrAll(names, (ms) => ({ metrics: ms, explain: true }));
+    // a metric that accumulates over a window (or to date within a grain) is a value per metric_time
+    // bucket: it is compiled and run grouped by metric_time, as a query of it must be
+    const windowed = new Set((ctx.state.engine === 'project' ? this._projectWindowed(layer, names) : this._windowedMetrics(ctx.state.metrics || [], names)).map((w) => w.through ?? w.metric));
+    const timed = (ms) => (ms.some((m) => windowed.has(m)) ? { groupBy: ['metric_time__day'] } : {});
+    const apart = async (items, opts) => [
+      ...await eachOrAll(items.filter((m) => !windowed.has(m)), opts),
+      ...await eachOrAll(items.filter((m) => windowed.has(m)), (ms) => ({ ...opts(ms), groupBy: ['metric_time__day', ...(opts(ms).groupBy || [])] })),
+    ];
+    const compiled = await apart(names, (ms) => ({ metrics: ms, explain: true }));
     const result = {
       ok: true, context_id: ctx.id, layer: ctx.state.engine === 'project' ? 'project' : 'task',
       compiled: compiled.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? {} : { error: c.error }) })),
@@ -222,7 +230,7 @@ export const semanticPreviewMethods = {
     if (bounds) {
       await this._ensureTimeSpineBuilt(ctx.id);
       const good = compiled.filter((c) => c.ok).map((c) => c.item);
-      const ran = await eachOrAll(good, (ms) => ({ metrics: ms, ...window, limit: 1 }));
+      const ran = await apart(good, (ms) => ({ metrics: ms, ...window, limit: 1 }));
       const valueOf = (c) => (c.raw?.rows?.[0] ? c.raw.rows[0][c.item] ?? null : null);
       const dims = [];
       for (const sm of scope.semanticModels) {
@@ -238,7 +246,7 @@ export const semanticPreviewMethods = {
         if (!via) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no metric of it in view ran over the window — nothing to cut its rows with' }); continue; }
         if (!listed.groupBys) { dims.push({ semantic_model: sm.name, checked: false, reason: `MetricFlow did not list what ${via} can be grouped by${listed.error ? `: ${listed.error}` : ''}` }); continue; }
         if (!cuts.length) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no dimension or entity to cut by' }); continue; }
-        const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: cs.map((c) => c.token), ...window, limit: 1 }));
+        const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: [...(timed([via]).groupBy || []), ...cs.map((c) => c.token)], ...window, limit: 1 }));
         const failed = r.filter((x) => !x.ok).map((x) => ({ [x.item.entity ? 'entity' : 'dimension']: x.item.name, error: x.error }));
         // a task's layer names an events source's time and partition columns by MetricFlow's own names
         // (event_time, partition_day): said as the source's columns, as a query names them

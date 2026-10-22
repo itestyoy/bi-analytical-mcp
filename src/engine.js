@@ -645,6 +645,8 @@ export class Engine {
     const asked = ['metric', 'semantic_model', 'validate', 'time_range'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (asked.length && !hasLayer) throw new ToolError(`context ${ctx.id} holds no semantic layer — ${asked.join(', ')} describe${asked.length > 1 ? '' : 's'} one (a build's semantic_model step makes it); context({ request: { action: 'describe', context_id: '${ctx.id}' } }) shows what it holds`, { stage: 'validate', field: asked[0] });
     if (input.validate) return this._describeLayer(ctx, input);
+    // one metric or one semantic model asked: that part of the layer, not the whole context again
+    if (input.metric !== undefined || input.semantic_model !== undefined) return this._describeLayer(ctx, input);
     const base = await this._describeBase(ctx);
     return hasLayer ? { ...base, ...(await this._describeLayer(ctx, input)) } : base;
   }

@@ -227,7 +227,7 @@ export const semanticBuildMethods = {
         ? `Query it: query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
         : `This context has no metric to query yet: add one to its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materialize.`,
       recommendations: [
-        `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column } (e.g. ${exText}), a declared event property { source, property }, a computed dimension { semantic_model: [<its source>], dimension } — or by { time: 'metric_time', grain }.`,
+        `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by; e.g. ${exText}), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column }, a declared event property { source, property }, a computed dimension or a column of a built table { semantic_model: [<its model>], dimension } — or by { time: 'metric_time', grain }.`,
         `Change it later by editing its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materializing again; inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };

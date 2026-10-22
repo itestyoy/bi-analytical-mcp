@@ -156,11 +156,15 @@ export function defName(node, taken, sites = []) {
   const sources = [...new Set(sites.map((x) => x.source))];
   const bySite = keys.length === 1 ? `${sources.length === 1 && sources[0] ? `${sources[0]}_` : ''}${keys[0]}` : null;
   const titled = typeof node.title === 'string' && node.title.length <= 40 ? node.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') : null;
+  // an object by the fields it requires ({ name, expr } → name_expr), a union by what its branches are
+  const fieldsOf = (n) => (n.required?.length ? n.required : Object.keys(n.properties || {}).slice(0, 1)).slice(0, 3).join('_');
+  const branchName = (b) => (typeof b?.title === 'string' ? b.title : b?.properties ? fieldsOf(b) : b?.$ref ? String(b.$ref).split('/').pop() : b?.type || '');
+  const branches = node.oneOf || node.anyOf;
   const base = titled || bySite || (node.enum?.length ? `enum_${node.enum[0]}`
     : node.properties?.stage?.enum?.[0] ? `stage_${node.properties.stage.enum[0]}`
       : node.items?.$ref ? `list_${String(node.items.$ref).split('/').pop()}`
-        : node.properties ? `obj_${Object.keys(node.properties)[0]}`
-          : node.oneOf || node.anyOf ? 'union'
+        : node.properties ? fieldsOf(node)
+          : branches ? branches.slice(0, 3).map(branchName).filter(Boolean).map((t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')).join('_or_') || 'one_of'
             : 'shared');
   const key = String(base).replace(/[^A-Za-z0-9_]/g, '_').slice(0, 48);
   let name = key; let n = 2;

@@ -76,7 +76,7 @@ export function metricSchema(catalog) {
   const kind = (type, title, required, optional) => form({ title, tag: ['type', type], required: ['name', ...required], properties: pick(fields, ['name', 'label', ...required, ...optional]) });
   return {
     type: 'object',
-    description: 'A metric: simple wraps one measure; cumulative accumulates a measure over time — over all history or a trailing window, or to date within a grain; derived computes an expression over other metrics (a ratio of two is a derived metric dividing one by the other). A conversion (B within a window of A) is a pipeline, not a metric: semantic_index({ request: { recipe: "conversion_metric_window" } }).',
+    description: 'A metric: simple wraps one measure; cumulative accumulates a measure over time — over all history or a trailing window, or to date within a grain (with a window or grain_to_date each value is the one ending at a metric_time bucket, so a query of it groups by metric_time); derived computes an expression over other metrics (a ratio of two is a derived metric dividing one by the other). A conversion (B within a window of A) is a pipeline, not a metric: semantic_index({ request: { recipe: "conversion_metric_window" } }).',
     anyOf: [
       kind('simple', 'simple: one measure', ['measure'], ['fill_nulls_with']),
       kind('cumulative', 'cumulative: over all history or a trailing window', ['measure'], ['window', 'period_agg']),

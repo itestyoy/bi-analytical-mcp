@@ -16,6 +16,17 @@ import { currentDisplay } from '../earlier-spelling.js';
 import { isPlainObject, samplingNote, pageBlock } from './helpers.js';
 import { READ_PAGE, KEPT_ROWS } from '../schema/fields.js';
 
+/** A read's rows with every HLL sketch said as what it is: the bytes of a sketch say nothing to a reader
+ *  (hll_merge reads them from the stored table, not from these rows). `held`: the task's answer, whose
+ *  output_columns type each column. */
+function sketchesSaid(r, held) {
+  const types = r?.output_columns || held?.output_columns;
+  if (!Array.isArray(r?.rows) || !Array.isArray(types)) return r;
+  const sketch = types.filter((c) => c?.type === 'sketch').map((c) => c.name);
+  if (!sketch.length) return r;
+  return { ...r, rows: r.rows.map((row) => (isPlainObject(row) ? { ...row, ...Object.fromEntries(sketch.filter((k) => row[k] != null).map((k) => [k, '<hll sketch>'])) } : row)) };
+}
+
 export const taskResultMethods = {
   /**
    * Materialization mode (inside the query's task): compile the query to SQL, write it as a
@@ -195,7 +206,7 @@ export const taskResultMethods = {
     const results = [];
     // a read hands the model a PAGE of each task's result (READ_PAGE rows from `offset` unless it asks for
     // another number): the task keeps what it keeps — what a card draws — and the rest is a next_offset away
-    for (const id of ids) results.push(refused.get(id) ?? await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }));
+    for (const id of ids) results.push(refused.get(id) ?? sketchesSaid(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }), this.tasks.held(id)));
     return TaskRunner.readAnswer(results, this._readers[[].concat(side)[0]], { waited_seconds: waited });
   },
 
@@ -377,7 +388,8 @@ export const taskResultMethods = {
     return {
       ...around, ok: true, status: 'done', ...(held.columns !== undefined ? { columns: held.columns } : {}), rows, row_count: rows.length,
       page: stored ? block : { ...block, held_rows: count },
-      ...(cut ? { warnings: [...(around.warnings || []), `the task keeps the first ${count} row(s) of its result — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
+      // (said once: the answer's own recommendation says the same where it is carried with the page)
+      ...(cut && !(around.recommendations || []).some((r) => /^More rows exist past/.test(r)) ? { warnings: [...(around.warnings || []), `the task keeps the first ${count} row(s) of its result — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
     };
   },
 

@@ -111,7 +111,9 @@ export const pipelineDraftMethods = {
     return {
       context_id: ctx.id, action,
       // (an edit put the step in place, an add appended it: each answers under its own word)
-      ...(inc.steps ? { steps: all } : { [action === 'edit_step' ? 'step_edited' : 'steps_added']: all.slice(-1), steps_count: all.length }),
+      // (the step is the caller's own, just sent: said by where it stands — step_effects says what it
+      // declared; include: ["steps"] gives every step whole)
+      ...(inc.steps ? { steps: all } : { [action === 'edit_step' ? 'step_edited' : 'steps_added']: [{ index: all.length, stage: SEMANTIC_STAGE }], steps_count: all.length }),
       step_effects: [effect],
       next: `Materialize — build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }), or materialize: true beside the step — writes the layer and parses it; then query its metrics (${effect.metrics.join(', ')}) with query_model({ request: { context_id: "${ctx.id}", steps: [{ stage: "metrics", metrics: [...] }] } }).`,
     };
@@ -309,6 +311,13 @@ export const pipelineDraftMethods = {
     if (!draft.stages.length) return draft.base ? draft.base.columns.map((c) => (stored ? { ...c } : { name: c.name, type: c.type })) : this._groundedDeclared(draft.source, physSet).cols;
     const { columns } = this._draftRender(draft, physSet);
     return stored ? columnList(columns) : [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+  },
+
+  /** The columns right after step `index` (1-based) of the draft — what the step after it reads; the
+   *  draft's last columns (`last`) where the step is its last, or its prefix does not render alone. */
+  _columnsAfter(draft, physSet, index, last) {
+    if (!index || index >= draft.stages.length) return last;
+    try { return this._draftColumns({ ...draft, stages: draft.stages.slice(0, index), checkpoints: (draft.checkpoints || []).filter((cp) => cp.at <= index) }, physSet); } catch { return last; }
   },
 
   /** The draft's steps rendered as its build renders them now — from the last live checkpoint, else from
@@ -727,7 +736,7 @@ export const pipelineDraftMethods = {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`To save tokens the answer echoes only ${changedStage ? 'the step this call placed and ' : ''}steps_count (${allSteps.length}) — you already have the other steps. For the FULL step list, pass include: ["steps"] or use build_model({ request: { action: "preview", context_id: "${ctx.id}" } }).`] : []),
-        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after, { building })] : []),
+        ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;

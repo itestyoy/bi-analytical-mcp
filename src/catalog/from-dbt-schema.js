@@ -6,7 +6,7 @@ import { isNumericType } from '../dialects/base.js';
 import { normalizeMeasure, normalizeAggregatable } from './measures.js';
 import { normalizeEntityKey } from './entities.js';
 import { normalizeJoinContract } from './joins.js';
-import { dimTypeFromDataType, pipelineColumnType } from './column-types.js';
+import { dimTypeFromDataType, pipelineColumnType, isBooleanType } from './column-types.js';
 
 /** A model's or a column's MCP block: `config.meta.mcp`. */
 export const mcpOf = (node) => node?.config?.meta?.mcp;
@@ -221,7 +221,8 @@ export function dbtSchemaToCatalog(doc) {
         // (meta.mcp.unit, e.g. 'seconds', 'usd_cents') is machine-readable so values in different
         // units are never blindly mixed/summed.
         flatProps[col.name] = {
-          type: isNumericType(col.data_type) ? 'numeric' : 'string',
+          // (a flag column is a flag: said alike by the source's columns and by the property)
+          type: isNumericType(col.data_type) ? 'numeric' : isBooleanType(col.data_type) ? 'boolean' : 'string',
           column: col.name,
           ...(cm.unit ? { unit: cm.unit } : {}),
           ...(col.description ? { description: col.description } : {}),

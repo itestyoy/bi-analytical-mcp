@@ -125,6 +125,17 @@ test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', asyn
   assert.ok(out.recommendations.some((r) => /closest matches by similarity/i.test(r)));
   // a loose query lists the few recipes nearest the best, not every one its prose touches
   assert.ok(out.recipe_matches.length <= 3, JSON.stringify(out.recipe_matches));
+  // and a loose match of any list is said only near the best match of all of them
+  const all = [...out.event_names, ...out.property_matches, ...out.column_matches, ...out.value_matches, ...out.recipe_matches];
+  const best = Math.max(...all.map((m) => m.score));
+  assert.ok(all.every((m) => m.score >= best - 0.15), JSON.stringify(all.map((m) => [m.event ?? m.property ?? m.column ?? m.id ?? m.value, m.score])));
+});
+
+test('semantic_index({ search }) with an exact name: that list keeps its exact matches, not every name its letters resemble', async () => {
+  const e = engine();
+  const out = await e.semantic_index({ search: 'revenue' });
+  const lists = [out.event_names, out.property_matches, out.column_matches, out.recipe_matches];
+  for (const list of lists) if (list.some((m) => m.match === 'exact')) assert.ok(list.every((m) => m.match === 'exact'), JSON.stringify(list));
 });
 
 // a word of a name mistyped scores by how close it is to that word, so the event it names comes before a

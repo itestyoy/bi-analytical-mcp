@@ -448,7 +448,9 @@ export const pipelineDraftMethods = {
     };
     // a partitioned source read with no window is read whole: said where the draft starts, while time_range
     // can still be given (a where on the partition column bounds it too)
-    const part = !base && !input.time_range ? this.catalog.getModel(source)?.partition_column : null;
+    // (a build that is only a semantic layer reads nothing: its queries take their own time_range)
+    const layerOnly = input.steps?.length && input.steps.every((st) => st?.stage === 'semantic_model');
+    const part = !base && !input.time_range && !layerOnly ? this.catalog.getModel(source)?.partition_column : null;
     if (part) resp.warnings = [`No time_range: every build of this draft reads the whole of '${source}' (partitioned by ${part}). Bound it — start again with time_range, or add a where on ${part} as the first step — unless the whole history is the point.`];
     const inc = included(input);
     if (inc.columns) resp.available_columns = cols;
@@ -721,7 +723,13 @@ export const pipelineDraftMethods = {
     // call is O(n²) waste across a build. By default: the step this call put in place (an edit's) and
     // steps_count; every step with include: ["steps"]
     // or preview. The retentioneering builder answers the same way.
+    // a distinct count grouped by a slowly-changing model's column: said where its columns do change between versions
+    const versioned = [];
+    for (const g of changedStage ? this.advisor.versionedDistinctGroups(newStages, changedStage) : []) {
+      if (await this.probe.versionsDiffer(g.model, g.columns) !== false) versioned.push(g.model);
+    }
     const leanSteps = !includeSteps;
+    const origin = draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`;
     const resp = {
       context_id: ctx.id, action, step_index: stepIndex ?? draft.stages.length,
       ...(leanSteps
@@ -740,11 +748,17 @@ export const pipelineDraftMethods = {
         : `Pipeline revalidated end-to-end after the ${action === 'delete_step' ? 'removal' : action === 'insert_step' ? 'insertion' : 'edit'}. Continue editing, preview, or materialize (include: ["columns"] for the full list).`,
       recommendations: [
         ...filterWarnings,
-        ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from ${draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`}.`] : []),
-        ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
+        ...(versioned.length ? [this.advisor.versionedDistinctNote(versioned)] : []),
+        // (said once per materialized prefix: the steps after it read it until an edit at or before it)
+        ...(plan.checkpoint && draft.told_prefix !== plan.checkpoint.model ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from ${origin}.`] : []),
+        ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from ${plan.checkpoint ? `the prefix still materialized, steps 1..${plan.checkpoint.at} (${plan.checkpoint.model})` : origin}.`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, this._columnsAfter(draft, physSet, stepIndex, after), { building })] : []),
       ],
     };
+    if (plan.checkpoint) draft.told_prefix = plan.checkpoint.model;
+    // how to preview is said on the draft's first step, not on every one after it
+    if (draft.told_preview) resp.recommendations = resp.recommendations.filter((r) => !r.startsWith('Preview the SQL anytime'));
+    else if (resp.recommendations.some((r) => r.startsWith('Preview the SQL anytime'))) draft.told_preview = true;
     if (includeColumns) resp.available_columns = after;
     return resp;
   },

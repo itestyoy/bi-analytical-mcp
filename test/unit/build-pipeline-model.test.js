@@ -58,14 +58,16 @@ test('build_model: add_steps propagates columns; bad step is rejected without mu
 test('build_model: add_steps returns only the applied step by default; include steps gives the full list', async () => {
   const e = engine();
   const s = await e.build_model({ action: 'start', name: 'lean', source: 'events' });
-  await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
+  const a1 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }] });
   const a2 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'aggregate', group_by: ['currency_of_event_data'], measures: [{ name: 'n', expr: { fn: 'count' } }] }] });
   // lean by default: the applied step + a count, NOT the whole steps array.
   assert.equal(a2.steps, undefined, 'the growing steps array is not re-echoed on add_steps');
   assert.equal(a2.steps_count, 2, 'steps_count reports the pipeline length');
   assert.equal(a2.steps_added[a2.steps_added.length - 1].stage, 'aggregate', 'the applied step is returned');
   assert.equal(a2.steps_added[a2.steps_added.length - 1].index, 2);
-  assert.ok(stepNotes(a2).some((r) => /include: \["steps"\]|preview/.test(r)), 'recommendation points to the full-list drill');
+  // (how to preview is said on the draft's first step, not again on every later one)
+  assert.ok(stepNotes(a1).some((r) => /include: \["steps"\]|preview/.test(r)), 'recommendation points to the full-list drill');
+  assert.ok(!stepNotes(a2).some((r) => /^Preview the SQL anytime/.test(r)), 'the preview hint is said once per draft');
   // opt back in to the full list.
   const a3 = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }], include: ['steps'] });
   assert.ok(Array.isArray(a3.steps) && a3.steps.length === 3, 'include steps returns the full steps array');

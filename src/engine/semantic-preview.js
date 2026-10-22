@@ -172,7 +172,13 @@ export const semanticPreviewMethods = {
         issues: shown,
         note: 'valid says what the declaration and its parse show; validate: true (with a time_range) compiles every metric in MetricFlow and runs it, and each semantic model\'s dimensions, in the warehouse.',
       },
-      semantic_models: scope.semanticModels.map(({ measures, ...sm }) => ({ ...sm, ...(measures?.length ? { measures } : {}) })),
+      // (an entity keyed by several columns is joined on a key the layer writes as one expression: its SQL is
+      // the server's, not the caller's — the entity is said by its name and type, the column of a plain key kept)
+      semantic_models: scope.semanticModels.map(({ measures, entities, ...sm }) => ({
+        ...sm,
+        ...(entities ? { entities: entities.map(({ expr, ...e }) => ({ ...e, ...(expr && expr !== e.name && !/[()|]/.test(expr) ? { expr } : {}) })) } : {}),
+        ...(measures?.length ? { measures } : {}),
+      })),
       metrics,
       // what a query of THIS context names a cut by
       ...(project || input.metric ? {} : { groupable }),

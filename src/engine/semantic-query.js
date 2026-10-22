@@ -1067,7 +1067,7 @@ export const semanticQueryMethods = {
       const cc = this._catalogOf(ctx);
       const factsRead = [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))].filter((k) => cc.models[k] && !cc.getModel(k).built && cc.getModel(k).time?.column);
       const freshByFact = {};
-      await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f); }));
+      await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f, { wait: true }); }));
       const knownFresh = Object.values(freshByFact).filter(Boolean);
       const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
       // Situational recommendations: surface a risk ONLY when it is actually present.
@@ -1084,8 +1084,20 @@ export const semanticQueryMethods = {
         // or a 0 / null of a query not grouped by time — is no measurement, said as a warning with the last week there is
         if (startDay && startDay > freshDay) {
           const weekBefore = new Date(Date.parse(`${freshDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
-          outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. The latest full week there is: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
+          outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
         } else if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+      }
+      // A window that holds no rows of the sources at all (before the data begins, a gap, past its end) gives
+      // a 0 / null that is no measurement: where the answer looks empty, the rows of each source inside the
+      // window are counted (pruned to it, so cheap) and, if there are none, that is said as the warning
+      const tr = input.time_range;
+      const looksEmpty = !pageRows.length || (!(q.tail || []).length && pageRows.every((r) => metrics.every((m) => r[m] == null || Number(r[m]) === 0)));
+      if (tr && (tr.start || tr.end) && looksEmpty && !outside.length && factsRead.length) {
+        const counts = await Promise.all(factsRead.map((f) => this.probe.estimateSourceRows(f, tr, { wait: true })));
+        if (counts.every((n) => n === 0)) {
+          const through = fresh ? ` (${factsRead.length > 1 ? 'the first of them ends' : 'its data runs through'} ${String(fresh).slice(0, 10)})` : '';
+          outside.push(`The window holds no rows of ${factsRead.map((f) => `'${f}'`).join(' or ')} at all${through}: ${pageRows.length ? 'a 0 or null here is no measurement' : 'there is nothing to return'} — not a real value. Query a window inside the data (semantic_index({ request: {} }) says each source's data_through).`);
+        }
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {

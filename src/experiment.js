@@ -163,7 +163,8 @@ export function abTest(input) {
     // peeking inflates false positives: said where a positive was found, not with every answer
     ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : anySig ? ['If the experiment is still RUNNING, a fixed-horizon p-value read before the planned sample size overstates significance — pass sequential:true for an always-valid p.'] : []),
     ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
-    ...(anySig ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
+    // (not said beside a small group's low p-value: there the small-sample note says why no verdict is read)
+    ...(anySig || results.some((r) => r.small_sample && r.p_value < 1 - confidence) ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
     ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
   ];
   // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio

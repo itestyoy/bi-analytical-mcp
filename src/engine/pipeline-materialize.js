@@ -421,7 +421,7 @@ export const pipelineMaterializeMethods = {
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
-      provenance: { tier: 'pipeline', source, data_freshness: await this.probe.dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
+      provenance: { tier: 'pipeline', source, data_freshness: await this.probe.dataFreshness(source, { wait: true }), ...(sampled ? { approximate: true } : {}) },
       ...(sampled ? { sampling: samplingNote(sampled.share) } : {}),
       assumptions: [
         ...(models.length > 1

@@ -274,6 +274,7 @@ export const semanticBuildMethods = {
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
-    return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics: render.metricNames, parse };
+    // what the layer holds now, and what went with the model
+    return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics_remaining: render.metricNames, ...(dependents.length ? { metrics_removed: dependents.map((d) => d.name) } : {}), parse };
   },
 };

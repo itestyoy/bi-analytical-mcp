@@ -382,7 +382,7 @@ export const taskResultMethods = {
     const end = offset + rows.length;
     // a page that reaches the end of what a result held in memory kept, when the result went on
     const cut = !stored && more && offset + limit >= count;
-    const block = pageBlock({ offset, limit, returned: rows.length, has_more: end < count || more, total: more ? null : count, ordered: held.page?.ordered === false ? false : undefined });
+    const block = pageBlock({ offset, limit, returned: rows.length, has_more: end < count || more, total: more ? (held.page?.total_rows ?? null) : count, ordered: held.page?.ordered === false ? false : undefined });
     if (cut) delete block.next_offset; // its next rows were not kept: no row number reads them
     const around = pageAround(held, offset);
     return {

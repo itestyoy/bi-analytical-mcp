@@ -10,6 +10,9 @@ import { rankFuzzy } from '../fuzzy.js';
 import { stageDef } from '../pipeline.js';
 import { exprCalls, exprColumns, isWindowCall, comparisonOf, eachCondition } from '../pipeline/compute.js';
 
+/** The aggregates that count distinct values — not additive across groups a key can fall into twice. */
+const DISTINCT_FNS = new Set(['count_distinct', 'approx_count_distinct', 'hll_init']);
+
 /** The values a where's own conditions scope `column` to — each a comparison of the column with
  *  constants by eq / in at the top of the list (one inside an or, or a negation, keeps other rows too). */
 function scopedValues(stages, column) {
@@ -331,6 +334,35 @@ export class PipelineAdvisor {
       if (dateOnly(upper) && !hits.some((h) => h.col === col)) hits.push({ col, upper });
     });
     return hits.map(({ col, upper }) => `'${col}' is bounded by the bare date '${upper}': on a timestamp that is ${upper} 00:00:00, so the rest of that day is left out. To include the whole day, write { fn: "lt", args: [{ column: "${col}" }, { value: "<the next day>" }] } (with gte for the start); on a DATE column the bound is right as it is.`);
+  }
+
+  /**
+   * An aggregate that counts distinct values grouped by a column a SLOWLY-CHANGING model's join brought in
+   * (the model declares a validity window): a key whose version changed within the rows is counted under
+   * each value it held, so the groups add up to more than the whole. → [{ model, columns }] — the models and
+   * their columns grouped by; the caller asks the warehouse whether those columns change between a key's
+   * versions at all (WarehouseProbe.versionsDiffer), and says it only where they do or that is not known.
+   */
+  versionedDistinctGroups(stages, stage) {
+    if (stage?.stage !== 'aggregate' || !(stage.group_by || []).length) return [];
+    const distinct = (stage.measures || []).some((m) => exprCalls(m.expr).some((c) => DISTINCT_FNS.has(c.fn)));
+    if (!distinct) return [];
+    const at = stages.indexOf(stage);
+    const byModel = new Map();
+    for (const st of at < 0 ? stages : stages.slice(0, at)) {
+      if (st?.stage !== 'join' || !this.catalog.models[st.source]?.scd) continue;
+      for (const a of st.attrs || []) {
+        if (!stage.group_by.includes(a.name ?? a.column)) continue;
+        if (!byModel.has(st.source)) byModel.set(st.source, []);
+        byModel.get(st.source).push(a.column);
+      }
+    }
+    return [...byModel].map(([model, columns]) => ({ model, columns }));
+  }
+
+  /** What versionedDistinctGroups' models mean for the counts, said once for them all. */
+  versionedDistinctNote(models) {
+    return `A distinct count grouped by ${models.map((m) => `'${m}'`).join(', ')}'s columns, a slowly-changing model: the join matches each row to the version valid at its time, so a key whose version changed within these rows is counted under each value it held, and the groups add up to more than the keys in all — read the total from an aggregate without that group_by, not from their sum.`;
   }
 
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.

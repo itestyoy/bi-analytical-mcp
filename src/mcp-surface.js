@@ -188,7 +188,15 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   // (the arguments are kept as they came, so a failure is replayed by the same call)
   // (a call refused for not using the envelope still carried its ids — at the top)
   const inner = isPlainObject(args?.request) ? args.request : isPlainObject(args) ? args : {};
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : typeof inner.task_ids?.[0] === 'string' ? inner.task_ids[0] : null });
+  // the task a refusal is about: the one id of the call, or among several the one its field names (task_ids.2)
+  const taskOf = (x, field) => {
+    if (typeof x.task_id === 'string') return x.task_id;
+    const ids = Array.isArray(x.task_ids) ? x.task_ids : [];
+    const at = /task_ids[.[](\d+)/.exec(String(field ?? ''))?.[1];
+    const id = at !== undefined ? ids[Number(at)] : ids.length === 1 ? ids[0] : null;
+    return typeof id === 'string' ? id : null;
+  };
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : null, task_id: taskOf(inner, field) });
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
     failed(name, unknownToolMessage(name), { stage: 'validate' });

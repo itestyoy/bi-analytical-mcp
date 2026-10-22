@@ -22,6 +22,7 @@ const RECIPE_MATCHES = 3; // recipes listed for one query, at most
 const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
 const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
+const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
 
@@ -144,6 +145,10 @@ export class CatalogSearch {
     };
     // (where nothing matches closely, a few resemblances per list are enough to say so)
     for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);
+    // a recipe is a task type, not a name of the data: beside a name the word does match (an event, a
+    // value), a recipe whose title only resembles it is left out — an exact one, or a close one, stays
+    const named = ['event_names', 'property_matches', 'column_matches', 'value_matches'].some((k) => lists[k].length);
+    if (named) lists.recipe_matches = lists.recipe_matches.filter((m) => m.match === 'exact' || (m.score ?? 0) >= RECIPE_BESIDE_NAME);
     const recommendations = this._recommend({ query, fuzzy, ...lists });
 
     return { query, fuzzy, ...lists, recommendations };

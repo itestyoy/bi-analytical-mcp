@@ -60,7 +60,7 @@ export class WarehouseProbe {
    * runs on in the background and primes the cache for the next call. Concurrent callers share
    * one in-flight read, so a burst of tool calls cannot spawn a dbt process each.
    */
-  async bestEffort(key, work, fallback = null) {
+  async bestEffort(key, work, fallback = null, { wait = false } = {}) {
     let p = this.inFlight.get(key);
     if (!p) {
       // detached: this read serves every caller waiting on it, so it must not die with the first
@@ -69,6 +69,9 @@ export class WarehouseProbe {
       p.catch(() => {}); // it finishes unobserved after a timeout — never an unhandled rejection
       this.inFlight.set(key, p);
     }
+    // a task's own answer waits for the read: it runs in the background already, and an answer that
+    // depends on it must not change between two reads of the same task
+    if (wait) { try { return await p; } catch { return fallback; } }
     let timer;
     const expired = Symbol('expired');
     // NOT unref'd: a tool call is in flight, and the process must stay alive to answer it. The
@@ -185,7 +188,7 @@ export class WarehouseProbe {
     });
   }
 
-  async dataFreshness(sourceKey) {
+  async dataFreshness(sourceKey, { wait = false } = {}) {
     const base = this.readDir();
     const m = this.catalog.getModel(sourceKey);
     const tcol = m.time?.column;
@@ -206,7 +209,7 @@ export class WarehouseProbe {
       } catch { /* freshness is best-effort */ }
       this.freshnessCache.set(sourceKey, { value: latest, gen });
       return latest;
-    });
+    }, null, { wait });
   }
 
   /**
@@ -215,7 +218,7 @@ export class WarehouseProbe {
    * gauge the scan before materializing. Best-effort: returns null when there is no
    * runner / base project, the count fails, or it is slower than the interactive grace.
    */
-  async estimateSourceRows(sourceKey, tr) {
+  async estimateSourceRows(sourceKey, tr, { wait = false } = {}) {
     const base = this.readDir();
     if (!this.runner || !base) return null;
     const m = this.catalog.getModel(sourceKey);
@@ -229,7 +232,7 @@ export class WarehouseProbe {
         if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
       } catch { /* estimate is best-effort */ }
       return null;
-    });
+    }, null, { wait });
   }
 }
 

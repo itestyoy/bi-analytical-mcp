@@ -123,6 +123,8 @@ test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', asyn
   const anyExact = [...out.event_names, ...out.property_matches, ...out.column_matches, ...out.recipe_matches].some((m) => m.match === 'exact');
   assert.equal(anyExact, false);
   assert.ok(out.recommendations.some((r) => /closest matches by similarity/i.test(r)));
+  // a loose query lists the few recipes nearest the best, not every one its prose touches
+  assert.ok(out.recipe_matches.length <= 3, JSON.stringify(out.recipe_matches));
 });
 
 // a word of a name mistyped scores by how close it is to that word, so the event it names comes before a

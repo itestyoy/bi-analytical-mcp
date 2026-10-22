@@ -75,6 +75,9 @@ export const CROSS_PATH_SPELLING = {
   columns: 'keep',
   alpha: 'confidence',
   finding: 'note',
+  // how many places a round keeps
+  digits: 'places',
+  decimals: 'places',
 };
 
 /**

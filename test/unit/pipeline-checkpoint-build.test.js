@@ -198,7 +198,10 @@ test('a view prefix is called out (reading it re-runs its SQL), and context desc
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const { context_id } = await e.build_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  const started = await e.build_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  const { context_id } = started;
+  // a start builds nothing yet: it says what it WILL be built as, never that it is built
+  assert.deepEqual([started.materializes_as, 'materialized' in started], ['view', false]);
   await add(e, context_id, { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] });
   const r = await finishTask(e, await materialize(e, context_id), runner);
   assert.equal(r.materialized, 'view');

@@ -265,7 +265,7 @@ export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
         if (scd) { droppedMeasures.add(me.name); droppedFrom.add(key); continue; }
-        const mm = onWarehouse(catalog, { ...me });
+        const mm = onWarehouse(catalog, manifestOnly(me));
         if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
       }

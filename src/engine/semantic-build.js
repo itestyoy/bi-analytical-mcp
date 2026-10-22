@@ -199,7 +199,13 @@ export const semanticBuildMethods = {
     const parse = await this._parse(ctx.id);
     const { now: groupable, afterLoading } = this._groupableSplit(ctx);
     // the example must be a call that RUNS in this context, so it comes from what is loaded
-    const exRef = groupable[0];
+    // — a categorical one where there is one: a time or a validity bound reads as an odd first cut
+    const c = this._catalogOf(ctx);
+    const plain = (r) => {
+      const dim = r.source !== undefined && r.column !== undefined ? c.models[r.source]?.dimensions?.[r.column] : null;
+      return dim && !/time|date|timestamp/i.test(String(dim.type || ''));
+    };
+    const exRef = groupable.find(plain) || groupable[0];
     const exText = exRef ? refText(exRef) : "{ time: 'metric_time', grain: 'day' }";
     return {
       context_id: ctx.id,

@@ -392,7 +392,7 @@ function matchRecognizeSchema(catalog) {
     properties: {
       name: { type: 'string', pattern: NAME, description: 'Step name — its output columns are reached_<name> and at_<name> (default s1, s2, …).' },
       event_name: { type: 'array', minItems: 1, uniqueItems: true, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, of the pipeline\'s own source (a funnel scans one table).' },
-      where: conditionSlot('#/$defs/expr', 'Conditions the step\'s row meets as well, all of them — on columns here or an event property: { fn: "eq", args: [{ property: "step_id" }, { value: "step_1" }] }.'),
+      where: conditionSlot('#/$defs/expr', 'Conditions the step\'s row meets as well, all of them — on columns here or an event property: { fn: "eq", args: [{ property: "<a property of the event>" }, { value: "<its value>" }] }.'),
     },
   };
   const capture = {

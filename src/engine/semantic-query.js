@@ -123,6 +123,16 @@ export const semanticQueryMethods = {
     return this._taskColumn(ctx, kind, ref, at, field);
   },
 
+  /** What a metric's values are, as the steps after the metrics step read them: a count of rows or of
+   *  distinct values a whole number, anything else a number. */
+  _metricType(ctx, name) {
+    const m = (ctx.state.metrics || []).find((x) => x.name === name);
+    if (m?.type !== 'simple') return 'numeric';
+    const aggs = new Map(Object.values(ctx.state.additions || {}).flatMap((a) => (a.measures || []).map((me) => [me.name, me._fn ?? me.agg])));
+    const [only, ...more] = [...measureRefs(m, ctx.state.metrics)];
+    return !more.length && ['count', 'count_distinct'].includes(aggs.get(only)) ? 'int' : 'numeric';
+  },
+
   /** The models a metric of this context folds the rows of: the owner of every measure it reads,
    *  through the metrics a derived one is built from. */
   _metricModels(ctx, name) {
@@ -202,7 +212,7 @@ export const semanticQueryMethods = {
       if (declaredRef?.property === undefined) {
         throw new ToolError(`${at}: the event property '${label}' is not a dimension of this context — declare it one — { property: '${name}' } in the dimensions of the build's semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } }), then materialize) — and name it { source: '${model}', property: '${name}' }.`, { stage: 'validate', field });
       }
-      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${name}`, label, type: 'unknown' };
+      return { kind: 'dimension', path: this._taskDimMap(ctx).get(declared.name) || declared.name, grain: null, column: `${model}_${name}`, label, type: declared._type || 'unknown' };
     }
     // 1. a column the step declared on this model → that dimension (a time column at the grain it was
     //    declared with)
@@ -576,7 +586,7 @@ export const semanticQueryMethods = {
         return columns.some((x) => x.name === c) ? [c] : [];
       } catch { return []; }
     };
-    const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: 'unknown' }))], rename, first: q.first, carried });
+    const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: this._metricType(ctx, name) }))], rename, first: q.first, carried });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a
     // window for — or every one, when the deployment does — is not scanned whole
@@ -587,7 +597,7 @@ export const semanticQueryMethods = {
     const conversionNotes = this._conversionNotes(layer, metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
     const paging = this._metricPaging(input, tail.ordered);
     const explain = this._compileOnly(input);
-    const qopts = { metrics, groupBy, where, orderBy: tail.orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
+    const qopts = { metrics, groupBy, where, orderBy: this._metricOrder(tail, groupBy), startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
     const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
     const respond = (raw) => {
       this.ctxs.touch(ctx.id);
@@ -808,6 +818,13 @@ export const semanticQueryMethods = {
   /** The rows a query task keeps — the first `limit` of its result (a read pages them) — and one row
    *  over them fetched, so has_more says whether the result goes on past them; `ordered` whether its
    *  steps end in an order_by (a limit after it aside). */
+  /** The order MetricFlow writes a query's rows in: the order_by step it takes as asked, or — with no
+   *  step after the metrics step — the time buckets, earliest first (a series reads in time order). */
+  _metricOrder(tail, groupBy) {
+    if (tail.orderBy.length || tail.steps.length) return tail.orderBy;
+    return groupBy.filter((g) => String(g).startsWith('metric_time__'));
+  },
+
   _metricPaging(input, ordered) {
     const limit = input.limit ?? KEPT_ROWS;
     return { limit, fetch: limit + 1, page: (rows) => { const kept = rows.slice(0, limit); return { rows: kept, page: pageBlock({ offset: 0, limit, returned: kept.length, has_more: rows.length > limit, ordered }) }; } };
@@ -934,7 +951,7 @@ export const semanticQueryMethods = {
         return columns.some((x) => x.name === column) ? [column] : [];
       } catch { return []; }
     };
-    const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: 'unknown' }))], rename, first: q.first, carried });
+    const tail = this._metricTail(q.tail, { columns: [...columns, ...metrics.map((name) => ({ name, type: this._metricType(ctx, name) }))], rename, first: q.first, carried });
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail covers every source this context reads, whichever one the metrics come from
@@ -943,7 +960,7 @@ export const semanticQueryMethods = {
     const paging = this._metricPaging(input, tail.ordered);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, metrics);
     const explain = this._compileOnly(input);
-    const qopts = { metrics, groupBy, where: [...where, ...partitionWhere], orderBy: tail.orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
+    const qopts = { metrics, groupBy, where: [...where, ...partitionWhere], orderBy: this._metricOrder(tail, groupBy), startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
     // …and the partition filter this query adds for its window, named as the caller would name it
@@ -990,8 +1007,10 @@ export const semanticQueryMethods = {
       const distinctMeasures = new Set();
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
       const usesDistinct = distinctMeasures.size && metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...measureRefs(metric, ctx.state.metrics)].some((dm) => distinctMeasures.has(dm)); });
-      if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
-        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+      // said where a step after the metrics step folds the per-bucket values again (an aggregate or a pivot)
+      const refolds = (q.tail || []).some((st) => st?.stage === 'aggregate' || st?.stage === 'pivot');
+      if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
+        recs.push('count_distinct is NOT additive across time buckets — a step after the metrics step folds the per-bucket values, and their sum counts a user once per bucket. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       // a slowly-changing model's attribute: a user whose version changed inside the window is counted
       // under each version's value, so the groups' distinct counts add up to more than the whole

@@ -194,7 +194,8 @@ function compileMeasure(catalog, modelKey, decl, smScope) {
   }
   // (after the measure's own refusals above, which name the value to cast where a case yields it)
   attempt(field, () => exprSql(d, null, e, at, { ...opts, context: 'measure', aggregates: [...TASK_MEASURE_AGGS] }));
-  const m = { name, agg, expr: applyScope(value, scope), ...(decl.label ? { label: decl.label } : {}) };
+  // (`_fn` keeps the function the caller chose — a count of rows is written as a sum of 1)
+  const m = { name, agg, expr: applyScope(value, scope), ...(decl.label ? { label: decl.label } : {}), _fn: e.fn };
   if (e.fn === 'percentile') m.agg_params = { percentile: e.percentile, use_discrete_percentile: false };
   return m;
 }
@@ -250,7 +251,10 @@ function compileDimension(catalog, modelKey, decl) {
       fail(`dimension: '${decl.property}' is not a scalar event property of '${modelKey}'.${nearest(decl.property, props)} semantic_index({ request: { source: '${modelKey}' } }) lists them.`, 'dimensions.property');
     }
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    return { name: found.name, type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name };
+    // (the type the catalog declares, read back as a column's is: a number comes back a number)
+    const declared = String(catalog.eventPropertySpec(found.name, modelKey)?.type || '').toLowerCase();
+    const held = READ_BACK_TYPES.has(declared) ? declared : isNumericType(declared) ? 'numeric' : null;
+    return { name: found.name, type: 'categorical', expr: propExpr(catalog, modelKey, found.name), ...label, _attribute: found.name, ...(held ? { _type: held } : {}) };
   }
   return fail(`a dimension is { column }, { property } or { name, expr } — ${JSON.stringify(decl)} is none of them`, 'dimensions');
 }

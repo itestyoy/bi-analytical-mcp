@@ -274,7 +274,10 @@ export const semanticIndexMethods = {
       // the index keeps a property's values across every event that carries it, not per event: a
       // property other events carry too says which, so its samples are not read as this event's
       const others = (applies[p] || []).filter((e) => e !== eventName);
-      return { name: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex: c.isComplexEventProp(p, fact), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(fact, p, 3), ...(others.length ? { sample_values_also_from: others } : {}) };
+      const complex = c.isComplexEventProp(p, fact);
+      // a complex property's samples are shapes, not counted values: their freq is not kept, so not shown
+      const samples = this.valueIndex.sampleValues(fact, p, 3).map((v) => (complex && v && typeof v === 'object' ? (({ freq, ...rest }) => rest)(v) : v));
+      return { name: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex, description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: samples, ...(others.length ? { sample_values_also_from: others } : {}) };
     });
     // Drill-down guidance: point at properties whose real values are worth inspecting
     // next (prefer ones already indexed so the AI sees data), plus value search.

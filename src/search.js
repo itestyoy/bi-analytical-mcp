@@ -18,6 +18,8 @@ import { keyRef, keyView } from './engine/value-index-views.js';
 const round3 = (n) => (n == null ? null : Math.round(n * 1000) / 1000);
 const NAME_WEIGHT = 2; // a name/id match outranks a description match
 const DESC_WEIGHT = 1;
+const RECIPE_MATCHES = 3; // recipes listed for one query, at most
+const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 
 export class CatalogSearch {
   constructor({ catalog, recipes, valueIndex }) {
@@ -112,6 +114,8 @@ export class CatalogSearch {
     }));
     const recipe_matches = recipes
       ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
+        // a loose query touches many recipes' prose: the few nearest the best one are the answer
+        .filter((r, i, all) => i < RECIPE_MATCHES && r.score >= all[0].score - RECIPE_SPREAD)
       : [];
 
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.

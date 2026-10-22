@@ -339,3 +339,28 @@ test('a flag column of a built table, declared a dimension, reads back as a flag
   const want = Object.fromEntries((await wh.query("select n > 3 as b, count(*) as k from (select player_id_of_internal, date_trunc('day', device_time) as d, count(*) as n from fct_analytics_events group by 1, 2) group by 1")).rows.map((x) => [String(x.b), num(x.k)]));
   assert.deepEqual(Object.fromEntries(r.rows.map((row) => [String(row[col]), num(row.player_days)])), want);
 });
+
+test('a numeric event property declared a dimension reads back as a number; a series comes in time order; a dry run types its metrics', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.build_model({ action: 'start', name: 'levels', source: 'events', materialize: true, steps: [
+    { stage: 'semantic_model', dimensions: [{ property: 'level_id_of_event_data' }], measures: [{ name: 'evts', expr: { fn: 'count' } }, { name: 'spent', expr: { fn: 'sum', args: [{ column: 'level_id_of_event_data' }] } }], metrics: [{ name: 'evts', type: 'simple', measure: 'evts' }, { name: 'spent', type: 'simple', measure: 'spent' }] },
+  ] });
+  await taskResult(engine, out.materialize.task_id);
+  const level = { source: 'events', property: 'level_id_of_event_data' };
+  const r = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [level] })] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const col = r.group_by_resolved['events.level_id_of_event_data'];
+  assert.ok(r.rows.every((row) => row[col] === null || typeof row[col] === 'number'), JSON.stringify(r.rows.slice(0, 5)));
+  const want = Object.fromEntries((await wh.query(`select level_id_of_event_data as l, count(*) as k from fct_analytics_events where device_time >= '${WINDOW.start}' and device_time < '2026-02-01' group by 1`)).rows.map((x) => [x.l == null ? 'null' : String(num(x.l)), num(x.k)]));
+  assert.deepEqual(Object.fromEntries(r.rows.map((row) => [row[col] == null ? 'null' : String(row[col]), num(row.evts)])), want);
+  // with no step after the metrics step, the days come earliest first
+  const days = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, steps: [metrics(['evts'], { group_by: [{ time: 'metric_time', grain: 'day' }] })] });
+  const dayCol = Object.keys(days.rows[0]).find((k) => k !== 'evts');
+  const seen = days.rows.map((row) => String(row[dayCol]));
+  assert.deepEqual(seen, [...seen].sort());
+  assert.ok(seen.length > 1);
+  // a dry run says what its metrics are: a count a whole number, a sum a number
+  const dry = await engine.query_model({ context_id: out.context_id, time_range: WINDOW, dry_run: true, steps: [metrics(['evts', 'spent'], { group_by: [level] })] });
+  const typeOf = Object.fromEntries(dry.output_columns.map((c) => [c.name, c.type]));
+  assert.deepEqual([typeOf.evts, typeOf.spent], ['int', 'numeric']);
+});

@@ -13,7 +13,7 @@
 // src/pipeline/compute.js PLACES) and passes it to the one writer.
 
 import { NAME, statAccuracyNote, EXPR, SORT_KEY, sourceProp, addCol, requireCol } from './sql.js';
-import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere } from './compute.js';
+import { exprDefs, exprSql, conditionListSql, mapAggregates, foldWhere, exprCalls } from './compute.js';
 import { form, strEnum, SCALAR, conditionSlot, measureForm } from '../schema-kit.js';
 import { physicalColumnType, isArrayPropertyType, itemType, elementType, nativeArrayType, groundedType } from '../catalog/column-types.js';
 import { METRICS_STEP, SEMANTIC_MODEL_STEP } from '../schema/fields.js';
@@ -308,11 +308,14 @@ export const STAGES = {
     },
   },
   aggregate: {
-    recommend: (available) => [
+    recommend: (available, p = {}) => [
       `Aggregated: the output is now group_by keys + measures (${listSome(available)}); add order_by/limit or materialize.`,
       // Comparing two groups? The stats live in a tool — don't hand-roll a t-test: the experiment
       // tool's analyze is a GENERAL two-sample significance test (not only randomized experiments).
-      'Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ request: { action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) } }) for the p-value and CI.',
+      // Said only where the stage computes what a test reads per group (a spread), not after every rollup.
+      ...(p.group_by?.length && (p.measures || []).some((m) => exprCalls(m.expr).some((c) => c.fn === 'stddev' || c.fn === 'variance'))
+        ? ['Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ request: { action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) } }) for the p-value and CI.']
+        : []),
     ],
     schema: (catalog, { refNames = false } = {}) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],

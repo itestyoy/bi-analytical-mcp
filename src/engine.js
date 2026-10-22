@@ -696,7 +696,7 @@ export class Engine {
       } : {}),
       // Per task, what its author said it computes — a name does not explain the metrics.
       ...(Object.keys(ctx.state.task_notes || {}).length ? { task_notes: ctx.state.task_notes } : {}),
-      semantic_models: Object.keys(additions),
+      semantic_models: Object.keys(additions).length ? [...new Set([...Object.keys(additions), ...(ctx.state.usedModels || [])])] : [],
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),
       groupable: this._groupableSplit(ctx).now,

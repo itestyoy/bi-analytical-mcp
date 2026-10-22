@@ -62,7 +62,7 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'display_model_result',
     title: 'Display Model Result',
-    description: 'Show a finished model result — a semantic query or a pipeline — to the person as a card. It is the only tool that draws a model\'s rows, in a host that renders MCP Apps; any other client is refused, and there you answer in words. Use it once, for the result the person should see; reading a task for your own analysis needs no card. Each task is drawn once (a second call is refused). display says how the rows are drawn — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot… — over the result\'s columns. A task still running is refused: read it with its query tool first. An experiment draws its own card (card: true).',
+    description: 'Only for a host that renders MCP Apps (any other client is refused — answer there in words): show a finished model result — a semantic query or a pipeline — to the person as a card. It is the only tool that draws a model\'s rows. Use it once, for the result the person should see; reading a task for your own analysis needs no card. Each task is drawn once (a second call is refused). display says how the rows are drawn — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot… — over the result\'s columns. A task still running is refused: read it with its query tool first. An experiment draws its own card (card: true).',
     // draws a card, once per task: a second call is refused, not repeated
     annotations: { readOnlyHint: true, idempotentHint: false },
     view: 'result',

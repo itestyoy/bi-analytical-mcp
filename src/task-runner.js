@@ -72,11 +72,13 @@ export class TaskRunner {
    */
   static readAnswer(results, reader, extra = {}) {
     const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
-    const failed = results.filter((r) => r.status === 'error' || r.ok === false);
-    const allFailed = failed.length === results.length;
+    // a task cancelled on purpose did what was asked of it: it is final, not a failure of the read
+    const cancelled = (r) => r.status === 'cancelled' || r.error?.code === 'cancelled';
+    const failed = results.filter((r) => (r.status === 'error' || r.ok === false) && !cancelled(r));
+    const allFailed = failed.length > 0 && failed.length === results.length;
     return {
       ok: !allFailed,
-      status: running.length ? 'running' : allFailed ? 'error' : 'done',
+      status: running.length ? 'running' : allFailed ? 'error' : results.every(cancelled) ? 'cancelled' : 'done',
       ...extra,
       ...(failed.length && !allFailed ? { failed: failed.length } : {}),
       ...(allFailed ? { error: results.length === 1 ? results[0].error : { stage: 'task', message: `all ${results.length} tasks failed — each one's error is under results` } } : {}),

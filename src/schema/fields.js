@@ -87,7 +87,7 @@ export function metricSchema(catalog) {
 }
 
 /** A metric_time window, as a metric query takes it (src/schema-kit.js timeRange: the one window shape). */
-export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.');
+export const METRIC_TIME_RANGE = timeRange('Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring. metric_time buckets are UTC days/weeks/months: a timezone moves only the bounds, not where a day starts — for local days group by a computed dimension with in_timezone.');
 
 /** The fields a metric query takes beside its context — the one list query_model's start form
  *  and a batch's item are built from (src/schema.js), and what tells an earlier metric query apart from

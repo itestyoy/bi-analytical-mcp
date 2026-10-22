@@ -705,6 +705,9 @@ test('a running query is cancelled at once: its process is stopped, a read says 
   assert.equal(signals[0].aborted, true, 'the process the task started is told to stop');
   const read = await one(e.query_model({ task_ids: [first.task_id], wait_seconds: 5 }));
   assert.deepEqual([read.status, read.error.code], ['cancelled', 'cancelled']);
+  // a task cancelled on purpose is final, not a failed read
+  const whole = await e.query_model({ task_ids: [first.task_id] });
+  assert.deepEqual([whole.ok, whole.status], [true, 'cancelled']);
   // the held process ends (as a killed one would); the next task runs, and the cancelled one stays cancelled
   runner.held.shift()();
   await until(() => runner.held.length === 1);

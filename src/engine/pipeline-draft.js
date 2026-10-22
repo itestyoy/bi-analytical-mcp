@@ -411,7 +411,7 @@ export const pipelineDraftMethods = {
     const cols = base ? base.columns.map((c) => ({ name: c.name, type: c.type })) : this._groundedDeclared(source, physSet).cols;
     const buildHint = `When the steps look right, materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }).`;
     const resp = {
-      context_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
+      context_id: ctx.id, action: 'start', name: input.name, source, materializes_as: ctx.state.draft.materialized,
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
       // (a task that read several models: its rows are its table's — source is only what the steps resolve against)
       ...(base && found.read.length > 1 ? { task_read: found.read, source_note: `the rows are task ${base.task_id}'s table, which read ${found.read.join(', ')}; source '${source}' is what these steps resolve relationships and properties against` } : {}),
@@ -572,7 +572,7 @@ export const pipelineDraftMethods = {
     try { cols = this._draftColumns(ctx.state.draft, physSet); } catch (e) { broken = e.message; }
     const resp = {
       context_id: ctx.id, action: 'fork', forked_from: input.context_id, name, source: ctx.state.draft.source,
-      materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
+      materializes_as: ctx.state.draft.materialized, copied_steps: after, step_index: after,
       // the caller has the steps it forked; every one of them with include: ["steps"] (or preview)
       ...(included(input).steps ? { steps: this._draftSteps(ctx.state.draft, physSet) } : { steps_count: after }),
       column_count: cols.length,
@@ -753,7 +753,7 @@ export const pipelineDraftMethods = {
   async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
     const physSet = await this.probe.grounding(draft.source, draft.stages);
-    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
+    const base = { context_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materializes_as: draft.materialized, dialect, steps: this._draftSteps(draft, physSet) };
     // the semantic_model step: the layer it declares, as it would be written (src/yaml-render.js) — over the
     // source, or beside the SQL of the table it stands on
     const layer = draft.semantic ? await this._semanticLayerOf(ctx, draft, draft.semantic) : null;

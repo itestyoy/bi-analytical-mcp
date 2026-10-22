@@ -200,6 +200,8 @@ export const semanticIndexMethods = {
         ...(a.unit ? { unit: a.unit } : {}),
         ...(a.label ? { label: a.label } : {}),
         ...(a.description ? { description: a.description } : {}),
+        // a per-row ratio: its sum or average over a group is not the group's ratio — that divides the sums
+        ...(a.expr !== a.name && /\//.test(String(a.expr)) ? { ratio_note: `A ratio per row: summing or averaging it over a group is not the group's ratio. For that, sum the numerator and the denominator as measures and divide them in a derived metric: { name, type: 'derived', expr: { fn: 'div', args: [{ metric: '<sum of the numerator>' }, { metric: '<sum of the denominator>' }] } }.` } : {}),
       }));
       out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${amounts[0].name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).`;
     }

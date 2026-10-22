@@ -175,7 +175,7 @@ models:
           meta: { mcp: { property: true } }
       - name: price_in_usd_of_event_data
         data_type: numeric
-        description: "IAP purchase price in USD. Events: iap_purchase_completed, iap_purchase_failed."
+        description: "IAP purchase price in USD — in-app purchase revenue on a completed purchase. Events: iap_purchase_completed, iap_purchase_failed."
         config:
           meta: { mcp: { property: true } }
       - name: product_id_of_event_data
@@ -572,7 +572,7 @@ models:
           # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
           # marked column it fixes NO function — the caller picks one per question.
           measures:
-            cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click." }
+            cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click — a group's CPC is sum(cost) / sum(clicks), not an average of this." }
             # …and the governed twin: the same schema key WITH `agg` fixes one function for
             # everyone, while `cost` itself stays freely aggregatable per question.
             total_spend: { expr: cost, agg: sum, unit: usd, description: "Total acquisition spend — fixed as a sum." }

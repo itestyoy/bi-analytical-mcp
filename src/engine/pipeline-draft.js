@@ -564,7 +564,10 @@ export const pipelineDraftMethods = {
   async _draftDeleteStep(ctx, draft, index, includeColumns = false, includeSteps = false) {
     const i = this._stepIndex(draft, index, 'delete_step');
     const next = draft.stages.slice(); next.splice(i - 1, 1);
-    return this._draftCommit(ctx, draft, next, { includeColumns, includeSteps, action: 'delete_step', stepIndex: Math.min(i, next.length) || null, dropFrom: i });
+    // (the answer names the step removed; step_index is the one now in its place — none where it was the last)
+    const r = await this._draftCommit(ctx, draft, next, { includeColumns, includeSteps, action: 'delete_step', stepIndex: i <= next.length ? i : null, dropFrom: i });
+    const { step_index: now, step: placed, ...rest } = r;
+    return { ...rest, deleted_step: i, ...(i <= next.length ? { step_index: now, ...(placed ? { step: placed } : {}) } : {}) };
   },
 
   /**

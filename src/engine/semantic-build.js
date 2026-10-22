@@ -106,7 +106,7 @@ export const semanticBuildMethods = {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `model definition removed; the stored ${stored} may persist in the warehouse until the context is dropped (delete_context({ request: { context_id } })) or the store cleans ephemeral objects` };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: `the model is removed: no task reads its rows any more (a read of one says so). The ${stored} object itself is dropped from the warehouse with the context (delete_context({ request: { context_id } })) or by the store's cleanup of ephemeral objects.` };
   },
 
   /**
@@ -228,7 +228,8 @@ export const semanticBuildMethods = {
       next: render.metricNames.length
         ? `Query it: query_model({ request: { context_id: '${ctx.id}', steps: [{ stage: 'metrics', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], group_by: [${exText}] }], time_range: { start, end } } }).`
         : `This context has no metric to query yet: add one to its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materialize.`,
-      recommendations: [
+      // how to query and change the layer is said on its first build; a rebuild of it says what changed only
+      recommendations: ctx.state.told_layer_hints ? [] : (ctx.state.told_layer_hints = true) && [
         `Bound every query with time_range. Group by a ref from \`groupable\` (the metrics step's group_by; e.g. ${exText}), or filter by one in a where step before the metrics step, as it is written there — a model's column { source, column }, a declared event property { source, property }, a computed dimension or a column of a built table { semantic_model: [<its model>], dimension } — or by { time: 'metric_time', grain }.`,
         `Change it later by editing its semantic_model step (build_model({ request: { action: 'edit_step', context_id: '${ctx.id}', index, step } })) and materializing again; inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],

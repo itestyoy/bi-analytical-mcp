@@ -474,7 +474,7 @@ export const STAGES = {
       const names = { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames) };
       return {
         type: 'object',
-        description: `Trim the columns before they are materialized: \`keep\` keeps exactly these (in this order), \`drop\` removes these and keeps the rest.${refNames ? REF_NAMES_NOTE : ''}`,
+        description: `Trim the columns before they are materialized: \`keep\` keeps exactly these (in this order), \`drop\` removes these and keeps the rest — { stage: "project", keep: ["a", "b"] }.${refNames ? REF_NAMES_NOTE : ''}`,
         anyOf: [
           form({ title: 'keep these columns', required: ['stage', 'keep'], properties: { stage: { enum: ['project'] }, keep: { ...names, description: 'The columns to keep, in order.' } } }),
           form({ title: 'drop these columns', required: ['stage', 'drop'], properties: { stage: { enum: ['project'] }, drop: { ...names, description: 'The columns to remove; every other column stays.' } } }),

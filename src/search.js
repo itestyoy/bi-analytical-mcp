@@ -172,11 +172,12 @@ export class CatalogSearch {
       // (a recipe is said to cover the task only where it matches it closely — a loose one is listed, not recommended)
       ...(recipe_matches.length && (recipe_matches[0].match === 'exact' || recipe_matches[0].score >= RECIPE_CLOSE) ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
     ];
-    recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
-
     const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
+    const best = all.length ? Math.max(...all.map((m) => (m.match === 'exact' ? 1 : m.score ?? 0))) : 0;
+    // (a match that only resembles the word is listed, not recommended: the note below says the data may not hold it)
+    if (best >= WEAK_MATCH) recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
+
     if (all.length && !all.some((m) => m.match === 'exact')) {
-      const best = Math.max(...all.map((m) => m.score ?? 0));
       recs.unshift(best < WEAK_MATCH
         ? `Nothing in the catalog matches '${query}' closely — the matches below only resemble it (fuzzy, best ${best}); the data may not hold it. Check the event list (semantic_index({ request: {} })) before building on one of them.`
         : `No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);

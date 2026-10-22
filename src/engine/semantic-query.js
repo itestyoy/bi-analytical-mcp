@@ -977,9 +977,11 @@ export const semanticQueryMethods = {
     const rename = new Map(); // MetricFlow output name → the column name the caller sees
     const groupByResolved = {}; // "<source>.<column>" → the result column
     const columns = []; // the result's group_by columns, as the steps after the query name them
+    const propertyCols = []; // the event properties grouped by, with the result column each gives
     for (const [i, g] of q.groupBy.entries()) {
       const at = `${q.at} group_by[${i}]`;
       const r = this._taskRef(ctx, g, at, 'steps');
+      if (g.property !== undefined && g.source) propertyCols.push({ source: g.source, property: g.property, column: r.column });
       if (r.kind === 'dimension') this._checkCuts(ctx, g.source ?? g.semantic_model.at(-1), r.label, metrics, at);
       if (r.kind === 'entity') this._checkEntityCuts(ctx, r.path, metrics, at);
       if (metrics.includes(r.column) || [...rename.values()].includes(r.column)) throw new ToolError(`${at}: '${r.label}' would produce a result column '${r.column}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'steps' });
@@ -1085,7 +1087,7 @@ export const semanticQueryMethods = {
         if (startDay && startDay > freshDay) {
           const weekBefore = new Date(Date.parse(`${freshDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
           outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
-        } else if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : 'latest event time'})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+        } else if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : `the latest row of ${factsRead[0]}`})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
       }
       // A window that holds no rows of the sources at all (before the data begins, a gap, past its end) gives
       // a 0 / null that is no measurement: where the answer looks empty, the rows of each source inside the
@@ -1106,6 +1108,18 @@ export const semanticQueryMethods = {
         const before = fresh && endDay && endDay < String(fresh).slice(0, 10);
         // (a window after the data ends is said above, as the warning)
         if (!outside.length) recs.push(`0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events.${before ? ` The data runs through ${String(fresh).slice(0, 10)}; if this window lies before it begins, the same query with a wide time_range and { time: "metric_time", grain: "month" } shows where it starts.` : ''} Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).`);
+      }
+      // a payload property grouped by is NULL on every event that does not carry it: where the where steps
+      // name no events, its NULL group is those other events — said with the events that do carry it
+      // (read off the value index: what the data holds, not what the catalog declares)
+      if (!(q.tail || []).length) {
+        for (const pc of propertyCols) {
+          if (!pageRows.some((row) => row[pc.column] == null)) continue;
+          const evCol = this.catalog.eventNameColumn(pc.source);
+          if (evCol && JSON.stringify(q.wheres || []).includes(`"column":"${evCol}"`)) continue;
+          const on = this.valueIndex.appliesMap(pc.source, [pc.property])?.[pc.property];
+          if (on?.length) recs.push(`'${pc.property}' is set only on ${on.length > 4 ? `${on.slice(0, 4).join(', ')}, … (${on.length} events)` : on.join(', ')}: on every other event of '${pc.source}' it is NULL, and those events are the NULL group here. To read it over the events that carry it, filter to them in a where step before the metrics step ({ fn: "in", args: [{ source: "${pc.source}", column: "${evCol}" }, ${on.slice(0, 2).map((e) => `{ value: "${e}" }`).join(', ')}] }).`);
+        }
       }
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();

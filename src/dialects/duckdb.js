@@ -273,7 +273,8 @@ export class DuckDBDialect extends Dialect {
   // EXACT, MERGEABLE sketch: a sketch is the chr(1)-joined set of distinct values. init dedups;
   // merge_partial concatenates (a coarser sketch); merge and extract dedup-and-count. Same additive
   // semantics as HLL++, exact.
-  hllInit(c) { return `string_agg(distinct CAST(${c} AS VARCHAR), chr(1))`; }
+  // DuckDB has no HLL: a sketch here is the set of the values' hashes (exact, and no value of the rows in it)
+  hllInit(c) { return `string_agg(distinct CAST(hash(${c}) AS VARCHAR), chr(1))`; }
   hllMergePartial(c) { return `string_agg(${c}, chr(1))`; }
   hllMerge(c) { return `len(list_distinct(string_split(string_agg(${c}, chr(1)), chr(1))))`; }
   hllExtract(c) { return `len(list_distinct(string_split(${c}, chr(1))))`; }

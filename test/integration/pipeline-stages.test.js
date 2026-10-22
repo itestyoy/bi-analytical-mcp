@@ -429,6 +429,12 @@ test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum =
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].merged), 7); // distinct buyers across products (u1 counted once)
   assert.equal(num(r.rows[0].naive), 8); // 3 + 3 + 2 — double-counts u1 (proves merge is additive/dedup)
+  // a sketch holds no value of the rows: no buyer's id is in any of them
+  const sketches = await show([
+    { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'sk', expr: { fn: 'hll_init', args: [{ column: 'player_id_of_internal' }] } }] },
+  ]);
+  assert.ok(sketches.rows.length > 0 && sketches.rows.every((row) => !String(row.sk).includes(String(row.player_id_of_internal))), JSON.stringify(sketches.rows.slice(0, 3)));
 });
 
 // hll_merge_partial keeps additivity as a coarser sketch; hll_extract reads cardinality

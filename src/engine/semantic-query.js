@@ -583,7 +583,7 @@ export const semanticQueryMethods = {
     const reads = [...new Set(metrics.flatMap((m) => known.get(m).semantic_models))];
     // (keyed by the dbt model dbt itself records each semantic model reads)
     const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
-    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy);
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy, reads);
     const conversionNotes = this._conversionNotes(layer, metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
     const paging = this._metricPaging(input, tail.ordered);
     const explain = this._compileOnly(input);
@@ -755,7 +755,7 @@ export const semanticQueryMethods = {
 
   /** The window: the cost guardrail (`guarded` names what requires a bounded one), the timezone, the
    *  bounds, and the warnings an open or still-filling window gets. → { bounds, windowWarnings } */
-  _metricWindow(input, guarded = [], groupBy = []) {
+  _metricWindow(input, guarded = [], groupBy = [], reads = []) {
     // Cost guardrail (require_time_range): block an unbounded scan over what the query reads
     if (guarded.length && !input.time_range?.start) {
       throw new ToolError(`${guarded.join(', ')} require${guarded.length === 1 ? 's' : ''} a bounded time window (require_time_range): pass time_range { start, end } to prune partitions`, { stage: 'validate', field: 'time_range' });
@@ -768,7 +768,7 @@ export const semanticQueryMethods = {
     // Window honesty: warn when unbounded or when the window reaches into today (the trailing bucket
     // is incomplete) — so partial periods are never reported silently.
     const bounds = resolveTimeRange(input.time_range) || {};
-    return { bounds, windowWarnings: [...timeRangeWarnings(input.time_range), ...wholeBucketWarnings(input.time_range, bounds, groupBy)] };
+    return { bounds, windowWarnings: [...timeRangeWarnings(input.time_range, new Date(), { reads }), ...wholeBucketWarnings(input.time_range, bounds, groupBy)] };
   },
 
   /**
@@ -939,7 +939,7 @@ export const semanticQueryMethods = {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail covers every source this context reads, whichever one the metrics come from
     const guarded = (ctx.state.usedModels || []).filter((k) => this._catalogOf(ctx).requireTimeRangeFor(k)).map((k) => `source ${k}`);
-    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy);
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy, [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))]);
     const paging = this._metricPaging(input, tail.ordered);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, metrics);
     const explain = this._compileOnly(input);

@@ -419,7 +419,10 @@ export const pipelineMaterializeMethods = {
         // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
         // reaches the caller as plausible numbers.
         ...this.advisor.stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
-        ...((this.runner && rows.length === 0)
+        ...((this.runner && rows.length === 0 && sampled)
+          ? [`0 rows after a sample of about ${Math.round(sampled.share * 100)}% of the rows: it keeps each row at random, so of a few rows it can keep none — leave the sample out on a small table, or check the steps without it.`]
+          : []),
+        ...((this.runner && rows.length === 0 && !sampled)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the steps / widen the window.`]
           : []),
       ],

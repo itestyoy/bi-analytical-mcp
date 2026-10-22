@@ -131,11 +131,12 @@ export function timeRangeConditions(model, tr, { partition = true } = {}) {
  * - no window at all → full-history scan warning;
  * - window reaching into today → the trailing period is incomplete.
  */
-export function timeRangeWarnings(tr, now = new Date()) {
+export function timeRangeWarnings(tr, now = new Date(), { reads = [] } = {}) {
   const warnings = [];
   const today = now.toISOString().slice(0, 10);
   if (!tr || (!tr.start && !tr.end)) {
-    warnings.push('No time_range: the query scans the WHOLE events history. Bound it with time_range {start, end} to prune partitions and keep results comparable.');
+    // (named by what the query reads: the sources of its metrics)
+    warnings.push(`No time_range: the query scans the WHOLE history of ${reads.length ? reads.join(', ') : 'what it reads'}. Bound it with time_range {start, end} to prune partitions and keep results comparable.`);
   } else if (!tr.end || String(tr.end).slice(0, 10) >= today) {
     warnings.push(`The window includes the current incomplete period (today is ${today}): trailing buckets are partial. For period comparisons set end to the last complete day.`);
   }

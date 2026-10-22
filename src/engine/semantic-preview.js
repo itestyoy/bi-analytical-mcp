@@ -145,7 +145,8 @@ export const semanticPreviewMethods = {
         cut = { ...(input.metric ? { dimensions: own, entities: this._metricEntities(ctx, m.name).map((entity) => ({ entity })) } : {}), ...time };
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
-      return { ...m, definition: def, group_by: cut };
+      // (one metric asked: what it is made of comes with it, each said so)
+      return { ...m, ...(input.metric && m.name !== input.metric ? { input_of: input.metric } : {}), definition: def, group_by: cut };
     });
     const first = scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;

@@ -52,11 +52,11 @@ export class PipelineAdvisor {
    */
   stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
     const draft = { source, stages, timeRange, startsFromTable };
-    return stages.flatMap((st, i) => [
+    return sayOnce(stages.flatMap((st, i) => [
       ...this.funnelCompletionWarnings(st, stages.slice(i + 1)),
       ...this.pythonPreparationWarnings(st, draft, i),
       ...this.globalWindowWarnings(st),
-    ]);
+    ]));
   }
 
   /**
@@ -342,3 +342,20 @@ export class PipelineAdvisor {
   }
 }
 
+/**
+ * Notes said once in one answer: a note said before (in `said`, which this adds to) is left out, and one
+ * whose explanation — what follows its first sentence — was said before keeps its first sentence alone.
+ */
+export function sayOnce(notes, said = new Set()) {
+  const out = [];
+  for (const n of notes) {
+    const cut = n.indexOf('. ');
+    const tail = cut > 0 ? n.slice(cut + 2) : null;
+    if (said.has(n)) continue;
+    if (tail && said.has(`tail:${tail}`)) out.push(`${n.slice(0, cut + 1)} (as said above)`);
+    else out.push(n);
+    said.add(n);
+    if (tail) said.add(`tail:${tail}`);
+  }
+  return out;
+}

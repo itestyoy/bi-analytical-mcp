@@ -376,7 +376,7 @@ export class Engine {
     const fact = (owner.usedModels || []).filter((k) => this.catalog.isFact(k));
     const source = input.source || (owner.draft?.source ?? owner.pipeline_origin?.source) || (fact.length === 1 ? fact[0] : null);
     if (!source) throw new ToolError(`name the source the steps resolve properties and relationships against (source: one of ${this.catalog.modelKeys().join(', ')}) — task ${job.id} read ${fact.length ? fact.join(' and ') : 'no events source'}`, { stage: 'validate', field: 'source' });
-    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source };
+    return { base: { task_id: job.id, model: job.table, owner: job.contextId, columns }, source, read: [...new Set(owner.usedModels || [])] };
   }
 
   /** Make a task's table readable from this draft's context, and keep its owner from being dropped under it. */
@@ -452,7 +452,10 @@ export class Engine {
     this._validate('context', input);
     if (input.action === 'list') return this._listContexts(input);
     const { action: _describe, ...describe } = input;
-    return this._describeContext(describe);
+    const out = await this._describeContext(describe);
+    // the tasks run on it, by id (its `tasks` are the builds' names): what a read, a from_task, a card take
+    const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: j.tool } : {}), status: j.status }));
+    return out && !out.task_id && ran.length ? { ...out, task_ids: ran } : out;
   }
 
   /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context

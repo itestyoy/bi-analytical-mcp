@@ -14,7 +14,8 @@
 export function builtModel({ key, dbtModel, columns, time, keys = {}, description }) {
   const dimensions = {};
   for (const c of columns) {
-    if (c.type === 'json' || /^array/.test(String(c.type))) continue;
+    // (a sketch is merged, never grouped by)
+    if (c.type === 'json' || c.type === 'sketch' || /^array/.test(String(c.type))) continue;
     dimensions[c.name] = c.type === 'time' ? { type: 'time', granularity: 'day' } : { type: 'categorical' };
   }
   return {

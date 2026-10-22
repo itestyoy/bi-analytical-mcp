@@ -10,6 +10,7 @@ import { currentSpelling } from '../pipeline/earlier.js';
 import { isSemanticStep, SEMANTIC_STAGE } from '../pipeline/semantic-stage.js';
 import { physicalColumnType } from '../catalog/column-types.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
+import { sayOnce } from './pipeline-warnings.js';
 
 /** The comparisons of a column with constants that bound a scan of it (require_time_range). */
 const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
@@ -412,6 +413,8 @@ export const pipelineDraftMethods = {
     const resp = {
       context_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
+      // (a task that read several models: its rows are its table's — source is only what the steps resolve against)
+      ...(base && found.read.length > 1 ? { task_read: found.read, source_note: `the rows are task ${base.task_id}'s table, which read ${found.read.join(', ')}; source '${source}' is what these steps resolve relationships and properties against` } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
       next: `Append steps with build_model({ request: { action: "add_steps", context_id: "${ctx.id}", steps: [...] } }) — a logical chunk at a time; each response shows what each step added or removed (include: ["columns"] or preview for the full list).`,
@@ -461,6 +464,7 @@ export const pipelineDraftMethods = {
     if (!Array.isArray(stages) || !stages.length) throw new ToolError('add_steps needs a non-empty `steps` array', { stage: 'validate', field: 'steps' });
     const snapshot = draft.stages.slice(); // atomic: restore on any failure so the draft is never half-applied
     const effects = [];
+    const said = new Set();
     let last = null; const dropped = [];
     try {
       for (const [i, stage] of stages.entries()) {
@@ -476,7 +480,9 @@ export const pipelineDraftMethods = {
           columns_added: r.columns_added,
           columns_removed_count: r.columns_removed_count,
           ...(r.columns_removed ? { columns_removed: r.columns_removed } : {}),
-          ...(r.recommendations.length ? { recommendations: r.recommendations } : {}), // per-step warnings/nudges (filter guard, empty-combination, funnel, etc.)
+          // per-step warnings/nudges (filter guard, empty-combination, funnel, etc.) — one said by an earlier
+          // step of this call is not said again
+          ...(() => { const own = sayOnce(r.recommendations, said); return own.length ? { recommendations: own } : {}; })(),
         });
       }
     } catch (e) {

@@ -50,8 +50,9 @@ export function pageBlock({ offset = 0, limit, returned, has_more = false, total
   return {
     offset, limit, returned, ...(known != null ? { total_rows: known } : {}), has_more,
     ...(has_more ? { next_offset: offset + returned } : {}),
-    // (one row, or none, has no order to speak of)
-    ...(ordered === false && !(known != null && known <= 1) ? { ordered: false, order_note: 'no order_by step: the rows come in no particular order — end the steps with an order_by step for a ranking, and for pages that hold the same rows each time' } : {}),
+    // (one row, or none, has no order to speak of; and where every row is on the page, which rows a page
+    // holds does not depend on it — the note is said where it matters: a page with more after it)
+    ...(ordered === false && !(known != null && known <= 1) ? { ordered: false, ...(has_more || offset > 0 ? { order_note: 'no order_by step: the rows come in no particular order — end the steps with an order_by step for a ranking, and for pages that hold the same rows each time' } : {}) } : {}),
   };
 }
 
@@ -60,11 +61,11 @@ export function pageBlock({ offset = 0, limit, returned, has_more = false, total
  * sample: what it is safe for, what it is NOT, and how to get the exact answer. So the
  * caller is never misled into acting on a sampled number, and always has the choice.
  */
-export function samplingNote(share) {
+export function samplingNote(share, of = 'the rows the sample step read') {
   return {
     approximate: true,
     sample_share: share,
-    why: `These rows were computed over a random sample of about ${+(share * 100).toPrecision(6)}% of the source (share ${share}) for a FAST directional read — NOT the full population.`,
+    why: `These rows were computed over a random sample of about ${+(share * 100).toPrecision(6)}% of ${of} (share ${share}) for a FAST directional read — NOT the full population.`,
     safe_for: 'getting the shape/direction: top categories, rough proportions, whether a segment is non-trivial, sanity-checking a pipeline before a full run.',
     not_reliable_for: 'exact totals/counts, rates near 0 or 1, small segments, distinct counts, or ranking values that are close — sampling error can change or flip these.',
     get_exact: 'For a number you will act on, re-run WITHOUT the sample stage to compute over ALL the data.',

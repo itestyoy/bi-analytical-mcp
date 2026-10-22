@@ -542,3 +542,15 @@ test('_buildPipeline: dry_run returns SQL without building', async () => {
   assert.equal(dr.dialect, e.catalog.dialect);
   assert.equal(dr.model_sql_bigquery, undefined);
 });
+// an unpivot says what stays beside the two columns it makes: keep is required ([] keeps none), so a
+// group key is never dropped by leaving keep out
+test('build_model: an unpivot without keep is refused, naming keep', async () => {
+  const e = engine();
+  const s = await e.build_model({ action: 'start', name: 'unp', source: 'events', steps: [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', expr: { fn: 'count' } }, { name: 'u', expr: { fn: 'count_distinct', args: [{ column: 'player_id_of_internal' }] } }] }] });
+  await assert.rejects(
+    () => e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unpivot', columns: ['n', 'u'], name_column: 'm', value_column: 'v' }] }),
+    /keep/,
+  );
+  const ok = await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [{ stage: 'unpivot', columns: ['n', 'u'], keep: ['event_name'], name_column: 'm', value_column: 'v' }], include: ['columns'] });
+  assert.deepEqual(ok.available_columns.map((c) => c.name).sort(), ['event_name', 'm', 'v']);
+});

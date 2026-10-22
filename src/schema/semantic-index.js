@@ -48,7 +48,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
   const refView = (kind, title, description, extra = {}) => refs[kind].map((f) => ({ ...f, title, description: description(f.properties.source), properties: { ...f.properties, ...extra } }));
   const sourceOf = (s) => s.const ?? null;
   const refViews = {
-    source: refView('source', '{ source }', () => 'One source — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.'),
+    source: refView('source', '{ source }', () => 'One source — its entities, time axis, dimension attributes (a model\'s with real sample values; an events source\'s events and payload properties are drilled one at a time: { source, event }, { source, property }), physical columns, declared relationships and aggregatable amounts.'),
     // an event name belongs to the source that declares it, so a pairing that source does not have cannot be written down
     source_event: refView('source_event', '{ source, event }', (s) => `The properties populated on that event of '${sourceOf(s)}'.`),
     source_column: refView('source_column', '{ source, column }', (s) => `One column of '${sourceOf(s)}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, paging),

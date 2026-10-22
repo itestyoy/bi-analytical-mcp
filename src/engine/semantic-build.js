@@ -210,7 +210,6 @@ export const semanticBuildMethods = {
     return {
       context_id: ctx.id,
       task: compiled.task,
-      files: [file],
       ...(wants(input, 'yaml') ? { yaml: render.yaml } : {}),
       semantic_models: render.semanticModels,
       joined_models: ctx.state.usedModels,
@@ -260,6 +259,8 @@ export const semanticBuildMethods = {
       for (const k of ['measures', 'join']) if (!st[k].length) delete st[k];
       if (st.metrics.length) draft.semantic = st; else delete draft.semantic;
     }
+    // its join went with it (above): the layer reads it no more — the build's own source excepted
+    if (modelKey !== draft?.source) ctx.state.usedModels = (ctx.state.usedModels || []).filter((k) => k !== modelKey);
     const render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() });
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);

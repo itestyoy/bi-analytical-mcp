@@ -172,7 +172,8 @@ export function buildViewModel(toolName, result, toolInput) {
         // metric (conversion up is good, crash rate up is not) — the `outcome` below
         verdict: !significant ? 'no_difference' : (lift ?? 0) >= 0 ? 'increase' : 'decrease',
         // whether that direction is GOOD is the caller's to say (good: up | down, echoed by the test)
-        outcome: r.outcome || (!significant || !lift ? 'no_difference' : (lift > 0) === ((result.good || 'up') === 'up') ? 'better' : 'worse'),
+        // (the card's word for a result that shows no difference; the analysis says inconclusive)
+        outcome: (r.outcome === 'inconclusive' ? 'no_difference' : r.outcome) || (!significant || !lift ? 'no_difference' : (lift > 0) === ((result.good || 'up') === 'up') ? 'better' : 'worse'),
         variance_reduction: num(r.variance_reduction),
         // significant on the raw p but not after the correction: the interval clears zero, the verdict does not
         significant_raw: !!r.significant,

@@ -273,7 +273,9 @@ function describe(e, ctx = {}) {
       if (vals.length === 1) return `${at} must be ${JSON.stringify(vals[0])}`;
       const used = valueAt(ctx.input, e.instancePath);
       const alt = otherSpelling(used, vals);
-      return oneOf(at, vals, used, alt);
+      // what the catalog knows of a value no list takes (a relationship's key, named where its entity is)
+      const note = typeof used === 'string' && ctx.valueNote ? ctx.valueNote(used) : null;
+      return oneOf(at, vals, used, alt) + (note ? `. ${note}` : '');
     }
     case 'const': return `${at} must be ${JSON.stringify(e.params.allowedValue)}`;
     case 'type': {
@@ -679,7 +681,7 @@ export function validateInput(validator, input, _opts = {}) {
   // every union read as the branch the input meant, each error as a sentence, de-duplicated
   const seen = new Set();
   const errors = [];
-  const ctx = { input, schema: validator.schema };
+  const ctx = { input, schema: validator.schema, valueNote: _opts.valueNote };
   for (const e of explain(validator.schema, validator.schema, input, new Map())) {
     const msg = describe(e, ctx);
     if (msg && !seen.has(msg)) { seen.add(msg); errors.push(msg); }

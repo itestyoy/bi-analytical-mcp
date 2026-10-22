@@ -145,7 +145,7 @@ export function abTest(input) {
   results = results.map((r) => {
     const sig = !!(r.significant_adjusted ?? r.significant);
     const lift = r.absolute_lift ?? 0;
-    return { ...r, outcome: !sig || lift === 0 ? 'no_difference' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
+    return { ...r, outcome: !sig || lift === 0 ? 'inconclusive' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
   });
   const thin = results.filter((r) => r.small_sample).map((r) => r.variant);
   // a verdict on a group too small to read is not stated as one: the small-sample warning speaks for it

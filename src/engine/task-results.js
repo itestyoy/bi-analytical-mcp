@@ -181,12 +181,21 @@ export const taskResultMethods = {
    */
   async _pollTasks(input, side) {
     const ids = input.task_ids;
-    for (const id of ids) this._taskForSide(id, side);
-    const waited = await this.tasks.await(ids, TaskRunner.clampWait(input.wait_seconds));
+    // one id this side cannot read is refused as the read; among several, it is that one's result — the
+    // others are read all the same
+    const refused = new Map();
+    for (const id of ids) {
+      try { this._taskForSide(id, side); } catch (e) {
+        if (ids.length === 1 || !(e instanceof ToolError)) throw e;
+        refused.set(id, { task_id: id, ok: false, status: 'error', error: { stage: e.stage, ...(e.code ? { code: e.code } : {}), message: e.message } });
+      }
+    }
+    const readable = ids.filter((id) => !refused.has(id));
+    const waited = await this.tasks.await(readable, TaskRunner.clampWait(input.wait_seconds));
     const results = [];
     // a read hands the model a PAGE of each task's result (READ_PAGE rows from `offset` unless it asks for
     // another number): the task keeps what it keeps — what a card draws — and the rest is a next_offset away
-    for (const id of ids) results.push(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }));
+    for (const id of ids) results.push(refused.get(id) ?? await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }));
     return TaskRunner.readAnswer(results, this._readers[[].concat(side)[0]], { waited_seconds: waited });
   },
 

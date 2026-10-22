@@ -309,7 +309,7 @@ test('a metric query has one metrics step, only where steps before it, and the r
   const scope = STAGE_PLACES.metric_scope;
   const before = e._listTasks().tasks.length;
   // no metrics step, or two
-  await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none\. This context defines: cnt/));
+  await assert.rejects(() => query({ stage: 'limit', limit: 3 }), refused(/^steps: a metric query is one metrics step .* these steps have none, and this context holds no table of a pipeline to read without one .*\. This context defines: cnt/));
   await assert.rejects(() => query(byCountry, { stage: 'limit', limit: 3 }, byCountry), refused(/^steps\[2\]: a metric query has one metrics step, and steps\[0\] is one — list every metric in it, or make the other a query of its own/));
   // a step the result takes, before the metrics step: it goes after it
   for (const st of [{ stage: 'order_by', keys: [{ key: 'cnt' }] }, { stage: 'compute', name: 'x', expr: { value: 1 } }, { stage: 'limit', limit: 1 }]) {
@@ -732,6 +732,13 @@ test('a queued task that is cancelled never starts a process; a batch is cancell
   assert.equal((await taskResult(e, first.task_id)).status, 'done');
   for (let i = 0; i < 20; i += 1) await tick();
   assert.equal(runner.log.filter((l) => l.startsWith('start:')).length, 1, 'the cancelled batch never reached the warehouse');
+  // a read of several tasks, one of them unknown: that one is its error, the others are read all the same
+  const mixed = await e.query_model({ task_ids: [first.task_id, 'feedfacefeed'] });
+  assert.deepEqual(mixed.results.map((r) => [r.task_id, r.status]), [[first.task_id, 'done'], ['feedfacefeed', 'error']]);
+  assert.match(mixed.results[1].error.message, /unknown task_id: feedfacefeed/);
+  assert.equal(mixed.ok, true);
+  // …one id alone is refused as the read
+  await assert.rejects(() => e.query_model({ task_ids: ['feedfacefeed'] }), /unknown task_id/);
   // cancel is refused beside fields it does not take
   await assert.rejects(() => one(e.query_model({ task_ids: [first.task_id], cancel: true, wait_seconds: 1 })));
   await assert.rejects(() => e.query_model({ context_id: created.context_id, cancel: true }));

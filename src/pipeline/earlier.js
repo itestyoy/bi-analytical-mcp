@@ -8,7 +8,7 @@
 // expression, a derive stage the compute stage reading the same event property, a join's top-level
 // `on` is via: { on } and its attrs' `as` their `name`, a join window's between.value is between.column;
 // a pivot's agg + value_column + its values as names is one measure and { value, name } per value;
-// unpivot's name_as / value_as are name_column / value_column; a funnel's `mode` is folded into
+// unpivot's name_as / value_as are name_column / value_column, and one with no keep keeps none (keep: []); a funnel's `mode` is folded into
 // between_steps (strict → none); unnest's `as` is `name` and its `source` the array it names; a
 // sample's percent is a share; project's `columns` is keep; limit's `n` is limit; and a python function
 // body written as nested arrays of lines (a nested array the block under the line before it) is its
@@ -122,9 +122,10 @@ function currentStage(st, ctx) {
     return expr ? { stage: 'compute', name: st.name, expr } : st;
   }
   if (st.stage === 'pivot' && st.measure === undefined && (st.agg !== undefined || st.fn !== undefined || st.value_column !== undefined)) return currentPivot(st);
-  if (st.stage === 'unpivot' && (st.name_as !== undefined || st.value_as !== undefined)) {
+  if (st.stage === 'unpivot' && (st.name_as !== undefined || st.value_as !== undefined || st.keep === undefined)) {
+    // (keep is said now — an earlier unpivot that left it out kept none)
     const { name_as: nameColumn, value_as: valueColumn, ...rest } = st;
-    return { ...rest, ...(nameColumn !== undefined ? { name_column: nameColumn } : {}), ...(valueColumn !== undefined ? { value_column: valueColumn } : {}) };
+    return { ...rest, keep: st.keep ?? [], ...(nameColumn !== undefined ? { name_column: nameColumn } : {}), ...(valueColumn !== undefined ? { value_column: valueColumn } : {}) };
   }
   if (st.stage === 'join' && st.on !== undefined && st.via === undefined && st.with !== undefined) {
     const { on, ...rest } = st;

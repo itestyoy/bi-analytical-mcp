@@ -137,6 +137,21 @@ test('pipeline array_last / element_at: last & first word per completed level', 
   const first = await show(stages({ stage: 'compute', name: 'w', expr: { fn: 'element_at', args: [{ column: 'wa' }], index: 1 } }));
   const byFirst = Object.fromEntries(first.rows.map((x) => [String(x.w), num(x.n)]));
   assert.deepEqual(byFirst, { cat: 12, moon: 4, tree: 3, x: 6 });
+  // the property itself, which the catalog declares a JSON array (as text and as a JSON column alike),
+  // is read the same way with no parse of one's own
+  for (const property of ['words_selected_of_event_data', 'words_selected_json_of_event_data']) {
+    const direct = (expr) => [
+      { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'level_completed' }] }] },
+      { stage: 'compute', name: 'w', expr },
+      { stage: 'where', conditions: [{ fn: 'is_not_null', args: [{ column: 'w' }] }] },
+      { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', expr: { fn: 'count' } }] },
+    ];
+    const l = await show(direct({ fn: 'array_last', args: [{ property }] }));
+    assert.equal(l.ok, true, JSON.stringify(l));
+    assert.deepEqual(Object.fromEntries(l.rows.map((x) => [String(x.w), num(x.n)])), byLast, property);
+    const f = await show(direct({ fn: 'element_at', args: [{ property }], index: 1 }));
+    assert.deepEqual(Object.fromEntries(f.rows.map((x) => [String(x.w), num(x.n)])), byFirst, property);
+  }
 });
 
 // #2: raw SQL escape hatch — verbatim dialect expression when no built-in op fits.

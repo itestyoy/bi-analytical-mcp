@@ -254,7 +254,8 @@ test('a group-by column or via the model does not have is refused, listing the r
     /`steps\.0\.group_by\.0\.column` must be one of: .*country/s, 'a column the model does not have is refused, listing the ones it has');
   assert.ok(!e.catalog.modelDimensionColumns('events').includes('session_number'), 'the session key is not a dimension column of events');
   await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { source: 'events', column: 'session_number' }),
-    (err) => /`steps\.0\.group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop()), 'the session key is not a groupable column of the events source');
+    (err) => /`steps\.0\.group_by\.0\.column` must be one of: bundle_id, event_name/.test(err.message) && !/session_number/.test(err.message.split('must be one of:').pop().split('. ')[0])
+      && /'session_number' is the key of 'session' — a metric query groups by and filters on it as \{ entity: "session" \}/.test(err.message), 'the session key is not a groupable column of the events source: it is named by its entity');
   await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { semantic_model: ['users'], dimension: 'country' }),
     (err) => err.field === 'steps' && /^steps\[0\] group_by\[0\]: 'users\.country' is a column of 'users', named where it lives in the catalog — write \{ source: 'users', column: 'country' \}/.test(err.message));
   await assert.rejects(() => groupBy(e, evu.context_id, 'rows', { source: 'events', property: 'level_id_of_event_data' }),

@@ -171,6 +171,15 @@ const needsArray = (fn, t, scalars = true) => {
   throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
 };
 
+/** An element of an array (element_at, array_last): of a native array, an element of its items' type;
+ *  of an array property the catalog says is held as JSON (as array_length and array_contains read one),
+ *  an element's text — any other text is parsed first (json_parse_array). */
+const elementRead = (d, sql, read, fn, at) => {
+  if (read.jsonArray) return { expr: at(d.jsonParseArray(sql)), type: 'string' };
+  needsArray(fn, read.type);
+  return { expr: at(sql), type: elementType(read.type) };
+};
+
 /** The window clause of a window: OVER (PARTITION BY … ORDER BY … frame). `frame`: an aggregate of a
  *  frame (sum, count …) rather than a rank or a neighbour — the dialect orders the two differently where
  *  it places NULLs. `opts` carries the pipeline's catalog and source, for a partition named by a
@@ -232,14 +241,15 @@ function propertyRead(kind, { d, cols, catalog, source, property, field, item, a
   // for a flag: read as the flag, which cast converts; a type that conversion does not make is not
   // claimed: the key's text. An array is what it is stored as: a native one an array of its items, JSON
   // text otherwise — a payload key's read as its JSON (a read of the key's text takes only a scalar on BigQuery)
-  if (array && !flat) return { sql: d.jsonExtractJson(payload, key), type: 'string' };
+  // (`jsonArray`: text the catalog says holds a JSON array — an element of it is read through the parse)
+  if (array && !flat) return { sql: d.jsonExtractJson(payload, key), type: 'string', jsonArray: true };
   const type = !array ? propertyType(spec) : native ? arrayType : 'string';
   // a scalar's own column, where it is tracked here, is read as that column is — its type (the
   // warehouse's once it was asked: a BOOLEAN column is a flag, a VARCHAR one holding a flag text) and its
   // mark — exactly as a { column } of it
   const backing = flat && !array ? cols?.get(spec.column) : null;
   if (backing && backing.type && backing.type !== 'unknown') return { sql: flat, type: backing.type, ...(backing.physical ? { physical: true } : {}) };
-  if (flat) return { sql: flat, type: tracked(type) };
+  if (flat) return { sql: flat, type: tracked(type), ...(array && !native ? { jsonArray: true } : {}) };
   const castTo = as !== undefined && !(isBooleanType(type) && isNumericType(as)) ? as : undefined;
   const read = textConverts(castTo ?? type) ? castTo ?? type : 'string';
   return { sql: d.jsonExtract(payload, key, read), type: tracked(read), ...(castTo !== undefined ? { readAs: read } : {}) };
@@ -376,8 +386,8 @@ export const FNS = {
   array_contains: { args: 2, title: '[array, { value }]', array: 'contains' },
   // an element of a native array, of the type it is stored as: the array's items (a parsed JSON array's
   // text), not claimed ('unknown') where they are not known
-  element_at: { args: 1, needs: ['index'], sql: ({ d, a, t, p }) => { needsArray('element_at', t[0]); return { expr: d.arrayElementAt(a[0], p.index), type: elementType(t[0]) }; } },
-  array_last: { args: 1, sql: ({ d, a, t }) => { needsArray('array_last', t[0]); return { expr: d.arrayLast(a[0]), type: elementType(t[0]) }; } },
+  element_at: { args: 1, needs: ['index'], sql: ({ d, a, r, p }) => elementRead(d, a[0], r[0], 'element_at', (arr) => d.arrayElementAt(arr, p.index)) },
+  array_last: { args: 1, sql: ({ d, a, r }) => elementRead(d, a[0], r[0], 'array_last', (arr) => d.arrayLast(arr)) },
   date_diff: { args: 2, title: '[from, to]', needs: ['unit'], sql: ({ d, a, p }) => ({ expr: d.dateDiff(p.unit, a[0], a[1]), type: 'int' }) },
   // the wall-clock time of a moment in a timezone — its local day, hour, week (date_trunc / date_part of it)
   in_timezone: {

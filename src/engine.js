@@ -230,8 +230,25 @@ export class Engine {
   }
 
   _validate(tool, input) {
-    const res = validateInput(this.validators[tool], input || {}, { propertyType: propertyTypes(this.catalog) });
+    const res = validateInput(this.validators[tool], input || {}, { propertyType: propertyTypes(this.catalog), valueNote: this._keyNote() });
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
+  }
+
+  /** What a refusal says of a value that is a relationship's key column: the entity it is named by
+   *  where a metric query groups by it (a key is no attribute of its model). */
+  _keyNote() {
+    if (!this._keyNotes) {
+      const of = new Map();
+      for (const k of this.catalog.modelKeys()) {
+        // (a key of one column: a key of several parts is no one column's)
+        for (const [entity, e] of Object.entries(this.catalog.entitiesOf(k))) {
+          const col = (e.key || []).length === 1 ? e.key[0]?.column : null;
+          if (col) of.set(col, [...new Set([...(of.get(col) || []), entity])]);
+        }
+      }
+      this._keyNotes = (used) => (of.has(used) ? `'${used}' is the key of ${of.get(used).map((n) => `'${n}'`).join(' / ')} — a metric query groups by and filters on it as { entity: "${of.get(used)[0]}" }` : null);
+    }
+    return this._keyNotes;
   }
 
   /**
@@ -255,7 +272,7 @@ export class Engine {
     // the parsed copy the project's own contexts share is internal: its semantic models are the contexts
     const hint = this.projectError
       ? ` (the dbt project's own semantic models could not be read, so none of them is a context: ${this.projectError})`
-      : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : '';
+      : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : ' (the dbt project declares no semantic models of its own, so none is a context — a semantic layer is a build_model semantic_model step)';
     // the way out: a context that is gone (deleted, retired after idling) or was never made is not
     // guessed at — the list names those that exist
     const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
@@ -454,7 +471,7 @@ export class Engine {
     const { action: _describe, ...describe } = input;
     const out = await this._describeContext(describe);
     // the tasks run on it, by id (its `tasks` are the builds' names): what a read, a from_task, a card take
-    const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: j.tool } : {}), status: j.status }));
+    const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: this.tasks.toolOf(j.tool) } : {}), status: j.status }));
     return out && !out.task_id && ran.length ? { ...out, task_ids: ran } : out;
   }
 
@@ -780,7 +797,6 @@ export class Engine {
   _assumptions(ctx) {
     const a = [`one semantic model per table in context ${ctx.id}`];
     if (this.catalog.facts.some((f) => ctx.state.additions[f])) a.push('the event scope is applied inside each measure');
-    a.push('metric_time / cumulative / conversion metrics require a configured time dimension');
     return a;
   }
 }

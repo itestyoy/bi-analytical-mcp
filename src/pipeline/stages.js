@@ -403,12 +403,12 @@ export const STAGES = {
 
   unpivot: {
     schema: (catalog, { refNames = false } = {}) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_column', 'value_column'],
-      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too) — so the folded columns are of one type (numbers alike; cast the others first). The result is exactly `keep` + those two columns; every other column is dropped. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
+      type: 'object', additionalProperties: false, required: ['stage', 'columns', 'keep', 'name_column', 'value_column'],
+      description: 'Fold the listed columns into rows: one row per input row and folded column, with the column\'s name in `name_column` and its value in `value_column` (a NULL value too) — so the folded columns are of one type (numbers alike; cast the others first). The result is exactly `keep` + those two columns: list in keep every column that should stay beside them (the group keys, a day) — keep: [] keeps none. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { enum: ['unpivot'] },
         columns: { type: 'array', minItems: 1, uniqueItems: true, items: columnSlot(refNames), description: `Columns to fold into rows.${refNames ? REF_NAMES_NOTE : ''}` },
-        keep: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: 'Columns carried as they are onto each folded row (default: none).' },
+        keep: { type: 'array', uniqueItems: true, items: columnSlot(refNames), description: `Columns carried as they are onto each folded row; every column not here and not folded is dropped ([]: none).${refNames ? REF_NAMES_NOTE : ''}` },
         name_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds each folded column\'s name.' },
         value_column: { type: 'string', pattern: NAME, description: 'The name of the column that holds its value.' },
       },

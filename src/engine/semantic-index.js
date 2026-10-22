@@ -16,6 +16,13 @@ import { keyRef, keyView } from './value-index-views.js';
 /** The fields of a view that are its ref's (the rest — paging, include — are what the view reads). */
 const REF_KEYS = new Set(Object.values(REFS).flatMap((r) => r.fields));
 
+/** A column an example names: a categorical one where the model has one — a time or a validity bound
+ *  reads as an odd first cut, and has no values to list. */
+const exampleColumn = (m) => {
+  const dims = Object.entries(m?.dimensions || {});
+  return (dims.find(([, d]) => d?.type !== 'time') || dims[0] || [])[0];
+};
+
 export const semanticIndexMethods = {
   // Not a tool of its own — reached through semantic_index({ request: { recipe } }) and the skills.
   _recipe(input) {
@@ -234,7 +241,7 @@ export const semanticIndexMethods = {
         `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ request: { search: '<value>' } }).`,
       ]
       : [
-        `Drill into a column's full value/frequency distribution: semantic_index({ request: { source: '${k}', column: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } }).`,
+        `Drill into a column's full value/frequency distribution: semantic_index({ request: { source: '${k}', column: '${exampleColumn(m) || '<column>'}' } }).`,
         `Looking for a known attribute value? semantic_index({ request: { search: '<value>' } }) tells you where it occurs.`,
       ];
     // Concrete next calls (structured) for this model.
@@ -245,7 +252,7 @@ export const semanticIndexMethods = {
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'trace a value to the property/event that carries it' },
       ]
       : [
-        { call: `semantic_index({ request: { source: '${k}', column: '${Object.keys(m.dimensions || {})[0] || '<column>'}' } })`, why: "drill a column's full value/frequency distribution" },
+        { call: `semantic_index({ request: { source: '${k}', column: '${exampleColumn(m) || '<column>'}' } })`, why: "drill a column's full value/frequency distribution" },
         { call: "semantic_index({ request: { search: '<value>' } })", why: 'find where a known attribute value occurs' },
       ];
     // Saved findings about this model (memory tool) — surface them where they belong (compact).
@@ -641,7 +648,7 @@ export const semanticIndexMethods = {
   const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent: 1 }) : null;
   const lastSync = sync?.last_successful_run || sync?.last_run || null;
   const userModel = c.modelKeys().find((k) => c.getModel(k).role === 'users');
-  const exAttr = userModel ? Object.keys(c.getModel(userModel).dimensions || {})[0] : null;
+  const exAttr = userModel ? exampleColumn(c.getModel(userModel)) : null;
   const memCount = this.memoryStore.counts().notes;
   // Apps (bundle ids) seen during indexing — drill one with { bundle } to see which
   // properties are populated vs empty for it (skip the empties for that app).
@@ -676,6 +683,8 @@ export const semanticIndexMethods = {
     // or why it could not be read (the project did not parse)
     ...(this.project ? { project_semantic_layer: this._projectOverview() } : {}),
     ...(this.projectError ? { project_semantic_layer: { available: false, reason: `the dbt project's own semantic models could not be read: ${this.projectError}` } } : {}),
+    // said either way: a reader told the project's models are contexts looks for them here
+    ...(!this.project && !this.projectError ? { project_semantic_layer: { available: false, reason: 'the dbt project declares no semantic models of its own — no context is named after one; declare a semantic layer with a build_model semantic_model step' } } : {}),
     // The features this deployment was asked to run (src/features.js): what each offers when on,
     // and why it is not offered when it cannot run here. A feature nobody asked for is not listed.
     ...(this.featureStatus.length ? {

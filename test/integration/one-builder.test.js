@@ -305,6 +305,27 @@ test('a fork after step N is the build taken back to it: its rows are those of t
   assert.ok((stale.warnings || []).some((w) => /built before the steps changed/.test(w)), JSON.stringify(stale.warnings));
 });
 
+test('insert_step and delete_step change the steps in place: the rows are those of the steps the build holds', opts, async (t) => {
+  if (skip(t)) return;
+  const tutorial = { stage: 'where', conditions: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'tutorial' }] }] };
+  const perPlayer = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'events', expr: { fn: 'count' } }] };
+  const s = await engine.build_model({ action: 'start', name: 'ins_del', source: 'events', steps: [perPlayer] });
+  const rowsOf = async () => { const r = await taskResult(engine, (await engine.raw.build_model({ action: 'materialize', context_id: s.context_id })).task_id); return r.page?.total_rows ?? r.total_rows ?? r.rows.length; };
+  const [{ all }] = (await wh.query('select count(distinct player_id_of_internal) as "all" from fct_analytics_events')).rows;
+  const [{ tut }] = (await wh.query("select count(distinct player_id_of_internal) as tut from fct_analytics_events where event_name = 'tutorial'")).rows;
+  assert.equal(await rowsOf(), num(all), 'one row per player');
+  // the where put in as step 1: the aggregate is step 2 now, and folds the tutorial events only
+  const ins = await engine.build_model({ action: 'insert_step', context_id: s.context_id, index: 1, step: tutorial });
+  assert.deepEqual([ins.step_index, ins.steps_count], [1, 2]);
+  assert.equal(await rowsOf(), num(tut), 'one row per player who did a tutorial');
+  // removed again: every player
+  const del = await engine.build_model({ action: 'delete_step', context_id: s.context_id, index: 1 });
+  assert.equal(del.steps_count, 1);
+  assert.equal(await rowsOf(), num(all));
+  // a step out of range is refused, naming the range
+  await assert.rejects(() => engine.build_model({ action: 'delete_step', context_id: s.context_id, index: 3 }), /delete_step index=3 out of range — the draft has 1 step/);
+});
+
 // A DATE column compared with a moment at midnight written ISO, with its zone (2026-01-03T00:00:00Z): the
 // day it names — the rows the warehouse keeps for that day — as a date written plainly keeps.
 test('a date column against a midnight written ISO keeps the rows of that day on', opts, async (t) => {

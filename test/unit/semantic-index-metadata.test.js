@@ -89,6 +89,8 @@ test('overview carries join_note + value_index_status; payload-less event is not
   // what a metric query can group by, spelled as it groups: { source, column, via? } — the one ref
   assert.ok(out.groupable_columns.some((g) => g.source === 'users' && g.column === 'country'), JSON.stringify(out.groupable_columns));
   assert.equal(out.groupable_attributes, undefined, 'one name for the list');
+  // a project that declares no semantic models of its own says so: no context is named after one
+  assert.equal(out.project_semantic_layer?.available, false, JSON.stringify(out.project_semantic_layer));
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');
   // Applicability is DATA-DERIVED: seed coverage so every event property is observed on some event

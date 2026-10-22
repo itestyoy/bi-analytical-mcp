@@ -127,8 +127,12 @@ export const semanticPreviewMethods = {
       const items = groupBys?.[m.name] || [];
       const t = timeItem(items);
       const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};
+      // a metric the asked one is made of says its definition, not its own group_by again: the asked
+      // metric's is what a query of it takes
+      const inputOf = input.metric && m.name !== input.metric;
       let cut;
-      if (project) {
+      if (inputOf) cut = time;
+      else if (project) {
         const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i) }));
         const dims = refs.filter((r) => r.item.kind === 'dimension');
         const ents = uniqueRefs(refs.filter((r) => r.item.kind === 'entity').map((r) => r.ref));
@@ -146,7 +150,7 @@ export const semanticPreviewMethods = {
       }
       // what this metric's query takes in group_by (and where), spelled as it takes it
       // (one metric asked: what it is made of comes with it, each said so)
-      return { ...m, ...(input.metric && m.name !== input.metric ? { input_of: input.metric } : {}), definition: def, group_by: cut };
+      return { ...m, ...(inputOf ? { input_of: input.metric } : {}), definition: def, group_by: cut };
     });
     const first = scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
@@ -165,7 +169,7 @@ export const semanticPreviewMethods = {
       semantic_models: scope.semanticModels.map(({ measures, ...sm }) => ({ ...sm, ...(measures?.length ? { measures } : {}) })),
       metrics,
       // what a query of THIS context names a cut by
-      ...(project ? {} : { groupable }),
+      ...(project || input.metric ? {} : { groupable }),
       ...(first ? { query_with: `query_model(${JSON.stringify({ request: { context_id: ctx.id, steps: [{ stage: 'metrics', metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }] }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
       validate_with: `context(${JSON.stringify({ request: { action: 'describe', context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
     };

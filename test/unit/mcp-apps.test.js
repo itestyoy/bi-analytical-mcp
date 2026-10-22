@@ -231,9 +231,9 @@ test('A/B outcome: the same significant rise is an improvement where up is good 
   const m = buildViewModel('experiment', down, { ...args, good: 'down' });
   assert.equal(m.good, 'down');
   assert.deepEqual([m.variants[0].verdict, m.variants[0].outcome], ['increase', 'worse']);
-  // a result with no significance reads as no difference either way
+  // a result with no significance is inconclusive either way — not proof of no effect
   const flat = await s.engine.experiment({ ...args, good: 'down', variants: [{ label: 'same', n: 10000, conversions: 402 }] });
-  assert.equal(flat.results[0].outcome, 'no_difference');
+  assert.equal(flat.results[0].outcome, 'inconclusive');
 });
 
 test('view model: each A/B variant carries its verdict, its interval in the headline\'s unit, its group sizes, on one shared scale', async () => {

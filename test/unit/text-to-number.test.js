@@ -119,10 +119,12 @@ test('an element of an array whose items are not known claims no type: any const
   }
 });
 
-test('an array held as JSON text is text until it is parsed: element_at and an unnest of a copy are refused, json_parse_array opens it', () => {
+test('an array held as JSON text: the property is read as the array the catalog says it is; a copy of it is text until it is parsed', () => {
   const crash = { source: 'crashlytics', from: null };
   for (const dialect of DIALECTS) {
-    assert.throws(() => build([compute('x', { fn: 'element_at', args: [{ property: 'breadcrumbs_of_event_data' }], index: 1 })], dialect, crash), /its argument is 'string', not an array — produce an array first/);
+    // element_at of the property itself reads its JSON array, as array_length and array_contains do
+    assert.doesNotThrow(() => build([compute('x', { fn: 'element_at', args: [{ property: 'breadcrumbs_of_event_data' }], index: 1 })], dialect, crash));
+    assert.throws(() => build([compute('trail', { property: 'breadcrumbs_of_event_data' }), compute('x', { fn: 'element_at', args: [col('trail')], index: 1 })], dialect, crash), /its argument is 'string', not an array — produce an array first/);
     assert.throws(() => build([compute('trail', { property: 'breadcrumbs_of_event_data' }), unnest(col('trail'))], dialect, crash), /'trail' is string, not an array column — make one with json_parse_array/);
     assert.doesNotThrow(() => build([
       compute('trail', { fn: 'json_parse_array', args: [col('breadcrumbs_of_event_data')] }),

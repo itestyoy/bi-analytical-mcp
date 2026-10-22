@@ -38,7 +38,7 @@ const QUERY_SIDES = ['semantic', 'pipeline'];
  *  belongs to a metric query alone is refused, naming it. */
 function readOnly(q) {
   const extra = ['time_range', 'materialize', 'include'].filter((k) => q[k] !== undefined);
-  if (extra.length) throw new ToolError(`${extra.join(', ')} ${extra.length > 1 ? 'belong' : 'belongs'} to a metric query — one with a metrics step; a query without one reads the context's stored table, and takes its steps, limit and dry_run`, { stage: 'validate', field: extra[0] });
+  if (extra.length) throw new ToolError(`${extra.join(', ')} ${extra.length > 1 ? 'belong' : 'belongs'} to a metric query — one with a metrics step; a query without one reads the context's stored table, and takes its steps, limit and dry_run${extra.includes('time_range') ? '. A window of its rows is a where step on its time column: { stage: "where", conditions: [{ fn: "gte", args: [{ column: <its time column> }, { value: <start> }] }, { fn: "lt", args: [{ column: <its time column> }, { value: <the day after the end> }] }] }' : ''}`, { stage: 'validate', field: extra[0] });
   return q;
 }
 
@@ -641,7 +641,7 @@ export const semanticQueryMethods = {
     const refuse = (message) => new ToolError(message, { stage: 'validate', field: 'steps' });
     const isMetrics = (st) => st?.stage === METRICS_STEP.stage;
     const k = steps.findIndex(isMetrics);
-    if (k < 0) throw refuse(`steps: a metric query is one metrics step — { stage: "metrics", metrics: [...], group_by: [...] } — with where steps before it for the rows its metrics fold and steps after it over its result; these steps have none. ${offers}`);
+    if (k < 0) throw refuse(`steps: a metric query is one metrics step — { stage: "metrics", metrics: [...], group_by: [...] } — with where steps before it for the rows its metrics fold and steps after it over its result; these steps have none, and this context holds no table of a pipeline to read without one (its rows are its metrics' results). ${offers}`);
     const again = steps.findIndex((st, i) => i > k && isMetrics(st));
     if (again >= 0) throw refuse(`steps[${again}]: a metric query has one metrics step, and steps[${k}] is one — list every metric in it, or make the other a query of its own (several run side by side in one call: queries)`);
     const result = STAGE_PLACES.metric_result;
@@ -872,7 +872,7 @@ export const semanticQueryMethods = {
           ? await this._metricRead(ctx, { qopts, input, rename, explain, tail })
           : callerNamed(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: wants(input, 'plan') }), rename), tail.outputColumns));
       // a result read through a sample of its rows is approximate, and says so (as a sampled read does)
-      return tail.sample && !explain && out?.ok !== false ? { ...out, sampled: true, sampling: samplingNote(tail.sample.share) } : out;
+      return tail.sample && !explain && out?.ok !== false ? { ...out, sampled: true, sampling: samplingNote(tail.sample.share, 'the metric query\'s result rows') } : out;
     };
   },
 
@@ -1020,7 +1020,6 @@ export const semanticQueryMethods = {
         recs.push(`count_distinct grouped by ${versioned.map((m) => `'${m}'`).join(', ')}, a slowly-changing model: a user whose version changed inside the window is counted under each value it held, so the groups add up to more than the users in all — read the total from a query without that group_by, not from their sum.`);
       }
       if (page.has_more) recs.push(this._keptRowsNote(page));
-      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_model({ request: { action: \'start\', name, from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
         columns: res.columns,

@@ -19,6 +19,9 @@ const BOUNDING_OPS = ['eq', 'gt', 'gte', 'lt', 'lte', 'between', 'in'];
  *  column, every step. */
 const included = (input) => ({ columns: !!input.include?.includes('columns'), steps: !!input.include?.includes('steps') });
 
+/** What a change to the steps did, said in the answer of the build it started. */
+const said = (action) => ({ edit_step: 'The step is replaced', insert_step: 'The step is put in', delete_step: 'The step is removed' })[action] || 'The steps are added';
+
 export const pipelineDraftMethods = {
   /**
    * Compose a pipeline INCREMENTALLY (single tool, `action`-driven). Each
@@ -49,6 +52,13 @@ export const pipelineDraftMethods = {
       if (toSemantic) throw new ToolError(`a semantic_model step is the build's last step${draft.semantic ? ` — this build's is step ${semanticAt}: edit that one` : ` — add it after step ${draft.stages.length}`}`, { stage: 'validate', field: 'step' });
       // (materialize: true builds right after the edit, as it does after added steps)
       return this._draftThenBuild(ctx, draft, input, await this._draftEditStep(ctx, draft, input.index, input.step, inc.columns, inc.steps));
+    }
+    if (input.action === 'insert_step' || input.action === 'delete_step') {
+      if (semanticAt && input.index >= semanticAt) throw new ToolError(`step ${semanticAt} is the build's semantic_model step, its last: ${input.action === 'insert_step' ? `a step goes before it (index 1..${semanticAt - 1}) — or edit it (edit_step)` : `it is edited (edit_step), or the build forked before it (fork, after: ${semanticAt - 1})`}`, { stage: 'validate', field: 'index' });
+      if (input.action === 'insert_step' && isSemanticStep(input.step)) throw new ToolError(`a semantic_model step is the build's last step — ${draft.semantic ? `this build's is step ${semanticAt}: edit that one` : `add it after step ${draft.stages.length} (add_steps)`}`, { stage: 'validate', field: 'step' });
+      return this._draftThenBuild(ctx, draft, input, await (input.action === 'insert_step'
+        ? this._draftInsertStep(ctx, draft, input.index, input.step, inc.columns, inc.steps)
+        : this._draftDeleteStep(ctx, draft, input.index, inc.columns, inc.steps)));
     }
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { context_id: ctx.id, action: 'discard', discarded: true }; }
@@ -122,7 +132,7 @@ export const pipelineDraftMethods = {
       return {
         ...added,
         materialize,
-        next: `${input.action === 'edit_step' ? 'The step is replaced' : 'The steps are added'} and the build is started (materialize.task_id): read it with ${this.tasks.readWith(materialize.task_id)} — it waits for the build and returns its rows.`,
+        next: `${said(input.action)} and the build is started (materialize.task_id): read it with ${this.tasks.readWith(materialize.task_id)} — it waits for the build and returns ${draft.semantic ? 'the semantic layer it declared (its metrics and what they are grouped by; a metric query returns rows)' : 'its rows'}.`,
       };
     } catch (e) {
       const stage = e instanceof ToolError ? (e.stage || 'validate') : 'internal';
@@ -131,7 +141,7 @@ export const pipelineDraftMethods = {
       return {
         ...added,
         materialize: { ok: false, error: { stage, message: e.message, ...(e.code ? { code: e.code } : {}) } },
-        next: `${input.action === 'edit_step' ? 'The step is replaced' : 'The steps are added'}; the build did not start (materialize.error says why). Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
+        next: `${said(input.action)}; the build did not start (materialize.error says why). Materialize with build_model({ request: { action: "materialize", context_id: "${ctx.id}" } }) once that is resolved.`,
       };
     }
   },
@@ -523,6 +533,22 @@ export const pipelineDraftMethods = {
     return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, includeSteps, action: 'edit_step', stepIndex: i, dropFrom: i });
   },
 
+  /** Put `stage` in as step N — the step there and those after it move one on — then revalidate. */
+  async _draftInsertStep(ctx, draft, index, stage, includeColumns = false, includeSteps = false) {
+    if (!Number.isInteger(index) || index < 1 || index > draft.stages.length + 1) {
+      throw new ToolError(`insert_step index=${index} out of range — the draft has ${draft.stages.length} step(s): a step goes in at 1..${draft.stages.length + 1} (${draft.stages.length + 1} appends, as add_steps does)`, { stage: 'validate', field: 'index' });
+    }
+    const next = draft.stages.slice(); next.splice(index - 1, 0, stage);
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, includeSteps, action: 'insert_step', stepIndex: index, dropFrom: index });
+  },
+
+  /** Remove step N — those after it move one back — then revalidate what follows without it. */
+  async _draftDeleteStep(ctx, draft, index, includeColumns = false, includeSteps = false) {
+    const i = this._stepIndex(draft, index, 'delete_step');
+    const next = draft.stages.slice(); next.splice(i - 1, 1);
+    return this._draftCommit(ctx, draft, next, { includeColumns, includeSteps, action: 'delete_step', stepIndex: Math.min(i, next.length) || null, dropFrom: i });
+  },
+
   /**
    * Branch a NEW draft from an existing draft (or an already-materialized pipeline) keeping
    * steps 1..after — so you iterate on a variant WITHOUT re-typing the shared prefix and
@@ -665,7 +691,7 @@ export const pipelineDraftMethods = {
     draft.stages = rendered ? newStages.map((st) => rendered.current.get(st) ?? st) : newStages;
     // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
     // the files of the ones nobody else reads go with them.
-    const why = `step ${dropFrom} was edited`;
+    const why = `step ${dropFrom} was ${action === 'delete_step' ? 'deleted' : action === 'insert_step' ? 'put in before it' : 'edited'}`;
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan, why);
     this.ctxs.touch(ctx.id);
     const after = rendered
@@ -695,7 +721,7 @@ export const pipelineDraftMethods = {
       ...(retiredNow.length ? { checkpoints_dropped: retiredNow } : {}),
       next: action === 'add_steps'
         ? 'add_steps the next steps; or fix a prior step with edit_step (fork to go back to step N); or materialize. Pass include: ["columns"] / preview for the full column list.'
-        : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include: ["columns"] for the full list).',
+        : `Pipeline revalidated end-to-end after the ${action === 'delete_step' ? 'removal' : action === 'insert_step' ? 'insertion' : 'edit'}. Continue editing, preview, or materialize (include: ["columns"] for the full list).`,
       recommendations: [
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),

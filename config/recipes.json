@@ -571,8 +571,8 @@
     {
       "id": "conversion_metric_window",
       "task_type": "pipeline",
-      "title": "A conversion within a window — retention (D1/D7), repeat purchase: B within N hours/days of A",
-      "when_to_use": "Any \"did they do B within N of A\" question per entity: retention (D1/D7), repeat purchase, trial-to-paid, start-to-complete, reactivation, visit-to-purchase conversion.",
+      "title": "A conversion within a window — B within N hours/days of A (rolling from A: retention within 48 h / 7 days, repeat purchase); a calendar D1/D7 is in the notes",
+      "when_to_use": "Any \"did they do B within N of A\" question per entity: retention within N hours/days (a calendar D1/D7: see the notes), repeat purchase, trial-to-paid, start-to-complete, reactivation, visit-to-purchase conversion.",
       "required_events": [
         "first_launch",
         "new_session"
@@ -1125,7 +1125,7 @@
                 }
               },
               {
-                "name": "avg_time",
+                "name": "avg_score",
                 "expr": {
                   "fn": "average",
                   "args": [
@@ -1183,9 +1183,9 @@
                 }
               },
               {
-                "name": "avg_time",
+                "name": "avg_score",
                 "type": "simple",
-                "measure": "avg_time"
+                "measure": "avg_score"
               }
             ]
           }

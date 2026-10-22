@@ -234,7 +234,8 @@ export const semanticPreviewMethods = {
     const timed = (ms) => (ms.some((m) => windowed.has(m)) ? { groupBy: ['metric_time__day'] } : {});
     const apart = async (items, opts) => [
       ...await eachOrAll(items.filter((m) => !windowed.has(m)), opts),
-      ...await eachOrAll(items.filter((m) => windowed.has(m)), (ms) => ({ ...opts(ms), groupBy: ['metric_time__day', ...(opts(ms).groupBy || [])] })),
+      // (ordered by the day, so the one row a run keeps is the window's first day — not whichever came first)
+      ...await eachOrAll(items.filter((m) => windowed.has(m)), (ms) => ({ ...opts(ms), groupBy: ['metric_time__day', ...(opts(ms).groupBy || [])], orderBy: ['metric_time__day'] })),
     ];
     const compiled = await apart(names, (ms) => ({ metrics: ms, explain: true }));
     const result = {

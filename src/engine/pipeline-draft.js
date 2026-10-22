@@ -100,7 +100,8 @@ export const pipelineDraftMethods = {
     draft.semantic = st;
     this.ctxs.touch(ctx.id);
     // (over a catalog source: a measure of an event property carried by several events)
-    const recs = [...(render.warnings || []), ...(!draft.stages.length && !draft.base ? this.advisor.measureScopeWarnings(draft.source, st.measures) : [])];
+    const overSource = !draft.stages.length && !draft.base;
+    const recs = [...(render.warnings || []), ...(overSource ? this.advisor.measureScopeWarnings(draft.source, st.measures) : []), ...this.advisor.ratioMeasureWarnings(overSource ? draft.source : null, st.measures)];
     return {
       step_index: draft.stages.length + 1, stage: SEMANTIC_STAGE,
       semantic_models: render.semanticModels, metrics: render.metricNames,
@@ -536,6 +537,18 @@ export const pipelineDraftMethods = {
     return resp;
   },
 
+  /** Where a column a join step before `stage` brought in lives in the value index — the joined model's
+   *  attribute — or null (no join brought it, or the model does not index it). */
+  _joinedAttribute(stages, stage, name) {
+    const at = stages.indexOf(stage);
+    for (const st of (at < 0 ? stages : stages.slice(0, at)).slice().reverse()) {
+      if (st?.stage !== 'join') continue;
+      const a = (st.attrs || []).find((x) => (x.name ?? x.column) === name);
+      if (a) return this.catalog.attributeKind(st.source, a.column) ? { source: st.source, property: a.column } : null;
+    }
+    return null;
+  },
+
   /** Validate `index` (1-based) against the current stage count for an edit op. */
   _stepIndex(draft, index, action) {
     if (!Number.isInteger(index) || index < 1 || index > draft.stages.length) {
@@ -693,7 +706,9 @@ export const pipelineDraftMethods = {
         const cmp = comparisonOf(cd);
         if (!cmp || cmp.subject.field !== undefined) return;
         const name = cmp.subject.column ?? cmp.subject.property;
-        specs.push({ at: this.advisor.valueKeyForColumn(draft.source, name), op: cmp.op, value: cmp.values, where: `where ${name}` });
+        // a column a join before this step brought in is checked against the joined model's values
+        const joined = cmp.subject.column !== undefined ? this._joinedAttribute(newStages, changedStage, name) : null;
+        specs.push({ at: joined ?? this.advisor.valueKeyForColumn(draft.source, name), op: cmp.op, value: cmp.values, where: `where ${name}` });
       });
       filterWarnings = this.advisor.guardFilterValues(specs);
     }

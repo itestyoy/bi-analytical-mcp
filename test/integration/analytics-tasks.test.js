@@ -417,7 +417,7 @@ test('TASK boolean_condition_as_measure: did-purchase and session counts as coun
 test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'agg_chosen_per_question');
-  const totals = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['starts', 'completes', 'completion_rate', 'avg_time'] }] });
+  const totals = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['starts', 'completes', 'completion_rate', 'avg_score'] }] });
   // the recipe's first example (starts and completes by level_id), with the rate beside them
   const byLevel = await q(ctx, { steps: [{ stage: 'metrics', metrics: ['starts', 'completes', 'completion_rate'], group_by: [{ source: 'events', property: 'level_id_of_event_data' }] }] });
   for (const r of [totals, byLevel]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
@@ -428,7 +428,7 @@ test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, a
   const cr = num(row.completion_rate);
   assert.ok(Math.abs(cr - 25 / 28) < 1e-9 && cr >= 0 && cr <= 1, `[overall rate] 25/28 in [0,1], got ${cr}`);
   assert.ok(cr > 0 && cr < 1, `[behavior: progression overall rate] 25/28 in (0,1), got ${cr}`);
-  assert.ok(num(row.avg_time) > 0, '[avg time] positive');
+  assert.ok(num(row.avg_score) > 0, '[avg score] positive');
   const sBy = mapCol(byLevel.rows, 'events_level_id_of_event_data', 'starts');
   assert.equal(sBy['1'], 12, '[per-level starts] L1'); assert.equal(sBy['2'], 6, '[per-level starts] L2'); assert.equal(sBy['3'], 3, '[per-level starts] L3');
   assert.equal(sumCol(byLevel.rows, 'starts'), 28, '[per-level starts] grouped starts sum to 28');

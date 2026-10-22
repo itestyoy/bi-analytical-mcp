@@ -200,6 +200,24 @@ export class PipelineAdvisor {
     return warnings;
   }
 
+  /** A measure that sums or averages an amount the catalog declares as a per-row RATIO (an expression that
+   *  divides): that is not the group's ratio, which divides the sums — said with how to write it. */
+  ratioMeasureWarnings(source, measures) {
+    const out = [];
+    for (const m of measures || []) {
+      const model = m.source ?? source; // (a built table's measure: its columns are no catalog amounts)
+      if (!model || !this.catalog.models[model]) continue;
+      const ratios = new Map(this.catalog.aggregatableFields(model).filter((a) => a.expr !== a.name && /\//.test(String(a.expr))).map((a) => [a.name, a.expr]));
+      if (!ratios.size) continue;
+      for (const c of exprCalls(m.expr)) {
+        if (!['sum', 'average'].includes(c.fn)) continue;
+        const col = (c.args || []).find((a) => a?.column !== undefined && ratios.has(a.column))?.column;
+        if (col) out.push(`measure '${m.name}' ${c.fn === 'sum' ? 'sums' : 'averages'} '${col}', a ratio per row (${ratios.get(col)}): that is not the ratio of a group, which divides the sums — measure the numerator and the denominator with sum and divide them in a derived metric ({ fn: "div", args: [{ metric }, { metric }] }).`);
+      }
+    }
+    return out;
+  }
+
   /** The same gotcha in a semantic layer: a measure that folds an event property populated on SEVERAL
    *  events (a price on a completed and on a failed purchase) folds it on all of them unless it names
    *  the event — said, with the events, so a total is not read as one event's. */

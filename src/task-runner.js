@@ -71,14 +71,15 @@ export class TaskRunner {
    * how many failed) — a tool error, as the call that waited on it reports it.
    */
   static readAnswer(results, reader, extra = {}) {
-    // a note several results carry alike (a query's advice, said for each task of a batch) is said once, at
-    // the top beside the task ids it applies to — not repeated in each result, nor left with only the first
+    // advice several results carry alike (a query's recommendations, said for each task of a batch) is said
+    // once, at the top beside the task ids it applies to. A WARNING stays with each result it is about: it
+    // says what a number there is (no measurement, partial), and is read beside that number.
     let shared = [];
     if (results.length > 1) {
       const holders = new Map();
       for (const r of results) {
         if (!isPlainObject(r)) continue;
-        for (const key of ['warnings', 'recommendations']) {
+        for (const key of ['recommendations']) {
           for (const n of Array.isArray(r[key]) ? r[key] : []) {
             if (typeof n !== 'string') continue;
             if (!holders.has(n)) holders.set(n, { key, ids: [] });
@@ -88,11 +89,11 @@ export class TaskRunner {
       }
       const common = new Map([...holders].filter(([, h]) => h.ids.length > 1));
       if (common.size) {
-        shared = [...common].map(([note, h]) => ({ [h.key === 'warnings' ? 'warning' : 'recommendation']: note, task_ids: h.ids }));
+        shared = [...common].map(([note, h]) => ({ recommendation: note, task_ids: h.ids }));
         results = results.map((r) => {
           if (!isPlainObject(r)) return r;
           const out = { ...r };
-          for (const key of ['warnings', 'recommendations']) {
+          for (const key of ['recommendations']) {
             if (!Array.isArray(r[key])) continue;
             const kept = r[key].filter((n) => !common.has(n));
             if (kept.length) out[key] = kept; else delete out[key];

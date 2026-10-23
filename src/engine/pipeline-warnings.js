@@ -260,7 +260,15 @@ export class PipelineAdvisor {
           if (off.length) return [`'${p}' is populated only on event(s) ${evs.join(', ')} — step '${st.name ?? '?'}' also names ${off.join(', ')}, where it reads NULL (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
         }
       }
-      stage = { ...stage, steps: [] };
+      // a capture reads its column at the row its step matched: scoped by that step's events as the step is
+      for (const cp of stage.capture || []) {
+        const st = stage.steps.find((x) => x.name === cp.step);
+        const p = c.eventProps(fact).find((x) => x === cp.column);
+        const evs = p ? applies[p] : null;
+        const off = st && evs?.length ? (st.event_name || []).filter((e) => !evs.includes(e)) : [];
+        if (off.length) return [`capture '${cp.name}' reads '${p}' at step '${st.name}', on event(s) ${off.join(', ')} — '${p}' is populated only on ${evs.join(', ')}, so it reads NULL there.`];
+      }
+      stage = { ...stage, steps: [], capture: [] };
     }
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
@@ -361,14 +369,18 @@ export class PipelineAdvisor {
    * their columns grouped by; the caller asks the warehouse whether those columns change between a key's
    * versions at all (WarehouseProbe.versionsDiffer), and says it only where they do or that is not known.
    */
-  versionedDistinctGroups(stages, stage) {
+  versionedDistinctGroups(stages, stage, source = null) {
     if (stage?.stage !== 'aggregate' || !(stage.group_by || []).length) return [];
+    // a join matched at each row's own time can meet several versions of a key; one matched at another moment
+    // (an install, a first event — one per key) meets one version each, and nothing is counted twice
+    const rowTime = source ? this.catalog.getModel(source)?.time?.column : null;
     const distinct = (stage.measures || []).some((m) => exprCalls(m.expr).some((c) => DISTINCT_FNS.has(c.fn)));
     if (!distinct) return [];
     const at = stages.indexOf(stage);
     const byModel = new Map();
     for (const st of at < 0 ? stages : stages.slice(0, at)) {
       if (st?.stage !== 'join' || !this.catalog.models[st.source]?.scd) continue;
+      if (rowTime && typeof st.on?.time === 'string' && st.on.time !== rowTime) continue;
       for (const a of st.attrs || []) {
         if (!stage.group_by.includes(a.name ?? a.column)) continue;
         if (!byModel.has(st.source)) byModel.set(st.source, []);

@@ -1101,6 +1101,19 @@ export const semanticQueryMethods = {
           outside.push(`The window holds no rows of ${factsRead.map((f) => `'${f}'`).join(' or ')} at all${through}: ${pageRows.length ? 'a 0 or null here is no measurement' : 'there is nothing to return'} — not a real value. Query a window inside the data (semantic_index({ request: {} }) says each source's data_through).`);
         }
       }
+      // a cumulative metric's rows come from the project's time spine (one row per day it holds): a series that
+      // stops short of the window asked for has run off the spine's days, which is said — not left as the end
+      const dayCol = rename.get('metric_time__day');
+      const spined = dayCol && !(q.tail || []).length && pageRows.length && !page.has_more
+        && [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].length;
+      if (spined) {
+        const days = pageRows.map((r) => String(r[dayCol] ?? '').slice(0, 10)).filter(Boolean).sort();
+        const [first, last] = [days[0], days.at(-1)];
+        const wantFrom = tr?.start ? String(tr.start).slice(0, 10) : null;
+        const wantTo = tr?.end ? String(tr.end).slice(0, 10) : null;
+        const short = [wantFrom && first > wantFrom ? `starts ${first}, not ${wantFrom}` : null, wantTo && last < wantTo ? `ends ${last}, not ${wantTo}` : null].filter(Boolean);
+        if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days past it are not in the answer, not zero. Widen the spine model to cover the window, or ask within ${first} … ${last}.`);
+      }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {
         // a window that ends before the data does may lie before it begins: say what is known of the data's range
@@ -1136,7 +1149,13 @@ export const semanticQueryMethods = {
       const timeCols = new Set((q.tail || []).filter((st) => st?.stage === 'compute' && readsTime(st.expr)).map((st) => st.name));
       const timeKey = (x) => (x && typeof x === 'object' ? x.time !== undefined : typeof x === 'string' && (x.startsWith('metric_time') || timeCols.has(x)));
       const keepsTime = (st) => [...(st.group_by || []), ...(st.stage === 'pivot' ? [st.on] : [])].some(timeKey);
-      const refolds = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st));
+      // (only a sum of a distinct count adds a user up once per bucket: an average, a max, a step that does not
+      // fold the distinct metric at all, reads each bucket's value as it is)
+      const distinctNames = new Set(metrics.filter((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...measureRefs(metric, ctx.state.metrics)].some((dm) => distinctMeasures.has(dm)); }));
+      const readsDistinct = (a) => (a?.metric !== undefined && distinctNames.has(a.metric)) || (typeof a?.column === 'string' && distinctNames.has(a.column));
+      const sumsDistinct = (st) => [...(st.measures || []).map((m) => m.expr), st.measure].filter(Boolean)
+        .some((e) => exprCalls(e).some((c) => c.fn === 'sum' && (c.args || []).some(readsDistinct)));
+      const refolds = (q.tail || []).some((st) => (st?.stage === 'aggregate' || st?.stage === 'pivot') && !keepsTime(st) && sumsDistinct(st));
       if (usesDistinct && refolds && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — a step after the metrics step folds the per-bucket values, and their sum counts a user once per bucket. Prefer HLL sketches (a build_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
@@ -1260,7 +1279,11 @@ function oneForm(raw, columns = []) {
  */
 export function wholeBucketWarnings(tr, bounds, groupBy) {
   const order = ['hour', 'day', 'week', 'month', 'quarter', 'year'];
-  const grains = [...new Set(groupBy.map((t) => /^metric_time__(\w+)$/.exec(t)?.[1]).filter((g) => order.includes(g)))];
+  const asked_ = [...new Set(groupBy.map((t) => /^metric_time__(\w+)$/.exec(t)?.[1]).filter((g) => order.includes(g)))];
+  // a query with no time grain is still windowed on whole days: MetricFlow aligns its time constraint to the
+  // grain metric_time is kept at — a day — so the same widening is said for it
+  const implicit = !groupBy.some((t) => String(t).startsWith('metric_time__'));
+  const grains = implicit ? ['day'] : asked_;
   const instant = (v) => {
     if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(v)) return null;
     const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? v.replace(' ', 'T') : `${v.replace(' ', 'T')}${v.length === 10 ? 'T00:00:00' : ''}Z`);
@@ -1288,7 +1311,7 @@ export function wholeBucketWarnings(tr, bounds, groupBy) {
     if (!((from && from.getTime() !== start.getTime()) || (to && to.getTime() !== endExcl.getTime()))) return [];
     const range = `${from ? said(from, g) : 'the start'} … ${to ? `${said(to, g, g !== 'hour')}${g === 'hour' ? ' (exclusive)' : ''}` : 'the end'}`;
     const local = `{ fn: "date_trunc", grain: "${g === 'hour' ? 'day' : g}", args: [{ fn: "in_timezone", timezone: "${tr?.timezone}", args: [{ column: "<the time column>" }] }] }`;
-    return [`metric_time at ${g}: each ${g} is a UTC ${g}, counted whole — so the result covers ${range} UTC, not ${asked}${tr?.timezone
+    return [`${implicit ? 'The window is applied to whole UTC days (metric_time is kept by the day even with no time grain in group_by)' : `metric_time at ${g}: each ${g} is a UTC ${g}, counted whole`} — so the result covers ${range} UTC, not ${asked}${tr?.timezone
       ? `. For ${tr.timezone}'s own ${g}s, declare a computed dimension in the semantic_model step — ${local} — group by it, and keep the ${g}s you want with a where step on it before the metrics step; or give UTC bounds of whole ${g}s`
       : `. Set the window on whole ${g}s${g !== 'day' && g !== 'hour' ? ', or group by day for its exact days' : ''}`}`];
   });

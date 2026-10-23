@@ -165,7 +165,7 @@ export function abTest(input) {
     ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
     // (not said beside a small group's low p-value: there the small-sample note says why no verdict is read)
     ...(anySig || results.some((r) => r.small_sample && r.p_value < 1 - confidence) ? [] : [`No significant lift: that is inconclusive, not proof of no effect${results.some((r) => r.detectable_lift != null) ? ' — detectable_lift says how large an effect this sample could have seen' : ''}.`]),
-    ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
+    ...(split ? [] : ['If these groups come from a randomized split, pass expected_ratio (control first) to check it in this same call — a sample ratio mismatch invalidates every lift.']),
   ];
   // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
   const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))

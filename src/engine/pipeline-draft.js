@@ -743,7 +743,7 @@ export const pipelineDraftMethods = {
     // or preview. The retentioneering builder answers the same way.
     // a distinct count grouped by a slowly-changing model's column: said where its columns do change between versions
     const versioned = [];
-    for (const g of changedStage ? this.advisor.versionedDistinctGroups(newStages, changedStage) : []) {
+    for (const g of changedStage ? this.advisor.versionedDistinctGroups(newStages, changedStage, draft.base ? null : draft.source) : []) {
       if (await this.probe.versionsDiffer(g.model, g.columns) !== false) versioned.push(g.model);
     }
     const leanSteps = !includeSteps;

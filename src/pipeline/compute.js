@@ -107,7 +107,7 @@ const params = ({ ref }) => ({
   part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'The date part to extract: dow is the ISO day of the week (Monday 1 … Sunday 7), week the ISO week number — on every warehouse.' },
   timezone: { type: 'string', minLength: 1, description: 'An IANA timezone name (Europe/Berlin, America/New_York, UTC).' },
   clamp_zero: { type: 'boolean', description: 'Fold negative (before the start) and NULL (e.g. a missing install_date) results to 0, so it is a clean day 0+. Default true; false for the raw signed/NULL-able value.' },
-  sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). It is one expression: no ; or comment, a text with one in `args` as { value }. E.g. { fn: "raw", sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "new" }, { column: "new_n" }] }.' },
+  sql: { type: 'string', description: 'Dialect SQL — the escape hatch when no function fits; not portable. Columns are positional: each is an item of `args`, and {1}, {2}, … in the SQL stand where it goes, written quoted by the server. A word spelled exactly as a column of this step (or in identifier quotes) is refused, so write SQL keywords in upper case (DAY, DATE). It is one expression: no ; or comment, a text with one in `args` as { value }. E.g. { fn: "raw", sql: "POWER({1}, {2})", args: [{ column: "base" }, { column: "exponent" }] }.' },
   cases: { type: 'array', minItems: 1, description: 'CASE branches (the first that holds wins); each `when` a list of conditions that all hold, `then` an expression.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: conditionSlot(ref, 'The conditions this branch takes: all of them hold.'), then: { $ref: ref } } } },
   else: { $ref: ref, description: 'The value when no branch holds (default NULL — under an aggregate, the rows it leaves out). Under count / count_distinct leave it out: count would count those rows, count_distinct their else value as one more.' },
   offset: { type: 'integer', minimum: 1, description: 'Row offset (default 1).' },
@@ -449,7 +449,7 @@ export const FNS = {
       }
       // a column comes positionally, in args: one written by name in the text is refused
       const named = cols ? rawNamedColumns(p.sql, cols, d.quoteIdent('x')[0]) : [];
-      if (named.length) throw new Error(`pipeline: a raw expression names ${named.map((n) => `'${n}'`).join(', ')} in its SQL text — a column goes in \`args\`, with {1}, {2}, … in the SQL where each goes (e.g. sql: "SAFE_DIVIDE({1}, {2})", args: [{ column: "${named[0]}" }, …]); the server writes it quoted`);
+      if (named.length) throw new Error(`pipeline: a raw expression names ${named.map((n) => `'${n}'`).join(', ')} in its SQL text — a column goes in \`args\`, with {1}, {2}, … in the SQL where each goes (e.g. sql: "POWER({1}, {2})", args: [{ column: "${named[0]}" }, …]); the server writes it quoted`);
       return { expr: `(${fillPlaceholders(p.sql, a)})`, type: p.type || 'unknown', ...(p.type ? { declared: true } : {}) };
     },
   },

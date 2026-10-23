@@ -150,7 +150,8 @@ export class CatalogSearch {
     // a name holds the word, or only its description does: the second is mentioned there, not a match of
     // the name — and a value equal to the word ranks above one that only contains it (US before USD)
     const q = String(query).toLowerCase();
-    const nameOf = (m) => String(m.event ?? m.property ?? m.column ?? m.value ?? '').toLowerCase();
+    // (a value match names its value — beside the column or property that carries it)
+    const nameOf = (m) => String(m.value ?? m.event ?? m.property ?? m.column ?? '').toLowerCase();
     // (a short word — two or three letters — names a thing only where a word of the name begins with it:
     // 'ad' is in ad_shown, not in breadcrumbs)
     const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

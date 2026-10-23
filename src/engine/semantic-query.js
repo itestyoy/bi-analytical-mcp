@@ -1004,7 +1004,9 @@ export const semanticQueryMethods = {
     if (coarse) {
       const cumulative = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })];
       const byName = new Map((ctx.state.metrics || []).map((m) => [m.name, m]));
-      const firstDay = [...new Set(cumulative.filter((w) => (byName.get(w.metric)?.period_agg ?? 'first') === 'first').map((w) => w.metric))];
+      // (a declared metric keeps it as MetricFlow does, under its cumulative parameters)
+      const periodAgg = (m) => m?.type_params?.cumulative_type_params?.period_agg ?? m?.period_agg ?? 'first';
+      const firstDay = [...new Set(cumulative.filter((w) => periodAgg(byName.get(w.metric)) === 'first').map((w) => w.metric))];
       if (firstDay.length) allTimeNotes.push(`${firstDay.map((n) => `'${n}'`).join(', ')} ${firstDay.length > 1 ? 'are' : 'is'} cumulative: each ${coarse} shows its value on the ${coarse}'s FIRST day (period_agg: first, what is used when it is not set), not the total as of the ${coarse}'s end. For that, set period_agg: "last" on the metric in the semantic_model step (edit_step) — or group by day.`);
     }
     let filterWarnings = [];
@@ -1118,15 +1120,21 @@ export const semanticQueryMethods = {
       }
       // a cumulative metric's rows come from the project's time spine (one row per day it holds): a series that
       // stops short of the window asked for has run off the spine's days, which is said — not left as the end
-      const dayCol = rename.get('metric_time__day');
-      const spined = dayCol && !(q.tail || []).length && pageRows.length && !page.has_more
-        && [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].length;
-      if (spined) {
-        const days = pageRows.map((r) => String(r[dayCol] ?? '').slice(0, 10)).filter(Boolean).sort();
-        const [first, last] = [days[0], days.at(-1)];
-        const wantFrom = tr?.start ? String(tr.start).slice(0, 10) : null;
-        const wantTo = tr?.end ? String(tr.end).slice(0, 10) : null;
-        const short = [wantFrom && first > wantFrom ? `starts ${first}, not ${wantFrom}` : null, wantTo && last < wantTo ? `ends ${last}, not ${wantTo}` : null].filter(Boolean);
+      const cumulativeHere = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].length > 0;
+      if (cumulativeHere && tr && (tr.start || tr.end)) {
+        // the spine's days: read off the rows where they are the answer's days, else asked of the spine itself
+        const dayCol = rename.get('metric_time__day');
+        let first; let last;
+        if (dayCol && !(q.tail || []).length && pageRows.length && !page.has_more) {
+          const days = pageRows.map((r) => String(r[dayCol] ?? '').slice(0, 10)).filter(Boolean).sort();
+          [first, last] = [days[0], days.at(-1)];
+        } else {
+          const spine = await this.probe.spineRange(this.ctxs.dir(ctx.id));
+          if (spine) [first, last] = [spine.from, spine.to];
+        }
+        const wantFrom = tr.start ? String(tr.start).slice(0, 10) : null;
+        const wantTo = tr.end ? String(tr.end).slice(0, 10) : null;
+        const short = first && last ? [wantFrom && first > wantFrom ? `starts ${first}, not ${wantFrom}` : null, wantTo && last < wantTo ? `ends ${last}, not ${wantTo}` : null].filter(Boolean) : [];
         if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days past it are not in the answer, not zero. Widen the spine model to cover the window, or ask within ${first} … ${last}.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".

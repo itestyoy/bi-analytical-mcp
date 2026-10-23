@@ -87,7 +87,7 @@ export function timeRange(description) {
     properties: {
       start: { ...ISO_TIME, description: 'Inclusive start (ISO date/datetime).' },
       end: { ...ISO_TIME, description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
-      timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start and end are read as wall-clock time there and converted to UTC instants. Omit to read them as UTC.' },
+      timezone: { ...TIMEZONE, description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start and end are read as wall-clock time there and converted to UTC instants — a pipeline filters at them exactly; a metric query counts the whole UTC days they fall in. Omit to read them as UTC.' },
     },
   };
 }

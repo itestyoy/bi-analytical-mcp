@@ -236,11 +236,44 @@ export const semanticBuildMethods = {
     };
   },
 
+  /** delete_context semantic_model on a layer that is a step only: its measures over the model (`source`)
+   *  and its join go, and the metrics that read them — with cascade, else refused naming them. */
+  _deleteFromLayerStep(ctx, draft, modelKey, cascade) {
+    const st = draft.semantic;
+    const main = modelKey === draft.source && !draft.base && !draft.stages.length;
+    const gone = new Set((st.measures || []).filter((m) => (m.source ?? (main ? modelKey : null)) === modelKey).map((m) => m.name));
+    const joined = (st.join || []).some((j) => j.source === modelKey);
+    if (!gone.size && !joined) {
+      const held = [...new Set([...(st.measures || []).map((m) => m.source).filter(Boolean), ...(st.join || []).map((j) => j.source)])];
+      return { context_id: ctx.id, removed: false, reason: `this context's semantic_model step neither measures '${modelKey}' nor joins it${held.length ? ` — it reads ${held.map((k) => `'${k}'`).join(', ')}` : ''}` };
+    }
+    // the metrics that read a removed measure, and those built on them
+    const reads = (m, names) => (m.measure && gone.has(m.measure)) || JSON.stringify(m.expr ?? {}).match(/"metric":"([^"]+)"/g)?.some((x) => names.has(x.slice(10, -1)));
+    const dependents = new Set();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const m of st.metrics || []) if (!dependents.has(m.name) && reads(m, dependents)) { dependents.add(m.name); grew = true; }
+    }
+    if (dependents.size && !cascade) throw new ToolError(`metrics depend on this model's measures: ${[...dependents].join(', ')} — add cascade: true to remove them with it, or edit the semantic_model step (build_model, action: "edit_step") to keep them on other measures`, { stage: 'validate', field: 'cascade' });
+    const next = { ...st, measures: (st.measures || []).filter((m) => !gone.has(m.name)), metrics: (st.metrics || []).filter((m) => !dependents.has(m.name)), join: (st.join || []).filter((j) => j.source !== modelKey) };
+    for (const k of ['measures', 'join']) if (!next[k].length) delete next[k];
+    if (next.metrics.length) draft.semantic = next; else delete draft.semantic;
+    this.ctxs.touch(ctx.id);
+    return {
+      context_id: ctx.id, semantic_model: modelKey, removed: true,
+      metrics_remaining: next.metrics.map((m) => m.name), ...(dependents.size ? { metrics_removed: [...dependents] } : {}),
+      note: `removed from the semantic_model step, which is not built yet: materialize (build_model({ request: { action: "materialize", context_id: "${ctx.id}" } })) to build what is left.`,
+    };
+  },
+
   async _deleteSemanticModel(input) {
     this._validate('delete_context.semantic_model', input);
     const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     const draft0 = ctx.state.draft;
+    // a layer not built yet (a fork, a step not materialized) is its semantic_model step alone: the model is
+    // removed from the step, as from a built layer, and the next materialize builds what is left
+    if (draft0?.semantic && !Object.keys(ctx.state.additions || {}).length) return this._deleteFromLayerStep(ctx, draft0, modelKey, input.cascade);
     // a model the layer only joins (its columns to group by, no measure or dimension of its own): the
     // join goes, and with it the model
     const joined = (draft0?.semantic?.join || []).some((j) => j.source === modelKey);

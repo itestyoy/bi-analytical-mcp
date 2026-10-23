@@ -6728,7 +6728,7 @@
         ]
       },
       "notes": "The users contract has a `time` part: the moment whose valid version is joined — the event time, the spend day, or a funnel's first event after a match_recognize stage. Every part is required, so the moment is always visible at the call site; the governed path applies the window itself.",
-      "hack": "Point-in-time = the key AND the moment: on: { user: <the rows' player column>, time: <the moment asked about> }. The window is half-open on the right — the CURRENT version has no end (NULL) and still matches. Extrapolate: any versioned model whose contract carries a time part."
+      "hack": "Point-in-time = the key AND the moment: on: { user: <the rows' player column>, time: <the moment asked about> }. The window includes both of its bounds, and a version with no end (NULL) still matches — the current version carries either NULL or a far-future end, as the model stores it. Extrapolate: any versioned model whose contract carries a time part."
     },
     {
       "required_events": [

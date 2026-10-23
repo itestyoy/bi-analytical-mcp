@@ -188,6 +188,19 @@ export class WarehouseProbe {
     });
   }
 
+  /** The days a project's time spine holds — { from, to } — read from the spine model of the project at
+   *  `dir` (cached per project); null where it cannot be read (no runner, a spine named otherwise). */
+  async spineRange(dir) {
+    if (!this.runner || !dir) return null;
+    return this.bestEffort(`spine:${dir}`, async () => {
+      try {
+        const r = await this.runner.show(dir, "select min(date_day) as d0, max(date_day) as d1 from {{ ref('metricflow_time_spine') }}", 1);
+        const row = r.ok ? r.rows?.[0] : null;
+        return row?.d0 && row?.d1 ? { from: String(row.d0).slice(0, 10), to: String(row.d1).slice(0, 10) } : null;
+      } catch { return null; }
+    }, null, { wait: true });
+  }
+
   async dataFreshness(sourceKey, { wait = false } = {}) {
     const base = this.readDir();
     const m = this.catalog.getModel(sourceKey);

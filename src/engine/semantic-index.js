@@ -408,6 +408,8 @@ export const semanticIndexMethods = {
     // (a time column, or one the schema keeps out of the index, is never profiled for its values: said as that)
     else if (String(dim.type || '').toLowerCase() === 'time' || dim.index === false) recommendations.push(`'${col}' is ${dim.index === false ? 'kept out of the value index by the schema' : 'a time column: its values are moments, not a set the index lists'} — read its range with a query (an aggregate stage with min / max).`);
     else recommendations.push('No values indexed yet (the background value index may not have run).');
+    // (a model with versions holds a row per version: its frequencies count versions, not keys)
+    if (m.scd && samples.length) recommendations.push(`'${mk}' keeps a row per version of a ${ent || 'key'} (a validity window): each frequency counts versions — a ${ent || 'key'} whose '${col}' changed is counted under each value it held.`);
     if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
     recommendations.push(...nullRecs);
     // A metric query names the column STRUCTURALLY — { source, column }, as this view does.

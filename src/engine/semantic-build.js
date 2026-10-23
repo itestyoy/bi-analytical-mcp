@@ -236,12 +236,20 @@ export const semanticBuildMethods = {
     };
   },
 
+  /** The governed measures the catalog fixes on `model` (a declaration with `agg`), by name. */
+  _governedOf(ctx, model) {
+    return Object.entries(this._catalogOf(ctx).models[model]?.measures || {}).filter(([, mm]) => mm?.agg).map(([n]) => n);
+  },
+
   /** delete_context semantic_model on a layer that is a step only: its measures over the model (`source`)
    *  and its join go, and the metrics that read them — with cascade, else refused naming them. */
   _deleteFromLayerStep(ctx, draft, modelKey, cascade) {
     const st = draft.semantic;
     const main = modelKey === draft.source && !draft.base && !draft.stages.length;
     const gone = new Set((st.measures || []).filter((m) => (m.source ?? (main ? modelKey : null)) === modelKey).map((m) => m.name));
+    // (a metric may read a governed measure of the model by name: it goes with the model too)
+    const governed = this._governedOf(ctx, modelKey).filter((n) => (st.metrics || []).some((m) => m.measure === n));
+    for (const n of governed) gone.add(n);
     const joined = (st.join || []).some((j) => j.source === modelKey);
     if (!gone.size && !joined) {
       const held = [...new Set([...(st.measures || []).map((m) => m.source).filter(Boolean), ...(st.join || []).map((j) => j.source)])];
@@ -282,11 +290,20 @@ export const semanticBuildMethods = {
       const held = [...new Set([...Object.keys(ctx.state.additions || {}), ...(draft0?.semantic?.join || []).map((j) => j.source)])];
       return { context_id: ctx.id, removed: false, reason: `the semantic layer of this context neither declares measures or dimensions on '${modelKey}' nor joins it${held.length ? ` — it holds ${held.map((k) => `'${k}'`).join(', ')}` : ''}` };
     }
-    const taskMeasureNames = new Set(add.measures.map((m) => m.name));
+    // what goes with the model: the measures the layer declared on it, and the governed measures the catalog
+    // fixes on it (a metric may read one by name) — a metric reading either depends on the model
+    const taskMeasureNames = new Set([...add.measures.map((m) => m.name), ...this._governedOf(ctx, modelKey)]);
     const dependents = ctx.state.metrics.filter((m) => [...measureRefs(m, ctx.state.metrics)].some((mm) => taskMeasureNames.has(mm)));
     if (dependents.length && !input.cascade) {
       throw new ToolError(`metrics depend on this model's measures: ${dependents.map((d) => d.name).join(', ')} — add cascade: true to remove them with it, or edit the semantic_model step (build_model, action: "edit_step") to keep them on other measures`, { stage: 'validate', field: 'cascade' });
     }
+    // ALL OR NOTHING: what the removal changes is kept aside, and put back if the layer left does not render
+    const before = JSON.parse(JSON.stringify({ metrics: ctx.state.metrics, additions: ctx.state.additions, usedModels: ctx.state.usedModels ?? null, semantic: ctx.state.draft?.semantic ?? null }));
+    const restore = () => {
+      Object.assign(ctx.state, { metrics: before.metrics, additions: before.additions });
+      if (before.usedModels) ctx.state.usedModels = before.usedModels;
+      if (ctx.state.draft) { if (before.semantic) ctx.state.draft.semantic = before.semantic; else delete ctx.state.draft.semantic; }
+    };
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
     // the layer is the build's semantic_model step: the step says the same, or the next materialize
@@ -304,7 +321,11 @@ export const semanticBuildMethods = {
     }
     // its join went with it (above): the layer reads it no more — the build's own source excepted
     if (modelKey !== draft?.source) ctx.state.usedModels = (ctx.state.usedModels || []).filter((k) => k !== modelKey);
-    const render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() });
+    let render;
+    try { render = renderContext(this._catalogOf(ctx), ctx.state, { spec: this._semanticSpec() }); } catch (e) {
+      restore();
+      throw new ToolError(`nothing was removed: the layer without '${modelKey}' does not hold — ${e.message}`, { stage: e.stage || 'validate', field: 'semantic_model' });
+    }
     this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);

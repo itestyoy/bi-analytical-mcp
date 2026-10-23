@@ -64,7 +64,11 @@ export const pipelineDraftMethods = {
         : this._draftDeleteStep(ctx, draft, input.index, inc.columns, inc.steps)));
     }
     if (input.action === 'preview') return input.validate ? this._draftValidate(ctx, draft) : this._draftPreview(ctx, draft);
-    if (input.action === 'discard') { delete ctx.state.draft; return { context_id: ctx.id, action: 'discard', discarded: true }; }
+    if (input.action === 'discard') {
+      delete ctx.state.draft;
+      // (the context stays — it may hold a built model or a layer — and says how it goes too)
+      return { context_id: ctx.id, action: 'discard', discarded: true, note: `the draft is gone; context ${ctx.id} stays (delete_context({ request: { context_id: "${ctx.id}" } }) removes it)` };
+    }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
   },
 
@@ -744,7 +748,7 @@ export const pipelineDraftMethods = {
     // a distinct count grouped by a slowly-changing model's column: said where its columns do change between versions
     const versioned = [];
     for (const g of changedStage ? this.advisor.versionedDistinctGroups(newStages, changedStage, draft.base ? null : draft.source) : []) {
-      if (await this.probe.versionsDiffer(g.model, g.columns) !== false) versioned.push(g.model);
+      if (await this.probe.versionsDiffer(g.model, g.columns) !== false) versioned.push(g);
     }
     const leanSteps = !includeSteps;
     const origin = draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`;

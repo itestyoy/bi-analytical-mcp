@@ -250,7 +250,7 @@ models:
       # JSON-vs-STRING comparison.
       - name: words_selected_json_of_event_data
         data_type: json
-        description: "Words collected on a completed level, as a native JSON array column. Events: level_completed."
+        description: "Words collected on a completed level — a JSON array held as JSON text in a column of its own (read as an array with { property }). Events: level_completed."
         config:
           meta: { mcp: { array: { items: string, encoding: json } } }
       # numeric value that physically arrives as STRING — aggregating it needs a cast

@@ -380,19 +380,21 @@ export class PipelineAdvisor {
     const byModel = new Map();
     for (const st of at < 0 ? stages : stages.slice(0, at)) {
       if (st?.stage !== 'join' || !this.catalog.models[st.source]?.scd) continue;
-      if (rowTime && typeof st.on?.time === 'string' && st.on.time !== rowTime) continue;
+      // (matched at another moment of the rows: said too, for where that moment differs between a key's rows)
+      const at = typeof st.on?.time === 'string' && st.on.time !== rowTime ? st.on.time : null;
       for (const a of st.attrs || []) {
         if (!stage.group_by.includes(a.name ?? a.column)) continue;
-        if (!byModel.has(st.source)) byModel.set(st.source, []);
-        byModel.get(st.source).push(a.column);
+        if (!byModel.has(st.source)) byModel.set(st.source, { columns: [], at });
+        byModel.get(st.source).columns.push(a.column);
       }
     }
-    return [...byModel].map(([model, columns]) => ({ model, columns }));
+    return [...byModel].map(([model, { columns, at }]) => ({ model, columns, ...(at ? { at } : {}) }));
   }
 
   /** What versionedDistinctGroups' models mean for the counts, said once for them all. */
-  versionedDistinctNote(models) {
-    return `A distinct count grouped by ${models.map((m) => `'${m}'`).join(', ')}'s columns, a slowly-changing model: the join matches each row to the version valid at its time, so a key whose version changed within these rows is counted under each value it held, and the groups add up to more than the keys in all — read the total from an aggregate without that group_by, not from their sum.`;
+  versionedDistinctNote(groups) {
+    const at = groups.map((g) => g.at).filter(Boolean);
+    return `A distinct count grouped by ${groups.map((g) => `'${g.model}'`).join(', ')}'s columns, a slowly-changing model: the join matches each row to the version valid at ${at.length ? `'${at.join("', '")}'` : 'its time'}, so a key whose version changed ${at.length ? 'between those moments of its rows' : 'within these rows'} is counted under each value it held, and the groups add up to more than the keys in all — read the total from an aggregate without that group_by, not from their sum${at.length ? ` (a moment that is the same on all of a key's rows — an install — meets one version)` : ''}.`;
   }
 
   /** Next-step hints for the just-added stage — its own (`recommend` in the stage registry), or where its columns can go.

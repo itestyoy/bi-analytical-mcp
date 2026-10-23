@@ -98,11 +98,14 @@ export class ErrorLog {
   explore(input = {}) {
     const iso = (ms) => (ms == null ? null : new Date(Number(ms)).toISOString());
     const parsed = (text) => { if (text == null) return null; try { return JSON.parse(text); } catch { return text; } };
+    // a JavaScript stack in a detail is the server's own frames: what is shown is its message, not where in
+    // the server's code it was thrown (the store keeps it whole, for whoever runs the server)
+    const outward = (k, v) => (k === 'detail' && typeof v === 'string' && /\n\s+at /.test(v) ? v.split('\n')[0] : v);
     const shown = (r, full) => ({
       id: Number(r.id), at: iso(r.at), source: r.source, severity: r.severity,
       ...Object.fromEntries(['tool', 'stage', 'field', 'code', 'context_id', 'task_id'].filter((k) => r[k] != null).map((k) => [k, r[k]])),
       message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ request: { id: ${Number(r.id)} } }) for all of it)`,
-      ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, parsed(r[k])])) : {}),
+      ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, outward(k, parsed(r[k]))])) : {}),
     });
     if (input.id != null) {
       const row = this.get(input.id);

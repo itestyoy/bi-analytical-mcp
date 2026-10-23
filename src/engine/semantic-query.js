@@ -220,7 +220,10 @@ export const semanticQueryMethods = {
     if (!not.length) return;
     const reads = not.map((m) => `'${m}' (it folds ${this._metricModels(ctx, m).join(', ')})`).join(', ');
     const cut = metrics.filter((m) => !not.includes(m));
-    throw new ToolError(`${at}: '${label}' does not cut ${reads} — a metric is grouped by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it cuts ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or group by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
+    // (said as what the place does with it: a where filters, a group_by cuts)
+    const filters = /condition|where/.test(String(at));
+    const [verb, does] = filters ? ['filter', 'filters'] : ['cut', 'cuts'];
+    throw new ToolError(`${at}: '${label}' does not ${verb} ${reads} — a metric is ${filters ? 'filtered' : 'grouped'} by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it ${does} ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or ${filters ? 'filter' : 'group'} by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
   },
 
   /** A stage of the pipeline's registry that no step of a query takes (a join, an unnest, a funnel, a
@@ -1136,13 +1139,14 @@ export const semanticQueryMethods = {
       if (cumulativeHere && tr && (tr.start || tr.end)) {
         // the spine's days: read off the rows where they are the answer's days, else asked of the spine itself
         const dayCol = rename.get('metric_time__day');
+        // (the spine's own range where it can be read — the answer's days are bounded by the window too, so
+        // they say where the spine cuts the series only on the side it does)
         let first; let last;
-        if (dayCol && !(q.tail || []).length && pageRows.length && !page.has_more) {
+        const spine = await this.probe.spineRange(this.ctxs.dir(ctx.id));
+        if (spine) [first, last] = [spine.from, spine.to];
+        else if (dayCol && !(q.tail || []).length && pageRows.length && !page.has_more) {
           const days = pageRows.map((r) => String(r[dayCol] ?? '').slice(0, 10)).filter(Boolean).sort();
           [first, last] = [days[0], days.at(-1)];
-        } else {
-          const spine = await this.probe.spineRange(this.ctxs.dir(ctx.id));
-          if (spine) [first, last] = [spine.from, spine.to];
         }
         const wantFrom = tr.start ? String(tr.start).slice(0, 10) : null;
         const wantTo = tr.end ? String(tr.end).slice(0, 10) : null;

@@ -203,7 +203,7 @@ export const semanticIndexMethods = {
         // a per-row ratio: its sum or average over a group is not the group's ratio — that divides the sums
         ...(a.expr !== a.name && /\//.test(String(a.expr)) ? { ratio_note: `A ratio per row: summing or averaging it over a group is not the group's ratio. For that, sum the numerator and the denominator as measures and divide them in a derived metric: { name, type: 'derived', expr: { fn: 'div', args: [{ metric: '<sum of the numerator>' }, { metric: '<sum of the denominator>' }] } }.` } : {}),
       }));
-      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${(amounts.find((a) => !(a.expr !== a.name && /\//.test(String(a.expr)))) || amounts[0]).name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).`;
+      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${(amounts.find((a) => !(a.expr !== a.name && /\//.test(String(a.expr))) && !m.measures?.[a.name]?.agg) || amounts[0]).name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).`;
     }
     // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way. Listed
     // with the catalog's own keys — `agg` is dbt's aggregation as the declaration fixes it (sum_boolean
@@ -626,7 +626,8 @@ export const semanticIndexMethods = {
     if (memHits.length) {
       res.memory_matches = memHits;
       // a saved note is a match too: "no catalog match" is said of the catalog, with where the word was found
-      res.recommendations = (res.recommendations || []).map((r) => (r.startsWith('No catalog match') ? `No catalog match for '${input.search}', but ${memHits.length} saved note(s) mention it — memory_matches says what each one recorded (an alias names the real field it meant).` : r));
+      // (a word the catalog only resembles, found in a saved note, is not "maybe not in the data": the note says what it meant)
+      res.recommendations = (res.recommendations || []).filter((r) => !r.startsWith('Nothing in the catalog matches')).map((r) => (r.startsWith('No catalog match') ? `No catalog match for '${input.search}', but ${memHits.length} saved note(s) mention it — memory_matches says what each one recorded (an alias names the real field it meant).` : r));
     }
     // Surface a semantic-search failure here too (don't hide it just because this path
     // also returns catalog hits) — otherwise a broken embedder looks like "no memory".

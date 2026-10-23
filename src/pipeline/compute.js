@@ -168,7 +168,7 @@ const needsArray = (fn, t, scalars = true) => {
     if (scalars && elementType(t) === 'struct') throw new Error(`${fn}: its argument is '${t}' — ${fn} takes an array of scalars. Read the elements' fields instead: unnest the property, then json_field on the element`);
     return;
   }
-  throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)`);
+  throw new Error(`${fn}: its argument is '${t}', not an array — produce an array first (json_parse_array on a JSON/string column, or unnest a native array column)${/string|json|varchar|text/i.test(String(t)) ? '; an event property the catalog declares an array, held as JSON text in a column of its own, is read as one with { property: "<its name>" }' : ''}`);
 };
 
 /** An element of an array (element_at, array_last): of a native array, an element of its items' type;

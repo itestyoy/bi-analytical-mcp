@@ -150,8 +150,12 @@ export class CatalogSearch {
     // the name — and a value equal to the word ranks above one that only contains it (US before USD)
     const q = String(query).toLowerCase();
     const nameOf = (m) => String(m.event ?? m.property ?? m.column ?? m.value ?? '').toLowerCase();
+    // (a short word — two or three letters — names a thing only where a word of the name begins with it:
+    // 'ad' is in ad_shown, not in breadcrumbs)
+    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const nameHolds = (m) => (q.length <= 3 ? new RegExp(`(^|[^a-z0-9])${esc}`).test(nameOf(m)) : nameOf(m).includes(q));
     for (const k of ['event_names', 'property_matches', 'column_matches']) {
-      lists[k] = lists[k].map((m) => (m.match === 'exact' && !nameOf(m).includes(q) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
+      lists[k] = lists[k].map((m) => (m.match === 'exact' && !nameHolds(m) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
     }
     lists.value_matches = lists.value_matches.slice().sort((a, b) => (nameOf(b) === q) - (nameOf(a) === q));
     const best = Math.max(0, ...Object.values(lists).flat().map((m) => m.score ?? 0));

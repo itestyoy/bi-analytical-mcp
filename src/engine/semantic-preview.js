@@ -128,8 +128,10 @@ export const semanticPreviewMethods = {
     // (in a task's context, what a metric reads that is no metric of its own — a measure the parse lists
     // beside the metrics — is said as the measure it is: it is not queried by name)
     const declared = project ? null : new Set((ctx.state.metrics || []).map((m) => m.name));
+    // (what a metric reads that is no declared metric of a task's context is its measure: said as one)
+    const asMeasure = (def) => (declared && def?.input?.metric && !declared.has(def.input.metric) ? { ...def, input: { measure: def.input.metric } } : def);
     const metrics = scope.metrics.map((m) => {
-      const def = layer.definition(m.name) || {};
+      const def = asMeasure(layer.definition(m.name) || {});
       if (declared && input.metric && m.name !== input.metric && !declared.has(m.name)) {
         return { name: m.name, kind: 'measure', input_of: input.metric, definition: def, note: `a measure '${input.metric}' reads — no metric of its own: query '${input.metric}'` };
       }
@@ -166,7 +168,9 @@ export const semanticPreviewMethods = {
     // (a categorical column where there is one: a time or a validity bound reads as an odd first cut)
     const cat = this._catalogOf(ctx);
     const plain = (r) => { const dim = r?.source !== undefined && r.column !== undefined ? cat.models[r.source]?.dimensions?.[r.column] : null; return dim && dim.type !== 'time'; };
-    const firstCut = first && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.find(plain) || groupable?.[0] || null);
+    // (a cumulative metric's example is by day alone: a cut by an attribute is where its caveats are)
+    const firstCumulative = first && (layer.definition(first.name)?.window || layer.definition(first.name)?.grain_to_date || layer.definition(first.name)?.period_agg !== undefined || (ctx.state.metrics || []).find((x) => x.name === first.name)?.type === 'cumulative');
+    const firstCut = first && !firstCumulative && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.find(plain) || groupable?.[0] || null);
     const errors = shown.filter((i) => i.severity === 'error').length;
     return {
       context_id: ctx.id,

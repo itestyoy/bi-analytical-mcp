@@ -336,8 +336,9 @@ test('a metric query answers in the caller\'s names whatever its steps — order
   const { context_id } = await startDeclare(e, TASK);
   const read = async (after, extra = {}) => taskResult(e, (await e.query_model({ context_id, steps: [DAILY, ...after], ...extra })).task_id);
   const desc = { stage: 'order_by', keys: [{ key: 'cnt', direction: 'desc' }] };
+  // (with no step after the metrics step, a series by metric_time comes in time order — MetricFlow is asked for it)
   for (const [steps, ordered] of [
-    [[], false],
+    [[], true],
     [[desc], true],
     [[{ stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }] }, desc, { stage: 'limit', limit: 10 }], true],
     [[desc, { stage: 'where', conditions: [{ fn: 'gt', args: [{ column: 'cnt' }, { value: 1 }] }] }], false],

@@ -83,6 +83,9 @@ export const TASK_KINDS = {
   preview_semantic_model: { side: 'semantic', tool: 'context' },
 };
 
+/** How many of a context's tasks its describe lists by id — the latest. */
+const DESCRIBED_TASKS = 5;
+
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
     this.catalog = catalog;
@@ -481,7 +484,9 @@ export class Engine {
     const out = await this._describeContext(describe);
     // the tasks run on it, by id (its `tasks` are the builds' names): what a read, a from_task, a card take
     const ran = this.jobs.list().filter((j) => j.context_id === describe.context_id).map((j) => ({ task_id: j.task_id, ...(j.tool ? { tool: this.tasks.toolOf(j.tool) } : {}), status: j.status }));
-    return out && !out.task_id && ran.length ? { ...out, task_ids: ran } : out;
+    // (the latest ones: a long-lived context's whole history is counted, not listed)
+    const shown = ran.slice(-DESCRIBED_TASKS);
+    return out && !out.task_id && ran.length ? { ...out, task_ids: shown, ...(ran.length > shown.length ? { task_count: ran.length } : {}) } : out;
   }
 
   /** Remove a context, its pipeline model, or one model's task additions — or what a feature's context

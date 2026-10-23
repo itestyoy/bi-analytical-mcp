@@ -68,7 +68,7 @@ export function metricSchema(catalog) {
     measure: ref('The measure it reads, by name: one of this step\'s measures, or a governed measure of the catalog.'),
     fill_nulls_with: { type: 'number', description: 'Value (e.g. 0) for this metric where a result row has none — beside another metric of the query, or as an input of a derived metric. It adds no rows: a time bucket with no rows at all is absent from the result.' },
     grain_to_date: { enum: GRAINS, description: 'Reset accumulation at the start of each period (e.g. month-to-date).' },
-    period_agg: { enum: ['first', 'last', 'average'], description: 'How to collapse multiple values within a period.' },
+    period_agg: { enum: ['first', 'last', 'average'], description: 'What a week or a month of this metric shows (it has a value per day): last — the running total as of the period\'s last day, usually what is meant; first — as of its first day (what is shown when this is left out); average — the mean of its days.' },
     window: { type: 'string', pattern: WINDOW, description: 'Accumulate over a trailing window (e.g. "7 days"); omit it for all history.' },
     expr: { $ref: EXPR_KINDS.metric_expr.ref, description: `The metric's value over the metrics it is built from — each a { metric } leaf naming another metric of this step, which is how its inputs are named — and numbers ({ value: 2 }), combined by ${PLACES.derived_metric.fns.join(', ')}, nested to any depth; div is NULL where the divisor is 0. A ratio of two metrics: { fn: "div", args: [{ metric: "payers" }, { metric: "users" }] }.` },
   };

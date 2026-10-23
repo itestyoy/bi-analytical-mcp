@@ -895,7 +895,7 @@
           ]
         }
       ],
-      "notes": "The cohort axis comes from the dimension model, so the semantic_model step joins it (join: [{ source: \"users\", on }]); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row.",
+      "notes": "The cohort axis comes from the dimension model, so the semantic_model step joins it (join: [{ source: \"users\", on }]); the activity axis is the fact's own time. A cell is a metric, so it obeys the same additivity rules — count_distinct per cell cannot be summed along a row. A cohort whose day N lies past the end of the data has 0 there that is no measurement (its day N has not come yet): keep only the cohorts whose day N the data reaches — a where on the cohort day ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).",
       "hack": "Group by a TIME column of the joined model (the cohort, { source, column }) and by metric_time (the activity) at once — the grid is just two time dimensions in one group_by. Swap either axis (any cohort column, any grain) and the shape holds."
     },
     {
@@ -3671,7 +3671,7 @@
           }
         ]
       },
-      "notes": "The offset is exact (\"on day N\"), which is a different question from a conversion window (\"within N days\"). Offsets whose day has not arrived yet are missing rather than zero — cut the range to complete offsets before reading a curve.",
+      "notes": "The offset is exact (\"on day N\"), which is a different question from a conversion window (\"within N days\"). Offsets whose day has not arrived yet are missing rather than zero — cut the range to complete offsets before reading a curve. A cohort whose day N lies past the end of the data has 0 there that is no measurement (its day N has not come yet): keep only the cohorts whose day N the data reaches — a where on the cohort day ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).",
       "hack": "Join the per-entity anchor date, date_diff it against the event time, group by the offset: that offset column is the axis a lifetime curve, an exact day-N series and a cohort heatmap all share. Change the unit for hours or weeks."
     },
     {

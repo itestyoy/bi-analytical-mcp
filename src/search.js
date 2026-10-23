@@ -22,6 +22,7 @@ const RECIPE_MATCHES = 3; // recipes listed for one query, at most
 const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
 const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
+const MENTIONED = 0.8; // a recipe whose prose (not its id or title) holds the word scores this
 const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
@@ -118,7 +119,14 @@ export class CatalogSearch {
       source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
     const recipe_matches = recipes
-      ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
+      ? recipes.search(query, opts).map(({ item: r, score, match }) => {
+        // a word found only in a recipe's prose (when to use it, its technique) is mentioned there, not
+        // what the recipe is: exact is kept for its id and title
+        const named = [r.id, r.title, r.task_type].some((x) => String(x || '').toLowerCase().includes(String(query).toLowerCase()));
+        return match === 'exact' && !named
+          ? { id: r.id, title: r.title, task_type: r.task_type, score: MENTIONED, match: 'mentioned' }
+          : { id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match };
+      })
         // a loose query touches many recipes' prose: the few nearest the best one are the answer
         .filter((r, i, all) => i < RECIPE_MATCHES && r.score >= all[0].score - RECIPE_SPREAD)
       : [];

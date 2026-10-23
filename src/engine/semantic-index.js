@@ -237,7 +237,7 @@ export const semanticIndexMethods = {
       // The app/bundle dimension: groupable per event AND the axis for per-app coverage.
       if (c.bundleColumn(k)) {
         out.bundle_column = c.bundleColumn(k);
-        out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
+        out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ request: { source: '${k}', bundle: '${apps[0].bundle}' } }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
       }
       const flat = c.eventProps(k).filter((p) => c.eventPropertySpec(p, k)?.column).length;
       // the payload properties with no column of their own are named here too — by name only, each drilled on
@@ -538,7 +538,7 @@ export const semanticIndexMethods = {
             populated: populated.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })),
           };
         }
-        if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { bundle: '<app>' } }) or include: ['coverage'].`];
+        if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ request: { source: '${propFact}', bundle: '<app>' } }) or include: ['coverage'].`];
       }
     }
     this.notes.attach(out, { kind: 'property', source: propFact, name: p });

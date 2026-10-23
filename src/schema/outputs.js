@@ -44,6 +44,7 @@ export const OUTPUTS = {
     engine: str,
     tasks: list(),
     task_ids: list(obj),
+    task_count: num,
     draft: obj,
     semantic_models: list(),
     measures: list(),

@@ -650,7 +650,8 @@ export const semanticQueryMethods = {
     const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
     const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy, reads);
     const conversionNotes = this._conversionNotes(layer, metrics, { where: where.length > 0, window: !!(bounds.start || bounds.end) });
-    const paging = this._metricPaging(input, tail.ordered);
+    // (with no step after the metrics step, a series by metric_time comes ordered by it — _metricOrder)
+    const paging = this._metricPaging(input, tail.ordered || this._metricOrder(tail, groupBy).length > 0);
     const explain = this._compileOnly(input);
     const qopts = { metrics, groupBy, where, orderBy: this._metricOrder(tail, groupBy), startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
     const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
@@ -997,6 +998,15 @@ export const semanticQueryMethods = {
     const allTime = input.time_range && !groupBy.some((g) => String(g).startsWith('metric_time__'))
       ? this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true }) : [];
     const allTimeNotes = allTime.map((w) => `'${w.through ?? w.metric}'${w.through ? ` reads '${w.metric}', which` : ''} accumulates since the data begins only when grouped by metric_time: asked over time_range with no time grain, it is the window's total, not all time. For the running total as of each day, add { time: "metric_time", grain: "day" } to group_by.`);
+    // a cumulative metric has a value per day: a week or a month of it shows ONE of its days — the first,
+    // unless its period_agg says otherwise — which is said, with how to have the period's end instead
+    const coarse = groupBy.map((g) => /^metric_time__(week|month|quarter|year)$/.exec(String(g))?.[1]).find(Boolean);
+    if (coarse) {
+      const cumulative = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })];
+      const byName = new Map((ctx.state.metrics || []).map((m) => [m.name, m]));
+      const firstDay = [...new Set(cumulative.filter((w) => (byName.get(w.metric)?.period_agg ?? 'first') === 'first').map((w) => w.metric))];
+      if (firstDay.length) allTimeNotes.push(`${firstDay.map((n) => `'${n}'`).join(', ')} ${firstDay.length > 1 ? 'are' : 'is'} cumulative: each ${coarse} shows its value on the ${coarse}'s FIRST day (period_agg: first, what is used when it is not set), not the total as of the ${coarse}'s end. For that, set period_agg: "last" on the metric in the semantic_model step (edit_step) — or group by day.`);
+    }
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
@@ -1039,7 +1049,8 @@ export const semanticQueryMethods = {
     // the guardrail covers every source this context reads, whichever one the metrics come from
     const guarded = (ctx.state.usedModels || []).filter((k) => this._catalogOf(ctx).requireTimeRangeFor(k)).map((k) => `source ${k}`);
     const { bounds, windowWarnings } = this._metricWindow(input, guarded, groupBy, [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))]);
-    const paging = this._metricPaging(input, tail.ordered);
+    // (with no step after the metrics step, a series by metric_time comes ordered by it — _metricOrder)
+    const paging = this._metricPaging(input, tail.ordered || this._metricOrder(tail, groupBy).length > 0);
     const partitionWhere = this._semanticPartitionWhere(ctx, bounds, metrics);
     const explain = this._compileOnly(input);
     const qopts = { metrics, groupBy, where: [...where, ...partitionWhere], orderBy: this._metricOrder(tail, groupBy), startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: this._metricLimit(input, paging, explain) };
@@ -1087,7 +1098,11 @@ export const semanticQueryMethods = {
         if (startDay && startDay > freshDay) {
           const weekBefore = new Date(Date.parse(`${freshDay}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
           outside.push(`The window starts ${startDay}, after the data ends (${freshDay}${stalest ? `, the latest row of ${stalest}` : ''}): there is nothing in it to measure, so ${pageRows.length ? 'a 0 or null here is no measurement' : 'it returns no rows'} — not a real value. Its last 7 days: time_range { start: "${weekBefore}", end: "${freshDay}" }.`);
-        } else if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : `the latest row of ${factsRead[0]}`})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}.`);
+        } else if (!endDay || endDay > freshDay) {
+          // (a cumulative metric is not empty there: it repeats the total it had when the data ended)
+          const carried = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].length;
+          recs.push(`Data is current only through ${freshDay} (${stalest ? `the latest row of ${stalest}, the source whose data ends first — ${each}` : `the latest row of ${factsRead[0]}`})${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial${stalest ? ' for the metrics that read it' : ''}${carried ? '; a cumulative metric there repeats the total it had when the data ended — no new data' : ''}.`);
+        }
       }
       // A window that holds no rows of the sources at all (before the data begins, a gap, past its end) gives
       // a 0 / null that is no measurement: where the answer looks empty, the rows of each source inside the

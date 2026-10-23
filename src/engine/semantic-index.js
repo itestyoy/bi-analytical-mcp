@@ -405,6 +405,8 @@ export const semanticIndexMethods = {
     const ent = c.primaryEntityName(mk);
     const recommendations = [];
     if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
+    // (a time column, or one the schema keeps out of the index, is never profiled for its values: said as that)
+    else if (String(dim.type || '').toLowerCase() === 'time' || dim.index === false) recommendations.push(`'${col}' is ${dim.index === false ? 'kept out of the value index by the schema' : 'a time column: its values are moments, not a set the index lists'} — read its range with a query (an aggregate stage with min / max).`);
     else recommendations.push('No values indexed yet (the background value index may not have run).');
     if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
     recommendations.push(...nullRecs);

@@ -22,7 +22,7 @@ const RECIPE_MATCHES = 3; // recipes listed for one query, at most
 const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
 const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
-const MENTIONED = 0.8; // a recipe whose prose (not its id or title) holds the word scores this
+const MENTIONED = 0.8; // a name whose description (not the name itself) holds the word scores this
 const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
@@ -146,6 +146,14 @@ export class CatalogSearch {
     // is answered by that, not by every name its letters resemble — within a list, an exact match
     // leaves out the list's loose ones; across the lists, a match far below the best is left out.
     const lists = { event_names, property_matches, column_matches, value_matches, recipe_matches };
+    // a name holds the word, or only its description does: the second is mentioned there, not a match of
+    // the name — and a value equal to the word ranks above one that only contains it (US before USD)
+    const q = String(query).toLowerCase();
+    const nameOf = (m) => String(m.event ?? m.property ?? m.column ?? m.value ?? '').toLowerCase();
+    for (const k of ['event_names', 'property_matches', 'column_matches']) {
+      lists[k] = lists[k].map((m) => (m.match === 'exact' && !nameOf(m).includes(q) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
+    }
+    lists.value_matches = lists.value_matches.slice().sort((a, b) => (nameOf(b) === q) - (nameOf(a) === q));
     const best = Math.max(0, ...Object.values(lists).flat().map((m) => m.score ?? 0));
     const near = (list) => {
       const exact = list.some((m) => m.match === 'exact');

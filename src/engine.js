@@ -282,7 +282,7 @@ export class Engine {
     // the parsed copy the project's own contexts share is internal: its semantic models are the contexts
     const hint = this.projectError
       ? ` (the dbt project's own semantic models could not be read, so none of them is a context: ${this.projectError})`
-      : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : ' (the dbt project declares no semantic models of its own, so none is a context — a semantic layer is a build_model semantic_model step)';
+      : this.project ? ` — the dbt project's own semantic models are contexts named after them: ${this.project.contexts.join(', ')}` : '';
     // the way out: a context that is gone (deleted, retired after idling) or was never made is not
     // guessed at — the list names those that exist
     const wayOut = ". No context has that id (deleted, retired after idling, or never created): context({ request: { action: 'list' } }) lists those that exist";
@@ -524,9 +524,16 @@ export class Engine {
       if (st.draft) st.draft.checkpoints = (st.draft.checkpoints || []).filter((cp) => cp.model !== c.model);
       this.ctxs.touch(c.consumer);
     }
+    // what it held, said with the removal: its tasks' results go with it (a read of one says so)
+    const held = this.ctxs.has(input.context_id) ? this.ctxs.get(input.context_id).state : null;
+    const tasks = held ? this.jobs.list().filter((j) => j.context_id === input.context_id).length : 0;
     const out = this.ctxs.drop(input.context_id);
     // nothing removed is said, not left to read as success: the id names no context
-    return out.removed ? out : { ...out, context_id: input.context_id, reason: "no context has this id (deleted already, retired after idling, or never created) — context({ request: { action: 'list' } }) lists those that exist" };
+    if (out.removed) {
+      const what = [held?.draft || held?.pipeline_model ? 'its pipeline' : null, (held?.metrics || []).length || held?.draft?.semantic ? 'its semantic layer' : null].filter(Boolean);
+      return { ...out, context_id: input.context_id, ...(what.length ? { held: what } : {}), ...(tasks ? { tasks_gone: tasks } : {}) };
+    }
+    return { ...out, context_id: input.context_id, reason: "no context has this id (deleted already, retired after idling, or never created) — context({ request: { action: 'list' } }) lists those that exist" };
   }
 
   /**

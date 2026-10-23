@@ -1009,6 +1009,18 @@ export const semanticQueryMethods = {
       const firstDay = [...new Set(cumulative.filter((w) => periodAgg(byName.get(w.metric)) === 'first').map((w) => w.metric))];
       if (firstDay.length) allTimeNotes.push(`${firstDay.map((n) => `'${n}'`).join(', ')} ${firstDay.length > 1 ? 'are' : 'is'} cumulative: each ${coarse} shows its value on the ${coarse}'s FIRST day (period_agg: first, what is used when it is not set), not the total as of the ${coarse}'s end. For that, set period_agg: "last" on the metric in the semantic_model step (edit_step) — or group by day.`);
     }
+    // a cumulative metric over a versioned model's attribute (grouped by or filtered on): MetricFlow joins the
+    // version valid on each day of the series, not on each row's own day — a key whose version changed drops
+    // out of the whole running total (and a day can come back empty). Said, with the exact way: a pipeline
+    const versionedCum = (() => {
+      const cumNames = [...this._windowedMetrics(ctx.state.metrics || [], metrics), ...this._windowedMetrics(ctx.state.metrics || [], metrics, { allTime: true })].map((w) => w.through ?? w.metric);
+      if (!cumNames.length) return null;
+      const cat = this._catalogOf(ctx);
+      const named = new Set([...q.groupBy.map((g) => g.source ?? g.semantic_model?.at(-1)), ...[...JSON.stringify(q.wheres || []).matchAll(/"source":"([^"]+)"/g)].map((x) => x[1])]);
+      const scd = [...named].filter((m) => m && cat.models[m]?.scd);
+      return scd.length ? { metrics: [...new Set(cumNames)], models: scd } : null;
+    })();
+    if (versionedCum) allTimeNotes.push(`${versionedCum.metrics.map((n) => `'${n}'`).join(', ')} accumulate over days, cut by ${versionedCum.models.map((m) => `'${m}'`).join(', ')}, a model with versions: the semantic layer joins the version valid on each day of the series, not on the day each row happened, so a key whose version changed drops out of the whole running total (a day can come back empty). For the total by the version at each row's own time, build it in a pipeline — a join of the model at the rows' time, then a running sum (a window sum over the days).`);
     let filterWarnings = [];
     // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
     const whereNames = new Map();
@@ -1135,7 +1147,7 @@ export const semanticQueryMethods = {
         const wantFrom = tr.start ? String(tr.start).slice(0, 10) : null;
         const wantTo = tr.end ? String(tr.end).slice(0, 10) : null;
         const short = first && last ? [wantFrom && first > wantFrom ? `starts ${first}, not ${wantFrom}` : null, wantTo && last < wantTo ? `ends ${last}, not ${wantTo}` : null].filter(Boolean) : [];
-        if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days past it are not in the answer, not zero. Widen the spine model to cover the window, or ask within ${first} … ${last}.`);
+        if (short.length) outside.push(`The series ${short.join(' and ')}: a cumulative metric has a row for each day of the project's time spine (metricflow_time_spine), and its days stop there — the days past it are not in the answer, not zero. Ask within ${first} … ${last} (the spine is the dbt project's: whoever owns it can widen it).`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
       if (pageRows.length === 0) {

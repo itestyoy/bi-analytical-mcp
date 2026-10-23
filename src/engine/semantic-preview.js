@@ -125,8 +125,14 @@ export const semanticPreviewMethods = {
     // what each metric can be grouped by is MetricFlow's list (src/group-by-items.js), never worked out here
     const { groupBys } = listed;
     if (parsed && !groupBys) shown.push({ severity: 'note', message: `MetricFlow did not list what the metrics can be grouped by${listed.error ? `: ${listed.error}` : ''} — group_by below is left out` });
+    // (in a task's context, what a metric reads that is no metric of its own — a measure the parse lists
+    // beside the metrics — is said as the measure it is: it is not queried by name)
+    const declared = project ? null : new Set((ctx.state.metrics || []).map((m) => m.name));
     const metrics = scope.metrics.map((m) => {
       const def = layer.definition(m.name) || {};
+      if (declared && input.metric && m.name !== input.metric && !declared.has(m.name)) {
+        return { name: m.name, kind: 'measure', input_of: input.metric, definition: def, note: `a measure '${input.metric}' reads — no metric of its own: query '${input.metric}'` };
+      }
       const items = groupBys?.[m.name] || [];
       const t = timeItem(items);
       const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};
@@ -155,7 +161,7 @@ export const semanticPreviewMethods = {
       // (one metric asked: what it is made of comes with it, each said so)
       return { ...m, ...(inputOf ? { input_of: input.metric } : {}), definition: def, group_by: cut };
     });
-    const first = scope.metrics[0];
+    const first = (input.metric && scope.metrics.find((m) => m.name === input.metric)) || scope.metrics.find((m) => !declared || declared.has(m.name)) || scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
     // (a categorical column where there is one: a time or a validity bound reads as an odd first cut)
     const cat = this._catalogOf(ctx);

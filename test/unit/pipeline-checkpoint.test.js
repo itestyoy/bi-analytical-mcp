@@ -155,7 +155,9 @@ test('fork inherits a checkpoint it keeps, copies its definition, and the owner 
   await assert.rejects(() => e.delete_context({ context_id }), new RegExp(`${fork.context_id}.*${c1.model}`));
   assert.ok(e.ctxs.has(context_id), 'nothing was dropped');
   // Forced: the fork's inherited checkpoint is retired, so it recomputes from the source.
-  assert.deepEqual(await e.delete_context({ context_id, force: true }), { removed: true });
+  // (the answer says what went: the context, its pipeline, the tasks whose results went with it)
+  const dropped = await e.delete_context({ context_id, force: true });
+  assert.deepEqual([dropped.removed, dropped.context_id, dropped.held], [true, context_id, ['its pipeline']]);
   assert.deepEqual(draftOf(e, fork.context_id).checkpoints, []);
 });
 

@@ -135,7 +135,10 @@ test('semantic_index({ search }) with an exact name: that list keeps its exact m
   const e = engine();
   const out = await e.semantic_index({ search: 'revenue' });
   const lists = [out.event_names, out.property_matches, out.column_matches, out.recipe_matches];
-  for (const list of lists) if (list.some((m) => m.match === 'exact')) assert.ok(list.every((m) => m.match === 'exact'), JSON.stringify(list));
+  // (beside them, a few names whose description holds the word — mentioned, never a loose resemblance)
+  for (const list of lists) if (list.some((m) => m.match === 'exact')) assert.ok(list.every((m) => m.match === 'exact' || m.match === 'mentioned'), JSON.stringify(list));
+  // a price described as purchase revenue is found by the word in its description
+  assert.ok(out.property_matches.some((m) => m.property === 'price_in_usd_of_event_data' && m.match === 'mentioned'), JSON.stringify(out.property_matches));
 });
 
 // a word of a name mistyped scores by how close it is to that word, so the event it names comes before a

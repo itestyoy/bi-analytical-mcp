@@ -23,6 +23,7 @@ const RECIPE_SPREAD = 0.15; // and only those within this of the best score
 const WEAK_MATCH = 0.8; // a best fuzzy score below this is no close match
 const RECIPE_CLOSE = 0.85; // a loose recipe match below this is listed, not recommended
 const MENTIONED = 0.8; // a name whose description (not the name itself) holds the word scores this
+const MENTIONED_SHOWN = 3; // …and that many of them are listed per kind, beside the names that hold it
 const RECIPE_BESIDE_NAME = 0.9; // beside a match of the data's own names, a loose recipe below this is left out
 const MATCH_SPREAD = 0.15; // a loose match is shown only within this of the best match of any list
 const WEAK_SHOWN = 2; // where nothing matches closely, each list shows at most this many resemblances
@@ -154,14 +155,19 @@ export class CatalogSearch {
     // 'ad' is in ad_shown, not in breadcrumbs)
     const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const nameHolds = (m) => (q.length <= 3 ? new RegExp(`(^|[^a-z0-9])${esc}`).test(nameOf(m)) : nameOf(m).includes(q));
-    for (const k of ['event_names', 'property_matches', 'column_matches']) {
+    for (const k of ['event_names', 'property_matches', 'column_matches', 'value_matches']) {
       lists[k] = lists[k].map((m) => (m.match === 'exact' && !nameHolds(m) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
     }
+    // (a recipe is named by its id and title: a short word there too only where a word begins with it)
+    if (q.length <= 3) lists.recipe_matches = lists.recipe_matches.map((m) => (m.match === 'exact' && ![m.id, m.title].some((x) => new RegExp(`(^|[^a-z0-9])${esc}`).test(String(x || '').toLowerCase())) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
     lists.value_matches = lists.value_matches.slice().sort((a, b) => (nameOf(b) === q) - (nameOf(a) === q));
     const best = Math.max(0, ...Object.values(lists).flat().map((m) => m.score ?? 0));
     const near = (list) => {
       const exact = list.some((m) => m.match === 'exact');
-      return list.filter((m) => m.match === 'exact' || (!exact && (m.score ?? 0) >= best - MATCH_SPREAD));
+      // (a name whose description holds the word is kept beside the names that hold it — "revenue" finds a
+      // price described as purchase revenue — a few of them)
+      const mentioned = list.filter((m) => m.match === 'mentioned' && q.length > 3).slice(0, MENTIONED_SHOWN);
+      return [...list.filter((m) => m.match === 'exact' || (!exact && m.match !== 'mentioned' && (m.score ?? 0) >= best - MATCH_SPREAD)), ...mentioned];
     };
     // (where nothing matches closely, a few resemblances per list are enough to say so)
     for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);

@@ -2063,3 +2063,18 @@ test('cast to int: the number a text or a number holds, rounded half away from z
   assert.equal(got.from_case_text, 45, 'a case that says int over the text "45"');
   assert.deepEqual(Object.fromEntries(Object.keys(texts).map((k) => [k, got[k]])), { t_999: 10, t_30: 3, t_25: 3, t_m25: -3, t_1e3: 1000, t_word: null, t_sep: null, t_hex: null }, 'the texts: "9.99" 10, "3.0" 3, "2.5" 3, "-2.5" -3, "1e3" 1000, a word, "1_000" and "0x1F" missing');
 });
+
+// A QUANTILE OF A FIXED-POINT COLUMN IS NOT CUT TO ITS PLACES: cost is a DECIMAL of two places, and the
+// median of 1.50, 2.00, 0.50, 1.75 is 1.625 — read as the warehouse computes it over the column as a float
+test('median and a percentile of a two-place decimal keep their third place (meta: 1.625)', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRowsFrom('acquisition', { stage: 'aggregate', group_by: ['media_source'], measures: [
+    { name: 'med', expr: { fn: 'median', args: [{ column: 'cost' }] } },
+    { name: 'p75', expr: { fn: 'percentile', args: [{ column: 'cost' }], percentile: 0.75 } },
+  ] });
+  const meta = rows.find((r) => r.media_source === 'meta');
+  const want = (await wh.query("select quantile_cont(cast(cost as double), 0.5) as med, quantile_cont(cast(cost as double), 0.75) as p75 from fct_player_acquisition where media_source = 'meta'")).rows[0];
+  assert.equal(num(meta.med), num(want.med));
+  assert.equal(num(meta.p75), num(want.p75));
+  assert.notEqual(num(meta.med), Math.trunc(num(want.med) * 100) / 100, 'not cut to the column\'s two places');
+});

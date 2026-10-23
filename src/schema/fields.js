@@ -150,7 +150,7 @@ export const SEMANTIC_MODEL_STEP = {
     };
     return {
       type: 'object', additionalProperties: false, required: ['stage', 'metrics'],
-      description: 'The semantic layer over this build: reusable named metrics, queried many ways with query_model (group_by, grain, filters). It is the build\'s last step; its main model is the build\'s source (the only step) or the table the steps before it built. MetricFlow writes the SQL and makes every join.',
+      description: 'The semantic layer over this build: reusable named metrics, queried many ways with query_model (group_by, grain, filters). It is the build\'s last step; its main model is the build\'s source (the only step) or the table the steps before it built — whose rows are named by the build\'s name, so a measure or a metric takes another one. MetricFlow writes the SQL and makes every join.',
       properties: {
         stage: { enum: ['semantic_model'] },
         time: { type: 'string', pattern: NAME, description: 'The main model\'s time axis (metric_time) — for a table the steps before this one built; a catalog source is read on its own.' },

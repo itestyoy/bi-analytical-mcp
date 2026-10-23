@@ -283,8 +283,8 @@ export class DuckDBDialect extends Dialect {
     switch (fn) {
       case 'stddev': return `stddev_samp(${c})`;
       case 'variance': return `var_samp(${c})`;
-      case 'median': return `quantile_cont(${c}, 0.5)`;
-      case 'percentile': return `quantile_cont(${c}, ${Number(q)})`;
+      case 'median': return `quantile_cont(${this.floatOf(c)}, 0.5)`;
+      case 'percentile': return `quantile_cont(${this.floatOf(c)}, ${Number(q)})`;
       default: throw new Error(`statAggExpr: bad fn ${fn}`);
     }
   }

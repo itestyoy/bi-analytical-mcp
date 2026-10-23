@@ -290,6 +290,10 @@ export class Dialect {
   jsonColumnStructField(_column, _field, _type) { throw new Error('abstract jsonColumnStructField'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
+
+  /** A number read as a floating-point one: a quantile of a fixed-point column (DECIMAL(p, 2)) is otherwise
+   *  computed in the column's own type, and its result cut to the column's places (1.875 read as 1.87). */
+  floatOf(expr) { return `CAST(${expr} AS ${this.castType('float')})`; }
   /**
    * Which of those this warehouse computes APPROXIMATELY. Declared, not guessed: a percentile that
    * is exact on one warehouse is a sketch on another, and a caller that reports "the P99" has to

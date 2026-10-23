@@ -195,7 +195,9 @@ function compileMeasure(catalog, modelKey, decl, smScope) {
   // (after the measure's own refusals above, which name the value to cast where a case yields it)
   attempt(field, () => exprSql(d, null, e, at, { ...opts, context: 'measure', aggregates: [...TASK_MEASURE_AGGS] }));
   // (`_fn` keeps the function the caller chose — a count of rows is written as a sum of 1)
-  const m = { name, agg, expr: applyScope(value, scope), ...(decl.label ? { label: decl.label } : {}), _fn: e.fn };
+  // (a quantile is folded over a float: MetricFlow's PERCENTILE_CONT keeps a fixed-point column's own places)
+  const folded = (e.fn === 'median' || e.fn === 'percentile') && arg !== undefined ? d.floatOf(value) : value;
+  const m = { name, agg, expr: applyScope(folded, scope), ...(decl.label ? { label: decl.label } : {}), _fn: e.fn };
   if (e.fn === 'percentile') m.agg_params = { percentile: e.percentile, use_discrete_percentile: false };
   return m;
 }

@@ -190,6 +190,15 @@ export const taskResultMethods = {
    * MAX_WAIT_SECONDS) and returns each one's result in the order asked — the same answer
    * { task_id } gives for it. Those still running come back as running, and `next` names just them.
    */
+  /** A task whose context was deleted since: its rows are still what it answered, but no next step on that
+   *  context is offered — said instead, so a read does not lead to a context that is gone. */
+  _contextGoneSaid(id, r) {
+    const job = this.jobs.get(id);
+    if (!job?.contextId || this.ctxs.has(job.contextId) || !r || r.ok === false) return r;
+    const { next: _next, recommendations: _recs, read_with: _rw, ...rest } = r;
+    return { ...rest, context_gone: `its context ${job.contextId} was deleted: these are the rows it answered then — nothing more can be queried or built on it` };
+  },
+
   async _pollTasks(input, side) {
     const ids = input.task_ids;
     // one id this side cannot read is refused as the read; among several, it is that one's result — the
@@ -206,7 +215,7 @@ export const taskResultMethods = {
     const results = [];
     // a read hands the model a PAGE of each task's result (READ_PAGE rows from `offset` unless it asks for
     // another number): the task keeps what it keeps — what a card draws — and the rest is a next_offset away
-    for (const id of ids) results.push(refused.get(id) ?? sketchesSaid(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }), this.tasks.held(id)));
+    for (const id of ids) results.push(refused.get(id) ?? this._contextGoneSaid(id, sketchesSaid(await this._taskResult(id, { waited, offset: input.offset, limit: input.limit, pageSize: READ_PAGE }), this.tasks.held(id))));
     return TaskRunner.readAnswer(results, this._readers[[].concat(side)[0]], { waited_seconds: waited });
   },
 

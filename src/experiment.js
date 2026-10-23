@@ -169,7 +169,7 @@ export function abTest(input) {
   ];
   // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
   const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))
-    ? { intervals_note: `confidence_interval is of the absolute lift (variant − control), in the metric's own unit, symmetric around absolute_lift${metric === 'proportion' ? ' unless it reaches past ±1, where it is cut (a difference of two rates lies within [−1, 1])' : ''}; relative_lift_ci is of the relative lift (variant / control − 1), from the log of the ratio (the delta method), so it is asymmetric around relative_lift and never below −100%; the two are computed apart, so near 0 one may hold it and the other not — read significance from p_value.${results.some((r) => r.control_rate === 1) ? ' Where the control converts every user (a rate of 1) there is no spread to log: its relative lift is its absolute one, and so is its relative_lift_ci.' : ''}` }
+    ? { intervals_note: `confidence_interval: of variant − control, in the metric's unit${metric === 'proportion' ? ' (cut to [−1, 1])' : ''}; relative_lift_ci: of variant / control − 1, from the log of the ratio, so asymmetric and never below −100%${results.some((r) => r.control_rate === 1) ? ' (a control converting every user: the same as the absolute one)' : ''}. Read significance from p_value.` }
     : {};
   return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, ...intervals, recommendations };
 }

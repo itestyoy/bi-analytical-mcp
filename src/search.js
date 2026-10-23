@@ -10,7 +10,7 @@
 // via the value index (exact substring in SQL + a fuzzy fallback over a bounded pool).
 //
 // Every match across every corpus carries { score (similarity, 1=best), match:
-// 'exact' | 'fuzzy' }, exact hits first — a consistent shape the AI can rely on.
+// 'exact' | 'prefix' | 'mentioned' | 'fuzzy' }, exact hits first — a consistent shape the AI can rely on.
 
 import { FuzzyIndex } from './fuzzy.js';
 import { keyRef, keyView } from './engine/value-index-views.js';
@@ -140,8 +140,11 @@ export class CatalogSearch {
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
       const ref = keyRef(c, v.source, v.property);
       const base = { value: v.value, freq: v.freq, source: v.source, ...ref, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      if (ref.property !== undefined) return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
-      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, events: null };
+      const type = ref.property !== undefined ? c.eventPropertySpec(v.property, v.source)?.type ?? null : c.models[v.source]?.dimensions?.[v.property]?.type ?? null;
+      // an array or a struct is indexed by a few whole EXAMPLES of it (its shape), not by a frequency
+      const { freq: _freq, ...shape } = base;
+      const kept = /^(array|struct|json)/.test(String(type ?? '')) ? { ...shape, example: true } : base;
+      return { ...kept, type, events: ref.property !== undefined ? appliesOf(v.source)[v.property] || null : null };
     });
     // A loose match is said only near the best one: a query that names something exactly (or nearly)
     // is answered by that, not by every name its letters resemble — within a list, an exact match
@@ -156,8 +159,10 @@ export class CatalogSearch {
     // 'ad' is in ad_shown, not in breadcrumbs)
     const esc = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const nameHolds = (m) => (q.length <= 3 ? new RegExp(`(^|[^a-z0-9])${esc}`).test(nameOf(m)) : nameOf(m).includes(q));
+    // (and where it begins a longer word — 'ad' in admob — the name starts with it: a prefix, not the word)
+    const wholeWord = (m) => new RegExp(`(^|[^a-z0-9])${esc}($|[^a-z0-9])`).test(nameOf(m));
     for (const k of ['event_names', 'property_matches', 'column_matches', 'value_matches']) {
-      lists[k] = lists[k].map((m) => (m.match === 'exact' && !nameHolds(m) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
+      lists[k] = lists[k].map((m) => (m.match !== 'exact' ? m : !nameHolds(m) ? { ...m, score: MENTIONED, match: 'mentioned' } : q.length <= 3 && !wholeWord(m) ? { ...m, match: 'prefix' } : m));
     }
     // (a recipe is named by its id and title: a short word there too only where a word begins with it)
     if (q.length <= 3) lists.recipe_matches = lists.recipe_matches.map((m) => (m.match === 'exact' && ![m.id, m.title].some((x) => new RegExp(`(^|[^a-z0-9])${esc}`).test(String(x || '').toLowerCase())) ? { ...m, score: MENTIONED, match: 'mentioned' } : m));
@@ -168,7 +173,7 @@ export class CatalogSearch {
       // (a name whose description holds the word is kept beside the names that hold it — "revenue" finds a
       // price described as purchase revenue — a few of them)
       const mentioned = list.filter((m) => m.match === 'mentioned' && q.length > 3).slice(0, MENTIONED_SHOWN);
-      return [...list.filter((m) => m.match === 'exact' || (!exact && m.match !== 'mentioned' && (m.score ?? 0) >= best - MATCH_SPREAD)), ...mentioned];
+      return [...list.filter((m) => m.match === 'exact' || m.match === 'prefix' || (!exact && m.match !== 'mentioned' && (m.score ?? 0) >= best - MATCH_SPREAD)), ...mentioned];
     };
     // (where nothing matches closely, a few resemblances per list are enough to say so)
     for (const k of Object.keys(lists)) lists[k] = near(lists[k]).slice(0, best < WEAK_MATCH ? WEAK_SHOWN : undefined);
@@ -189,7 +194,8 @@ export class CatalogSearch {
       // a column of its model, or a property riding on that source's events (run() says which)
       const name = top.property ?? top.column;
       recs.push(`Value '${top.value}' lives in ${top.property !== undefined ? 'property' : 'column'} '${name}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: ${keyView(this.catalog, top.source, name)}.`);
-      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
+      // (said once: the event list's own best match recommends the same view)
+      if (top.events?.[0] && !(event_names[0]?.event === top.events[0] && event_names[0]?.source === top.source)) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
     // the schema's best matches, the closest first (an event before a column at the same score)
     const named = [
@@ -200,11 +206,11 @@ export class CatalogSearch {
       ...(recipe_matches.length && (recipe_matches[0].match === 'exact' || recipe_matches[0].score >= RECIPE_CLOSE) ? [{ score: recipe_matches[0].score, text: `Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.` }] : []),
     ];
     const all = [...event_names, ...property_matches, ...column_matches, ...value_matches, ...recipe_matches];
-    const best = all.length ? Math.max(...all.map((m) => (m.match === 'exact' ? 1 : m.score ?? 0))) : 0;
+    const best = all.length ? Math.max(...all.map((m) => (m.match === 'exact' || m.match === 'prefix' ? 1 : m.score ?? 0))) : 0;
     // (a match that only resembles the word is listed, not recommended: the note below says the data may not hold it)
     if (best >= WEAK_MATCH) recs.push(...named.sort((a, b) => b.score - a.score).map((n) => n.text));
 
-    if (all.length && !all.some((m) => m.match === 'exact')) {
+    if (all.length && !all.some((m) => m.match === 'exact' || m.match === 'prefix')) {
       recs.unshift(best < WEAK_MATCH
         ? `Nothing in the catalog matches '${query}' closely — the matches below only resemble it (fuzzy, best ${best}); the data may not hold it. Check the event list (semantic_index({ request: {} })) before building on one of them.`
         : `No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);

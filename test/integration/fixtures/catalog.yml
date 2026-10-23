@@ -293,7 +293,7 @@ models:
           meta: { mcp: { dimension: { validity: start } } }
       - name: install_time_valid_until
         data_type: timestamp
-        description: "End of this version's validity window (inclusive)."
+        description: "End of this version's validity window — inclusive in a pipeline join (the row's own time); a metric query compares the day, the end exclusive (MetricFlow's rule)."
         config:
           meta: { mcp: { dimension: { validity: end } } }
       - name: install_date

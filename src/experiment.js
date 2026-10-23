@@ -169,7 +169,7 @@ export function abTest(input) {
   ];
   // how the two intervals read: one is of the difference, in the metric's unit; the other of the ratio
   const intervals = results.some((r) => Array.isArray(r.relative_lift_ci))
-    ? { intervals_note: `confidence_interval: of variant − control, in the metric's unit${metric === 'proportion' ? ' (cut to [−1, 1])' : ''}; relative_lift_ci: of variant / control − 1, from the log of the ratio, so asymmetric and never below −100%${results.some((r) => r.control_rate === 1) ? ' (a control converting every user: the same as the absolute one)' : ''}. Read significance from p_value.` }
+    ? { intervals_note: `confidence_interval: of variant − control, in the metric's unit${metric === 'proportion' ? ' (cut to [−1, 1])' : ''}; relative_lift_ci: of variant / control − 1, from the log of the ratio, so asymmetric and never below −100%${results.some((r) => r.control_rate === 1) ? ' (a control converting every user: the same as the absolute one)' : ''}. Read significance from significant (p_value against the confidence)${thin.length ? ` — null where small_sample: there a p_value, however low, is not read` : ''}.` }
     : {};
   return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, ...intervals, recommendations };
 }

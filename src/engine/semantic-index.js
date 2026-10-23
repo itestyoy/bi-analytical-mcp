@@ -203,7 +203,7 @@ export const semanticIndexMethods = {
         // a per-row ratio: its sum or average over a group is not the group's ratio — that divides the sums
         ...(a.expr !== a.name && /\//.test(String(a.expr)) ? { ratio_note: `A ratio per row: summing or averaging it over a group is not the group's ratio. For that, sum the numerator and the denominator as measures and divide them in a derived metric: { name, type: 'derived', expr: { fn: 'div', args: [{ metric: '<sum of the numerator>' }, { metric: '<sum of the denominator>' }] } }.` } : {}),
       }));
-      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${(amounts.find((a) => !(a.expr !== a.name && /\//.test(String(a.expr))) && !m.measures?.[a.name]?.agg) || amounts[0]).name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).`;
+      out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_model({ request: { action: 'start', name, source: '${k}', steps: [{ stage: 'semantic_model', measures: [{ name: <your name>, expr: { fn: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', args: [{ column: '${(amounts.find((a) => !(a.expr !== a.name && /\//.test(String(a.expr))) && !m.measures?.[a.name]?.agg) || amounts[0]).name}' }] } }], metrics }] } }) (percentile also takes percentile: 0.9 beside its args).${amounts.some((a) => a.expr !== a.name) ? ` An item with \`expr\` is not a column of the table: it is an amount the schema declares over its columns, named like one ({ column: '<its name>' }) in a semantic_model step's measure; a pipeline step reads the columns of its expr.` : ''}`;
     }
     // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way. Listed
     // with the catalog's own keys — `agg` is dbt's aggregation as the declaration fixes it (sum_boolean
@@ -382,11 +382,13 @@ export const semanticIndexMethods = {
     // distribution (every row has its own moment)
     if (col === m.time?.column || col === m.partition_column) {
       const axis = col === m.time?.column;
+      // the models whose rows this one is joined onto: there its time is an attribute, not metric_time
+      const reachedBy = axis ? c.modelKeys().filter((src) => src !== mk && Object.keys(c.entitiesOf(src)).some((e) => c.joinTargetFor(e) === mk)) : [];
       const out = {
         column: col, source: mk, role: axis ? 'time axis' : 'partition', type: c.modelColumns(mk).find((x) => x.name === col)?.type ?? null, description: c.columnDescriptions(mk)[col],
         ...(m.time?.column ? { data_freshness: await this.probe.dataFreshness(mk) } : {}),
         recommendations: [axis
-          ? `'${col}' is each row's time: metric_time in a metric query ({ time: "metric_time", grain }), bounded by time_range; in a pipeline a { column } like any other.`
+          ? `'${col}' is each row's time: metric_time in a metric query over this model's own measures ({ time: "metric_time", grain }), bounded by time_range${reachedBy.length ? `; where '${mk}' is joined onto another model's rows (${reachedBy.join(', ')}), it is an attribute like any other — group by { source: '${mk}', column: '${col}' }, while metric_time stays that model's time` : ''}; in a pipeline a { column } like any other.`
           : `'${col}' is the partition the warehouse prunes by: a time_range bounds it for you. It can lag the time axis (a row filed in a later partition), so count by '${m.time?.column || 'the time axis'}', not by it.`],
       };
       this.notes.attach(out, { kind: 'column', source: mk, name: col });

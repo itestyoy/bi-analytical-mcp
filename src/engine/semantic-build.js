@@ -133,7 +133,7 @@ export const semanticBuildMethods = {
       if (!['time', 'unknown'].includes(axis.type)) throw say(Object.assign(new Error(`time: '${st.time}' is ${axis.type}, not a moment — the time axis is a moment the steps before this one carry: a time column, or one made of it (min / max of it in an aggregate, date_trunc of it)`), { field: 'time' }));
       let keys;
       try { keys = joinKeysOf(c, st.join || [], columns.map((x) => x.name)); } catch (e) { throw say(e); }
-      const model = builtModel({ key, dbtModel: table || this._nextPipelineModel(ctx, draft.name), columns, time: st.time, keys, description: draft.description });
+      const model = builtModel({ key, dbtModel: table || this._nextPipelineModel(ctx, draft.name), columns, time: st.time, keys, description: draft.description, from: draft.source });
       catalog = catalogWith(c, key, model);
       layerModel = { key, model };
       source = key;
@@ -217,7 +217,8 @@ export const semanticBuildMethods = {
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
       groupable,
-      ...(afterLoading.length ? {
+      // (said with the first build, as the layer's hints are)
+      ...(afterLoading.length && !ctx.state.told_layer_hints ? {
         groupable_after_loading: afterLoading,
         groupable_after_loading_note: `These columns are reachable in the catalog but this context does not read their model — load it before naming them in a group_by or a where: ${loadModelCall(ctx.id, afterLoading[0].source, this.catalog)}.`,
       } : {}),

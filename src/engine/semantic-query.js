@@ -1098,6 +1098,11 @@ export const semanticQueryMethods = {
       const factsRead = [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))].filter((k) => cc.models[k] && !cc.getModel(k).built && cc.getModel(k).time?.column);
       const freshByFact = {};
       await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this.probe.dataFreshness(f, { wait: true }); }));
+      // a build's own table: provenance names it and the source its build read, whose latest row its data
+      // cannot be past
+      const builtRead = factsRead.length ? [] : [...new Set(metrics.flatMap((m) => this._metricModels(ctx, m)))].filter((k) => cc.models[k]?.built);
+      const builtFrom = [...new Set(builtRead.map((k) => cc.models[k].built_from).filter((f) => f && cc.models[f]?.time?.column))];
+      const builtFresh = builtFrom.length === 1 ? await this.probe.dataFreshness(builtFrom[0], { wait: true }) : null;
       const knownFresh = Object.values(freshByFact).filter(Boolean);
       const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
       // Situational recommendations: surface a risk ONLY when it is actually present.
@@ -1227,8 +1232,9 @@ export const semanticQueryMethods = {
         provenance: {
           tier: 'governed_metric',
           metrics,
-          source: factsRead.length === 1 ? factsRead[0] : factsRead,
-          data_freshness: fresh,
+          source: factsRead.length === 1 ? factsRead[0] : factsRead.length ? factsRead : builtRead.length === 1 ? builtRead[0] : builtRead,
+          ...(builtFrom.length ? { built_from: builtFrom.length === 1 ? builtFrom[0] : builtFrom } : {}),
+          data_freshness: fresh ?? builtFresh,
           ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
         },
         warnings: [...outside, ...allTimeNotes, ...openPeriod(windowWarnings, fresh), ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],

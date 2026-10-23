@@ -369,6 +369,9 @@ export const taskResultMethods = {
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
       const read = await this._readTable(this.ctxs.dir(job.contextId), job.table, page?.limit ?? job.keptRows ?? KEPT_ROWS, { ordered: held?.page?.ordered }, page?.offset ?? 0);
       if (read.ok === false) return { ...head, ...read, status: 'error' };
+      // a page in the middle of the table says its size too, where the answer counted it (a build does)
+      const counted = held?.page?.total_rows;
+      if (read.page && read.page.total_rows == null && counted != null) read.page = pageBlock({ ...read.page, total: counted, ordered: read.page.ordered });
       return { ...head, ...pageAround(held, page?.offset ?? 0), ...read, status: 'done', ...this._showHint(id, read) };
     }
     // a task that FAILED answers with its failure — paged or not: it has no rows to page, and telling

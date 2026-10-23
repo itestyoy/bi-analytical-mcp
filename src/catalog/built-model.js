@@ -7,11 +7,12 @@
 
 /**
  * The model, from what the build knows of its table: its dbt model, its columns ({ name, type }), its time
- * axis and its foreign keys ({ <relationship>: [<column>, …] }, in the order the owner's key is written). It
+ * axis, its foreign keys ({ <relationship>: [<column>, …] }, in the order the owner's key is written) and
+ * the source its build read (`from`). It
  * has no key of its own (a built table holds whatever rows its steps left): its semantic model names its
  * identity alone, so its columns are reached under it and nothing joins onto it.
  */
-export function builtModel({ key, dbtModel, columns, time, keys = {}, description }) {
+export function builtModel({ key, dbtModel, columns, time, keys = {}, description, from = null }) {
   const dimensions = {};
   for (const c of columns) {
     // (a sketch is merged, never grouped by)
@@ -22,6 +23,8 @@ export function builtModel({ key, dbtModel, columns, time, keys = {}, descriptio
     dbt_model: dbtModel,
     role: key,
     built: true,
+    // the source the build read: its data is as recent as that source's
+    ...(from ? { built_from: from } : {}),
     ...(description ? { description } : {}),
     primary_entity: { name: key },
     time: { column: time, granularity: 'day' },

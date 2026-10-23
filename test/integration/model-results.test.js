@@ -606,7 +606,9 @@ test('a pipeline build pages its stored table to the last row, and a read of it 
     assert.equal(page.status, 'done', JSON.stringify(page.error));
     assert.equal(page.page.offset, offset);
     seen.push(...page.rows.map((r) => r.event_id)); sizes.push(page.rows.length);
-    if (!page.page.has_more) { assert.equal(page.page.total_rows, truth.length); break; }
+    // every page counts the table's rows — one in the middle too
+    assert.equal(page.page.total_rows, truth.length, `the page at ${offset} counts the rows`);
+    if (!page.page.has_more) break;
     offset = page.page.next_offset;
   }
   assert.deepEqual([...seen].sort(), [...truth].sort(), 'the pages hold every event exactly once');

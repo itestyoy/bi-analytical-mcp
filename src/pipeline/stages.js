@@ -220,7 +220,7 @@ export const STAGES = {
             on: contractOnSchema(model, contract),
             attrs: {
               type: 'array', minItems: 1, uniqueItems: true,
-              description: 'The columns of the joined model that arrive — exactly these.',
+              description: 'The columns of the joined model that arrive — exactly these; one whose name the rows already carry takes a `name` of its own.',
               items: {
                 type: 'object', additionalProperties: false, required: ['column'],
                 properties: {

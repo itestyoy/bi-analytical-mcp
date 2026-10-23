@@ -247,7 +247,7 @@ export const pipelineMaterializeMethods = {
       }
       draft.told_checkpoints = true;
       (result.assumptions ||= []).push(
-        `The draft ${ctx.id} stays open and steps 1..${stages.length} are now the table ${modelName}: add_steps continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${stages.length} retires it and the next materialize rebuilds from ${draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`}.`
+        `The draft stays open: add_steps continues on top of ${modelName} (steps 1..${stages.length}, not recomputed); editing a step at or before ${stages.length} retires it, and the next materialize rebuilds from ${draft.base ? `task ${draft.base.task_id}'s table` : `'${draft.source}'`}.`
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;
@@ -426,8 +426,8 @@ export const pipelineMaterializeMethods = {
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
-          : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
-        `To re-slice it without recomputing, start a pipeline FROM this build: build_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_model({ request: { task_ids, offset, limit } }), or filter / regroup them with query_model({ request: { context_id, steps } }) — the pipeline's own stages, run over the stored table.`,
+          : [`Built as a ${materialized} model (${modelName}); its rows are the result.`]),
+        `To re-slice it without recomputing: page it with query_model({ request: { task_ids, offset, limit } }), filter / regroup it with query_model({ request: { context_id, steps } }), or build on it with build_model({ request: { action: 'start', name, from_task: '<this task_id>' } }).`,
       ],
       warnings: [
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at

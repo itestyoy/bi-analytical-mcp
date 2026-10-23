@@ -409,7 +409,7 @@ export const semanticIndexMethods = {
     else if (String(dim.type || '').toLowerCase() === 'time' || dim.index === false) recommendations.push(`'${col}' is ${dim.index === false ? 'kept out of the value index by the schema' : 'a time column: its values are moments, not a set the index lists'} — read its range with a query (an aggregate stage with min / max).`);
     else recommendations.push('No values indexed yet (the background value index may not have run).');
     // (a model with versions holds a row per version: its frequencies count versions, not keys)
-    if (m.scd && samples.length) recommendations.push(`'${mk}' keeps a row per version of a ${ent || 'key'} (a validity window): each frequency counts versions — a ${ent || 'key'} whose '${col}' changed is counted under each value it held.`);
+    const versionsNote = m.scd && samples.length ? (`'${mk}' keeps a row per version of a ${ent || 'key'} (a validity window): each frequency counts versions — a ${ent || 'key'} whose '${col}' changed is counted under each value it held.`) : null;
     if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
     recommendations.push(...nullRecs);
     // A metric query names the column STRUCTURALLY — { source, column }, as this view does.
@@ -426,7 +426,7 @@ export const semanticIndexMethods = {
     const out = {
       column: col, source: mk, type: dim.type,
       description: dDescs[col],
-      sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
+      sample_values: samples, ...(versionsNote ? { versions_note: versionsNote } : {}), distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
       indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
       indexing: this.indexViews.history(mk, col, input.recent ?? 3),
       recommendations: recommendations.slice(0, 3),

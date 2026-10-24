@@ -19,10 +19,27 @@ import { declare } from '../helpers/declare.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
-function engine() {
+function engine(opts = {}) {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }), ...opts }));
 }
+
+// Allowed non-data test: the advertised surface. The result cards are a deployment's choice
+// (MCP_RESULT_CARDS): off, display_model_result and drill_result are neither listed nor callable and
+// the instructions name neither, while experiment keeps the A/B test card and the view it draws in.
+test('result cards switched off: no display_model_result or drill_result, the experiment card stays', async () => {
+  const off = engine({ resultCards: false });
+  const names = buildToolDefs(off).map((d) => d.name);
+  assert.ok(!names.includes('display_model_result') && !names.includes('drill_result'), names.join(', '));
+  assert.ok(!('display_model_result' in off.schemas) && !('drill_result' in off.schemas));
+  const experiment = buildToolDefs(off).find((d) => d.name === 'experiment');
+  assert.ok(experiment?._meta?.ui?.resourceUri, 'the experiment still draws its A/B card in the view');
+  const { servicesFor } = await import('../../src/mcp-surface.js');
+  const said = servicesFor(off).instructionsFor({ apps: true });
+  assert.ok(!said.includes('display_model_result') && said.includes('card: true'), said.slice(-400));
+  const on = buildToolDefs(engine()).map((d) => d.name);
+  assert.ok(on.includes('display_model_result') && on.includes('drill_result'), 'on, both are offered');
+});
 
 // Advertised tool surface: the folded/rudimentary tools are gone; the merged ones present.
 test('advertised tools: folded tools removed, context + experiment present', () => {
@@ -405,16 +422,17 @@ test('every tool description, and the core of the instructions for any offer, fi
   // the served skills under one root, and the feature's line: the largest core a deployment can serve
   const skillUris = ['skill://omg-analytics/analytics/SKILL.md', 'skill://omg-analytics/research/SKILL.md', 'skill://omg-analytics/python-stage/SKILL.md'];
   const { INSTRUCTIONS_LINE } = await import('../../src/retentioneering/guide.js');
-  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }, { apps: true, skillUris, featureLines: [INSTRUCTIONS_LINE] }]) {
+  for (const offer of [{}, { apps: true }, { apps: true, cards: true }, { skillUris }, { apps: true, cards: true, skillUris }, { apps: true, cards: true, skillUris, featureLines: [INSTRUCTIONS_LINE] }]) {
     const core = coreInstructions(offer);
     assert.ok(core.length <= 2048, `${JSON.stringify(offer)}: ${core.length} characters`);
   }
-  const services = servicesFor(engine());
+  const e = engine();
+  const services = servicesFor(e);
   // the skills are found within the cut: the core names the root every served skill sits under
   const { skillRoot } = await import('../../src/mcp-surface.js');
   const served = services.skills?.skills.map((s) => s.uri) ?? [];
   assert.ok(served.length && served.every((u) => u.startsWith(skillRoot(served))) && coreInstructions({ skillUris: served }).includes(skillRoot(served)), 'the core names where the skills are');
   for (const offer of [{}, { apps: true, skills: true }]) {
-    assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
+    assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, cards: e.resultCards, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
   }
 });

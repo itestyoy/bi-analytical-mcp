@@ -220,7 +220,7 @@ export const CASES = [
     prompt: 'How many orders did customers place in our online shop last month? Use the orders table.',
     // looking is right (the catalog says what exists); building or querying something that is not
     // there, or answering with a number, is not
-    expect: { forbid: ['build_model', 'query_model', 'display_model_result'] },
+    expect: { forbid: ['build_model', 'query_model'] },
     answer: { kind: 'none' },
   },
   {

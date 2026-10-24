@@ -77,6 +77,9 @@ export const SETTING_GROUPS = [
     S('MCP_PYTHON_MODEL_CONFIG', 'raw', 'JSON of dbt python-model config (runtime, timeout, …); wins over what is read from the profile.', { shown: '{}' }),
     S('MCP_PYTHON_PACKAGES', 'raw', 'More allowed imports, comma-separated: import_name (preinstalled) or import_name=pip-name.', { shown: '' }),
   ]],
+  ['result cards (MCP Apps)', [
+    S('MCP_RESULT_CARDS', 'flag', 'on: offer display_model_result and drill_result — a model result drawn as a card. Off, neither exists;\nthe A/B test card of experiment is drawn either way.', { default: false, shown: 'on' }),
+  ]],
   ['path analysis (retentioneering)', [
     S('MCP_RETENTIONEERING', 'flag', 'on: switch the feature on. Off, none of it exists.', { default: false, shown: 'on' }),
     S('MCP_RETENTIONEERING_ENV', 'string', 'Its environment.', { default: 'retentioneering' }),

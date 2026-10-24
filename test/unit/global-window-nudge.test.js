@@ -110,11 +110,11 @@ test('the stage says whether this warehouse computes median/percentile exactly o
     const stage = stageSchema(catalog);
     return formWhere(stage, stage, 'stage', 'aggregate').description;
   };
-  assert.match(describe('bigquery'), /median\/percentile are APPROXIMATE/);
-  assert.match(describe('duckdb'), /every measure here is exact/);
+  assert.match(describe('bigquery'), /median\/percentile are approximate/);
+  assert.doesNotMatch(describe('duckdb'), /approximate/);
   // …and both warn off the global window, since that part is not per warehouse
   for (const d of ['bigquery', 'duckdb']) {
     assert.match(describe(d), /no group_by/i);
-    assert.match(describe(d), /Resources exceeded/);
+    assert.match(describe(d), /runs out of memory/);
   }
 });

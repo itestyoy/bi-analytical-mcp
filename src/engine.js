@@ -87,7 +87,7 @@ export const TASK_KINDS = {
 const DESCRIBED_TASKS = 5;
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null, resultCards = true }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -156,7 +156,11 @@ export class Engine {
     // (above, by its name); a feature's by its own definition.
     this.features = features;
     this.featureStatus = featureStatus;
-    this.tools = toolRegistry([...CORE_TOOLS, ...featureToolDefinitions(features)]);
+    // (the result cards — display_model_result and the card's own drill_result — are offered only where the
+    // deployment asks for them, MCP_RESULT_CARDS: off, neither tool nor its schema exists)
+    this.resultCards = !!resultCards;
+    for (const def of CORE_TOOLS) if (def.resultCard && !this.resultCards) delete this.schemas[def.name];
+    this.tools = toolRegistry([...CORE_TOOLS.filter((def) => this.resultCards || !def.resultCard), ...featureToolDefinitions(features)]);
     for (const def of this.tools.values()) {
       if (def.feature) {
         if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);

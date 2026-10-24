@@ -18,24 +18,24 @@ import { aboutSchema, aboutDefs } from './memory.js';
 export function semanticIndexSchema(catalog, { project = null, places = null } = {}) {
   // a column's values, paged — and on an events source, its coverage per event and per app
   const paging = {
-    limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'How many indexed values to return (default 10).' },
-    offset: { type: 'integer', minimum: 0, description: 'Skip this many values first — page through a long tail.' },
+    limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Default 10.' },
+    offset: { type: 'integer', minimum: 0 },
     order_by: {
       type: 'array', minItems: 1, maxItems: 2,
-      description: 'How the values are ordered — by frequency (the default, most frequent first) or by the value itself (alphabetically); a second item orders the values the first one ties.',
+      description: 'Default: by frequency.',
       items: {
         type: 'object', additionalProperties: false, required: ['key'],
         properties: {
-          key: { enum: ['freq', 'value'], description: 'freq — how often the value occurs; value — the value itself.' },
-          direction: { enum: ['asc', 'desc'], description: 'Sort direction (default desc for freq, asc for value).' },
+          key: { enum: ['freq', 'value'] },
+          direction: { enum: ['asc', 'desc'] },
         },
       },
     },
-    recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many of this column\'s latest indexing runs to include (default 3).' },
+    recent: { type: 'integer', minimum: 1, maximum: 100, description: 'Latest indexing runs to include (default 3).' },
   };
   // the per-event and per-app split of an event property (an events source alone has either)
-  const include = { include: { type: 'array', uniqueItems: true, items: { enum: ['coverage'] }, description: '"coverage" — the full per-event and per-app coverage instead of the summary.' } };
-  const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
+  const include = { include: { type: 'array', uniqueItems: true, items: { enum: ['coverage'] }, description: 'The full per-event and per-app coverage.' } };
+  const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, ...(description ? { description } : {}), ...(required.length ? { required } : {}), properties });
   // per-app coverage is measured on the events sources that name the app (src/engine/semantic-index.js _indexBundle)
   const bundleSources = catalog.facts.filter((f) => catalog.bundleColumn(f));
 
@@ -46,64 +46,63 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
   // reads a relationship.
   const refs = refForms(catalog, { project, via: !!REF_PLACES.index_view.via, timeColumns: !!REF_PLACES.index_view.timeColumns });
   const refView = (kind, title, description, extra = {}) => refs[kind].map((f) => ({ ...f, title, description: description(f.properties.source), properties: { ...f.properties, ...extra } }));
-  const sourceOf = (s) => s.const ?? null;
   const refViews = {
-    source: refView('source', '{ source }', () => 'One source — its entities, time axis, dimension attributes (a model\'s with real sample values; an events source\'s events and payload properties are drilled one at a time: { source, event }, { source, property }), physical columns, declared relationships and aggregatable amounts.'),
+    source: refView('source', '{ source }', () => 'One source: its columns, relationships, amounts.'),
     // an event name belongs to the source that declares it, so a pairing that source does not have cannot be written down
-    source_event: refView('source_event', '{ source, event }', (s) => `The properties populated on that event of '${sourceOf(s)}'.`),
-    source_column: refView('source_column', '{ source, column }', (s) => `One column of '${sourceOf(s)}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, paging),
-    source_property: refView('source_property', '{ source, property }', (s) => `One event property of '${sourceOf(s)}' — its meaning, real value distribution (pageable), NULL coverage per event and per app, and indexing freshness.`, { ...paging, ...include }),
+    source_event: refView('source_event', '{ source, event }', () => 'The properties that event carries.'),
+    source_column: refView('source_column', '{ source, column }', () => 'One column: its meaning, values, NULL coverage.', paging),
+    source_property: refView('source_property', '{ source, property }', () => 'One event property: its meaning, values, coverage per event and app.', { ...paging, ...include }),
   };
 
   // The single-view fields, written once.
   const field = {
-    search: { type: 'string', description: 'The word or phrase to look for.' },
-    fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
-    status: { const: true, description: 'Ask for the operational state.' },
-    run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
-    bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
-    recipe: { type: 'string', description: 'Recipe id, from the overview.' },
-    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: `true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with ${RESEARCH_DOMAINS.map((d) => `"${d}"`).join(', ')} for what matters in each domain. "python", "research" and "research/<domain>" are reserved: not recipe families.` },
+    search: { type: 'string' },
+    fuzzy: { type: 'boolean', description: 'Default true; false: exact substring.' },
+    status: { const: true },
+    run: { type: 'integer', minimum: 1 },
+    bundle: { type: 'string' },
+    recipe: { type: 'string' },
+    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: `true, a task family, "python", or "research" (${RESEARCH_DOMAINS.map((d) => `"${d}"`).join(', ')}).` },
   };
 
   // the views that drill into one thing — what a { views } request may hold several of: first the
   // views of the refs the place takes (REF_PLACES.index_view), in its order
   const drill = [
     ...REF_PLACES.index_view.takes.flatMap((kind) => refViews[kind]),
-    view('{ search }', 'Find events, event properties, columns, indexed values and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
+    view('{ search }', 'Events, properties, columns, values and recipes by word.', ['search'], {
       search: field.search,
       fuzzy: field.fuzzy,
-      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'How many indexed values to return at most (default 20) — it bounds value_matches; the event, property, column and recipe matches are each the closest few.' },
+      limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Value matches (default 20).' },
     }),
-    view('{ notes }', 'The analyst memory — the saved findings, newest first, each with its id (memory forgets one by id): every one, or those `about` one entity. A finding also surfaces on the views of what it is about, and in { search }.', ['notes'], {
+    view('{ notes }', 'The saved findings, newest first.', ['notes'], {
       notes: { const: true },
-      about: aboutSchema('Only the notes about this one entity — named as memory records it: { source } for the model itself, { source, event }, { source, column }, { source, property }, or { term }.'),
-      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many notes the page holds (default 50).' },
-      offset: { type: 'integer', minimum: 0, description: 'Skip this many of the newest first — next_offset of the previous page.' },
+      about: aboutSchema('Only the notes about this entity.'),
+      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Default 50.' },
+      offset: { type: 'integer', minimum: 0 },
     }),
-    ...(bundleSources.length ? [view('{ bundle }', 'For one app — which event properties and columns carry data for it and which are empty.', ['bundle'], {
+    ...(bundleSources.length ? [view('{ bundle }', 'Which properties one app fills.', ['bundle'], {
       bundle: field.bundle,
-      source: { enum: bundleSources, description: 'Which source\'s per-app coverage; omitted, every source that saw the app, each in its own block.' },
+      source: { enum: bundleSources },
     })] : []),
-    view('{ recipe }', 'One ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
+    view('{ recipe }', 'One recipe in full.', ['recipe'], {
       recipe: field.recipe,
     }),
   ];
   const branches = [
-    view('overview (an empty request)', 'The overview: models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    view('overview (an empty request)', null, [], {}),
     ...drill,
     // several drill-ins at once (a few events, their properties): one call where they would go one by one
-    view('{ views }', '2–5 of the drill-in views at once, answered in the order asked — e.g. the events a question names and the properties it groups by.', ['views'], {
+    view('{ views }', '2–5 drill-in views at once.', ['views'], {
       views: { type: 'array', minItems: 2, maxItems: 5, items: { anyOf: drill } },
     }),
-    view('{ status }', 'Operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
+    view('{ status }', 'Index sync runs and background tasks.', ['status'], {
       status: field.status,
-      recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many of the latest index runs and of the latest tasks to list — it caps both lists (default 10).' },
+      recent: { type: 'integer', minimum: 1, maximum: 100, description: 'Default 10.' },
     }),
-    view('{ run }', 'One sync run by id — its per-property breakdown, slowest first.', ['run'], {
+    view('{ run }', 'One sync run by id.', ['run'], {
       run: field.run,
     }),
-    view('{ guide }', 'How to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
+    view('{ guide }', 'How to approach a question.', ['guide'], {
       guide: field.guide,
     }),
   ];
@@ -111,7 +110,7 @@ export function semanticIndexSchema(catalog, { project = null, places = null } =
     // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
     // so the branch union narrows the shape but never replaces it.
     type: 'object',
-    description: 'An empty request for the overview, exactly one view (one of the forms below), or { views: [...] } for several drill-ins at once. A source and a name are separate fields, never glued into one string: a model\'s column is { source, column }, an event\'s payload property { source, property }.',
+    description: 'An empty request for the overview, one view, or { views } for several.',
     // what a note is about is the one ref (`$defs.ref`), as memory records it — built for this tool's
     // places (`places`: its views and the notes' about)
     $defs: aboutDefs(catalog, { project, places }),

@@ -590,7 +590,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   declared time dimensions' `<dimension>__<grain>` — never a pattern: a project's own columns may be
   named with `__` (measure__…), and SQL with them renamed would not run. Each occurrence is renamed
   alike, so the SQL as shown runs to the same rows.
-  `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
+  `display_model_result` is the ONLY tool that draws a MODEL result, for either side — offered, with the card's
+  `drill_result`, only where the deployment switches the result cards on (`MCP_RESULT_CARDS`, off by default: then
+  neither tool, schema nor instruction line exists, and the A/B test card of `experiment` is the one card): it reads the task the way the
   query tool does (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an

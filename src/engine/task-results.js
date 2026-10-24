@@ -409,7 +409,7 @@ export const taskResultMethods = {
    *  declares (a chart, KPI tiles, a funnel, a pivot…) says how the card draws its rows. */
   _showHint(id, out) {
     const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0;
-    if (!drawable || this._displayed?.has(id)) return {};
+    if (!this.resultCards || !drawable || this._displayed?.has(id)) return {};
     return { show_to_user: { tool: 'display_model_result', arguments: { request: { task_id: id } }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should see — not for the intermediate reads you make to work something out.` } };
   },
 

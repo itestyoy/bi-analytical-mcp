@@ -51,15 +51,24 @@ export function partitionDays({ start = null, endExclusive = null, end = null } 
 const bound = (column, op, value) => ({ fn: op, args: [{ column }, { value }] });
 
 /**
+ * How many days after its own an event may be filed under, where the source does not say
+ * (meta.mcp.partition_late_days): the partition bound is the server's own pruning, never a filter of
+ * the answer, so it reads the days an event can still arrive on — a day's number then holds every
+ * row of it the warehouse has, whatever window it was asked in.
+ */
+export const DEFAULT_PARTITION_LATE_DAYS = 30;
+
+/**
  * The conditions on a model's partition column for a window on its time axis — [] when the model
  * has none, or when it partitions by the time axis itself (the window already bounds it). An event
- * lies in the partition of its own day, or up to `partition_late_days` days later.
+ * lies in the partition of its own day, or up to `partition_late_days` days later
+ * (DEFAULT_PARTITION_LATE_DAYS where the model does not say; 0 says it is always filed on its day).
  * @returns the conditions, each { fn: 'gte' | 'lt', args: [{ column }, { value }] }
  */
 export function partitionConditions(model, bounds) {
   const part = model?.partition_column;
   if (!part || part === model.time?.column) return [];
-  const { from, until } = partitionDays(bounds, model.partition_late_days || 0);
+  const { from, until } = partitionDays(bounds, model.partition_late_days ?? DEFAULT_PARTITION_LATE_DAYS);
   return [...(from ? [bound(part, 'gte', from)] : []), ...(until ? [bound(part, 'lt', until)] : [])];
 }
 

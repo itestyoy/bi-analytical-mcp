@@ -23,7 +23,7 @@ export function analyzeContract() {
 
 const AB_DESCRIPTION = 'Significance test of variants against control on per-group aggregates — any two groups, not only a randomized test. The group fields depend on metric: proportion → n, conversions; mean → n, mean, stddev; ratio → n, numerator and denominator { sum, sum_squares }, sum_products (per-user values; delta method); cuped → n, sum, sum_squares, covariate { sum, sum_squares }, sum_products (pre-period covariate).';
 
-/** The A/B test's forms, one per metric — with `extra` fields (an action, a card) added to each. */
+/** The A/B test's forms, one per metric — with `extra` fields (the action) added to each. */
 function abTestForms(extra = {}) {
   const correction = { enum: ['none', 'holm', 'bh'], default: 'holm', description: 'Across the variants.' };
 
@@ -173,21 +173,18 @@ function sampleSizeForms(extra = {}) {
 
 // ── ONE experiment-lifecycle tool (action-driven), folding in plan/check_split/analyze ──
 // The three statistics' own forms, each with the `action` that picks it added: plan → the planning
-// forms, check_split → the split check, analyze → the test's forms (with `card`, which only the test
-// has). The engine hands the rest to the per-action statistic, which re-validates it.
+// forms, check_split → the split check, analyze → the test's forms. Each draws its card where the
+// host renders MCP Apps. The engine hands the rest to the per-action statistic, which re-validates it.
 export function experimentSchema() {
-  const card = { type: 'boolean', description: 'Draw the result as a card for the person (MCP Apps hosts only).' };
-  // a card exists for the test alone: card: true elsewhere is refused by name (false is harmless)
-  const noCard = { const: false, description: 'The split check and the plan have no card: answer them in words.' };
   const action = (value, description) => ({ required: true, schema: { const: value, description } });
   const srm = checkSplitContract();
   return {
     type: 'object',
     description: 'plan, check_split or analyze (`metric` picks the test).',
     anyOf: [
-      ...sampleSizeForms({ action: action('plan', 'plan: the required sample size, or the MDE at a given n (power planning, before running).'), card: { schema: noCard } }).map((f) => ({ ...f, title: `plan — ${f.title}` })),
-      { ...form({ title: 'check_split', description: srm.description, tag: ['action', 'check_split'], required: srm.required, properties: { ...srm.properties, card: noCard } }) },
-      ...abTestForms({ action: action('analyze', 'analyze: the A/B significance test on per-group aggregates.'), card: { schema: card } }).map((f) => ({ ...f, title: `analyze — ${f.title}` })),
+      ...sampleSizeForms({ action: action('plan', 'plan: the required sample size, or the MDE at a given n (power planning, before running).') }).map((f) => ({ ...f, title: `plan — ${f.title}` })),
+      { ...form({ title: 'check_split', description: srm.description, tag: ['action', 'check_split'], required: srm.required, properties: srm.properties }) },
+      ...abTestForms({ action: action('analyze', 'analyze: the A/B significance test on per-group aggregates.') }).map((f) => ({ ...f, title: `analyze — ${f.title}` })),
     ],
   };
 }

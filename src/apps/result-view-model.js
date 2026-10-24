@@ -2,8 +2,8 @@
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
 // WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL, a PIVOT and the A/B
-// TEST. A card exists per KIND: these have one, and nothing else does (the experiment's split check
-// and sample-size plan are answered in words and have no card here). Anything else — a failure, a
+// TEST with its split check and sample-size plan. A card exists per KIND: these have one, and nothing
+// else does. Anything else — a failure, a
 // build still running, an explained query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
@@ -206,6 +206,40 @@ export function buildViewModel(toolName, result, toolInput) {
       good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],
+    };
+  }
+  // ── the split check: each group's observed size against the designed one, and the verdict ──
+  if (toolName === 'experiment' && Array.isArray(result.groups) && num(result.chi_square) !== null) {
+    const groups = result.groups.filter(isObj).map((g) => ({ label: String(g.label), observed: num(g.observed), expected: num(g.expected) }));
+    const total = groups.reduce((a, g) => a + (g.observed ?? 0), 0);
+    return {
+      kind: 'experiment_split',
+      title: 'Sample ratio check',
+      detected: !!result.srm_detected,
+      p_value: num(result.p_value),
+      chi_square: num(result.chi_square),
+      df: num(result.df),
+      groups: groups.map((g) => ({ ...g, share: total > 0 && g.observed !== null ? g.observed / total : null, deviation: g.expected ? (g.observed - g.expected) / g.expected : null })),
+    };
+  }
+  // ── the plan: the sample a test needs, or the effect a given sample can detect ──
+  if (toolName === 'experiment' && num(result.n_per_group) !== null && num(result.mde) !== null) {
+    const input = isObj(toolInput) ? toolInput : {};
+    return {
+      kind: 'experiment_plan',
+      title: `Test plan · ${result.metric === 'proportion' ? 'conversion rate' : result.metric || 'metric'}`,
+      metric: result.metric,
+      // what was solved for: the sample (a target effect given) or the effect (a sample given)
+      solved: input.n !== undefined ? 'mde' : 'n',
+      n_per_group: num(result.n_per_group),
+      total_n: num(result.total_n),
+      mde: num(result.mde),
+      relative_mde: num(result.relative_mde),
+      baseline: num(result.baseline),
+      stddev: num(result.stddev),
+      power: num(result.power),
+      confidence: num(result.confidence),
+      alternative: result.alternative || null,
     };
   }
   if (toolName === 'experiment') return none('experiment');

@@ -296,7 +296,8 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   conversation as an interactive view (`ui://betti/result-view.html`):
   `display_model_result({ task_id, display })` a finished MODEL result — a semantic query or a
   pipeline — and `experiment` (a separate process: statistics over the numbers the caller brings, no
-  task) its own card when called with `card: true`:
+  task) its own card on every call — the test, the split check (each group against the design, the
+  verdict) and the plan (the sample or the effect solved for):
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (one variant: a stat card — lift, interval, verdict, the groups; several: ONE card, the control
@@ -347,7 +348,7 @@ offered none of them, whatever its `initialize` declared (src/client-extensions.
   `display_model_result` is the only tool that draws a model result, for either side: it reads the
   task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: on a tool with a card, `structuredContent` (what a host draws a card from) is
-  carried only by a `display_model_result` that drew, or an `experiment` called with `card: true`. The
+  carried only by a `display_model_result` that drew, or an `experiment` answer. The
   tools whose answer has one shape and no card (`context`, `memory`,
   `explore_errors`) declare an `outputSchema` and carry every successful
   answer as `structuredContent` too; every other answer is text alone. A task still running

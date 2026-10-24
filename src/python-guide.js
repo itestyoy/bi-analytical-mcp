@@ -434,6 +434,13 @@ export function pythonRulesText(key, recipes = []) {
  * repeated there: they are in the reference recipe and in the guide's own rule, so a reader is
  * never offered two lists that can disagree.
  */
+/** The strings a BigFrames frame's astype takes (exact, and any case), from the fact sheet — what the
+ *  static gate warns against (python/ast_gate.py); null where the sheet does not say. */
+export function astypeStrings() {
+  const a = FACTS?.astype_strings;
+  return a && Array.isArray(a.exact) ? { exact: a.exact, any_case: a.any_case || [] } : null;
+}
+
 export function mlClassesText() {
   const per = FACTS?.ml || {};
   const mods = Object.entries(per).map(([mod, entries]) => {

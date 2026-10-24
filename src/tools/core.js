@@ -62,7 +62,7 @@ export const CORE_TOOLS = [
   defineTool({
     name: 'display_model_result',
     title: 'Display Model Result',
-    description: 'Only for a host that renders MCP Apps: show a finished model result (a metric query or a pipeline) to the person as a card — chart, KPI tiles, funnel, sankey, drill-down pivot. Use it once, for the result the person should see; each task is drawn once, and a running task is refused. An experiment draws its own card (card: true).',
+    description: 'Only for a host that renders MCP Apps: show a finished model result (a metric query or a pipeline) to the person as a card — chart, KPI tiles, funnel, sankey, drill-down pivot. Use it once, for the result the person should see; each task is drawn once, and a running task is refused. An experiment draws its own card.',
     // draws a card, once per task: a second call is refused, not repeated
     annotations: { readOnlyHint: true, idempotentHint: false },
     view: 'result',
@@ -106,7 +106,6 @@ export const CORE_TOOLS = [
     description: 'A/B test statistics over per-group numbers you bring (compute them with a pipeline first), answered at once. plan: sample size, or MDE at a given n. check_split: sample-ratio-mismatch χ² — p < 0.001 means the split is broken; run it before trusting a lift. analyze: proportion → z-test, mean → Welch t-test, ratio → delta method, cuped → variance reduction; lift with CI, p-value and a multiplicity-adjusted p per variant; sequential: true adds an always-valid p. Example: {action:"analyze",metric:"proportion",control:{n:5000,conversions:500},variants:[{label:"variant_b",n:5020,conversions:580}],correction:"holm"}.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     view: 'result',
-    cardField: 'card',
     run: (engine, input) => engine.experiment(input),
   }),
   defineTool({

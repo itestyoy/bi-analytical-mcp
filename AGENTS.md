@@ -596,7 +596,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   query tool does (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried by a display_model_result that drew (`drawn: true`) or an
-  experiment called with `card: true`, only when `buildViewModel(...).kind !== 'none'` — and by every
+  experiment's answer (every one: a host draws a tool's view on each call), only when `buildViewModel(...).kind !== 'none'` — and by every
   successful answer of a tool that declares an `outputSchema` (`output` on its definition,
   src/schema/outputs.js: context, memory, explore_errors —
   an answer of one shape, from a tool with no view, since a host draws a card for every answer that
@@ -605,9 +605,9 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   fits a picture has its card, a kind that does not has no card code at all (no view-model branch, no
   renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
   NOT MIXED WITH display: it is statistics over numbers the caller brings — no task, no task_id —
-  returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
-  only when asked with `card: true` on analyze (a card offered to an Apps client alone: `card: true`
-  from any other is refused, `false` — no card — is what it gets anyway). A stored result is
+  returned at once, and it draws its own card on every call — each action has one (the A/B test; the
+  split check: each group's size against the design and the verdict; the plan: the sample or the
+  effect solved for), since a host draws a tool's view on every call and an empty one is clutter. A stored result is
   built on by a pipeline started from its task (`build_model({ action: 'start', name,
   from_task })`); there is no timer tool — a read of a task waits itself. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
@@ -718,7 +718,7 @@ The rules of this codebase. HARD RULE marks an invariant a change must not break
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the
     RESULT CARDS instructions, the `show_to_user` hint — and what DRAWS — a call to
-    display_model_result, `card` on experiment (refused otherwise). The tool list (with `_meta.ui`,
+    display_model_result (refused otherwise). The tool list (with `_meta.ui`,
     display_model_result and drill_result) and the view page (listed and read) are the SAME for every
     client, as the official ext-apps registerAppTool serves them: a host re-draws a card already in a
     conversation — reopened, or on another device — by finding its tool and page on requests that

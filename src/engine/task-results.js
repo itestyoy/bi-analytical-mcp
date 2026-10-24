@@ -419,8 +419,8 @@ export const taskResultMethods = {
    * task is refused, so one question gets one card by construction. A task still running after
    * that read's wait, or a failed one, is REFUSED (a tool error, no card): waiting is the query tools'. `display` says how rows are drawn
    * — checked against the result's columns; without it the card follows the rows' shape. It draws
-   * MODEL results only: an experiment is its own process and draws its own card (experiment with
-   * card: true). A drill-down (a pivot, a
+   * MODEL results only: an experiment is its own process and draws its own card (every experiment
+   * call). A drill-down (a pivot, a
    * chart with drill) shows its first view, and the card reads the views below from the task's
    * stored table (drill_result).
    */

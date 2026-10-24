@@ -75,6 +75,27 @@ def _enforced_in_body(fn: ast.FunctionDef) -> list[str]:
     return found
 
 
+def _astype_from_tree(tree: ast.Module) -> dict:
+    """What `astype` takes as a STRING, read from bigframes/dtypes.py: the `DtypeString` literals
+    (`bigframes_type` → `_dtype_from_string` accepts exactly these) and the names it also accepts in
+    any case (a `.lower() == "<name>"` test in `_dtype_from_string`). Any other string raises TypeError
+    — `'float64'` and `'int64'` among them, the pandas spellings authors reach for first."""
+    exact, any_case = [], []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "DtypeString" for t in node.targets):
+            sub = node.value
+            if isinstance(sub, ast.Subscript):
+                elts = sub.slice.elts if isinstance(sub.slice, ast.Tuple) else [sub.slice]
+                exact = [e.value for e in elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        if isinstance(node, ast.FunctionDef) and node.name == "_dtype_from_string":
+            for n in ast.walk(node):
+                if isinstance(n, ast.Compare) and isinstance(n.left, ast.Call) and isinstance(n.left.func, ast.Attribute) and n.left.func.attr == "lower":
+                    any_case += [c.value for c in n.comparators if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+    if not exact:
+        raise SystemExit("dtypes.py: DtypeString not found — the astype facts cannot be read")
+    return {"exact": exact, "any_case": sorted(set(any_case))}
+
+
 def from_source(root: pathlib.Path) -> dict:
     version = None
     vfile = root / "version.py"
@@ -113,6 +134,7 @@ def from_source(root: pathlib.Path) -> dict:
         facts["signatures"][cls] = sigs
         facts["where"][cls] = where
     facts["ml"] = _ml_from_source(root)
+    facts["astype_strings"] = _astype_from_tree(ast.parse((root / "dtypes.py").read_text()))
     return {"version": version, "read_from": "source", **facts}
 
 
@@ -168,6 +190,7 @@ def from_installed() -> dict:
         facts["signatures"][cls] = sigs
         facts["where"][cls] = {}
     facts["ml"] = _ml_from_installed()
+    facts["astype_strings"] = _astype_from_tree(ast.parse(inspect.getsource(importlib.import_module("bigframes.dtypes"))))
     return {"version": getattr(bf, "__version__", None), "read_from": "installed", **facts}
 
 

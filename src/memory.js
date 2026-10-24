@@ -62,9 +62,13 @@ export function targetWords(t) {
  */
 const asRead = (e, catalog) => e && { ...e, targets: (e.targets || []).map((t) => (t && typeof t === 'object' ? currentTarget(t, catalog) : { kind: 'term', term: String(t) })) };
 
-// Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
-// genuinely related-but-differently-worded texts well above this; noise stays below).
-const SEMANTIC_FLOOR = 0.3;
+// Cosine-similarity floor for a SEMANTIC hit to count. Two notes of one domain (a game's analytics) sit
+// at 0.3–0.45 with a text-embedding-3 model whatever they say, so a floor at 0.3 let every note in;
+// a same-meaning note is well above this one.
+const SEMANTIC_FLOOR = 0.45;
+// A hit far weaker than the best one is noise beside it: a search answers with the notes within this
+// share of its top score.
+const RELATIVE_FLOOR = 0.75;
 
 export class MemoryStore {
   constructor({ store, embedder, catalog = null } = {}) {
@@ -147,21 +151,27 @@ export class MemoryStore {
 
     // ── lexical: exact phrase + token coverage (bag-of-words, unicode-aware) ──
     const ql = q.toLowerCase();
-    const qtokens = ql.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 3);
+    // a query word counts where a word of the note STARTS with it ('purchase' in 'purchases'), never
+    // inside one ('format' in 'reformatted', 'ad' in 'load'); a two-letter word ('ad', 'ui') counts too
+    const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const qtokens = ql.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2).map((t) => new RegExp(`(?<![\\p{L}\\p{N}])${escape(t)}`, 'u'));
     for (const n of notes) {
       const hay = this._embedText(n).toLowerCase();
       let lex = 0;
       if (ql && hay.includes(ql)) lex = 1; // whole-query exact substring
       else if (qtokens.length) {
-        const cov = qtokens.filter((t) => hay.includes(t)).length / qtokens.length;
+        const cov = qtokens.filter((t) => t.test(hay)).length / qtokens.length;
         if (cov >= 0.6) lex = 0.5 + 0.4 * cov; // most/all query words present
       }
       if (lex > 0) scored.set(n.id, lex);
     }
 
-    // ── lexical: Fuse typo/approximate (only when fuzzy is enabled) ──
+    // ── lexical: Fuse typo/approximate (only when fuzzy is enabled) — over the SHORT fields only (the
+    // question, the aliases, what the note is about): over a long note body a short query's letters
+    // match fragments of almost any note; the body is matched by its words above and by meaning below ──
     if (fuzzy) {
-      for (const r of rankFuzzy(q, notes, { fields: (e) => this._embedText(e).split('\n'), threshold: 0.6, limit: Math.max(limit, 20), tiebreak: (e) => e.id })) {
+      const short = (e) => [e.question, ...(e.aliases || []), ...(e.targets || []).map(targetWords)].filter(Boolean);
+      for (const r of rankFuzzy(q, notes, { fields: short, threshold: 0.55, limit: Math.max(limit, 20), tiebreak: (e) => e.id })) {
         scored.set(r.item.id, Math.max(scored.get(r.item.id) ?? 0, r.score));
       }
     }
@@ -192,10 +202,12 @@ export class MemoryStore {
       }
     }
 
+    const best = Math.max(0, ...scored.values());
     const ranked = [...scored.entries()]
+      .filter(([, score]) => score >= best * RELATIVE_FLOOR)
       .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0]))
       .slice(0, limit)
-      .map(([id]) => byId.get(id))
+      .map(([id, score]) => byId.get(id) && { ...byId.get(id), score: Math.round(score * 100) / 100 })
       .filter(Boolean);
     return { notes: ranked, semantic, ...(semanticError ? { semantic_error: semanticError } : {}) };
   }

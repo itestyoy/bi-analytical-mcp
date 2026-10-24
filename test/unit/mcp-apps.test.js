@@ -47,7 +47,7 @@ test('the two drawing tools carry the view — for a client that declares MCP Ap
   const takes = (name, f) => { const s = tools.find((t) => t.name === name).inputSchema; return fieldNames(s, s.properties.request).includes(f); };
   assert.ok(takes('display_model_result', 'display'), 'display is declared on display_model_result');
   for (const name of ['query_model', 'query_model', 'experiment']) assert.equal(takes(name, 'display'), false, `${name} takes no model card declaration`);
-  assert.ok(takes('experiment', 'card'), 'experiment asks for its own card with card: true');
+  assert.equal(takes('experiment', 'card'), false, 'experiment draws on every call: nothing asks for its card');
   assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
 });
 
@@ -69,12 +69,6 @@ test('a client that does not declare MCP Apps sees the same tools and page, but 
     const r = await c.callTool({ name: 'display_model_result', arguments: { request: { task_id: 'ffffffffffff' } } });
     assert.equal(r.isError, true, label);
     assert.match(JSON.parse(r.content[0].text).error.message, /MCP Apps/, label);
-    const card = await c.callTool({ name: 'experiment', arguments: { request: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } } });
-    assert.equal(card.isError, true, `${label}: card is refused`);
-    assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
-    // card: false asks for no card — what this client gets anyway — so it is not refused
-    const none = await c.callTool({ name: 'experiment', arguments: { request: { action: 'analyze', metric: 'proportion', control: { label: 'a', n: 1000, conversions: 100 }, variants: [{ label: 'b', n: 1000, conversions: 130 }], card: false } } });
-    assert.notEqual(none.isError, true, `${label}: card: false is accepted — ${none.content[0].text.slice(0, 200)}`);
   }
 });
 
@@ -132,17 +126,18 @@ test('a task this server never ran reaches the model as unknown_task over MCP; a
   assert.deepEqual(buildViewModel('display_model_result', { ok: false, error: { code: 'result_gone', message: 'gone' } }), { kind: 'none', reason: 'gone' });
 });
 
-test('structured output only for a card that is DRAWN — display_model_result\'s answer, experiment with card: true — and the same view model decides', () => {
+test('structured output only for a card that is DRAWN — display_model_result\'s answer, every experiment answer — and the same view model decides', () => {
   const rows = { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] };
   const display = { kind: 'bar', x: 'c', y: ['v'] };
   const drawn = { ...rows, display, drawn_from: { tool: 'query_model' }, drawn: true };
   assert.ok(toCallToolResult(drawn, 'display_model_result').structuredContent);
   // the same rows from any other tool — a query, a read — are text alone
   for (const name of ['query_model', 'query_model', 'build_model', 'experiment']) assert.equal(toCallToolResult({ ...rows, display }, name).structuredContent, undefined, name);
-  // experiment: its own card when the call asks for it, and only then
+  // experiment: its own card on every answer (a host draws its view on every call)
   const ab = { metric: 'proportion', confidence: 0.95, results: [{ variant: 'b', control_rate: 0.1, variant_rate: 0.12, absolute_lift: 0.02, relative_lift: 0.2, confidence_interval: [0.01, 0.03], relative_lift_ci: [0.1, 0.3], p_value: 0.001, significant: true }] };
-  assert.ok(toCallToolResult(ab, 'experiment', { action: 'analyze', card: true }).structuredContent);
-  assert.equal(toCallToolResult(ab, 'experiment', { action: 'analyze' }).structuredContent, undefined);
+  assert.ok(toCallToolResult(ab, 'experiment', { action: 'analyze' }).structuredContent);
+  // …but a failure is the text alone
+  assert.equal(toCallToolResult({ ok: false, error: { message: 'x' } }, 'experiment', { action: 'analyze' }).structuredContent, undefined);
   // display_model_result that drew nothing: refused, failed, empty
   for (const nothing of [{ ...drawn, drawn: false }, { ok: false, error: { message: 'x' }, display }, { ...drawn, rows: [] }]) {
     const r = toCallToolResult(nothing, 'display_model_result');
@@ -159,18 +154,14 @@ test('the view resource is one mcp-app HTML document, listed and readable for a 
   assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
-test('an experiment is its own process: card: true draws its A/B test card, equal to the text; without it, text alone — and no task, nothing for display_model_result', async () => {
+test('an experiment is its own process: every call draws its A/B test card, equal to the text — and no task, nothing for display_model_result', async () => {
   const args = { action: 'analyze', metric: 'proportion', control: { n: 5000, conversions: 500 }, variants: [{ label: 'b', n: 5020, conversions: 580 }] };
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
-  const asked = await c.callTool({ name: 'experiment', arguments: { request: { ...args, card: true } } });
-  assert.deepEqual(asked.structuredContent, JSON.parse(asked.content[0].text));
-  assert.equal(asked.structuredContent.results[0].variant, 'b', 'the card carries the test\'s own numbers');
-  assert.equal(buildViewModel('experiment', asked.structuredContent, args).kind, 'experiment');
-  const plain = await c.callTool({ name: 'experiment', arguments: { request: args } });
-  assert.equal(plain.structuredContent, undefined, 'no card asked for: no structured output');
-  const answer = JSON.parse(plain.content[0].text);
-  assert.equal(answer.results[0].p_value, asked.structuredContent.results[0].p_value, 'the same answer, as text');
-  assert.equal(answer.task_id, undefined, 'statistics are no task');
+  const drawn = await c.callTool({ name: 'experiment', arguments: { request: args } });
+  assert.deepEqual(drawn.structuredContent, JSON.parse(drawn.content[0].text));
+  assert.equal(drawn.structuredContent.results[0].variant, 'b', 'the card carries the test\'s own numbers');
+  assert.equal(buildViewModel('experiment', drawn.structuredContent, args).kind, 'experiment');
+  assert.equal(drawn.structuredContent.task_id, undefined, 'statistics are no task');
 });
 
 test('the checked-in view is the build of its sources (npm run build:app)', async () => {
@@ -493,16 +484,20 @@ test('view model: a declaration the rows cannot fill falls back to the inferred 
   assert.equal(m.chart.type, 'bar');
 });
 
-test('the experiment has a card for its test alone: a split check and a plan have none, and card: true on them is refused', async () => {
-  const split = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'a', n: 5000 }, { label: 'b', n: 5100 }] });
-  assert.deepEqual(buildViewModel('experiment', split), { kind: 'none', reason: 'experiment' });
+test('every experiment action has a card: the split check draws each group against the design, the plan what it solved for', async () => {
+  const split = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'a', n: 5000 }, { label: 'b', n: 5600 }] });
+  const sm = buildViewModel('experiment', split);
+  assert.equal(sm.kind, 'experiment_split');
+  assert.equal(sm.detected, true, 'a 5000 / 5600 split of a 50/50 design is a mismatch');
+  assert.deepEqual(sm.groups.map((g) => [g.label, g.observed, g.expected]), [['a', 5000, 5300], ['b', 5600, 5300]]);
   const plan = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
-  assert.deepEqual(buildViewModel('experiment', plan), { kind: 'none', reason: 'experiment' });
-  for (const args of [{ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true }, { action: 'check_split', groups: [{ n: 1 }, { n: 1 }], card: true }]) {
-    await assert.rejects(Promise.resolve().then(() => s.engine.experiment(args)), /`card` must be false/, args.action);
-  }
-  // asking for no card is harmless
-  assert.equal((await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: false })).n_per_group, 3841);
+  const pm = buildViewModel('experiment', plan, { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
+  assert.deepEqual([pm.kind, pm.solved, pm.n_per_group, pm.total_n], ['experiment_plan', 'n', 3841, 7682]);
+  const mde = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, n: 5000 });
+  const mm = buildViewModel('experiment', mde, { action: 'plan', metric: 'proportion', baseline: 0.1, n: 5000 });
+  assert.deepEqual([mm.kind, mm.solved, mm.n_per_group, mm.mde], ['experiment_plan', 'mde', 5000, mde.mde]);
+  // a card is no longer asked for: the field is refused as unknown
+  await assert.rejects(Promise.resolve().then(() => s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true })), /card/);
 });
 
 test('view model: a result with no card is none, with its reason', () => {

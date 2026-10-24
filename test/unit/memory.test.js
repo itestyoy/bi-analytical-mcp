@@ -182,6 +182,24 @@ test('semantic memory search finds a same-meaning note with no shared words', as
   assert.ok(!f.notes.some((n) => n.note.includes('IAP purchases')), 'fuzzy-only misses the same-meaning note (proves semantic added the recall)');
 });
 
+// Noise: a search answers with the notes it is about, not every note a fragment of the query lands in.
+// Typos are matched on the short fields (aliases, the question, what a note is about), a long body by
+// its words and its meaning, and a hit far weaker than the best one is left out — each with its score.
+test('a search returns the notes it matches, not the ones a fragment of it lands in, each with its score', async () => {
+  const e = engine();
+  const notes = (await e.memory({ action: 'record', notes: [
+    { note: 'ad_type_of_event_data carries the ad format: rewarded, interstitial, banner', aliases: ['ad format', 'формат рекламы'], about: [{ source: 'events', property: 'ad_type_of_event_data' }] },
+    { note: 'the onboarding tutorial has 5 steps; step_id is set on every tutorial event, formatted as step_<n>', about: [{ source: 'events', event: 'tutorial' }] },
+    { note: 'crash rate rose after release 2.3 on older Android devices; the crash format changed in that release too', about: [{ term: 'crash rate' }] },
+    { note: 'payers from Germany convert to a first purchase twice as often as the average player', about: [{ term: 'payers' }] },
+  ] })).notes;
+  const s = await searchNotes(e, 'ad format');
+  assert.deepEqual(s.notes.map((n) => n.id), [notes[0].id], JSON.stringify(s.notes.map((n) => [n.note.slice(0, 30), n.score])));
+  assert.equal(typeof s.notes[0].score, 'number');
+  // a typo of an alias still finds it
+  assert.deepEqual((await searchNotes(e, 'ad fromat')).notes.map((n) => n.id), [notes[0].id]);
+});
+
 // Regression (test report 2026-06-13 #7): a multi-word phrase lifted from the NOTE body —
 // not contiguous, not an alias — must still be found (token-coverage lexical match).
 test('search finds a multi-word phrase from the note body (interleaved words)', async () => {

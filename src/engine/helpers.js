@@ -26,6 +26,8 @@ export function memoryView(e) {
     ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
     ...(e.links && e.links.length ? { links: e.links } : {}),
     recorded_at: e.created_at ? new Date(e.created_at).toISOString() : null,
+    // how strongly a search matched it (0–1), where a search found it
+    ...(typeof e.score === 'number' ? { score: e.score } : {}),
   };
 }
 

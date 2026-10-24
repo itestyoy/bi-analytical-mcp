@@ -246,3 +246,60 @@ export function experimentTable({ model, confidenceLabel, verdictBadge, value, s
 // its share of the first step and a bar of that share. Between a step and its parent, the share of
 // the parent it holds: "continued" for the next step of the line, "of <parent>" for an outcome,
 // which sits under its parent; the continuation that lost the most is marked.
+
+/** The split check: the verdict up front, then each group's observed size against the designed one. */
+export function renderExperimentSplit(model) {
+  setDescription(
+    model.p_value !== null ? badge(`p ${formatP(model.p_value)}`, 'outline') : null,
+    model.chi_square !== null ? badge(`χ² ${model.chi_square.toFixed(2)}${model.df !== null ? ` · df ${model.df}` : ''}`, 'outline') : null,
+  );
+  if (model.detected) {
+    showAlert({
+      title: 'Sample ratio mismatch — the test results cannot be trusted',
+      description: 'The groups are not the split the test was designed for, so randomization or logging is broken. Find the cause before reading any lift.',
+      variant: 'destructive',
+      iconName: 'circle-alert',
+    });
+  }
+  const stats = el('dl', 'stat-grid');
+  stats.append(...model.groups.map((g) => stat(
+    g.label,
+    g.observed === null ? '—' : integerFormat.format(g.observed),
+    [g.expected !== null ? `expected ${integerFormat.format(Math.round(g.expected))}` : null, g.deviation !== null ? formatSignedPercent(g.deviation, 1) : null].filter(Boolean).join(' · '),
+  )));
+  const node = card({
+    description: `${model.groups.length} groups`,
+    title: model.detected ? 'Split mismatch' : 'Split as designed',
+    titleClass: 'card-title card-title-stat',
+    action: model.detected ? badge('SRM detected', 'destructive', 'circle-alert') : badge('OK', 'success', 'circle-check'),
+  }, stats);
+  node.classList.add('ab-card');
+  cardsSection.className = 'ab-list';
+  cardsSection.append(node);
+  cardsSection.hidden = false;
+}
+
+/** The plan: the figure solved for as the headline, the assumptions it was solved under beneath it. */
+export function renderExperimentPlan(model) {
+  const isRate = model.metric === 'proportion';
+  const effect = (x) => (x === null ? '—' : isRate ? formatPoints(x).replace(/^\+/, '') : columnFormat([x])(x));
+  setDescription(
+    model.power !== null ? badge(`power ${formatPercent(model.power)}`, 'outline') : null,
+    model.confidence !== null ? badge(`${formatPercent(model.confidence)} confidence`, 'outline') : null,
+    model.alternative && model.alternative !== 'two_sided' ? badge(`one-sided · ${model.alternative}`, 'outline') : null,
+  );
+  const headline = model.solved === 'mde'
+    ? { description: 'Minimum detectable effect', title: effect(model.mde), subline: model.relative_mde !== null ? `${formatPercent(model.relative_mde)} relative` : null }
+    : { description: 'Users per group', title: integerFormat.format(model.n_per_group), subline: model.total_n !== null ? `${integerFormat.format(model.total_n)} in total` : null };
+  const stats = el('dl', 'stat-grid');
+  stats.append(...[
+    model.solved === 'mde' ? stat('Users per group', integerFormat.format(model.n_per_group)) : stat('Effect to detect', effect(model.mde), model.relative_mde !== null ? `${formatPercent(model.relative_mde)} relative` : null),
+    model.baseline !== null ? stat('Baseline', isRate ? formatPercent(model.baseline) : String(model.baseline)) : null,
+    model.stddev !== null ? stat('Std. deviation', columnFormat([model.stddev])(model.stddev)) : null,
+  ].filter(Boolean));
+  const node = card({ ...headline, titleClass: 'card-title card-title-stat' }, stats);
+  node.classList.add('ab-card');
+  cardsSection.className = 'ab-list';
+  cardsSection.append(node);
+  cardsSection.hidden = false;
+}

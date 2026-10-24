@@ -100,8 +100,8 @@ export const pipelineMaterializeMethods = {
   /** The static gate over ONE python stage's function bodies (the incremental builder's path). */
   async _gatePythonStage(stage) {
     const compiled = this._compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', pipeline: null });
-    await this._gateCompiled([compiled]);
-    return compiled;
+    const warnings = await this._gateCompiled([compiled]);
+    return { compiled, warnings };
   },
 
   /**
@@ -115,14 +115,15 @@ export const pipelineMaterializeMethods = {
    */
   async _gateCompiled(units) {
     const functions = units.flatMap((u, i) => (u.functions || []).map((f) => ({ ...f, id: String(i), bindings: u.bindings || [] })));
-    if (!functions.length) return;
+    if (!functions.length) return [];
     // Whether an unordered head()/tail() is fatal is a property of the RUNTIME (dbt's BigFrames
     // wrapper runs with ordering_mode="partial" and raises OrderRequiredError there), so the
     // profile decides and the gate enforces — the author hears it here, not from a traceback in
     // the warehouse's notebook runtime.
-    const gate = await runAstGate(this.pythonBin, functions, []);
-    if (gate.ok) return;
+    // (and what the runtime's astype takes, where its profile says: an astype outside it is WARNED)
+    const gate = await runAstGate(this.pythonBin, functions, [], { astype: units.find((u) => u.astype)?.astype || null });
     const named = units.length > 1;
+    if (gate.ok) return (gate.warnings || []).map((w) => `python stage: ${named && units[Number(w.id)]?.model ? `${units[Number(w.id)].model}: ` : ''}${w.function} line ${w.line}${w.text ? ` (${w.text})` : ''}: ${w.message}`);
     const lines = gate.errors.map((e) => {
       const where = named && units[Number(e.id)]?.model ? `${units[Number(e.id)].model}: ` : '';
       return `${where}${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`;

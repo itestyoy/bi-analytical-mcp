@@ -36,7 +36,7 @@ test('result cards switched off: no display_model_result or drill_result, the ex
   assert.ok(experiment?._meta?.ui?.resourceUri, 'the experiment still draws its A/B card in the view');
   const { servicesFor } = await import('../../src/mcp-surface.js');
   const said = servicesFor(off).instructionsFor({ apps: true });
-  assert.ok(!said.includes('display_model_result') && said.includes('card: true'), said.slice(-400));
+  assert.ok(!said.includes('display_model_result') && said.includes('draws its own card'), said.slice(-400));
   const on = buildToolDefs(engine()).map((d) => d.name);
   assert.ok(on.includes('display_model_result') && on.includes('drill_result'), 'on, both are offered');
 });

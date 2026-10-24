@@ -26,7 +26,7 @@ export const APPS_CAPS = { extensions: { 'io.modelcontextprotocol/ui': { mimeTyp
 
 export function makeEngine({ recipes = true } = {}) {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({
+  return new Engine({ resultCards: true,
     catalog,
     recipes: recipes ? loadRecipes(assetPath('systemRecipes'), '', { dialect: catalog.dialect, python: false }) : undefined,
     contextManager: new ContextManager({ workspaceRoot: tempDir('mcp-http') }),

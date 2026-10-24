@@ -26,7 +26,7 @@ before(async () => {
   wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('detq'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
-  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
+  engine = settle(new Engine({ resultCards: true, catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await declare(engine, {
     name: 'mon',
     semantic_models: [{ source: 'events', measures: [{ name: 'revenue', expr: { fn: 'sum', args: [{ property: 'price_in_usd_of_event_data' }] } }], where: [{ fn: 'eq', args: [{ column: 'event_name' }, { value: 'iap_purchase_completed' }] }] }, { source: 'users' }],

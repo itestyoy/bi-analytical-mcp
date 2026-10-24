@@ -42,7 +42,7 @@ before(async () => {
   wh = await buildWarehouse(BASE); // the run's one build of the fixture, copied
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('batch'), timeSpineDialect: 'duckdb' });
   const runner = createDbt({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
-  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner }));
+  engine = settle(new Engine({ resultCards: true, catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner }));
 }, opts);
 
 after(async () => { if (wh) await wh.stop(); });

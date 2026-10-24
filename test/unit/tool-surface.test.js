@@ -21,7 +21,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 function engine(opts = {}) {
   const catalog = loadCatalog(CATALOG, {});
-  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }), ...opts }));
+  return settle(new Engine({ resultCards: true, catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }), ...opts }));
 }
 
 // Allowed non-data test: the advertised surface. The result cards are a deployment's choice
@@ -230,7 +230,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
 // Without recipes configured, the recipe view + overview list are simply absent.
 test('semantic_index recipe view is absent when no recipes configured', async () => {
   const catalog = loadCatalog(CATALOG, {});
-  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('norec') }) }));
+  const e = settle(new Engine({ resultCards: true, catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('norec') }) }));
   const overview = await e.semantic_index();
   assert.equal(overview.recipes, undefined);
   await assert.rejects(() => e.semantic_index({ recipe: 'x' }), /recipes are not configured|invalid input/);
@@ -294,7 +294,7 @@ test('a group-by column or via the model does not have is refused, listing the r
   mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
   const at = join(tempDir('surf-own'), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
-  const owner = settle(new Engine({ catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
+  const owner = settle(new Engine({ resultCards: true, catalog: loadCatalog(at, {}), contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const own = await declare(owner, {
     name: 'own',
     semantic_models: [{ source: 'events', measures: [{ name: 'rows', expr: { fn: 'count' } }] }, { source: 'crashlytics' }, { source: 'users' }],
@@ -360,7 +360,7 @@ test('the guide derives its join trigger from the catalog\'s join contracts, or 
   assert.ok(!g.routing_triggers.some((x) => /crash/i.test(x.if)), 'no domain-specific crash trigger');
   const catalog = loadCatalog(CATALOG, {});
   for (const m of Object.values(catalog.models)) delete m.join;
-  const plain = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
+  const plain = settle(new Engine({ resultCards: true, catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('surf') }) }));
   const g2 = await plain.semantic_index({ guide: true });
   assert.ok(!g2.routing_triggers.some((x) => /JOIN CONTRACT/.test(x.do)), 'no contract → no trigger');
 });

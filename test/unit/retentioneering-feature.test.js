@@ -42,7 +42,7 @@ const RUNNER = { pythonModelsOn: () => true };
 const engines = [];
 after(() => { for (const e of engines) e.close(); });
 const engine = (features = []) => {
-  const e = settle(new Engine({
+  const e = settle(new Engine({ resultCards: true,
     catalog: loadCatalog(CATALOG, {}),
     contextManager: new ContextManager({ workspaceRoot: tempDir('rete-u') }),
     dbPath: join(tempDir('rete-u-db'), 'x.sqlite'),

@@ -48,7 +48,7 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('results'), timeSpineDialect: 'duckdb' });
   backend = testDbt({ profilesDir: BASE });
-  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
+  engine = settle(new Engine({ resultCards: true, catalog, contextManager: ctxs, runner: backend }));
 
   // ---- build the task models once ----
 

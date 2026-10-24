@@ -9,12 +9,15 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
+import yaml from 'js-yaml';
+import { mcp } from '../helpers/catalog-doc.js';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { buildWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle } from '../helpers/settle.js';
+import { settle, taskResult } from '../helpers/settle.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 import { tempDir } from '../helpers/temp-dir.js';
 import { declare } from '../helpers/declare.js';
@@ -230,4 +233,26 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   assert.ok(near(byCountry.GB, 5.0), `[by users.country] GB=${byCountry.GB}`);
   assert.ok(near(byCountry.DE, 4.0), `[by users.country] DE=${byCountry.DE}`);
   assert.ok(near(byCountry.BR, 1.75), `[by users.country] BR=${byCountry.BR}`);
+});
+
+// A model whose identity names no key column (a variant of the fixture: acquisition's primary entity a
+// name alone, its acquisition_id an ordinary column) is grouped by its own columns, never by that
+// identity — which would read a column of its name the table does not have: a validate over a window
+// runs every column it can be cut by, and each comes back.
+test('a source whose identity has no key column validates whole: every column it can be cut by runs', opts, async (t) => {
+  if (skip(t)) return;
+  const doc = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+  const acq = doc.models.find((m) => mcp(m).role === 'acquisition');
+  const idCol = acq.columns.find((c) => c.name === 'acquisition_id');
+  delete idCol.config;
+  const at = join(tempDir('mcpit-keyless'), 'catalog.yml');
+  writeFileSync(at, yaml.dump(doc));
+  const keyless = settle(new Engine({ catalog: loadCatalog(at, { profilesDir: BASE, projectDir: BASE }), contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: tempDir('mcpit-keyless-ws'), timeSpineDialect: 'duckdb' }), runner: backend }));
+  const out = await declare(keyless, { name: 'keyless', semantic_models: [{ source: 'acquisition', measures: [{ name: 'cost', expr: { fn: 'sum', args: [{ column: 'cost' }] } }] }], metrics: [{ name: 'cost', type: 'simple', measure: 'cost' }] });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+  const started = await keyless.raw.context({ action: 'describe', context_id: out.context_id, validate: true, time_range: { start: '2026-01-01', end: '2026-01-31' } });
+  const checked = await taskResult(keyless, started.task_id);
+  const sm = checked.ran.semantic_models.find((x) => x.semantic_model === 'acquisition');
+  assert.deepEqual([sm?.checked, sm?.ok, sm?.failed], [true, true, undefined], JSON.stringify(sm));
+  assert.ok(checked.ran.metrics.find((m) => m.metric === 'cost').value > 0, 'the metric reads rows in the window');
 });

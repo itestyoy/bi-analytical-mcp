@@ -206,6 +206,12 @@ export function sampleSizeMean({ stddev, mde, alpha = 0.05, power = 0.8, alterna
   return Math.ceil(2 * ((za + zb) ** 2) * stddev * stddev / (mde * mde));
 }
 
+/** Smallest absolute lift detectable at `power` by a test whose difference has variance `variance`
+ *  (each group's own spread over its own n — what the test itself reads). */
+export function mdeFromVariance({ variance, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  return (zAlpha(alpha, alternative) + normalQuantile(power)) * Math.sqrt(variance);
+}
+
 /** Smallest absolute mean lift detectable at `power` with `n` per group. */
 export function mdeMean({ stddev, n, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
   const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);

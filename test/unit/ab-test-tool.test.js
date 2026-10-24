@@ -260,14 +260,15 @@ test('analyze with expected_ratio carries its own split check; without it, none 
   await assert.rejects(async () => engine.experiment({ action: 'analyze', metric: 'proportion', expected_ratio: [1, 1, 1], control: { n: 10, conversions: 1 }, variants: [{ n: 10, conversions: 2 }] }), (e) => e.field === 'expected_ratio');
 });
 
-test('each variant carries the smallest effect its sample could detect (power 0.8, the test\'s α, the smaller group)', async () => {
+test('each variant carries the smallest effect its sample could detect (power 0.8, the test\'s α; a rate at the smaller group, a mean at both groups\' spreads)', async () => {
   const { sampleSizeProportion, normalQuantile } = await import('../../src/stats.js');
   const p = engine._analyzeExperiment({ metric: 'proportion', control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 12000, conversions: 1250 }] }).results[0];
   // the detectable lift is the one the plan would need this n for (to the user, the plan rounds up)
   assert.ok(Math.abs(sampleSizeProportion({ baseline: 0.1, mde: p.detectable_lift }) - 10000) <= 1);
   assert.ok(Math.abs(p.detectable_relative_lift - p.detectable_lift / 0.1) < 1e-12);
   const m = engine._analyzeExperiment({ metric: 'mean', confidence: 0.9, control: { n: 500, mean: 10, stddev: 2 }, variants: [{ label: 'b', n: 800, mean: 10.1, stddev: 2.5 }] }).results[0];
-  const expected = (normalQuantile(0.95) + normalQuantile(0.8)) * 2 * Math.sqrt(2 / 500);
+  // a test of means reads each group's spread over its own n (Welch's), and so does the effect it can see
+  const expected = (normalQuantile(0.95) + normalQuantile(0.8)) * Math.sqrt(2 ** 2 / 500 + 2.5 ** 2 / 800);
   assert.ok(Math.abs(m.detectable_lift - expected) < 1e-12, `${m.detectable_lift} vs ${expected}`);
   assert.ok(Math.abs(m.detectable_relative_lift - expected / 10) < 1e-12);
 });

@@ -64,7 +64,7 @@ export class PipelineAdvisor {
   }
 
   /**
-   * AN OFFSET FROM AN ANCHOR (date_diff of two moments: day N since install, weeks since a first
+   * AN OFFSET FROM AN ANCHOR (date_diff or elapsed_days of two moments: day N since install, weeks since a first
    * purchase) is only measured where the data reaches it: an anchor late in the data has not lived to
    * day N yet, so a count of it there is 0 or missing — no measurement — and a curve or a cohort grid
    * read over every anchor bends down at its end. Said where such a column is made.
@@ -74,10 +74,10 @@ export class PipelineAdvisor {
     // an anchor is a moment the rows were given per entity — an attribute a join before it brought (an
     // install date, a first purchase): a gap to the previous row or between a funnel's steps is no age
     const joined = new Set(before.filter((st) => st?.stage === 'join').flatMap((st) => (st.attrs || []).map((a) => a.name ?? a.column)));
-    const diff = exprCalls(stage.expr).find((c) => c.fn === 'date_diff' && joined.has(c.args?.[0]?.column));
+    const diff = exprCalls(stage.expr).find((c) => (c.fn === 'date_diff' || c.fn === 'elapsed_days') && joined.has(c.args?.[0]?.column));
     if (!diff) return [];
     const from = diff.args[0].column;
-    const unit = diff.unit || 'day';
+    const unit = diff.fn === 'elapsed_days' ? 'day' : diff.unit || 'day';
     return [`'${stage.name}' counts ${unit}s from '${from}': an anchor late in the data has not reached a large value yet, so there its count is 0 or missing — no measurement. Read a value N only over anchors early enough to reach it: a where on '${from}' ≤ the data's last day minus N (semantic_index({ request: {} }) says each source's data_through).`];
   }
 

@@ -186,8 +186,11 @@ export const semanticPreviewMethods = {
       },
       // (an entity keyed by several columns is joined on a key the layer writes as one expression: its SQL is
       // the server's, not the caller's — the entity is said by its name and type, the column of a plain key kept)
-      semantic_models: scope.semanticModels.map(({ measures, entities, ...sm }) => ({
+      // (a column's meaning is the catalog's — semantic_index says it —, so a dimension is said by its name, type
+      // and label; one metric's describe lists what it is cut by under its group_by, and a model's columns by count)
+      semantic_models: scope.semanticModels.map(({ measures, entities, dimensions, ...sm }) => ({
         ...sm,
+        ...(dimensions ? (input.metric ? { dimension_count: dimensions.length } : { dimensions: dimensions.map(({ description: _d, ...d }) => d) }) : {}),
         ...(entities ? { entities: entities.map(({ expr, ...e }) => ({ ...e, ...(expr && expr !== e.name && !/[()|]/.test(expr) ? { expr } : {}) })) } : {}),
         ...(measures?.length ? { measures } : {}),
       })),
@@ -283,7 +286,8 @@ export const semanticPreviewMethods = {
         const model = ctx.state.engine === 'project' ? null : this._catalogOf(ctx).models[sm.name];
         const shown = (n) => (model && n === EVENT_TIME_DIM && model.time?.column ? model.time.column : model && n === PARTITION_DIM && model.partition_column ? model.partition_column : n);
         const failedShown = failed.map((f) => (f.dimension !== undefined ? { ...f, dimension: shown(f.dimension) } : f));
-        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: own.map((c) => shown(c.name)), entities: keys.map((c) => c.name), ...(failed.length ? { failed: failedShown } : {}) });
+        // (the partition dimension is shown as its column: once, where the column is also declared a dimension)
+        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: [...new Set(own.map((c) => shown(c.name)))], entities: keys.map((c) => c.name), ...(failed.length ? { failed: failedShown } : {}) });
       }
       result.window = input.time_range;
       result.ran = {

@@ -225,7 +225,7 @@ export const semanticQueryMethods = {
     // (said as what the place does with it: a where filters, a group_by cuts)
     const filters = /condition|where/.test(String(at));
     const [verb, does] = filters ? ['filter', 'filters'] : ['cut', 'cuts'];
-    throw new ToolError(`${at}: '${label}' does not ${verb} ${reads} — a metric is ${filters ? 'filtered' : 'grouped'} by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it ${does} ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or ${filters ? 'filter' : 'group'} by what every metric reaches (metric_time, a joined model's column).`, { stage: 'validate', field: 'steps' });
+    throw new ToolError(`${at}: '${label}' does not ${verb} ${reads} — a metric is ${filters ? 'filtered' : 'grouped'} by the columns of the model its measures fold and of the models that one joins to, and '${model}' is none of them${cut.length ? `; it ${does} ${cut.map((m) => `'${m}'`).join(', ')}` : ''}. Query them apart (queries: [ … ] runs them side by side), or ${filters ? 'filter' : 'group'} by what every metric reaches (metric_time, a joined model's column)${filters ? ', or write the condition into the measures of the metrics it should filter (a case in each measure: only the rows where it holds are folded)' : ''}.`, { stage: 'validate', field: 'steps' });
   },
 
   /** A stage of the pipeline's registry that no step of a query takes (a join, an unnest, a funnel, a

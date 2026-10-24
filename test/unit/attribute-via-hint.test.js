@@ -35,6 +35,9 @@ models:
       - name: event_data
         data_type: jsonb
         config: { meta: { mcp: { is_event_data: true } } }
+      - name: environment
+        data_type: string
+        config: { meta: { mcp: { dimension: {} } } }
   - name: dim_users
     config: { meta: { mcp: { role: users } } }
     columns:
@@ -62,6 +65,15 @@ test('a column reached through several relationships: its page names via and eve
   assert.match(rec, /from 'events' add via: one of 'user', 'referrer'|from 'events' add via: one of 'referrer', 'user'/);
   // a model's column is `column` — the earlier `property` is told its name, not served
   await assert.rejects(() => e.semantic_index({ source: 'users', property: 'country' }), /unexpected property 'property' — here that field is called 'column'/);
+});
+
+// Allowed non-data test: the same recommendation for an events source's OWN column — read in a build
+// over that source, never by joining the source onto itself.
+test('an events source\'s own column: its page reads it in a build over the source, with no join', async () => {
+  const e = engine();
+  const page = await e.semantic_index({ source: 'events', column: 'environment' });
+  assert.ok(page.recommendations.some((r) => r.includes("source: 'events'") && r.includes("{ column: 'environment' }")), JSON.stringify(page.recommendations));
+  assert.ok(!page.recommendations.some((r) => r.includes("join: [{ source: 'events'") || r.includes("stage: 'join', source: 'events'")), JSON.stringify(page.recommendations));
 });
 
 // Allowed non-data test: an input-validation guard. The `via` a metric query's group_by takes is not a

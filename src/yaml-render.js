@@ -130,8 +130,11 @@ export function renderBaseModel(catalog, key) {
   const peExpr = pe.key ? entityExpr(catalog, pe) : undefined;
   // a model with no key of its own (a build's table: src/catalog/built-model.js) names its identity
   // alone — its dimensions are reached under it, and nothing joins onto it
-  if (m.built) sm.primary_entity = peName;
-  sm.entities = m.built ? [] : [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
+  // …and so does a model whose identity names no key column (a fact's grain, an amount per row): an entity
+  // there would read a column of that name, which the table does not have
+  const keyless = m.built || (!scd && !peExpr);
+  if (keyless) sm.primary_entity = peName;
+  sm.entities = keyless ? [] : [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }

@@ -2,7 +2,7 @@
 // numbers the caller brings (pre-aggregated per-group stats a pipeline computed). Pure: no warehouse,
 // no task, no state; the input is validated against the tool's schema by the engine before it gets here.
 
-import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
+import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean, mdeFromVariance } from './stats.js';
 import { ToolError } from './validate.js';
 
 /** The fewest conversions, and non-conversions, a group needs for a z-test's normal approximation to hold. */
@@ -110,7 +110,9 @@ export function abTest(input) {
       const base = metric === 'proportion' ? control.conversions / control.n : control.mean;
       const detectable = metric === 'proportion'
         ? (base > 0 && base < 1 ? mdeProportion({ baseline: base, n: nMin, alpha, power: 0.8, alternative }) : null)
-        : (control.stddev > 0 ? mdeMean({ stddev: control.stddev, n: nMin, alpha, power: 0.8, alternative }) : null);
+        // (a test of means reads both groups' spreads — Welch's — so the effect it can see does too)
+        : metric === 'mean' && variance > 0 ? mdeFromVariance({ variance, alpha, power: 0.8, alternative })
+          : (control.stddev > 0 ? mdeMean({ stddev: control.stddev, n: nMin, alpha, power: 0.8, alternative }) : null);
       r = { ...r, detectable_lift: detectable, detectable_relative_lift: detectable !== null && base ? detectable / Math.abs(base) : null };
       // sequential: an ALWAYS-VALID p (mixture SPRT) that stays honest when the
       // experiment is checked repeatedly while running — use it for live peeking;

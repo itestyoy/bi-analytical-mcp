@@ -202,20 +202,23 @@ export function loadRecipes(system, deployment = [], caps = null, catalog = null
   for (const r of pythonReferenceRecipes()) merged.set(r.id, r);
   for (const r of readFile(system, 'system', catalog)) merged.set(r.id, r);
   for (const p of paths) for (const r of readFile(p, 'deployment', catalog)) merged.set(r.id, r);
-  return new Recipes([...merged.values()], caps);
+  return new Recipes([...merged.values()], caps, catalog);
 }
 
 export class Recipes {
   /** `caps` = { dialect, python: boolean, runtime } — what THIS deployment can run. */
-  constructor(list, caps = null) {
+  constructor(list, caps = null, catalog = null) {
     this.list = list;
     this.caps = caps;
+    this.catalog = catalog;
     this.byId = new Map(list.map((r) => [r.id, r]));
+    // what each recipe names that this catalog does not hold (a recipe written for another catalog)
+    this.misfits = new Map(catalog ? list.map((r) => [r.id, namesNotIn(r, catalog)]).filter(([, n]) => n.length) : []);
   }
 
   /** The same recipes, judged against a deployment's capabilities. */
   withCapabilities(caps) {
-    return new Recipes(this.list, caps);
+    return new Recipes(this.list, caps, this.catalog);
   }
 
   /** Why this recipe cannot be used here, or null when it can. */
@@ -270,6 +273,7 @@ export class Recipes {
       metric_types: r.metric_types,
       ...(r.requires ? { requires: r.requires } : {}), // e.g. 'python_models'
       origin: r.origin || 'system', // system (ships with the server) vs deployment (yours)
+      ...(this.misfits.has(r.id) ? { names_not_in_this_catalog: this.misfits.get(r.id) } : {}),
       hack: r.hack, // the generalizable technique — lets the AI adapt a recipe to novel tasks
     }));
   }
@@ -278,6 +282,49 @@ export class Recipes {
     const r = this.byId.get(id);
     if (!r) throw new Error(`unknown recipe: ${id}`);
     const why = this.unavailableReason(r);
-    return why ? { ...r, unavailable_here: why } : r;
+    const misfit = this.misfits.get(id);
+    return {
+      ...r,
+      ...(why ? { unavailable_here: why } : {}),
+      ...(misfit ? { names_not_in_this_catalog: misfit, adapt: `written for another catalog: ${misfit.join(', ')} ${misfit.length === 1 ? 'is' : 'are'} not in this one — its technique holds, its payload runs once those names are mapped to this catalog's (semantic_index({ request: { search } }) finds the counterparts)` } : {}),
+    };
   }
+}
+
+/**
+ * The names a recipe's payloads and requirements use that `catalog` does not hold: its sources, the
+ * events and properties it requires, the event properties and columns its payloads read — a column
+ * counted as known when a model of the catalog has it or the payload itself makes it (a step's name, a
+ * joined attribute, a funnel step's time). Read off the recipe's own data, no name of any catalog here.
+ */
+function namesNotIn(r, catalog) {
+  const payloads = [r.pipeline_payload, r.semantic_payload, ...(r.scenarios || []).flatMap((x) => [x.pipeline_payload, x.semantic_payload])].filter(Boolean);
+  if (!payloads.length) return [];
+  const models = new Set(catalog.modelKeys());
+  const columns = new Set(catalog.modelKeys().flatMap((k) => [...catalog.modelColumns(k).map((c) => c.name), ...Object.keys(catalog.models[k].dimensions || {})]));
+  const properties = new Set(catalog.facts.flatMap((f) => catalog.eventProps(f)));
+  const events = new Set(catalog.facts.flatMap((f) => catalog.eventNames(f)));
+  const made = new Set(); const readCols = new Set(); const readProps = new Set(); const sources = new Set();
+  const walk = (v, key) => {
+    if (Array.isArray(v)) { v.forEach((x) => walk(x, key)); return; }
+    if (!v || typeof v !== 'object') return;
+    if (typeof v.name === 'string') made.add(v.name);
+    if (v.stage === 'match_recognize') for (const st of v.steps || []) if (typeof st.name === 'string') made.add(`at_${st.name}`);
+    if (v.stage === 'join') for (const a of v.attrs || []) { if (a.name) made.add(a.name); else if (a.column) made.add(a.column); }
+    if (v.stage === 'python') for (const c of v.output?.columns || []) if (typeof c === 'string') made.add(c);
+    if (typeof v.source === 'string' && (v.action || v.stage === 'join' || key === 'join')) sources.add(v.source);
+    if (typeof v.column === 'string' && !v.fn) readCols.add(v.column);
+    if (typeof v.property === 'string' && !v.fn) readProps.add(v.property);
+    for (const [k, x] of Object.entries(v)) if (x && typeof x === 'object') walk(x, k);
+    for (const k of ['group_by', 'keep', 'partition_by']) for (const c of Array.isArray(v[k]) ? v[k] : []) if (typeof c === 'string') readCols.add(c);
+  };
+  payloads.forEach((p) => walk(p));
+  const missing = [
+    ...[...sources].filter((x) => !models.has(x)),
+    ...(r.required_events || []).filter((e) => !events.has(e)),
+    ...(r.required_properties || []).filter((x) => !properties.has(x) && !columns.has(x)),
+    ...[...readProps].filter((x) => !properties.has(x)),
+    ...[...readCols].filter((x) => !columns.has(x) && !made.has(x) && !properties.has(x)),
+  ];
+  return [...new Set(missing)];
 }

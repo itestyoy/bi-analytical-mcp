@@ -652,12 +652,13 @@ export class Catalog {
     const push = (source, column, via) => { const k = `${source}\u0000${column}\u0000${via || ''}`; if (!seen.has(k)) { seen.add(k); out.push({ source, column, ...(via ? { via } : {}) }); } };
     for (const fact of this.facts) {
       const m = this.models[fact];
-      for (const [ent, e] of Object.entries(m.entities || {})) {
-        if (e.type !== 'foreign') continue;
+      const foreign = Object.entries(m.entities || {}).filter(([ent, e]) => e.type === 'foreign' && this.primaryByEntity[ent]);
+      for (const [ent] of foreign) {
         const target = this.primaryByEntity[ent];
-        if (!target) continue;
         const identity = primaryEntityName(this.models[target]);
-        for (const dim of this.modelDimensionColumns(target)) push(target, dim, ent === identity ? undefined : ent);
+        // (`via` only where the fact reaches the model by several relationships: one needs no naming)
+        const several = foreign.filter(([other]) => this.primaryByEntity[other] === target).length > 1;
+        for (const dim of this.modelDimensionColumns(target)) push(target, dim, ent === identity || !several ? undefined : ent);
       }
     }
     for (const key of this.modelKeys()) {

@@ -422,9 +422,13 @@ export const semanticIndexMethods = {
       .map((src) => [src, Object.keys(c.entitiesOf(src)).filter((e) => c.joinTargetFor(e) === mk)])
       .filter(([, rels]) => rels.length > 1);
     const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
-    recommendations.push(ent
-      ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (the build's semantic_model step joins the model: join: [{ source: '${mk}', on }]${viaHint}), or reference '${col}' after a pipeline join stage { stage: 'join', source: '${mk}', on, attrs }.`
-      : `Reference '${col}' after a pipeline join with:'${mk}' (build_model join stage).`);
+    // (a build over this source reads the column as its own — a join is the way only from another model's rows)
+    const pipelineJoin = c.joinContract(mk) ? `a pipeline join stage { stage: 'join', source: '${mk}', on, attrs } carries '${col}' onto another model's rows` : null;
+    recommendations.push(c.isFact(mk)
+      ? `A column of '${mk}''s own rows: in a build over '${mk}' (build_model start with source: '${mk}') a step reads it as { column: '${col}' }, and a metric query over its measures groups/filters by { source: '${mk}', column: '${col}' } — no join.${pipelineJoin ? ` From elsewhere, ${pipelineJoin}.` : ''}`
+      : ent
+        ? `Group/filter by it in metric queries as { source: '${mk}', column: '${col}' } (the build's semantic_model step joins the model: join: [{ source: '${mk}', on }]${viaHint})${pipelineJoin ? `; ${pipelineJoin}` : ''}.`
+        : pipelineJoin ? `In a pipeline, ${pipelineJoin}.` : `'${mk}' declares no join contract: read '${col}' in a build over '${mk}' itself (build_model start with source: '${mk}').`);
     const out = {
       column: col, source: mk, type: dim.type,
       description: dDescs[col],
@@ -750,7 +754,8 @@ export const semanticIndexMethods = {
     event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
     // Every column a metric query can group/filter by, addressed by where it lives — the ref
     // { source, column, via? } — and the join is resolved from the schema, never spelled.
-    groupable_columns: c.reachableAttributes(),
+    // (a validity window's bounds are how a version is matched, not an attribute to cut by)
+    groupable_columns: c.reachableAttributes().filter((r) => !c.models[r.source]?.dimensions?.[r.column]?.validity),
     // Saved analyst findings (the memory tool): how many are stored + how to reach them.
     // They also surface inline on the entity views/{ search } they were linked to.
     ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views, via { search } and { notes: true }; the memory tool records and forgets them.' } } : {}),

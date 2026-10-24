@@ -20,7 +20,7 @@ import { assetPath, missingAssetMessage } from './runtime-assets.js';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
 import { currentSpelling } from './pipeline/earlier.js';
-import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
+import { pythonRulesText, mlClassesText, bigframesRunHints, astypeStrings } from './python-guide.js';
 import { inertText } from './jinja-inert.js';
 import { form } from './schema-kit.js';
 
@@ -62,6 +62,8 @@ export function frameProfile(rt, config = {}) {
       // ships no recipes there is nothing to point at, so the description inlines the list instead
       // — the same fallback the rules use.
       mlClasses: mlClassesText(),
+      // the strings its astype takes, from the fact sheet: an astype('<other>') is warned by the static gate
+      astype: astypeStrings(),
       mlReference: (rt?.recipes || []).some((r) => (r?.id || r) === 'bf_ml_signatures') ? 'bf_ml_signatures' : null,
       guide: pythonRulesText('bigframes', rt?.recipes || []),
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
@@ -302,7 +304,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
     }],
   }, { lineWidth: 100, noRefs: true });
 
-  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], bindings: [...bound, ...byName.keys()], outputColumns: outCols, config: cfg, runtime: profile.key };
+  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], bindings: [...bound, ...byName.keys()], outputColumns: outCols, config: cfg, runtime: profile.key, astype: profile.astype || null };
 }
 
 /**
@@ -323,13 +325,13 @@ export function pythonRunHints(profile, text) {
  * other declared functions — so the gate can allowlist the names a body may read instead of
  * chasing an open-ended list of the ones it may not.
  */
-export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000 } = {}) {
+export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000, astype = null } = {}) {
   // A build that shipped src/ without python/ used to surface as "python3 exit 2: can't open
   // file" — a message that reads like the analyst's code broke. Say what actually happened.
   const gate = assetPath('astGate');
   if (!gate) return Promise.reject(new Error(missingAssetMessage('astGate')));
   if (!pythonBin) return Promise.reject(new Error('ast gate has no Python to run on: the engine was given neither pythonBin nor a dbt environment (whose MetricFlow Python runs it) — nothing is taken from PATH'));
-  return runWithInput(pythonBin, [gate], JSON.stringify({ functions, bindings: [...bindings] }), { timeout: timeoutMs }).then((r) => {
+  return runWithInput(pythonBin, [gate], JSON.stringify({ functions, bindings: [...bindings], ...(astype ? { astype } : {}) }), { timeout: timeoutMs }).then((r) => {
     if (r.cancelled) throw new Error('ast gate was not run: the call was cancelled');
     if (r.killed) throw new Error(`ast gate timed out after ${timeoutMs}ms`);
     if (!r.ok && r.code == null) throw new Error(`ast gate could not start (${pythonBin}): ${r.error}`);

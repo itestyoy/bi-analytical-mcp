@@ -17,8 +17,12 @@ the warehouse's Python runtime, and what it may touch THERE is decided by that r
 credentials dbt runs with.
 
 Protocol: one JSON object on stdin — {"functions": [{"name","params","body","id"?,"bindings"?]}],
-"bindings": [...]} — one JSON object on stdout — {"ok": bool, "errors": [{"function","id","line",
-"text","message"}]}. A function may carry its own `bindings` (and an `id` echoed back in its
+"bindings": [...], "astype"?: {"exact": [...], "any_case": [...]}} — one JSON object on stdout —
+{"ok": bool, "errors": [{"function","id","line","text","message"}], "warnings": [same shape]}.
+`astype`, when given, is the runtime's word on which STRINGS its frame's astype takes (BigFrames':
+config/bigframes-facts.json `astype_strings`, extracted from the library): an `.astype('<string>')`
+outside it is WARNED, never refused — the call may be on a pandas object (after to_pandas()), where
+the string is legal. A function may carry its own `bindings` (and an `id` echoed back in its
 errors), so the functions of SEVERAL declarations are checked in one run without sharing names.
 Lines are 1-based within the BODY as the caller wrote it.
 """
@@ -94,7 +98,36 @@ def _bound_names(fdef):
     return names
 
 
-def _check(fn, default_bindings):
+def _astype_warnings(fdef, astype, at, text, name, fid):
+    """`.astype('<string>')` — or `.astype({col: '<string>'})` — with a string the runtime's frame does
+    not take: a warning naming the strings it does, and the one this spelling meant where only its case
+    differs ('float64' → 'Float64')."""
+    exact = list(astype.get("exact") or [])
+    any_case = {s.lower() for s in astype.get("any_case") or []}
+    by_lower = {}
+    for s in exact:
+        by_lower.setdefault(s.lower(), s)
+    out = []
+    for node in ast.walk(fdef):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "astype"):
+            continue
+        arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "dtype"), None)
+        given = [arg] if isinstance(arg, ast.Constant) else (list(arg.values) if isinstance(arg, ast.Dict) else [])
+        for c in given:
+            if not (isinstance(c, ast.Constant) and isinstance(c.value, str)):
+                continue
+            v = c.value
+            if v in exact or v.lower() in any_case:
+                continue
+            meant = by_lower.get(v.lower())
+            hint = " — write '%s'" % meant if meant else ""
+            out.append({"function": name, "id": fid, "line": at(node), "text": text(node),
+                        "message": "astype('%s'): this frame's astype takes only %s%s (on a pandas object, after to_pandas(), '%s' is fine)"
+                                   % (v, ", ".join("'%s'" % s for s in exact + sorted(astype.get("any_case") or [])), hint, v)})
+    return out
+
+
+def _check(fn, default_bindings, astype=None):
     name, params, body = fn["name"], fn.get("params") or [], fn.get("body") or ""
     bindings = fn.get("bindings")
     if bindings is None:
@@ -110,7 +143,7 @@ def _check(fn, default_bindings):
         ln = max(1, (e.lineno or 2) - 1)
         lines = body.splitlines()
         errors.append({"function": name, "id": fid, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": "syntax error: %s" % e.msg})
-        return errors
+        return errors, []
     fdef = tree.body[0]
     body_lines = body.splitlines()
 
@@ -148,16 +181,20 @@ def _check(fn, default_bindings):
         if key not in seen:
             seen.add(key)
             unique.append(e)
-    return unique
+    warnings = _astype_warnings(fdef, astype, at, text, name, fid) if astype else []
+    return unique, warnings
 
 
 def main():
     req = json.loads(sys.stdin.read() or "{}")
     bindings = req.get("bindings") or []
-    errors = []
+    astype = req.get("astype")
+    errors, warnings = [], []
     for fn in req.get("functions") or []:
-        errors.extend(_check(fn, bindings))
-    sys.stdout.write(json.dumps({"ok": not errors, "errors": errors}))
+        e, w = _check(fn, bindings, astype)
+        errors.extend(e)
+        warnings.extend(w)
+    sys.stdout.write(json.dumps({"ok": not errors, "errors": errors, "warnings": warnings}))
 
 
 if __name__ == "__main__":

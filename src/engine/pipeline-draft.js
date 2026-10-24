@@ -707,8 +707,9 @@ export const pipelineDraftMethods = {
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
     // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.
     let filterWarnings = [];
-    // A python stage's bodies pass the static gate BEFORE the draft persists them.
-    if (changedStage && changedStage.stage === 'python') await this._gatePythonStage(changedStage);
+    // A python stage's bodies pass the static gate BEFORE the draft persists them (what it only
+    // warns of — an astype the runtime's frame does not take — goes with the answer)
+    if (changedStage && changedStage.stage === 'python') filterWarnings = (await this._gatePythonStage(changedStage)).warnings;
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
       // each comparison of a column or an event property (its own value, not a field of it) with
       // constants, at any depth of and / or / not

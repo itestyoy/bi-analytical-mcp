@@ -191,6 +191,26 @@ test('python stage: a package the runtime lacks goes to dbt\'s packages config; 
   assert.equal(ctxs.list().length, 0, 'dry_run writes nothing');
 });
 
+// Which strings a BigFrames frame's astype takes is the library's word (config/bigframes-facts.json,
+// extracted from bigframes/dtypes.py): 'float64' raises there, 'Float64' does not. The gate WARNS of the
+// first — the same call on a pandas object (after to_pandas()) is legal — and names the spelling meant.
+test('python stage on BigFrames: an astype string the frame does not take is warned with the one it meant; the right one is not', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: tempDir('pystage') }), pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } }));
+  const cast = (dtype) => ({ ...PY_STAGE, functions: [{ name: 'cast', params: ['df'], body: `df['revenue'] = df['revenue'].astype('${dtype}')\nreturn df` }], steps: [{ call: 'cast', args: {} }], output: { columns: ['player_id_of_internal', 'revenue'] } });
+  const step = async (dtype) => {
+    const s = await e.build_model({ action: 'start', name: 'cast', source: 'events' });
+    await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [AGG] });
+    return stepNotes(await e.build_model({ action: 'add_steps', context_id: s.context_id, steps: [cast(dtype)] })).filter((n) => n.includes('astype('));
+  };
+  const wrong = await step('float64');
+  assert.equal(wrong.length, 1, 'one warning, and the step is accepted');
+  assert.ok(wrong[0].includes("write 'Float64'"), wrong[0]);
+  assert.deepEqual(await step('Float64'), [], 'the spelling it takes is not warned');
+});
+
 // The operator's pin decides ONE runtime, so the tool SCHEMA and the compiled model must describe
 // the same one. A BigQuery profile submits through BigFrames by default; pinning `serverless` makes
 // it PySpark — and the schema used to keep offering the default's packages (it re-read the
